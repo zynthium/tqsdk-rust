@@ -436,6 +436,13 @@ impl TqApi {
             "wait-kline-{}-{duration_ns}-{data_length}",
             sanitize_chart_token(symbol)
         );
+        let (focus_datetime_ns, focus_position) = self
+            .driver
+            .backtest
+            .as_ref()
+            .map_or((None, None), |backtest| {
+                (Some(backtest.start_datetime_ns()), Some(0))
+            });
 
         if !self.driver.serial_charts.contains(&chart_id) {
             self.driver
@@ -446,8 +453,8 @@ impl TqApi {
                     duration_ns,
                     view_width: data_length,
                     left_kline_id: None,
-                    focus_datetime_ns: None,
-                    focus_position: None,
+                    focus_datetime_ns,
+                    focus_position,
                 })
                 .await
                 .map_err(crate::error::WaitFacadeError::Session)?;

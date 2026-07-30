@@ -704,6 +704,26 @@ async fn kline_set_chart_uses_protocol_safe_chart_id() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn backtest_kline_requests_the_first_window_from_the_backtest_start() {
+    let start_ns = 1_000_000_i64;
+    let mut api = support::backtest_api_for_test(start_ns, 2_000_000);
+
+    let _bars = api
+        .kline("SHFE.au2608", Duration::from_secs(60), 64)
+        .await
+        .unwrap();
+    let dispatches = api.session().handle().drain_dispatches().unwrap();
+    let set_chart = dispatches
+        .iter()
+        .map(|dispatch| transport_payload(&dispatch.request))
+        .find(|payload| payload["aid"] == "set_chart")
+        .expect("backtest kline should submit set_chart");
+
+    assert_eq!(set_chart["focus_datetime"], json!(start_ns));
+    assert_eq!(set_chart["focus_position"], json!(0));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn kline_multi_uses_one_chart_with_joined_symbols_and_bootstrap_width() {
     let mut api = support::seeded_api();
 

@@ -566,7 +566,7 @@ impl RemoteBacktestFillRuntime {
         }
     }
 
-    fn emit(&self, event: BacktestRemoteFillProgress) {
+    pub(crate) fn emit(&self, event: BacktestRemoteFillProgress) {
         if let Some(progress) = &self.progress {
             progress(&event);
         }
@@ -602,7 +602,7 @@ impl RemoteBacktestFillRuntime {
         }
     }
 
-    fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.cancellation
             .as_ref()
             .is_some_and(BacktestRemoteFillCancellation::is_cancelled)

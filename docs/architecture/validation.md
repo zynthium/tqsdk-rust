@@ -164,6 +164,7 @@ TQSDK_HISTORY_CACHE_BENCH_INPUT_CACHE_DIR=<cache-root> TQSDK_HISTORY_CACHE_BENCH
 rtk cargo test -p tqsdk-data
 rtk cargo test -p tqsdk-data --test backtest_tick_cache_ops
 rtk cargo test -p tqsdk-data --test minute_kline_cache
+rtk cargo test -p tqsdk-data --test minute_kline_cache_ops
 rtk cargo test -p tqsdk-cache
 rtk cargo clippy -p tqsdk-cache --all-targets -- -D warnings
 rtk cargo clippy -p tqsdk-data --all-targets -- -D warnings
@@ -173,6 +174,7 @@ rtk cargo test -p tqsdk-task --test history_backtest_replay
 rtk cargo test -p tqsdk-task --test minute_kline_aggregate
 rtk cargo test -p tqsdk-task kline_synth
 rtk cargo test -p tqsdk backtest_kline
+rtk cargo test -p tqsdk --lib
 rtk cargo test -p tqsdk --test facade_contract
 rtk cargo test -p tqsdk --test facade_contract facade_backtest_warmup
 rtk cargo check -p tqsdk --example api_contract_s43_facade_backtest_history_cache
@@ -205,13 +207,17 @@ final coverage；`facade_contract` 还覆盖
 已检查完整 cache 时发出 physical plan；CLI tests 还覆盖 JSONL `inspection` record。真实远端 fill
 仍只在用户明确授权、提供凭证后手动运行，不进入普通 unit test。
 
-`minute_kline_cache` 覆盖 v3 `logical symbol × trading month` `.tqmk` partition、snapshot
-hash fail-closed、current-day final-coverage guard、streaming reader 与 Refresh 只移除相交月文件。
+`minute_kline_cache` 与 `minute_kline_cache_ops` 覆盖 v4 `logical symbol × trading month` `.tqmk`
+partition、snapshot hash fail-closed、current-day final-coverage guard、streaming reader、Refresh 只移除
+相交月文件、缺失 root 的 read-only fast inventory，以及 readable v4 / legacy v3
+`LegacyUnsupported` diagnosis。旧 v3 不得被自动迁移、覆盖或当作 cache hit。
 `minute_kline_aggregate` 和 `history_backtest_replay` 覆盖 60s open/final、`N × 60s` session-aware
 聚合、same-timestamp batch、以及主连 minute cache 保持 logical key 而 replay 保留 dated
-`underlying_symbol`。facade contract 还覆盖 61s/90s rejection、K-only minute path 不请求 tick、
-CacheOnly 不创建 minute namespace、typed history inspect/purge、stock backtest builder selection，
-以及 `DataClient` 的 retention/max-byte 配置只在显式
+`underlying_symbol`。`tqsdk-cache` tests 还覆盖 minute/tick/all kind routing、minute logical-symbol
+inspect、stock minute fill 拒绝 futures universe、tick fill 拒绝 stock market、CacheOnly minute dry-run、
+minute report-bound verify、safe purge 与 schema-v2 `cache_kind` JSONL progress。facade contract 还覆盖
+61s/90s rejection、K-only minute path 不请求 tick、CacheOnly 不创建 minute namespace、typed history
+inspect/purge、stock backtest builder selection，以及 `DataClient` 的 retention/max-byte 配置只在显式
 `run_configured_history_cache_maintenance()` 时执行；任何 tick/minute history read/write 都不能自动删除数据。
 
 `facade_contract` 覆盖 `record_ticks(...)` 和 `MarketCachePolicy` 在 live/session mode 下把显式
@@ -250,6 +256,27 @@ store semantics, records range-index selection/fallback, corrupted input reporti
 该 smoke 验证首次 server-side backtest 按时间片补 tick 缓存、二次无 auth 本地缓存命中。
 cache warmup runner 的远端 smoke：
 `rtk cargo test -p tqsdk --test facade_contract facade_backtest_warmup_remote_on_miss_live_smoke -- --ignored`。
+
+canonical-minute 的凭证门控验收同样只在用户明确授权时执行，且必须选择已结束的历史 trading-day
+window、不得连接交易账户或输出 `TQ_AUTH_*`。至少选取少量实际可用的指数合约（例如
+`KQ.i@SHFE.au` 与另一交易所的可用指数代码），先用 `tqsdk-cache --kind minute fill` materialize
+60s cache，再对相同 closed window：
+
+1. 从本地 canonical 60s cache 聚合 5m 与 15m bars；
+2. 通过 official server-side backtest Kline stream 获取同周期 bars；
+3. 按 bar bucket 与 session 边界对齐，比较 timestamp、open/high/low/close、volume、open interest；
+4. 仅记录总 bar 数、mismatch 数与少量脱敏样本。
+
+仓库提供了凭证门控的回归入口；它会填充两个指数合约的 canonical 60s cache，并逐根比较本地
+5m/15m 聚合与远端 chart：
+
+```bash
+rtk cargo test -p tqsdk --test facade_contract canonical_minute_aggregation_matches_remote_index_klines -- --ignored --nocapture
+```
+
+任何明显的 bucket/session 偏移、未来 OHLC 泄漏或成片 OHLC/volume/open-interest 差异都应阻止发布。
+对 remote minute fill 的回归还必须确认：只有 terminal-success batch 才提交 final coverage；合法空
+range 可以提交 coverage；取消、超时和失败 batch 留下缺口，不能污染 final coverage。
 
 ## 场景驱动 public API 契约
 

@@ -124,14 +124,15 @@
   - 默认 facade 的用户入口收敛为 `.backtest(start_ns, end_ns)` 和 `.replay_backtest(...)`：
     `.backtest(...)` 默认使用 `tqsdk-data` 共享 history cache root；配置 `cache_dir` /
     `market_cache` 可覆盖 root，显式 `.disabled_cache()` 使用官方服务端回测行情且不落盘；
-    持久 tick cache、canonical-minute cache、远端补缺、`.warmup()` 由 `BacktestBuilder` 承接；
+    持久 tick cache、canonical-minute v4 cache、远端补缺、`.warmup()` 由 `BacktestBuilder` 承接；
     `.inspect_cache()` / `.purge_cache_symbols()` 保持 tick-only 兼容，
     `.inspect_history_cache()` / `.purge_history_cache()` 返回两类 typed report；任何 retention、
     后台 timer 或 cache daemon 都不进入 task/runtime。
     `KQ.m@...` 的 tick 在 facade 解析为 concrete-contract sources；minute cache 始终以逻辑
     main-contract symbol 为 key，task 只把 dated mapping 写入 replay `underlying_symbol` metadata。
-    `<60s` K 从 tick cache 本地合成；`60s` 是唯一持久 canonical K；`>60s` 只允许
-    `N × 60s`，由 `MinuteKlineAggregator` 从已关闭分钟线聚合，`61s` / `90s` 会拒绝。
+    `<60s` K 从 tick cache 本地合成；`60s` 是唯一持久 canonical K，且只由官方
+    server-side backtest terminal 确认后写入；`>60s` 只允许 `N × 60s`，由
+    `MinuteKlineAggregator` 从已关闭分钟线聚合，`61s` / `90s` 会拒绝。
     canonical minute 在 row timestamp 发 open-only、在 `+60s` 发 final row；高周期在 bar
     start 发 open-only，随后每个关闭分钟更新一次。`HistoryBacktestReplayStream` 与 tick /
     synthetic K 线按 event time 合并，而 `StrategyBacktest` 原子批处理相同 timestamp，避免

@@ -3,7 +3,8 @@ use std::process::Command;
 use chrono::NaiveDate;
 use serde_json::Value;
 use tqsdk_data::{
-    BacktestTickCache, backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
+    BacktestTickCache, MinuteKlineCache, MinuteKlineCacheSnapshot,
+    backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
 };
 
 fn v3_result<'a>(json: &'a Value, command: &str, status: &str, exit_code: i32) -> &'a Value {
@@ -32,6 +33,423 @@ fn inventory_is_read_only_for_a_missing_cache_root() {
     assert_eq!(result["schema_version"], 2);
     assert_eq!(result["command"], "inventory");
     assert_eq!(result["total_files"], 0);
+}
+
+#[test]
+fn minute_inventory_is_read_only_for_a_missing_cache_root() {
+    let cache_dir = temp_dir("minute-inventory");
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "inventory",
+    ]);
+
+    assert!(output.status.success());
+    assert!(!cache_dir.exists());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "inventory", "success", 0);
+    assert_eq!(result["cache_kind"], "minute");
+    assert_eq!(result["total_files"], 0);
+    assert_eq!(result["total_bytes"], 0);
+}
+
+#[test]
+fn all_kind_is_rejected_for_targeted_cache_operations() {
+    let output = run_json([
+        "--kind",
+        "all",
+        "inspect",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let _ = v3_result(&json, "inspect", "error", 2);
+    assert_eq!(json["error"]["code"], "usage");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--kind all")
+    );
+}
+
+#[test]
+fn minute_inspect_uses_the_logical_symbol_as_its_cache_key() {
+    let cache_dir = temp_dir("minute-inspect");
+    let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    let cache = MinuteKlineCache::open(&cache_dir).unwrap();
+    cache
+        .store_final_range(
+            "KQ.m@SHFE.au",
+            range.start_ns,
+            range.end_ns,
+            &MinuteKlineCacheSnapshot::cst_v1(),
+            &[],
+        )
+        .unwrap();
+
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "inspect",
+        "--symbol",
+        "KQ.m@SHFE.au",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+    ]);
+
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "inspect", "success", 0);
+    assert_eq!(result["cache_kind"], "minute");
+    assert_eq!(result["statuses"][0]["symbol"], "KQ.m@SHFE.au");
+    assert_eq!(result["statuses"][0]["complete"], true);
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn minute_doctor_reports_the_v4_month_file_without_touching_tick_cache() {
+    let cache_dir = temp_dir("minute-doctor");
+    let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    let cache = MinuteKlineCache::open(&cache_dir).unwrap();
+    cache
+        .store_final_range(
+            "KQ.i@SHFE.au",
+            range.start_ns,
+            range.end_ns,
+            &MinuteKlineCacheSnapshot::cst_v1(),
+            &[],
+        )
+        .unwrap();
+
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "doctor",
+    ]);
+
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "doctor", "success", 0);
+    assert_eq!(result["cache_kind"], "minute");
+    assert_eq!(result["problem_files"], 0);
+    assert_eq!(result["files"][0]["status"], "readable");
+    assert_eq!(result["files"][0]["schema_version"], 4);
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn minute_fill_dry_run_is_cache_only_and_does_not_create_the_root() {
+    let cache_dir = temp_dir("minute-fill-dry-run");
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-03",
+        "--dry-run",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!cache_dir.exists());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "fill", "incomplete", 1);
+    assert_eq!(result["cache_kind"], "minute");
+    assert_eq!(result["dry_run"], true);
+    assert_eq!(result["report"]["cache_kind"], "minute");
+    assert_eq!(result["report"]["remote_used"], false);
+    assert_eq!(result["report"]["complete"], false);
+}
+
+#[test]
+fn minute_stock_fill_rejects_futures_universe_selectors() {
+    let output = run_json([
+        "--kind",
+        "minute",
+        "--market",
+        "stock",
+        "fill",
+        "--universe",
+        "main:all",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-03",
+        "--dry-run",
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let _ = v3_result(&json, "fill", "error", 2);
+    assert_eq!(json["error"]["code"], "usage");
+    assert!(json["error"]["message"].as_str().unwrap().contains("stock"));
+}
+
+#[test]
+fn tick_fill_rejects_stock_market_instead_of_silently_using_futures() {
+    let output = run_json([
+        "--kind",
+        "tick",
+        "--market",
+        "stock",
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-03",
+        "--dry-run",
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let _ = v3_result(&json, "fill", "error", 2);
+    assert_eq!(json["error"]["code"], "usage");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--kind minute")
+    );
+}
+
+#[test]
+fn minute_fill_reuses_complete_coverage_without_auth_and_writes_a_minute_report() {
+    let cache_dir = temp_dir("minute-fill-complete");
+    let start = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    let end = backtest_tick_trading_day_range(day(2020, 1, 3)).unwrap();
+    let cache = MinuteKlineCache::open(&cache_dir).unwrap();
+    cache
+        .store_final_range(
+            "SHFE.rb2601",
+            start.start_ns,
+            end.end_ns,
+            &MinuteKlineCacheSnapshot::cst_v1(),
+            &[],
+        )
+        .unwrap();
+    let report_path = cache_dir.join("minute-fill-report.json");
+
+    let output = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-03",
+        "--report",
+        report_path.to_str().unwrap(),
+    ]);
+
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "fill", "success", 0);
+    assert_eq!(result["cache_kind"], "minute");
+    assert_eq!(result["report"]["remote_used"], false);
+    assert_eq!(result["report"]["complete"], true);
+    assert_eq!(result["report"]["symbols"][0]["symbol"], "SHFE.rb2601");
+    assert!(report_path.exists());
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn minute_verify_uses_a_minute_fill_report_and_reads_final_coverage() {
+    let cache_dir = temp_dir("minute-verify-report");
+    let start = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    let cache = MinuteKlineCache::open(&cache_dir).unwrap();
+    cache
+        .store_final_range(
+            "SHFE.rb2601",
+            start.start_ns,
+            start.end_ns,
+            &MinuteKlineCacheSnapshot::cst_v1(),
+            &[],
+        )
+        .unwrap();
+    let report_path = cache_dir.join("minute-verify-report.json");
+    let fill = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--report",
+        report_path.to_str().unwrap(),
+    ]);
+    assert!(fill.status.success());
+
+    let verified = run_without_auth_json([
+        "--kind",
+        "minute",
+        "verify",
+        "--report",
+        report_path.to_str().unwrap(),
+    ]);
+    assert!(verified.status.success());
+    let json: Value = serde_json::from_slice(&verified.stdout).unwrap();
+    let result = v3_result(&json, "verify", "success", 0);
+    assert_eq!(result["cache_kind"], "minute");
+    assert_eq!(result["source_report"], "bound");
+    assert_eq!(result["coverage_complete"], true);
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn minute_purge_requires_yes_and_dry_run_only_lists_the_month_partition() {
+    let cache_dir = temp_dir("minute-purge");
+    let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    let cache = MinuteKlineCache::open(&cache_dir).unwrap();
+    cache
+        .store_final_range(
+            "SHFE.rb2601",
+            range.start_ns,
+            range.end_ns,
+            &MinuteKlineCacheSnapshot::cst_v1(),
+            &[],
+        )
+        .unwrap();
+    let month_path = cache.month_file_path("SHFE.rb2601", "202001");
+    assert!(month_path.exists());
+
+    let dry_run = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "purge",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--dry-run",
+    ]);
+    assert!(dry_run.status.success());
+    assert!(month_path.exists());
+    let json: Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    let result = v3_result(&json, "purge", "success", 0);
+    assert_eq!(result["cache_kind"], "minute");
+    assert_eq!(result["dry_run"], true);
+    assert_eq!(result["would_remove_files"].as_array().unwrap().len(), 1);
+
+    let not_confirmed = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "purge",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+    ]);
+    assert_eq!(not_confirmed.status.code(), Some(2));
+    assert!(month_path.exists());
+
+    let purged = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "purge",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--yes",
+    ]);
+    assert!(purged.status.success());
+    assert!(!month_path.exists());
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn minute_fill_progress_jsonl_uses_v2_and_identifies_the_cache_kind() {
+    let cache_dir = temp_dir("minute-progress-jsonl");
+    let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    let cache = MinuteKlineCache::open(&cache_dir).unwrap();
+    cache
+        .store_final_range(
+            "SHFE.rb2601",
+            range.start_ns,
+            range.end_ns,
+            &MinuteKlineCacheSnapshot::cst_v1(),
+            &[],
+        )
+        .unwrap();
+
+    let output = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--progress",
+        "jsonl",
+    ]);
+
+    assert!(output.status.success());
+    let records = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(!records.is_empty());
+    assert!(records.iter().all(|record| {
+        record["schema_version"] == 2
+            && record["kind"] == "tqsdk-cache.progress"
+            && record["cache_kind"] == "minute"
+    }));
+    assert_eq!(records.last().unwrap()["event"], "complete");
+
+    let _ = std::fs::remove_dir_all(cache_dir);
 }
 
 #[test]
@@ -649,8 +1067,9 @@ fn fill_progress_jsonl_emits_versioned_stderr_records() {
         .lines()
         .map(|line| {
             let record: Value = serde_json::from_str(line).unwrap();
-            assert_eq!(record["schema_version"], 1);
+            assert_eq!(record["schema_version"], 2);
             assert_eq!(record["kind"], "tqsdk-cache.progress");
+            assert_eq!(record["cache_kind"], "tick");
             assert!(matches!(
                 record["event"].as_str(),
                 Some("planning" | "inspection" | "snapshot" | "complete")

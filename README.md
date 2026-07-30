@@ -31,8 +31,8 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-session`](crates/tqsdk-session) | 共享 session、lazy connection、命令推进、one-shot direct query、metadata、schema 和 service query |
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
 | [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、task-owned replay source、streaming local backtest execution、Python-compatible local backtest sim、kline default price tick、cash/equity drawdown summary、低延迟 trading desk profile |
-| [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、TQBN daily v2 (`.tqbn`) 默认 history cache、按交易日分区的 backtest tick cache 和共享 universe selector |
-| [`tqsdk-cache`](crates/tqsdk-cache) | 可选 TQBN tick cache 运维 CLI：默认文本摘要、按需 versioned JSON、inventory、coverage inspect、calendar-aware closed-day fill、显式日期当前日自动 provisional fill、selectable stderr progress、CacheOnly verify 与 deep doctor；不进入默认策略 hot path |
+| [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、TQBN daily v2 (`.tqbn`) 默认 history cache、按交易日分区的 backtest tick cache、canonical final-60s K cache 和共享 universe selector |
+| [`tqsdk-cache`](crates/tqsdk-cache) | 可选 tick / canonical-minute cache 运维 CLI：默认文本摘要、按需 versioned JSON、inventory、coverage inspect、closed-day fill、tick 的显式当前日 provisional fill、selectable stderr progress、CacheOnly verify、deep doctor 与受控 minute purge；不进入默认策略 hot path |
 | [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端的 quote / tick / K 线请求；未配置 relay 时 SDK 仍直连天勤 |
 
 一般使用建议：
@@ -41,7 +41,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 - 已明确需要 Python 风格单 owner 推进点：直接用 `tqsdk-wait`。
 - 只做合约、日历、metadata、schema 等一次性查询：用 `tqsdk-session`。
 - 做历史数据、批量导出和 history series cache：用 `tqsdk-data`。
-- 对固定 root 做历史 tick cache 预检、补齐或验收：使用可选 `tqsdk-cache` CLI；普通策略不需要启动它。
+- 对固定 root 做历史 tick 或 canonical-minute cache 预检、补齐或验收：使用可选 `tqsdk-cache` CLI；普通策略不需要启动它。
 - 做确定性 replay / 本地回测行情输入：用 `tqsdk_task::replay::ReplayMarketSource`。
 - 需要策略下单并撮合成交的回测：优先用 `tqsdk` 的
   `.backtest(start_ns, end_ns)` 单一入口；默认复用共享 history cache，显式
@@ -152,7 +152,9 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 `Tq::futures().backtest(start_ns, end_ns)` 是唯一推荐回测入口：默认使用
 `tqsdk-data` 共享 history cache root（`$HOME/.tqsdk/data_series_1`，可用
 `TQSDK_HISTORY_CACHE_DIR` 覆盖）。tick 使用 `BacktestTickCache`，唯一持久 K 线输入使用
-独立 `MinuteKlineCache` 的 canonical 60s monthly files，再由本地 `TqSim` 回放。显式配置 `cache_dir(...)`、
+独立 `MinuteKlineCache` 的 canonical final-60s monthly files（v4，按 logical symbol × trading month
+分区），再由本地 `TqSim` 回放。minute 缺口只通过官方 server-side backtest Kline stream 填补，并且仅在
+远端 terminal 成功后标记 final coverage；不回退到专业历史下载路径。显式配置 `cache_dir(...)`、
 `cache_store(...)` 或 `.market_cache(...)` 会覆盖默认 cache；显式 `.disabled_cache()`
 才使用官方 server-side backtest market stream 且不落盘。默认 `RemoteOnMiss`
 会先检查本地缓存；缓存完整时不需要 auth，缓存缺失时使用官方 server-side backtest market
@@ -170,14 +172,15 @@ metadata；可在 backtest builder 上用 `.price_tick(...)`、`.instrument_spec
 `DataClient::query_his_cont_underlying_segments(...)` 取得历史 date → concrete-contract
 映射，按 CST 交易日切成物理合约 tick range。缓存、coverage、remote-on-miss 和 `.warmup()`
 都以具体合约为 key：主连与同一时段的具体合约共用同一份 `.tqbn` tick 文件，replay 事件仍保留
-主连 symbol 并附带 `underlying_symbol`。minute cache 则以逻辑主连 symbol 为 key，dated physical
-mapping 只作为 metadata；主连支持 canonical 60s 和整数分钟本地聚合。映射查询不需要天勤账号，
+主连 symbol 并附带 `underlying_symbol`。minute cache 则以逻辑主连 symbol 为 key，不复制 physical
+minute 文件；主连支持 canonical 60s 和整数分钟本地聚合。映射查询不需要天勤账号，
 但主连 `.cache_only()` 仍需要取得这份公开 mapping metadata。
 
 `Tq::stock()` 选择股票 market / server-backtest endpoint；cache-backed stock backtest 使用同一套
 canonical 60s monthly cache。futures universe selector 不适用于股票，股票策略应显式声明 symbol。
-tick 与 minute cache 都不会因读取、写入、retention 或 max-byte 配置而自动删除数据；需要维护时
-显式调用 `DataClient::run_configured_history_cache_maintenance()` 或 backtest builder 的 purge API。
+tick 与 minute cache 都不会因读取、写入、retention 或 max-byte 配置而自动删除数据。清除或重拉必须
+显式使用 backtest builder 的 `refresh` / purge API；`tqsdk-cache` 的 CLI purge 目前只作用于
+minute cache，且需要范围与确认。
 
 自有多资产调度器可在 `.prepare().await?` 后读取 `PreparedBacktest::tick_sources()`，
 复用同一 logical-to-physical 投影；必须按每项的半开有效区间读取物理 cache。
@@ -234,7 +237,8 @@ serial；写入端只在 tick id 连续时推进 coverage，断线、跳号或�
 `LiveTickCacheWriteReport::appended_rows` 只统计本次实际落盘行数。
 
 显式离线校验可加 `.cache_only()`；需要强制重新走官方回测流并覆盖本地缓存时用
-`.refresh()`，它会删除对应范围的 tick cache，以及只删除相交月文件的 canonical-minute cache 后再由官方回测流补齐；
+`.refresh()`，这是显式破坏性操作：它会对每个已解析的 physical tick symbol 删除其全部 tick
+日分区，并对 canonical-minute cache 只删除请求窗口相交的月文件，之后再由官方回测流补齐；
 需要自定义内存 replay source、测试 fixture 或外部数据源时用
 `.replay_backtest(source)`。官方服务端 market-data-only 回测就是同一个
 `.backtest(start_ns, end_ns).disabled_cache()` 的行为；单日服务端复盘仍用
@@ -366,7 +370,7 @@ let page = client.get_kline_data_page(request).await?;
 | 默认 facade 缓存预热 | `cargo run -p tqsdk --example api_contract_s45_facade_backtest_cache_warmup` | `.warmup()` 只预热缓存；示例也编译检查当前日 `.provisional_open_day_fill(...)` 配置 |
 | 默认 facade 实时 tick 记录 | `TQ_RUN_LIVE_RECORD_TICKS=1 cargo run -p tqsdk --example api_contract_s46_facade_record_ticks` | 显式 `record_ticks(...)` 把指定合约 live tick 写入同一份回测缓存；需要账号 |
 | 默认 facade 共享缓存 policy | `TQ_RUN_LIVE_RECORD_TICKS=1 cargo run -p tqsdk --example api_contract_s47_facade_market_cache_policy` | `MarketCachePolicy` 同时驱动 live tick recording 和 cache-backed local backtest 输入 |
-| 回测 tick cache 运维 CLI | `cargo run -p tqsdk-cache -- --help` | 可选 binary；管理 daily TQBN tick cache，不启动 relay 或守护进程 |
+| 回测缓存运维 CLI | `cargo run -p tqsdk-cache -- --help` | 可选 binary；以 `--kind tick|minute|all` 管理 daily TQBN tick 与 canonical-minute cache，不启动 relay 或守护进程 |
 | 默认 facade 多合约同主体 | `cargo run -p tqsdk --example api_contract_s39_facade_same_body` | 同一两腿价差策略只接受 `&mut Tq`，`TQ_EXAMPLE_MODE` 决定本地回测、快期模拟或实盘 |
 | 默认 facade 本地回测 TargetPos | `cargo run -p tqsdk --example api_contract_s40_facade_local_backtest_target_pos` | 同一 `Tq::next()` 策略主体在本地 replay 中读取持仓并用 `TargetPos` 调仓 |
 | `wait_update()` 行情更新 | `TQ_WAIT_ONCE=1 cargo run -p tqsdk-wait --example quote_wait` | 需要 `TQ_AUTH_USER` / `TQ_AUTH_PASS`；去掉 `TQ_WAIT_ONCE=1` 后持续运行 |

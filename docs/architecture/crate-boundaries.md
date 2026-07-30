@@ -328,9 +328,13 @@ sink、WAL、journal 或 cache writer。
   会执行 append-log compaction、合并重复 rows 并保留 last-write-wins 语义；history read/write
   不会自动调用它。
   旧 `.tqseries` 和旧单文件 `.tqbn` layout 不再作为默认 backend，且没有兼容读取或迁移 store
-- `MinuteKlineCache`：独立 v3 `logical symbol × trading month` `.tqmk` cache，只持久化 final
-  60s K；higher periods 属于 task replay aggregation。它用 calendar/session snapshot fail closed，
-  不做 automatic retention/max-byte eviction，Refresh/purge 只作为显式操作
+- `MinuteKlineCache`：独立 v4 `logical symbol × trading month` `.tqmk` cache，只持久化由
+  official server-side backtest terminal 确认的 final 60s K；higher periods 属于 task replay
+  aggregation。文件 format id 是 `tqsdk.minute-kline.monthly.v4`，目录名继续为
+  `minute-kline-v3`，以便将旧 v3 文件诊断为 `LegacyUnsupported` 而不是静默迁移。它不做
+  automatic retention/max-byte eviction 或后台清理，Refresh/purge 都是显式破坏性操作；
+  `fast_inventory()` 是不解码、不建 root 的只读盘点，`diagnose()` 是逐月深检并区分
+  readable / legacy / unsupported / corrupt
 - remote backtest cache fill 的完整性 accumulator / report 类型
 - `LiveTickCacheWriter` 这类纯数据层 live tick row writer：只接收已解码 tick rows，按连续
   tick id 推进 coverage；可合并连续单 tick push，并通过 `flush()` / Drop 提交短尾，但不拥有
@@ -362,19 +366,27 @@ sink、WAL、journal 或 cache writer。
 ### 正确职责
 
 - 可选 workspace binary，不进入 Cargo default-members
-- 对 canonical daily TQBN tick cache 提供 `inventory`、physical-symbol `inspect`、
-  closed-day `fill`、显式日期当前日自动 provisional `fill`、CacheOnly `verify` 和 deep `doctor`
-- 将现有 `tqsdk` remote-on-miss warmup、`BacktestTickCache` read-only/diagnostic/root-lock
-  APIs 组合为默认 text / opt-in V3 JSON stdout（可选 legacy V2）+ selectable stderr progress 的 operator contract
-- normal fill report 记录 canonical root、logical/physical symbols、coverage state、共同
-  checkpoint 和调度配置，供 `verify --report` 复用；取消 flush partial rows，但不提交 final
-  coverage 或推进 provisional checkpoint
+- 以 `--kind tick|minute|all`（默认 tick）选择 cache family：tick 与 minute 都提供
+  read-only `inventory`；tick 提供 physical-symbol `inspect`、closed-day/current-day provisional
+  `fill`、CacheOnly `verify`；minute 提供 logical-symbol final-only `fill`、`inspect`、`verify`
+  与 deep diagnostic；`all` 只可用于 `inventory` / `doctor`
+- minute fill 只通过 `Tq::futures()` / `Tq::stock()` 的 server-side backtest 60s Kline 流补齐；
+  stock 不接受 futures universe selector，必须显式 symbol。minute report 写入
+  `<cache-root>/reports/minute/`，并以 `cache_kind=minute` 供 `verify --report` 绑定
+- 将现有 `tqsdk` remote-on-miss warmup、`BacktestTickCache` / `MinuteKlineCache`
+  read-only/diagnostic APIs 组合为默认 text / opt-in V3 JSON stdout（可选 legacy V2）+
+  selectable stderr progress 的 operator contract；JSONL progress schema 为 v2，带 `cache_kind`
+- tick normal fill report 记录 canonical root、logical/physical symbols、coverage state、共同
+  checkpoint 和调度配置，供 `verify --report` 复用；minute report 记录 logical cache symbols。
+  取消时不提交未完成的 final coverage
 
 ### 不应承担的职责
 
 - 新的持久格式、store adapter、remote protocol client 或 proxy policy
 - session/state-tree/backtest runtime ownership，live tick recording、daemon、relay 或 dashboard
-- V1 destructive `purge` / `refresh` / `compact` command；这类操作继续要求显式 SDK API 和人工确认
+- tick 的 `refresh` / purge / compact 继续要求显式 SDK API 和人工确认；CLI 仅提供 minute
+  `purge`，它必须恰好一个 symbol、明确日期范围与 `--yes`，`--dry-run` 只列出月文件且不写入。
+  两类 cache 都不进行自动清理
 
 ### 判断
 

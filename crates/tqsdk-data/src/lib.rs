@@ -116,9 +116,11 @@ pub use integrity::{
 pub use live_tick_cache_writer::{LiveTickCacheWriteReport, LiveTickCacheWriter};
 pub use minute_kline_cache::{
     MINUTE_KLINE_CACHE_FORMAT_ID, MINUTE_KLINE_CACHE_SCHEMA_VERSION, MINUTE_KLINE_DURATION_NS,
-    MinuteKlineCache, MinuteKlineCacheMonthReport, MinuteKlineCachePurgeReport,
-    MinuteKlineCacheSnapshot, MinuteKlineCacheStatus, MinuteKlineCacheWriteReport,
-    MinuteKlineCoverage, MinuteKlineReader, trading_month_for_timestamp_ns,
+    MinuteKlineCache, MinuteKlineCacheDiagnosticFile, MinuteKlineCacheDiagnosticReport,
+    MinuteKlineCacheDiagnosticStatus, MinuteKlineCacheInventory, MinuteKlineCacheInventorySymbol,
+    MinuteKlineCacheMonthReport, MinuteKlineCachePurgeReport, MinuteKlineCacheSnapshot,
+    MinuteKlineCacheStatus, MinuteKlineCacheWriteReport, MinuteKlineCoverage, MinuteKlineReader,
+    trading_month_for_timestamp_ns,
 };
 pub use universe::{
     DEFAULT_FUTURES_METADATA_BATCH_SIZE, FuturesContract, FuturesProductCode,

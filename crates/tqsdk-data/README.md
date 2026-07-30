@@ -27,6 +27,10 @@
 - `LiveTickCacheWriter::new(...).push_ticks(...)` / `flush()`
 - `MinuteKlineCache::open(...)` / `open_read_only(...)` / `coverage(...)`
 - `MinuteKlineCache::store_final_range(...)` / `open_reader(...)` / `purge_range(...)`
+- `MinuteKlineCache::fast_inventory()` / `diagnose()`
+- `MinuteKlineCacheInventory` / `MinuteKlineCacheInventorySymbol`
+- `MinuteKlineCacheDiagnosticReport` / `MinuteKlineCacheDiagnosticFile` /
+  `MinuteKlineCacheDiagnosticStatus`
 - `DataClient::run_configured_history_cache_maintenance()`
 - `UniverseExpression::parse(...)`
 - `resolve_futures_universe_symbols(...)`
@@ -91,15 +95,17 @@
   只用于恢复当前交易日的增量填充，不进入普通 coverage/cache-hit；其范围、高水位和 as-of
   必须属于同一 TQBN 日分区。盘中追加 checkpoint 不触发全历史 compaction，final coverage
   覆盖后才在 compaction 中淘汰。它不持久化 K 线，也不引入第二套 tick cache 文件格式
-- cache-backed facade backtest 的唯一 durable K 线是 `MinuteKlineCache` 的 final 60s series，
-  文件位于 `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk`。`<60s` K 线由
-  `tqsdk-task` 从 tick rows 临时合成；`>60s` 只允许 `N × 60s`，也由 task 从 closed
-  canonical minutes 聚合。facade 不读取/写入 native higher-period `HistorySeriesCache` K 线，
-  `61s` / `90s` 会拒绝
+- cache-backed facade backtest 的唯一 durable K 线是 `MinuteKlineCache` 的 final 60s series。
+  它只接受官方 server-side backtest terminal 确认完成的 range（合法的零行 range 也可以 final），
+  不回退到 `DataClient` 历史下载路径。当前 format id 是
+  `tqsdk.minute-kline.monthly.v4`，文件按 `logical symbol × trading month` 分区，路径仍为
+  `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk`。`<60s` K 线由 `tqsdk-task` 从
+  tick rows 临时合成；`>60s` 只允许 `N × 60s`，也由 task 从 closed canonical minutes 聚合。
+  facade 不读取/写入 native higher-period `HistorySeriesCache` K 线，`61s` / `90s` 会拒绝
 - `MinuteKlineCache` 以 calendar/session snapshot hash fail closed，只有完成的远端 60s range
-  才可记录 final coverage；当前/未来 trading day 不可 claim final。它没有 retention、max-byte
-  eviction 或自动清理，`Refresh` 只删除请求范围相交的月文件，`purge_range` / `purge_symbol`
-  是显式 destructive maintenance
+  才可记录 final coverage；当前/未来 trading day 不可 claim final。v3 文件不会自动迁移、覆盖或
+  被当作 cache hit；`diagnose()` 会将其列为 `LegacyUnsupported`。它没有 retention、max-byte
+  eviction 或自动清理，`Refresh`、`purge_range` / `purge_symbol` 都是显式 destructive maintenance
 - `BacktestTickCache::inspect(...)` 输出 backend format、缓存目录、series 文件路径、完整性、
   cached/missing ranges；`tick_series_path(...)` 返回逻辑 series 路径，`purge_symbol_ticks(...)` 和
   `compact_symbol_ticks(...)` 是按 `(symbol, tick)` 的全部日分区文件粒度的运维入口，供回测 warmup、
@@ -108,10 +114,10 @@
   daily file metadata / magic，`diagnose()` 解码全部 tick partitions 并返回文件级状态。root-scoped
   `try_acquire_remote_fill_lock()` 与 `try_acquire_consistency_read_lock()` 用于协调远端 fill owner
   和稳定检查视图；它们是 advisory lock，不替代单 TQBN 文件写锁
-- 可选 `tqsdk-cache` binary 只编排上述 data/facade 能力，提供 JSON inventory、默认 closed-day
-  fill、显式当前日 provisional fill、report-bound verify 和 doctor；它不属于本 crate 的 runtime、
-  store adapter 或 live writer 边界，
-  详见 [回测 Tick Cache CLI](../../docs/architecture/backtest-tick-cache-cli.md)
+- 可选 `tqsdk-cache` binary 只编排上述 data/facade 能力。它以 `--kind tick|minute|all`
+  选择 cache family（默认 tick），为 minute 提供 final-only closed-day fill、report-bound verify、
+  fast inventory / deep doctor 和显式 purge；它不属于本 crate 的 runtime、store adapter 或 live
+  writer 边界，详见 [回测缓存 CLI](../../docs/architecture/backtest-tick-cache-cli.md)
 - `LiveTickCacheWriter` 是纯数据层 writer：调用方或 `tqsdk` facade 传入已经收到的 live tick
   rows，它负责追加 rows、按连续 tick id 推进 coverage，并在跳号处留下缺口。连续单 tick push
   默认聚合到 128 行；批量输入、跳号、约 250 ms 后的下一次 push、显式 `flush()` 或最后一个

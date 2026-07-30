@@ -10,15 +10,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{NaiveDate, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use tqsdk::{
-    BacktestCacheWarmupAction, BacktestCacheWarmupReport, BacktestRemoteFillConfig,
-    BacktestTickCacheStatus,
+    BacktestCacheWarmupAction, BacktestCacheWarmupReport,
+    BacktestMinuteKlineCacheWarmupSymbolReport, BacktestRemoteFillConfig, BacktestTickCacheStatus,
 };
 use tqsdk_data::{
-    BacktestTickCache, DataError, TradingCalendarRow, backtest_tick_trading_day_for_timestamp_ns,
-    backtest_tick_trading_day_range, default_history_cache_dir,
+    BacktestTickCache, DataError, MinuteKlineCacheStatus, TradingCalendarRow,
+    backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
+    default_history_cache_dir,
 };
 
 pub const REPORT_SCHEMA_VERSION: u32 = 2;
+pub const MINUTE_FILL_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const TRADING_CALENDAR_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -542,6 +544,136 @@ impl FillReport {
     }
 }
 
+/// Cache-only coverage snapshot for a logical canonical-minute symbol.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MinuteCacheCoverageSnapshot {
+    pub namespace_dir: String,
+    pub cached_ranges: Vec<(i64, i64)>,
+    pub missing_ranges: Vec<(i64, i64)>,
+    pub complete: bool,
+}
+
+impl From<&MinuteKlineCacheStatus> for MinuteCacheCoverageSnapshot {
+    fn from(value: &MinuteKlineCacheStatus) -> Self {
+        Self {
+            namespace_dir: value.namespace_dir.display().to_string(),
+            cached_ranges: value.cached_ranges.clone(),
+            missing_ranges: value.missing_ranges.clone(),
+            complete: value.is_complete(),
+        }
+    }
+}
+
+/// One logical canonical-minute symbol recorded in a minute fill report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MinuteFillReportSymbol {
+    pub symbol: String,
+    pub action: String,
+    pub before: MinuteCacheCoverageSnapshot,
+    pub after: MinuteCacheCoverageSnapshot,
+    pub rows_written: usize,
+}
+
+/// Stable credential-free report for a canonical 60-second Kline fill.
+///
+/// Unlike the legacy tick report, all symbols here are logical cache keys. A
+/// `KQ.m@...` main contract is never expanded into duplicate physical minute
+/// files in this report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MinuteFillReport {
+    pub schema_version: u32,
+    pub cache_kind: String,
+    pub generated_at: String,
+    pub cache_dir: String,
+    pub requested_days: TradingDayWindow,
+    pub requested_range: (i64, i64),
+    #[serde(default)]
+    pub selector: FillSelectorReport,
+    pub market: String,
+    pub logical_symbols: Vec<String>,
+    pub symbols: Vec<MinuteFillReportSymbol>,
+    pub remote_used: bool,
+    pub rows_written: usize,
+    pub complete: bool,
+    pub dry_run: bool,
+}
+
+impl MinuteFillReport {
+    pub fn from_warmup(
+        warmup: &BacktestCacheWarmupReport,
+        cache_dir: &Path,
+        requested_days: TradingDayWindow,
+        market: impl Into<String>,
+        dry_run: bool,
+    ) -> Self {
+        let symbols = warmup
+            .minute_kline_symbols
+            .iter()
+            .map(minute_fill_report_symbol)
+            .collect::<Vec<_>>();
+        let complete = !symbols.is_empty() && symbols.iter().all(|symbol| symbol.after.complete);
+        Self {
+            schema_version: MINUTE_FILL_REPORT_SCHEMA_VERSION,
+            cache_kind: "minute".to_string(),
+            generated_at: Utc::now().to_rfc3339(),
+            cache_dir: cache_dir.display().to_string(),
+            requested_range: warmup.requested_range,
+            requested_days,
+            selector: FillSelectorReport::default(),
+            market: market.into(),
+            logical_symbols: warmup.logical_symbols.clone(),
+            symbols,
+            remote_used: warmup.remote_minute_kline_used,
+            rows_written: warmup.minute_kline_rows_written,
+            complete,
+            dry_run,
+        }
+    }
+
+    #[must_use]
+    pub fn with_selector(mut self, selector: FillSelectorReport) -> Self {
+        self.selector = selector;
+        self
+    }
+
+    pub fn symbols(&self) -> Result<Vec<String>, DataError> {
+        let mut symbols = self
+            .symbols
+            .iter()
+            .map(|symbol| symbol.symbol.trim())
+            .filter(|symbol| !symbol.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        symbols.sort();
+        symbols.dedup();
+        if symbols.is_empty() {
+            return Err(DataError::Validation(
+                "minute fill report contains no logical cache symbols".to_string(),
+            ));
+        }
+        Ok(symbols)
+    }
+}
+
+fn minute_fill_report_symbol(
+    symbol: &BacktestMinuteKlineCacheWarmupSymbolReport,
+) -> MinuteFillReportSymbol {
+    MinuteFillReportSymbol {
+        symbol: symbol.symbol.clone(),
+        action: warmup_action_name(symbol.action).to_string(),
+        before: MinuteCacheCoverageSnapshot::from(&symbol.before),
+        after: MinuteCacheCoverageSnapshot::from(&symbol.after),
+        rows_written: symbol.rows_written,
+    }
+}
+
+/// Persisted fill-report variants understood by `verify --report`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PersistedFillReport {
+    Tick(Box<FillReport>),
+    Minute(Box<MinuteFillReport>),
+}
+
 fn default_coverage_state() -> String {
     "final".to_string()
 }
@@ -587,7 +719,25 @@ pub fn default_fill_report_path(cache_dir: &Path) -> PathBuf {
     ))
 }
 
+/// Default report destination for a canonical-minute fill.
+pub fn default_minute_fill_report_path(cache_dir: &Path) -> PathBuf {
+    let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ");
+    cache_dir.join("reports").join("minute").join(format!(
+        "tqsdk-cache-minute-fill-{timestamp}-{}.json",
+        std::process::id()
+    ))
+}
+
 pub fn write_fill_report(path: &Path, report: &FillReport) -> Result<(), DataError> {
+    write_json_atomically(path, report)
+}
+
+pub fn write_minute_fill_report(path: &Path, report: &MinuteFillReport) -> Result<(), DataError> {
+    if report.schema_version != MINUTE_FILL_REPORT_SCHEMA_VERSION || report.cache_kind != "minute" {
+        return Err(DataError::Validation(
+            "minute fill report has an unsupported schema or cache kind".to_string(),
+        ));
+    }
     write_json_atomically(path, report)
 }
 
@@ -602,6 +752,32 @@ pub fn read_fill_report(path: &Path) -> Result<FillReport, DataError> {
         )));
     }
     Ok(report)
+}
+
+pub fn read_persisted_fill_report(path: &Path) -> Result<PersistedFillReport, DataError> {
+    let file = File::open(path)?;
+    let value: serde_json::Value = serde_json::from_reader(BufReader::new(file))
+        .map_err(|error| DataError::InvalidResponse(error.to_string()))?;
+    if value.get("cache_kind").and_then(serde_json::Value::as_str) == Some("minute") {
+        let report: MinuteFillReport = serde_json::from_value(value)
+            .map_err(|error| DataError::InvalidResponse(error.to_string()))?;
+        if report.schema_version != MINUTE_FILL_REPORT_SCHEMA_VERSION {
+            return Err(DataError::Validation(format!(
+                "unsupported minute fill report schema {}; expected {MINUTE_FILL_REPORT_SCHEMA_VERSION}",
+                report.schema_version
+            )));
+        }
+        return Ok(PersistedFillReport::Minute(Box::new(report)));
+    }
+    let report: FillReport = serde_json::from_value(value)
+        .map_err(|error| DataError::InvalidResponse(error.to_string()))?;
+    if !matches!(report.schema_version, 1 | REPORT_SCHEMA_VERSION) {
+        return Err(DataError::Validation(format!(
+            "unsupported fill report schema {}; expected 1 or {REPORT_SCHEMA_VERSION}",
+            report.schema_version
+        )));
+    }
+    Ok(PersistedFillReport::Tick(Box::new(report)))
 }
 
 pub fn warmup_action_name(action: BacktestCacheWarmupAction) -> &'static str {

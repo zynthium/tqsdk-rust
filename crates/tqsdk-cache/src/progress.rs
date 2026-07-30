@@ -43,7 +43,7 @@ pub(crate) struct FillProgressSession {
 }
 
 impl FillProgressSession {
-    pub(crate) fn new(mode: ProgressMode, max_bars: usize) -> Self {
+    pub(crate) fn new(mode: ProgressMode, max_bars: usize, cache_kind: &'static str) -> Self {
         let mode = resolve_mode(mode);
         if matches!(mode, ResolvedProgressMode::Off) {
             return Self {
@@ -52,7 +52,9 @@ impl FillProgressSession {
             };
         }
 
-        let shared = Arc::new(Mutex::new(ProgressState::new(mode, max_bars)));
+        let shared = Arc::new(Mutex::new(ProgressState::new_with_cache_kind(
+            mode, max_bars, cache_kind,
+        )));
         let renderer = match mode {
             ResolvedProgressMode::Tty | ResolvedProgressMode::Plain => {
                 let renderer_state = Arc::clone(&shared);
@@ -196,6 +198,7 @@ fn resolve_mode(mode: ProgressMode) -> ResolvedProgressMode {
 struct ProgressState {
     mode: ResolvedProgressMode,
     max_bars: usize,
+    cache_kind: &'static str,
     planning: String,
     calendar: Option<ProgressCalendar>,
     calendar_error: Option<String>,
@@ -243,10 +246,20 @@ struct SymbolProgress {
 }
 
 impl ProgressState {
+    #[cfg(test)]
     fn new(mode: ResolvedProgressMode, max_bars: usize) -> Self {
+        Self::new_with_cache_kind(mode, max_bars, "tick")
+    }
+
+    fn new_with_cache_kind(
+        mode: ResolvedProgressMode,
+        max_bars: usize,
+        cache_kind: &'static str,
+    ) -> Self {
         Self {
             mode,
             max_bars,
+            cache_kind,
             planning: "planning cache fill".to_string(),
             calendar: None,
             calendar_error: None,
@@ -440,8 +453,9 @@ impl ProgressState {
             ),
         };
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "tqsdk-cache.progress",
+            "cache_kind": self.cache_kind,
             "event": event,
             "sequence": self.revision,
             "emitted_at": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),

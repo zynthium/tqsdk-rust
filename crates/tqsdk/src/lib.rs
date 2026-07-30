@@ -1149,7 +1149,7 @@ pub struct BacktestCacheWarmupReport {
     pub rows_written: usize,
     pub remote_used: bool,
     pub symbols: Vec<BacktestCacheWarmupSymbolReport>,
-    /// Independent v3 canonical-minute cache preparation results.
+    /// Independent v4 canonical-minute cache preparation results.
     pub minute_kline_symbols: Vec<BacktestMinuteKlineCacheWarmupSymbolReport>,
     pub minute_kline_rows_written: usize,
     pub remote_minute_kline_used: bool,
@@ -2180,7 +2180,7 @@ impl BacktestBuilder {
                 auth.pass,
                 fill_requests,
                 cache.clone(),
-                remote_fill_runtime,
+                remote_fill_runtime.clone(),
             )
             .await?;
             for (symbol, rows) in fill_report.rows_by_symbol {
@@ -2197,6 +2197,7 @@ impl BacktestBuilder {
                 &minute_snapshot,
                 self.base.market_kind.backtest_market_kind(),
                 minute_fill_requests,
+                remote_fill_runtime,
             )
             .await?;
             minute_rows_by_symbol = fill_report.rows_by_symbol;
@@ -2895,6 +2896,7 @@ impl PreparedBacktest {
                         &tqsdk_data::MinuteKlineCacheSnapshot::cst_v1(),
                         backtest_market_kind,
                         minute_fill_requests,
+                        remote_fill_runtime,
                     )
                     .await?;
                     let _ = report.rows_by_symbol.len();

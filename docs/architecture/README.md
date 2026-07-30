@@ -106,8 +106,9 @@ V1 是：
   - Python-style `.backtest(start_ns, end_ns)` 统一回测入口：默认使用 `tqsdk-data`
     共享 history cache root（`$HOME/.tqsdk/data_series_1`，可用
     `TQSDK_HISTORY_CACHE_DIR` 覆盖）；默认 `RemoteOnMiss` 先复用本地 TQBN daily
-    tick cache 与独立 canonical 60s monthly cache，缺失时通过官方 server-side backtest
-    stream 填充对应输入并驱动本地 `TqSim`；`KQ.m@...` 主连先由
+    tick cache 与独立 canonical final-60s monthly cache，缺失时通过官方 server-side backtest
+    stream 填充对应输入并驱动本地 `TqSim`。minute cache 使用 v4 文件身份，只有远端 terminal
+    成功后才提交 final coverage；`KQ.m@...` 主连先由
     `tqsdk-data` 的历史 segment query 解析为 dated concrete-contract tick ranges，
     因而与具体合约共用物理 cache、coverage 和远端补缺请求；主连 mapping 本身不需 auth，
     但 cache-only 主连路径仍需公开 metadata service；具体合约 cache hit 不需要 auth，
@@ -220,15 +221,21 @@ V1 是：
   - 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store
   - shared futures universe selector parser / resolver，relay 和 facade backtest 复用同一套语义
   - history page/series/download/export foundation
+  - `MinuteKlineCache` 是与 TQBN 并列的 canonical final-60s K 线 store：v4 格式按 logical
+    symbol × trading month 分区，目录名保持 `minute-kline-v3` 以诊断 legacy v3 文件；不存在
+    automatic retention/max-byte eviction 或后台清理
 - `tqsdk-cache`
-  - 可选 operator CLI；对 canonical daily TQBN tick cache 提供 fast inventory、closed-day
-    remote-on-miss fill、显式当前结束日期自动 provisional fill、`--require-final` 严格保护、
-    calendar-aware `--last-trading-days` selector、selectable physical-symbol stderr
-    progress（plain/TTY/JSONL）、默认 text / 按需 V3 stdout result、schema-v2 persisted
-    report（兼容读取 v1）、report-bound CacheOnly verify 与 deep doctor
+  - 可选 operator CLI；以 `--kind tick|minute|all`（默认 tick）管理 canonical daily TQBN
+    tick cache 与 canonical final-60s minute cache。`all` 只允许 inventory / doctor；minute fill
+    只接受 closed day，支持 futures / stock（stock 必须显式 symbol），minute purge 是单 symbol、
+    明确日期范围、`--yes` 才执行的 destructive operation
+  - tick 保留 remote-on-miss / current-day provisional / `--require-final`、calendar-aware
+    `--last-trading-days` 等合同；两类 fill 都有 selectable stderr progress（plain/TTY/JSONL），
+    JSONL progress 为 schema v2 并携带 `cache_kind`。tick report 保持 schema v2（兼容 v1），
+    minute report 写入 `reports/minute/` 并可由 minute `verify --report` 复用
   - generic trading-calendar snapshot 只用于日期 selector 和进度分母；TQBN coverage、CST `18:00`
     partition 与 CacheOnly verification 仍是完整性权威
-  - 复用 `tqsdk` facade / `tqsdk-data` store，不拥有第二种缓存格式、session、状态树、live
+  - 复用 `tqsdk` facade / `tqsdk-data` store，不定义或拥有任何缓存格式、session、状态树、live
     recording loop、回测推进或 relay 服务；不进入 Cargo default-members
 - `tqsdk-relay`
   - 可选 market relay / cache service
@@ -366,6 +373,7 @@ V1 是：
 | `wait_update` facade | [api-wait.md](api-wait.md) |
 | task facade / execution tool | [api-task.md](api-task.md) |
 | data facade / research tooling | [api-data.md](api-data.md) |
+| 回测 tick / canonical-minute 缓存 CLI | [backtest-tick-cache-cli.md](backtest-tick-cache-cli.md) |
 | 回测 Tick 持久缓存预热、检查和严格本地回放 | [backtest-tick-cache-operations.md](backtest-tick-cache-operations.md) |
 | 未来 facade / adapter 的验收基线 | [validation.md](validation.md) |
 | 场景审查和 public API disposition 输入 | [../reviews/README.md](../reviews/README.md) |

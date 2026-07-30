@@ -21,6 +21,7 @@ pub(crate) fn write_result(
         "fill" => write_fill(&mut output, value)?,
         "verify" => write_verify(&mut output, value)?,
         "doctor" => write_doctor(&mut output, value)?,
+        "purge" => write_purge(&mut output, value)?,
         _ => writeln!(output, "No terminal summary is available for this command.")?,
     }
 
@@ -47,15 +48,40 @@ pub(crate) fn write_error(
 
 fn write_inventory(output: &mut impl Write, value: &Value) -> io::Result<()> {
     write_cache_header(output, value)?;
-    writeln!(
-        output,
-        "Files: {} | Days: {} | Size: {} | Problems: {}",
-        number(value, "total_files"),
-        number(value, "total_days"),
-        format_bytes(number(value, "total_bytes")),
-        number(value, "problem_files"),
-    )?;
-    write_inventory_symbols(output, value.get("symbols"))
+    if string(value, "cache_kind") == Some("all") {
+        for (label, inventory) in [("Tick", value.get("tick")), ("Minute", value.get("minute"))] {
+            let Some(inventory) = inventory else {
+                continue;
+            };
+            writeln!(
+                output,
+                "{label}: {} files | {} | {} problems",
+                number(inventory, "total_files"),
+                format_bytes(number(inventory, "total_bytes")),
+                number(inventory, "problem_files"),
+            )?;
+        }
+        return Ok(());
+    }
+    let minute = string(value, "cache_kind") == Some("minute");
+    if minute {
+        writeln!(
+            output,
+            "Files: {} | Size: {}",
+            number(value, "total_files"),
+            format_bytes(number(value, "total_bytes")),
+        )?;
+    } else {
+        writeln!(
+            output,
+            "Files: {} | Days: {} | Size: {} | Problems: {}",
+            number(value, "total_files"),
+            number(value, "total_days"),
+            format_bytes(number(value, "total_bytes")),
+            number(value, "problem_files"),
+        )?;
+    }
+    write_inventory_symbols(output, value.get("symbols"), minute)
 }
 
 fn write_inspect(output: &mut impl Write, value: &Value) -> io::Result<()> {
@@ -72,13 +98,22 @@ fn write_fill(output: &mut impl Write, value: &Value) -> io::Result<()> {
             "Accepted partial rows were flushed; coverage was not committed."
         )?;
         if let Some(inventory) = value.get("partial_inventory") {
-            writeln!(
-                output,
-                "Partial cache: {} files | {} days | {}",
-                number(inventory, "total_files"),
-                number(inventory, "total_days"),
-                format_bytes(number(inventory, "total_bytes")),
-            )?;
+            if string(value, "cache_kind") == Some("minute") {
+                writeln!(
+                    output,
+                    "Partial cache: {} files | {}",
+                    number(inventory, "total_files"),
+                    format_bytes(number(inventory, "total_bytes")),
+                )?;
+            } else {
+                writeln!(
+                    output,
+                    "Partial cache: {} files | {} days | {}",
+                    number(inventory, "total_files"),
+                    number(inventory, "total_days"),
+                    format_bytes(number(inventory, "total_bytes")),
+                )?;
+            }
         }
         return Ok(());
     }
@@ -128,16 +163,38 @@ fn write_fill(output: &mut impl Write, value: &Value) -> io::Result<()> {
         writeln!(output, "Report: {path}")?;
     }
 
+    let minute = string(value, "cache_kind") == Some("minute");
     let symbols = report
-        .get("physical_symbols")
+        .get(if minute {
+            "symbols"
+        } else {
+            "physical_symbols"
+        })
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or_default();
     if symbols.is_empty() {
-        writeln!(output, "Physical symbols: none")?;
+        writeln!(
+            output,
+            "{}: none",
+            if minute {
+                "Minute symbols"
+            } else {
+                "Physical symbols"
+            }
+        )?;
         return Ok(());
     }
-    writeln!(output, "Physical symbols ({})", symbols.len())?;
+    writeln!(
+        output,
+        "{} ({})",
+        if minute {
+            "Minute symbols"
+        } else {
+            "Physical symbols"
+        },
+        symbols.len()
+    )?;
     for symbol in symbols {
         let day_stats = symbol.get("day_stats");
         let day_summary = day_stats.map_or_else(
@@ -192,10 +249,23 @@ fn write_verify(output: &mut impl Write, value: &Value) -> io::Result<()> {
 
 fn write_doctor(output: &mut impl Write, value: &Value) -> io::Result<()> {
     write_cache_header(output, value)?;
+    if string(value, "cache_kind") == Some("all") {
+        for (label, report) in [("Tick", value.get("tick")), ("Minute", value.get("minute"))] {
+            let Some(report) = report else {
+                continue;
+            };
+            writeln!(
+                output,
+                "{label} problem files: {}",
+                number(report, "problem_files")
+            )?;
+        }
+        return Ok(());
+    }
     let problem_files = number(value, "problem_files");
     writeln!(output, "Problem files: {problem_files}")?;
     if problem_files == 0 {
-        writeln!(output, "All checked TQBN files are readable.")?;
+        writeln!(output, "All checked cache files are readable.")?;
         return Ok(());
     }
     writeln!(output, "Problems")?;
@@ -217,12 +287,35 @@ fn write_doctor(output: &mut impl Write, value: &Value) -> io::Result<()> {
     Ok(())
 }
 
+fn write_purge(output: &mut impl Write, value: &Value) -> io::Result<()> {
+    write_cache_header(output, value)?;
+    write_requested_days(output, value.get("requested_days"))?;
+    if boolean(value, "dry_run") {
+        writeln!(
+            output,
+            "Dry run: {} monthly file(s) would be removed.",
+            array(value, "would_remove_files").len()
+        )?;
+    } else {
+        writeln!(
+            output,
+            "Removed: {} monthly file(s), {}.",
+            number(value, "removed_files"),
+            format_bytes(number(value, "removed_bytes"))
+        )?;
+    }
+    Ok(())
+}
+
 fn write_cache_header(output: &mut impl Write, value: &Value) -> io::Result<()> {
     if let Some(cache_dir) = string(value, "cache_dir") {
         writeln!(output, "Cache: {cache_dir}")?;
     }
     if let Some(backend_format) = string(value, "backend_format") {
         writeln!(output, "Format: {backend_format}")?;
+    }
+    if let Some(cache_kind) = string(value, "cache_kind") {
+        writeln!(output, "Kind: {cache_kind}")?;
     }
     Ok(())
 }
@@ -236,7 +329,11 @@ fn write_requested_days(output: &mut impl Write, value: Option<&Value>) -> io::R
     writeln!(output, "Trading days: {start} to {end}")
 }
 
-fn write_inventory_symbols(output: &mut impl Write, value: Option<&Value>) -> io::Result<()> {
+fn write_inventory_symbols(
+    output: &mut impl Write,
+    value: Option<&Value>,
+    minute: bool,
+) -> io::Result<()> {
     let symbols = value
         .and_then(Value::as_array)
         .map(Vec::as_slice)
@@ -247,15 +344,26 @@ fn write_inventory_symbols(output: &mut impl Write, value: Option<&Value>) -> io
     }
     writeln!(output, "Symbols ({})", symbols.len())?;
     for symbol in symbols {
-        writeln!(
-            output,
-            "  {}: {} files | {} days | {} | {} problems",
-            string(symbol, "symbol").unwrap_or("-"),
-            number(symbol, "files"),
-            number(symbol, "days"),
-            format_bytes(number(symbol, "bytes")),
-            number(symbol, "problem_files"),
-        )?;
+        if minute {
+            writeln!(
+                output,
+                "  {}: {} files | {} months | {}",
+                string(symbol, "symbol").unwrap_or("-"),
+                number(symbol, "files"),
+                number(symbol, "months"),
+                format_bytes(number(symbol, "bytes")),
+            )?;
+        } else {
+            writeln!(
+                output,
+                "  {}: {} files | {} days | {} | {} problems",
+                string(symbol, "symbol").unwrap_or("-"),
+                number(symbol, "files"),
+                number(symbol, "days"),
+                format_bytes(number(symbol, "bytes")),
+                number(symbol, "problem_files"),
+            )?;
+        }
     }
     Ok(())
 }
@@ -363,6 +471,34 @@ mod tests {
         assert!(output.contains("tqsdk-cache inventory: success"));
         assert!(output.contains("1.50 KiB"));
         assert!(!output.contains("\"total_files\""));
+    }
+
+    #[test]
+    fn minute_inventory_reports_months_without_fabricating_day_counts() {
+        let value = json!({
+            "command": "inventory",
+            "cache_kind": "minute",
+            "cache_dir": "/tmp/cache",
+            "backend_format": "tqsdk.minute-kline.monthly.v4",
+            "total_files": 2,
+            "total_bytes": 1_536,
+            "total_days": null,
+            "problem_files": 0,
+            "symbols": [{
+                "symbol": "KQ.i@SHFE.au",
+                "files": 2,
+                "months": 2,
+                "bytes": 1_536,
+            }],
+        });
+        let mut output = Vec::new();
+
+        write_result(&mut output, &value, "success", 0, 12).unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Files: 2 | Size: 1.50 KiB"));
+        assert!(output.contains("2 months"));
+        assert!(!output.contains("0 days"));
     }
 
     #[test]

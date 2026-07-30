@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, Ordering},
 };
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 use tqsdk::advanced::task::{HistoryBacktestTickSource, ReplayMarketEvent, ReplayMarketSource};
@@ -12,6 +14,7 @@ use tqsdk_core::{
 };
 use tqsdk_data::{MinuteKlineCache, MinuteKlineCacheSnapshot, TickDataSeriesRequest};
 use tqsdk_session::testing::ManualSession;
+use tqsdk_task::{MinuteKlineAggregator, MinuteKlineSessionTemplate};
 
 static NEXT_TEMP_CACHE_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -308,6 +311,174 @@ async fn facade_backtest_remote_on_miss_prepare_marks_remote_used_when_cache_mis
 
     assert!(prepared.data_report().remote_used);
     assert_eq!(prepared.data_report().resolved_symbols, 1);
+}
+
+#[tokio::test]
+#[ignore = "live server-backtest regression; requires TQ_AUTH_USER/TQ_AUTH_PASS"]
+async fn server_backtest_fills_final_canonical_minutes_for_an_index_symbol() {
+    let Ok(user) = std::env::var("TQ_AUTH_USER") else {
+        return;
+    };
+    let Ok(pass) = std::env::var("TQ_AUTH_PASS") else {
+        return;
+    };
+    let cache_dir = temp_cache_dir();
+    let start_ns = 1_577_872_800_000_000_000_i64;
+    let end_ns = 1_577_959_200_000_000_000_i64;
+
+    let warmup = Tq::futures()
+        .auth(user, pass)
+        .backtest(start_ns, end_ns)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .remote_on_miss()
+        .remote_fill_config(
+            BacktestRemoteFillConfig::default()
+                .with_symbol_batch_size(1)
+                .with_symbol_concurrency(1)
+                .with_idle_timeout(Duration::from_secs(30))
+                .with_batch_timeout(Some(Duration::from_secs(90))),
+        )
+        .kline("KQ.i@SHFE.au", Duration::from_secs(60), 1)
+        .unwrap()
+        .warmup()
+        .await
+        .expect("server backtest should produce final 60-second Kline coverage");
+
+    assert!(warmup.remote_minute_kline_used);
+    assert_eq!(warmup.minute_kline_symbols.len(), 1);
+    assert!(warmup.minute_kline_symbols[0].after.is_complete());
+
+    let rows = MinuteKlineCache::open(&cache_dir)
+        .unwrap()
+        .read_range(
+            "KQ.i@SHFE.au",
+            start_ns,
+            end_ns,
+            &MinuteKlineCacheSnapshot::cst_v1(),
+        )
+        .unwrap();
+    assert!(
+        rows.len() >= 100,
+        "expected a substantive closed-day minute series"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row.datetime >= start_ns && row.datetime < end_ns)
+    );
+    assert!(
+        rows.windows(2)
+            .all(|pair| pair[0].datetime < pair[1].datetime)
+    );
+}
+
+#[tokio::test]
+#[ignore = "live server-backtest protocol probe; requires TQ_AUTH_USER/TQ_AUTH_PASS"]
+async fn server_backtest_can_ready_a_canonical_minute_chart_without_a_tick_driver() {
+    let Ok(user) = std::env::var("TQ_AUTH_USER") else {
+        return;
+    };
+    let Ok(pass) = std::env::var("TQ_AUTH_PASS") else {
+        return;
+    };
+    let start_ns = 1_577_872_800_000_000_000_i64;
+    let end_ns = 1_577_959_200_000_000_000_i64;
+    let mut api = tqsdk_wait::TqApiBuilder::new(user, pass)
+        .futures_backtest(start_ns, end_ns)
+        .unwrap()
+        .backtest_cache_fill_mode()
+        .build()
+        .await
+        .unwrap();
+    let handle = api
+        .kline("KQ.i@SHFE.au", Duration::from_secs(60), 10_000)
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+
+    while !handle.is_ready().unwrap() {
+        if api.step_until(Some(deadline)).await.unwrap().is_none()
+            && tokio::time::Instant::now() >= deadline
+        {
+            panic!("server-side 60-second Kline chart did not become ready without a tick driver");
+        }
+    }
+
+    assert!(handle.has_rows().unwrap());
+}
+
+#[tokio::test]
+#[ignore = "live canonical-minute acceptance; requires TQ_AUTH_USER/TQ_AUTH_PASS"]
+async fn canonical_minute_aggregation_matches_remote_index_klines() {
+    let Ok(user) = std::env::var("TQ_AUTH_USER") else {
+        return;
+    };
+    let Ok(pass) = std::env::var("TQ_AUTH_PASS") else {
+        return;
+    };
+    // A closed trading day avoids provisional last bars and gives both the
+    // SHFE and CFFEX index series enough 5m/15m bars to expose an anchoring,
+    // OHLC, volume, or open-interest aggregation error.
+    let start_ns = 1_577_872_800_000_000_000_i64;
+    let end_ns = 1_577_959_200_000_000_000_i64;
+    let durations = [Duration::from_secs(5 * 60), Duration::from_secs(15 * 60)];
+
+    for symbol in ["KQ.i@SHFE.au", "KQ.i@CFFEX.IF"] {
+        let cache_dir = temp_cache_dir();
+        Tq::futures()
+            .auth(user.clone(), pass.clone())
+            .backtest(start_ns, end_ns)
+            .cache_dir(&cache_dir)
+            .unwrap()
+            .remote_on_miss()
+            .remote_fill_config(
+                BacktestRemoteFillConfig::default()
+                    .with_symbol_batch_size(1)
+                    .with_symbol_concurrency(1)
+                    .with_idle_timeout(Duration::from_secs(30))
+                    .with_batch_timeout(Some(Duration::from_secs(90))),
+            )
+            .kline(symbol, durations[0], 1)
+            .unwrap()
+            .kline(symbol, durations[1], 1)
+            .unwrap()
+            .warmup()
+            .await
+            .unwrap_or_else(|error| panic!("canonical-minute warmup failed for {symbol}: {error}"));
+
+        let minutes = MinuteKlineCache::open(&cache_dir)
+            .unwrap()
+            .read_range(
+                symbol,
+                start_ns,
+                end_ns,
+                &MinuteKlineCacheSnapshot::cst_v1(),
+            )
+            .unwrap();
+        assert!(
+            minutes.len() >= 100,
+            "expected a substantive canonical-minute series for {symbol}, got {} rows",
+            minutes.len()
+        );
+
+        let remote = collect_remote_index_klines(
+            user.as_str(),
+            pass.as_str(),
+            symbol,
+            start_ns,
+            end_ns,
+            durations.as_slice(),
+        )
+        .await;
+        for duration in durations {
+            let duration_ns = i64::try_from(duration.as_nanos()).unwrap();
+            let local = aggregate_final_minutes(&minutes, duration_ns, end_ns);
+            let remote = remote
+                .get(&duration_ns)
+                .expect("all requested remote Kline periods are collected");
+            assert_local_aggregate_matches_remote(symbol, duration_ns, &local, remote);
+        }
+    }
 }
 
 #[tokio::test]
@@ -1528,6 +1699,183 @@ fn market_cache_policy_contract_example_exposes_shared_cache_flow() {
             "market cache policy example missing required flow fragment: {required}"
         );
     }
+}
+
+async fn collect_remote_index_klines(
+    user: &str,
+    pass: &str,
+    symbol: &str,
+    start_ns: i64,
+    end_ns: i64,
+    durations: &[Duration],
+) -> BTreeMap<i64, Vec<Kline>> {
+    let mut api = tqsdk_wait::TqApiBuilder::new(user.to_owned(), pass.to_owned())
+        .futures_backtest(start_ns, end_ns)
+        .unwrap()
+        .backtest_cache_fill_mode()
+        .build()
+        .await
+        .unwrap_or_else(|error| panic!("remote Kline connection failed for {symbol}: {error}"));
+    let mut charts = Vec::with_capacity(durations.len());
+    for duration in durations {
+        let duration_ns = i64::try_from(duration.as_nanos()).unwrap();
+        let chart = api
+            .kline(symbol, *duration, 10_000)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "remote {}ns Kline subscription failed for {symbol}: {error}",
+                    duration_ns
+                )
+            });
+        charts.push((duration_ns, chart));
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let charts_ready = charts.iter().all(|(_, chart)| chart.is_ready().unwrap());
+        if charts_ready && server_backtest_history_complete(&api) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "remote Kline history did not finish for {symbol}"
+        );
+        api.step_until(Some(deadline))
+            .await
+            .unwrap_or_else(|error| panic!("remote Kline polling failed for {symbol}: {error}"));
+    }
+
+    charts
+        .into_iter()
+        .map(|(duration_ns, chart)| {
+            let rows = chart
+                .rows()
+                .unwrap()
+                .into_iter()
+                .filter(|row| {
+                    row.datetime >= start_ns
+                        && row
+                            .datetime
+                            .checked_add(duration_ns)
+                            .is_some_and(|bar_end_ns| bar_end_ns <= end_ns)
+                })
+                .collect();
+            (duration_ns, rows)
+        })
+        .collect()
+}
+
+fn server_backtest_history_complete(api: &tqsdk_wait::TqApi) -> bool {
+    api.session()
+        .reader()
+        .read_market_state()
+        .get_path(&["mdhis_more_data"])
+        .and_then(|value| value.as_bool())
+        == Some(false)
+}
+
+fn aggregate_final_minutes(
+    minutes: &[Kline],
+    duration_ns: i64,
+    end_ns: i64,
+) -> BTreeMap<i64, Kline> {
+    let mut aggregator =
+        MinuteKlineAggregator::new(duration_ns, MinuteKlineSessionTemplate::cst_trading_day())
+            .unwrap();
+    let mut aggregated = BTreeMap::new();
+    for minute in minutes {
+        let Some(update) = aggregator.update(minute).unwrap() else {
+            continue;
+        };
+        if update
+            .updated
+            .datetime
+            .checked_add(duration_ns)
+            .is_some_and(|bar_end_ns| bar_end_ns <= end_ns)
+        {
+            aggregated.insert(update.updated.datetime, update.updated);
+        }
+    }
+    aggregated
+}
+
+fn assert_local_aggregate_matches_remote(
+    symbol: &str,
+    duration_ns: i64,
+    local: &BTreeMap<i64, Kline>,
+    remote: &[Kline],
+) {
+    let remote_by_datetime = remote
+        .iter()
+        .map(|row| (row.datetime, row.clone()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        remote_by_datetime.len(),
+        remote.len(),
+        "remote {duration_ns}ns Kline stream has duplicate bar timestamps for {symbol}"
+    );
+
+    let local_only = local
+        .keys()
+        .filter(|datetime| !remote_by_datetime.contains_key(datetime))
+        .copied()
+        .collect::<Vec<_>>();
+    let remote_only = remote_by_datetime
+        .keys()
+        .filter(|datetime| !local.contains_key(datetime))
+        .copied()
+        .collect::<Vec<_>>();
+    let mismatches = local
+        .iter()
+        .filter_map(|(datetime, local_row)| {
+            let remote_row = remote_by_datetime.get(datetime)?;
+            (!same_kline_ohlcv_oi(local_row, remote_row))
+                .then(|| format!("{datetime}: local={local_row:?}, remote={remote_row:?}"))
+        })
+        .collect::<Vec<_>>();
+
+    eprintln!(
+        "canonical-minute acceptance: symbol={symbol} duration_ns={duration_ns} local={} remote={} local_only={} remote_only={} mismatches={}",
+        local.len(),
+        remote_by_datetime.len(),
+        local_only.len(),
+        remote_only.len(),
+        mismatches.len(),
+    );
+    assert!(
+        !local.is_empty(),
+        "local {duration_ns}ns aggregation produced no complete bars for {symbol}"
+    );
+    assert!(
+        local_only.is_empty() && remote_only.is_empty(),
+        "{symbol} {duration_ns}ns bar timestamps differ: local_only={:?}, remote_only={:?}",
+        &local_only[..local_only.len().min(3)],
+        &remote_only[..remote_only.len().min(3)],
+    );
+    assert!(
+        mismatches.is_empty(),
+        "{symbol} {duration_ns}ns local aggregation differs from remote rows: {}",
+        mismatches
+            .into_iter()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" | "),
+    );
+}
+
+fn same_kline_ohlcv_oi(left: &Kline, right: &Kline) -> bool {
+    same_kline_price(left.open, right.open)
+        && same_kline_price(left.high, right.high)
+        && same_kline_price(left.low, right.low)
+        && same_kline_price(left.close, right.close)
+        && left.volume == right.volume
+        && left.open_oi == right.open_oi
+        && left.close_oi == right.close_oi
+}
+
+fn same_kline_price(left: f64, right: f64) -> bool {
+    left == right || (left.is_nan() && right.is_nan())
 }
 
 fn temp_cache_dir() -> std::path::PathBuf {

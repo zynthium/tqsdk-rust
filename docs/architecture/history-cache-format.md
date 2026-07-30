@@ -10,6 +10,7 @@
 
 - [data facade / research tooling](api-data.md)
 - [backtest tick cache operations](backtest-tick-cache-operations.md)
+- [backtest cache operator CLI](backtest-tick-cache-cli.md)
 - [crate 边界审计](crate-boundaries.md)
 - [验收标准与测试矩阵](validation.md)
 
@@ -54,42 +55,51 @@ symbol 的全部 tick 日分区 append-log；默认远端回测补缓存成功�
 后续如果 TQBN 的内部 record layout 需要演进，应先保持这些 public facade 不变；只有当
 用户可见语义改变时，才同步调整 public API 文档和 contract examples。
 
-## Backtest Canonical-minute v3
+## Backtest Canonical-minute v4
 
 本地 facade 回测不再把任意周期的 K 线写入 TQBN history-series cache。它使用独立的
-`MinuteKlineCache`，其唯一持久 K 线输入是服务端回测确认完成的 `60s` bar：
+`MinuteKlineCache`。其唯一持久 K 线输入是官方 server-side backtest 确认 terminal 完成的
+`60s` bar；不回退到 `DataClient` 历史下载路径，也不持久化原生高周期 K 线：
 
 | 请求 | 历史来源 | 持久化 / 回放 |
 | --- | --- | --- |
 | tick、quote、`<60s` K | tick cache | 按 tick 本地合成 |
-| `60s` K | server-side backtest Kline stream | v3 monthly minute cache |
+| `60s` K | server-side backtest Kline stream | v4 monthly minute cache |
 | `N × 60s` K (`N > 1`) | 已关闭的 canonical 60s K | `tqsdk-task` 本地聚合 |
 
 `61s`、`90s` 等不是整数分钟的周期会在 facade 规划阶段拒绝。K-only `>=60s` 不会隐式请求
 tick history；若仅需要 quote fallback，则隐式使用 canonical 60s K，也不会回退到 tick。
 
-v3 文件身份如下：
+v4 文件身份如下：
 
 | 项 | 值 |
 | --- | --- |
-| format id | `tqsdk.minute-kline.monthly.v3` |
-| schema version | `3` |
+| format id | `tqsdk.minute-kline.monthly.v4` |
+| schema version | `4` |
 | file extension | `.tqmk` |
 | root layout | `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk` |
 | time basis | CST trading day，`18:00` 后归入下一交易日 |
 
 每个文件只属于一个 `logical symbol × trading month`。写入前必须验证 calendar/session
 snapshot hash；不匹配、损坏或不完整覆盖一律 fail closed，不能降级为近似命中。完成的远端
-range 才能标记 final coverage；当前或未来交易日不得标记为 final。文件更新按单月原子重写，
-reader 以流式方式读取，不必把整月 materialize 到内存。
+range（包括合法的零行 range）才可标记 final coverage；当前或未来交易日不得标记为 final。
+文件更新按单月原子重写，reader 以流式方式读取，不必把整月 materialize 到内存。
+
+目录名继续保留 `minute-kline-v3`，但它承载的是 v4 文件身份。这是刻意的诊断兼容策略：
+旧 v3 文件不会被静默忽略、迁移或覆盖；读取/coverage 会 fail closed，`diagnose()` 将其报告为
+`LegacyUnsupported`。如需移除旧文件，必须由操作者显式 purge。
+
+`fast_inventory()` 是只读的 filesystem inventory：它不解码月文件，也不创建缺失 root。
+`diagnose()` 是只读的深度检查，会逐文件报告 `Readable`、`LegacyUnsupported`、
+`UnsupportedVersion` 或 `Corrupt`；它是排查格式问题的入口，不进行迁移或修复。
 
 `KQ.m@...` 的 minute cache key 始终是逻辑主连 symbol。按日期解析得到的实际合约只作为 replay
 event 的 `underlying_symbol` metadata，用于撮合和 quote 解释；它不会造成按 physical symbol
 复制 minute 文件。
 
-minute cache 没有 retention、max-byte eviction 或后台清理。`Refresh` 仅删除与请求窗口相交的
-monthly files；显式 `purge_range` / `purge_symbol` 才可删除数据。`CacheOnly` inspection 使用
-read-only open，不创建 v3 namespace、目录或文件。
+minute cache 没有 retention、max-byte eviction 或后台清理。`Refresh` 是显式的破坏性操作，
+仅删除与请求窗口相交的 monthly files；显式 `purge_range` / `purge_symbol` 才可删除数据。
+`CacheOnly` inspection 使用 read-only open，不创建 namespace、目录或文件。
 
 ## TQBN daily v2 File Identity
 

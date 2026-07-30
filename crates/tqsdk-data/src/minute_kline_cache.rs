@@ -1,7 +1,7 @@
 //! Canonical, monthly-partitioned 60-second Kline cache for local backtests.
 //!
 //! This cache deliberately does not reuse daily TQBN history-series files.  A
-//! 60-second Kline is the durable canonical Kline input for the v3 backtest
+//! 60-second Kline is the durable canonical Kline input for the v4 backtest
 //! path; higher periods are derived by `tqsdk-task` at replay time.
 
 use std::collections::BTreeMap;
@@ -21,16 +21,16 @@ use crate::{DataError, Result};
 /// The only durable Kline period accepted by [`MinuteKlineCache`].
 pub const MINUTE_KLINE_DURATION_NS: i64 = 60_000_000_000;
 
-/// Stable identity for the independent v3 monthly-minute cache format.
-pub const MINUTE_KLINE_CACHE_FORMAT_ID: &str = "tqsdk.minute-kline.monthly.v3";
+/// Stable identity for the independent v4 monthly-minute cache format.
+pub const MINUTE_KLINE_CACHE_FORMAT_ID: &str = "tqsdk.minute-kline.monthly.v4";
 
 /// Public format version stored in every monthly-minute file.
-pub const MINUTE_KLINE_CACHE_SCHEMA_VERSION: u32 = 3;
+pub const MINUTE_KLINE_CACHE_SCHEMA_VERSION: u32 = 4;
 
 const ROOT_DIR_NAME: &str = "minute-kline-v3";
 const FILE_EXTENSION: &str = "tqmk";
 const FILE_MAGIC: [u8; 4] = *b"TQMK";
-const FILE_VERSION: u16 = 3;
+const FILE_VERSION: u16 = 4;
 const FILE_HEADER_BYTES: usize = 36;
 const COVERAGE_BYTES: usize = 16;
 const KLINE_ROW_BYTES: usize = 80;
@@ -129,7 +129,7 @@ pub struct MinuteKlineCacheWriteReport {
     pub months: Vec<MinuteKlineCacheMonthReport>,
 }
 
-/// Typed inspection result for the v3 monthly-minute namespace.
+/// Typed inspection result for the monthly-minute namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MinuteKlineCacheStatus {
     pub format_id: &'static str,
@@ -150,7 +150,7 @@ impl MinuteKlineCacheStatus {
     }
 }
 
-/// Result of explicit v3 monthly-minute cache deletion.
+/// Result of explicit v4 monthly-minute cache deletion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MinuteKlineCachePurgeReport {
     pub cache_dir: PathBuf,
@@ -161,7 +161,77 @@ pub struct MinuteKlineCachePurgeReport {
     pub removed_months: Vec<String>,
 }
 
-/// Independent v3 store for canonical 60-second Kline history.
+/// One logical symbol summarized by a filesystem-only minute-cache inventory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MinuteKlineCacheInventorySymbol {
+    pub symbol: String,
+    pub files: usize,
+    pub bytes: u64,
+    pub months: Vec<String>,
+}
+
+/// Fast, best-effort filesystem inventory for the minute-cache namespace.
+///
+/// It does not open or decode cache files, and never creates the cache root.
+/// Use [`MinuteKlineCache::diagnose`] when a stable, deep validation pass is
+/// required.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MinuteKlineCacheInventory {
+    pub format_id: &'static str,
+    pub cache_dir: PathBuf,
+    pub namespace_dir: PathBuf,
+    pub total_files: usize,
+    pub total_bytes: u64,
+    pub symbols: Vec<MinuteKlineCacheInventorySymbol>,
+}
+
+/// Deep validation classification for one monthly-minute file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MinuteKlineCacheDiagnosticStatus {
+    /// A current-format file decoded, validated, and passed its checksum.
+    Readable,
+    /// A v3 file is deliberately not readable or writable by the v4 cache.
+    LegacyUnsupported,
+    /// The header uses an unknown future or otherwise unsupported version.
+    UnsupportedVersion,
+    /// The path or file contents are malformed, truncated, or inconsistent.
+    Corrupt,
+}
+
+impl MinuteKlineCacheDiagnosticStatus {
+    #[must_use]
+    pub fn is_problem(self) -> bool {
+        !matches!(self, Self::Readable)
+    }
+}
+
+/// Deep diagnostic details for one monthly-minute file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MinuteKlineCacheDiagnosticFile {
+    pub path: PathBuf,
+    pub trading_month: String,
+    pub symbol: String,
+    pub status: MinuteKlineCacheDiagnosticStatus,
+    pub schema_version: Option<u32>,
+    pub rows: usize,
+    pub cached_ranges: Vec<(i64, i64)>,
+    pub size_bytes: u64,
+    pub error: Option<String>,
+}
+
+/// Result of a deep, read-only minute-cache integrity pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MinuteKlineCacheDiagnosticReport {
+    pub format_id: &'static str,
+    pub cache_dir: PathBuf,
+    pub namespace_dir: PathBuf,
+    pub total_files: usize,
+    pub total_bytes: u64,
+    pub problem_files: usize,
+    pub files: Vec<MinuteKlineCacheDiagnosticFile>,
+}
+
+/// Independent v4 store for canonical 60-second Kline history.
 ///
 /// It has no automatic retention or max-byte eviction.  Callers may explicitly
 /// use [`Self::purge_range`] or [`Self::purge_symbol`] for destructive
@@ -210,6 +280,71 @@ impl MinuteKlineCache {
     #[must_use]
     pub fn schema_version(&self) -> u32 {
         MINUTE_KLINE_CACHE_SCHEMA_VERSION
+    }
+
+    /// Return a filesystem-only inventory without creating the cache root.
+    pub fn fast_inventory(&self) -> Result<MinuteKlineCacheInventory> {
+        let mut symbols = BTreeMap::<String, MinuteKlineCacheInventorySymbol>::new();
+        let mut total_files = 0usize;
+        let mut total_bytes = 0u64;
+        for entry in self.month_files()? {
+            let metadata = fs::metadata(entry.path.as_path())?;
+            let symbol = symbol_from_file_path(entry.path.as_path())
+                .unwrap_or_else(|_| entry.file_stem.clone());
+            let record =
+                symbols
+                    .entry(symbol.clone())
+                    .or_insert_with(|| MinuteKlineCacheInventorySymbol {
+                        symbol,
+                        files: 0,
+                        bytes: 0,
+                        months: Vec::new(),
+                    });
+            record.files = record.files.saturating_add(1);
+            record.bytes = record.bytes.saturating_add(metadata.len());
+            record.months.push(entry.trading_month);
+            total_files = total_files.saturating_add(1);
+            total_bytes = total_bytes.saturating_add(metadata.len());
+        }
+        let mut symbols = symbols.into_values().collect::<Vec<_>>();
+        for symbol in &mut symbols {
+            symbol.months.sort();
+            symbol.months.dedup();
+        }
+        Ok(MinuteKlineCacheInventory {
+            format_id: self.format_id(),
+            cache_dir: self.root_dir.clone(),
+            namespace_dir: self.namespace_dir(),
+            total_files,
+            total_bytes,
+            symbols,
+        })
+    }
+
+    /// Decode and validate every current-format monthly file without writing.
+    ///
+    /// Legacy v3 files and malformed files are reported as problems rather
+    /// than being upgraded, replaced, or removed.  This preserves the cache's
+    /// fail-closed contract and leaves destructive maintenance explicit.
+    pub fn diagnose(&self) -> Result<MinuteKlineCacheDiagnosticReport> {
+        let mut files = Vec::new();
+        let mut total_bytes = 0u64;
+        for entry in self.month_files()? {
+            let size_bytes = fs::metadata(entry.path.as_path())?.len();
+            total_bytes = total_bytes.saturating_add(size_bytes);
+            files.push(diagnose_month_file(entry, size_bytes));
+        }
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        let problem_files = files.iter().filter(|file| file.status.is_problem()).count();
+        Ok(MinuteKlineCacheDiagnosticReport {
+            format_id: self.format_id(),
+            cache_dir: self.root_dir.clone(),
+            namespace_dir: self.namespace_dir(),
+            total_files: files.len(),
+            total_bytes,
+            problem_files,
+            files,
+        })
     }
 
     /// Return the fixed path for `symbol × trading-YYYYMM`.
@@ -310,7 +445,7 @@ impl MinuteKlineCache {
 
     /// Store a server-confirmed final 60-second range.
     ///
-    /// A range touching the current CST trading day is rejected.  The v3 MVP
+    /// A range touching the current CST trading day is rejected.  The v4 cache
     /// intentionally has no provisional-minute coverage: a future fill must
     /// revisit that day after it closes before claiming a cache hit.
     pub fn store_final_range(
@@ -639,6 +774,45 @@ impl MinuteKlineCache {
                 FILE_EXTENSION
             ))
     }
+
+    fn month_files(&self) -> Result<Vec<MonthFilePath>> {
+        let namespace = self.namespace_dir();
+        let entries = match fs::read_dir(namespace.as_path()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut files = Vec::new();
+        for directory in entries {
+            let directory = directory?;
+            if !directory.file_type()?.is_dir() {
+                continue;
+            }
+            let directory_name = directory.file_name().to_string_lossy().into_owned();
+            let Some(trading_month) = directory_name.strip_prefix("trading-") else {
+                continue;
+            };
+            if !is_trading_month(trading_month) {
+                continue;
+            }
+            for file in fs::read_dir(directory.path())? {
+                let file = file?;
+                if !file.file_type()?.is_file() {
+                    continue;
+                }
+                let file_name = file.file_name().to_string_lossy().into_owned();
+                let Some(file_stem) = file_name.strip_suffix(&format!(".{FILE_EXTENSION}")) else {
+                    continue;
+                };
+                files.push(MonthFilePath {
+                    path: file.path(),
+                    trading_month: trading_month.to_string(),
+                    file_stem: file_stem.to_string(),
+                });
+            }
+        }
+        Ok(files)
+    }
 }
 
 /// Streaming 60-second rows from final monthly-minute cache files.
@@ -714,8 +888,16 @@ struct MonthFile {
     rows: Vec<Kline>,
 }
 
+#[derive(Debug, Clone)]
+struct MonthFilePath {
+    path: PathBuf,
+    trading_month: String,
+    file_stem: String,
+}
+
 #[derive(Debug)]
 struct MonthScan {
+    metadata: MonthMetadata,
     coverage: Vec<(i64, i64)>,
     rows: usize,
 }
@@ -874,12 +1056,17 @@ fn scan_month_file(
     trading_month: &str,
     snapshot: &MinuteKlineCacheSnapshot,
 ) -> Result<MonthScan> {
+    let scan = scan_month_file_unchecked(path)?;
+    validate_expected_metadata(path, &scan.metadata, symbol, trading_month, snapshot)?;
+    Ok(scan)
+}
+
+fn scan_month_file_unchecked(path: &Path) -> Result<MonthScan> {
     let file = File::open(path)?;
     let file_len = file.metadata()?.len();
     let mut reader = BufReader::new(file);
     let (header, metadata_bytes) = read_file_prefix(&mut reader, path, file_len)?;
     let metadata = decode_metadata(path, metadata_bytes.as_slice())?;
-    validate_expected_metadata(path, &metadata, symbol, trading_month, snapshot)?;
     let mut checksum = checksum_bytes(FNV_OFFSET_BASIS, metadata_bytes.as_slice());
     let mut coverage = Vec::with_capacity(header.coverage_count);
     for _ in 0..header.coverage_count {
@@ -888,21 +1075,148 @@ fn scan_month_file(
         checksum = checksum_bytes(checksum, &bytes);
         coverage.push(decode_coverage(bytes.as_slice()));
     }
-    validate_stored_coverage(path, trading_month, coverage.as_slice())?;
+    validate_stored_coverage(path, metadata.trading_month.as_str(), coverage.as_slice())?;
     for _ in 0..header.row_count {
         let mut bytes = [0_u8; KLINE_ROW_BYTES];
         read_exact_format(&mut reader, &mut bytes, path, "Kline row")?;
         checksum = checksum_bytes(checksum, &bytes);
         let row = decode_kline(bytes.as_slice());
-        validate_one_stored_row(path, trading_month, &row)?;
+        validate_one_stored_row(path, metadata.trading_month.as_str(), &row)?;
     }
     if checksum != header.checksum {
         return Err(format_error(path, "payload checksum mismatch"));
     }
     Ok(MonthScan {
+        metadata,
         coverage,
         rows: header.row_count,
     })
+}
+
+fn diagnose_month_file(entry: MonthFilePath, size_bytes: u64) -> MinuteKlineCacheDiagnosticFile {
+    let fallback_symbol =
+        symbol_from_file_path(entry.path.as_path()).unwrap_or_else(|_| entry.file_stem.clone());
+    let mut file = MinuteKlineCacheDiagnosticFile {
+        path: entry.path.clone(),
+        trading_month: entry.trading_month.clone(),
+        symbol: fallback_symbol,
+        status: MinuteKlineCacheDiagnosticStatus::Corrupt,
+        schema_version: None,
+        rows: 0,
+        cached_ranges: Vec::new(),
+        size_bytes,
+        error: None,
+    };
+    let version = match read_month_file_version(entry.path.as_path()) {
+        Ok(version) => {
+            file.schema_version = Some(u32::from(version));
+            version
+        }
+        Err(error) => {
+            file.error = Some(error.to_string());
+            return file;
+        }
+    };
+    if version == 3 {
+        file.status = MinuteKlineCacheDiagnosticStatus::LegacyUnsupported;
+        file.error = Some(
+            "minute kline cache schema v3 is legacy and is not migrated or overwritten automatically"
+                .to_string(),
+        );
+        return file;
+    }
+    if version != FILE_VERSION {
+        file.status = MinuteKlineCacheDiagnosticStatus::UnsupportedVersion;
+        file.error = Some(format!(
+            "unsupported minute kline cache schema version {version}; expected {FILE_VERSION}"
+        ));
+        return file;
+    }
+
+    match scan_month_file_unchecked(entry.path.as_path()).and_then(|scan| {
+        let path_symbol = symbol_from_file_path(entry.path.as_path())?;
+        if scan.metadata.symbol != path_symbol {
+            return Err(format_error(
+                entry.path.as_path(),
+                "symbol metadata does not match the monthly filename",
+            ));
+        }
+        if scan.metadata.trading_month != entry.trading_month {
+            return Err(format_error(
+                entry.path.as_path(),
+                "trading month metadata does not match the parent directory",
+            ));
+        }
+        Ok(scan)
+    }) {
+        Ok(scan) => {
+            file.symbol = scan.metadata.symbol;
+            file.rows = scan.rows;
+            file.cached_ranges = scan.coverage;
+            file.status = MinuteKlineCacheDiagnosticStatus::Readable;
+        }
+        Err(error) => file.error = Some(error.to_string()),
+    }
+    file
+}
+
+fn read_month_file_version(path: &Path) -> Result<u16> {
+    let mut file = File::open(path)?;
+    let mut prefix = [0_u8; 6];
+    read_exact_format(&mut file, &mut prefix, path, "file magic and version")?;
+    if prefix[..4] != FILE_MAGIC {
+        return Err(format_error(path, "unexpected magic"));
+    }
+    Ok(u16::from_le_bytes([prefix[4], prefix[5]]))
+}
+
+fn symbol_from_file_path(path: &Path) -> Result<String> {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format_error(path, "monthly filename is not UTF-8"))?;
+    let file_stem = file_name
+        .strip_suffix(&format!(".{FILE_EXTENSION}"))
+        .ok_or_else(|| format_error(path, "monthly filename has an unexpected extension"))?;
+    unescape_symbol_path_component(file_stem).map_err(|reason| {
+        format_error(
+            path,
+            format!("invalid escaped symbol in filename: {reason}"),
+        )
+    })
+}
+
+fn unescape_symbol_path_component(value: &str) -> std::result::Result<String, String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            decoded.push(bytes[index]);
+            index = index.saturating_add(1);
+            continue;
+        }
+        let high = *bytes
+            .get(index.saturating_add(1))
+            .ok_or_else(|| "truncated percent escape".to_string())?;
+        let low = *bytes
+            .get(index.saturating_add(2))
+            .ok_or_else(|| "truncated percent escape".to_string())?;
+        let high = hex_value(high).ok_or_else(|| "invalid percent escape".to_string())?;
+        let low = hex_value(low).ok_or_else(|| "invalid percent escape".to_string())?;
+        decoded.push((high << 4) | low);
+        index = index.saturating_add(3);
+    }
+    String::from_utf8(decoded).map_err(|_| "symbol is not UTF-8".to_string())
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn load_month_file(

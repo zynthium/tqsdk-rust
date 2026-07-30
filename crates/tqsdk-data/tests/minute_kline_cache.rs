@@ -39,6 +39,35 @@ fn final_60s_rows_are_partitioned_by_trading_month_and_streamed() {
 }
 
 #[test]
+fn final_empty_range_records_coverage_without_inventing_rows() {
+    let root = temp_dir("final-empty-range");
+    let cache = MinuteKlineCache::open(&root).unwrap();
+    let snapshot = MinuteKlineCacheSnapshot::new(1, "calendar-v1", "session-v1").unwrap();
+    let start = utc_ns(2026, 1, 15, 2, 0);
+    let end = start + MINUTE_NS;
+
+    let report = cache
+        .store_final_range("SHFE.rb2601", start, end, &snapshot, &[])
+        .unwrap();
+
+    assert_eq!(report.rows, 0);
+    assert!(
+        cache
+            .coverage("SHFE.rb2601", start, end, &snapshot)
+            .unwrap()
+            .is_complete()
+    );
+    assert!(
+        cache
+            .open_reader("SHFE.rb2601", start, end, &snapshot)
+            .unwrap()
+            .next_kline()
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn snapshot_mismatch_and_corrupt_month_file_fail_closed() {
     let root = temp_dir("fail-closed");
     let cache = MinuteKlineCache::open(&root).unwrap();
