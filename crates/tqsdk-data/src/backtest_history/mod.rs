@@ -1,5 +1,6 @@
 //! Async, cache-backed historical market-data queries for local backtests.
 
+mod metadata;
 mod report;
 mod request;
 
@@ -14,6 +15,12 @@ use tokio::task::JoinHandle;
 
 use crate::error::{DataError, Result};
 
+pub use metadata::{
+    BACKTEST_HISTORY_METADATA_FORMAT_ID, BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+    BacktestHistoryMaintenanceClient, BacktestHistoryMaintenanceClientBuilder,
+    BacktestHistoryMarketKind, BacktestHistoryMetadataCache, BacktestHistoryMetadataSnapshot,
+    BacktestHistoryTradingDay,
+};
 pub use report::{
     BacktestHistoryBatchReport, BacktestHistoryChunk, BacktestHistoryCollected,
     BacktestHistoryCollectedBatch, BacktestHistoryCoverageReport, BacktestHistoryEvent,

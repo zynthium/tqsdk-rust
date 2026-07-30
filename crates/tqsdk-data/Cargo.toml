@@ -21,6 +21,7 @@ futures.workspace = true
 reqwest = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+sha1 = "0.10"
 fs2 = "0.4"
 tqsdk-core = { path = "../tqsdk-core", version = "0.1.0", default-features = false }
 tqsdk-session = { path = "../tqsdk-session", version = "0.1.0", default-features = false }

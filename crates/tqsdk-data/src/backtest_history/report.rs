@@ -113,7 +113,7 @@ pub enum BacktestHistoryFinality {
 }
 
 /// One physical-symbol interval serving a logical request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BacktestHistoryPhysicalSegment {
     pub physical_symbol: String,
     pub start_ns: i64,

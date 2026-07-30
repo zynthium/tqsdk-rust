@@ -85,14 +85,17 @@ pub use aggregation::{
     TickKlineAggregator,
 };
 pub use backtest_history::{
+    BACKTEST_HISTORY_METADATA_FORMAT_ID, BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
     BacktestHistoryAuthProvider, BacktestHistoryBatchReport, BacktestHistoryChunk,
     BacktestHistoryClient, BacktestHistoryClientBuilder, BacktestHistoryCollected,
     BacktestHistoryCollectedBatch, BacktestHistoryCoverageReport, BacktestHistoryCredentials,
-    BacktestHistoryEvent, BacktestHistoryFinality, BacktestHistoryKind, BacktestHistoryPhase,
-    BacktestHistoryPhysicalSegment, BacktestHistoryPolicy, BacktestHistoryRequest,
-    BacktestHistoryRequestFailure, BacktestHistoryRequestId, BacktestHistoryRequestReport,
-    BacktestHistoryRows, BacktestHistoryRun, BacktestHistoryTelemetryEvent,
-    BacktestHistoryTelemetryStream,
+    BacktestHistoryEvent, BacktestHistoryFinality, BacktestHistoryKind,
+    BacktestHistoryMaintenanceClient, BacktestHistoryMaintenanceClientBuilder,
+    BacktestHistoryMarketKind, BacktestHistoryMetadataCache, BacktestHistoryMetadataSnapshot,
+    BacktestHistoryPhase, BacktestHistoryPhysicalSegment, BacktestHistoryPolicy,
+    BacktestHistoryRequest, BacktestHistoryRequestFailure, BacktestHistoryRequestId,
+    BacktestHistoryRequestReport, BacktestHistoryRows, BacktestHistoryRun,
+    BacktestHistoryTelemetryEvent, BacktestHistoryTelemetryStream, BacktestHistoryTradingDay,
 };
 pub use backtest_tick_cache::{
     BacktestCachePolicy, BacktestTickCache, BacktestTickCacheDiagnostic,
