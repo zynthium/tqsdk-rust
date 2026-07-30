@@ -15,6 +15,7 @@ pub type Result<T> = std::result::Result<T, DataError>;
 pub enum DataError {
     Session(tqsdk_session::SessionFacadeError),
     FeatureDisabled(&'static str),
+    RemoteBacktestHistoryFillUnavailable,
     PermissionDenied(String),
     CacheMiss(Box<HistorySeriesCacheMiss>),
     CacheBusy {
@@ -75,6 +76,10 @@ impl Display for DataError {
                     "this operation requires the tqsdk-data feature {feature:?}"
                 )
             }
+            Self::RemoteBacktestHistoryFillUnavailable => write!(
+                f,
+                "remote backtest history fill requires tqsdk-data features \"live\" and \"services\""
+            ),
             Self::PermissionDenied(message) => write!(f, "{message}"),
             Self::CacheMiss(miss) => write!(
                 f,
@@ -133,6 +138,7 @@ impl std::error::Error for DataError {
             Self::Io(error) => Some(error),
             Self::Json(error) => Some(error),
             Self::FeatureDisabled(_)
+            | Self::RemoteBacktestHistoryFillUnavailable
             | Self::PermissionDenied(_)
             | Self::CacheMiss(_)
             | Self::CacheBusy { .. }

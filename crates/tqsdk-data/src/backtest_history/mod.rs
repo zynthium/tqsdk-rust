@@ -1,8 +1,10 @@
 //! Async, cache-backed historical market-data queries for local backtests.
 
+mod fill;
 mod metadata;
 mod report;
 mod request;
+mod telemetry;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::pin::Pin;
@@ -32,6 +34,7 @@ pub use request::{
     BacktestHistoryAuthProvider, BacktestHistoryClientBuilder, BacktestHistoryCredentials,
     BacktestHistoryKind, BacktestHistoryPolicy, BacktestHistoryRequest, BacktestHistoryRequestId,
 };
+pub use telemetry::BacktestHistoryTelemetryStream;
 
 use request::{BacktestHistoryClientConfig, ValidatedBacktestHistoryRequest};
 
@@ -97,8 +100,8 @@ impl BacktestHistoryClient {
             })
             .collect::<Vec<_>>();
         let (event_sender, event_receiver) = mpsc::channel(failures.len().max(1));
-        let (telemetry_sender, telemetry_receiver) = mpsc::unbounded_channel();
-        drop(telemetry_sender);
+        let telemetry = telemetry::TelemetryHub::new();
+        telemetry.close();
 
         let report = Arc::new(Mutex::new(BacktestHistoryBatchReport::default()));
         let report_for_task = Arc::clone(&report);
@@ -125,9 +128,7 @@ impl BacktestHistoryClient {
             report,
             request_kinds,
             collect_limit_bytes: self.config.collect_limit_bytes,
-            telemetry: Some(BacktestHistoryTelemetryStream {
-                events: telemetry_receiver,
-            }),
+            telemetry: Some(telemetry.stream()),
         }
     }
 
@@ -296,17 +297,5 @@ impl Stream for BacktestHistoryRun {
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut self.events).poll_recv(context)
-    }
-}
-
-/// Independent, best-effort progress stream for a backtest history run.
-pub struct BacktestHistoryTelemetryStream {
-    events: mpsc::UnboundedReceiver<BacktestHistoryTelemetryEvent>,
-}
-
-impl BacktestHistoryTelemetryStream {
-    /// Receives the next telemetry event, if any.
-    pub async fn next(&mut self) -> Option<BacktestHistoryTelemetryEvent> {
-        self.events.recv().await
     }
 }

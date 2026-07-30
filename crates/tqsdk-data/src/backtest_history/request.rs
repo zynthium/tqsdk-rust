@@ -7,6 +7,7 @@ use std::time::Duration;
 use crate::error::{DataError, Result};
 
 use super::BacktestHistoryClient;
+use super::fill::{ServerHistorySourceFactory, default_server_history_source_factory};
 
 /// Stable identifier supplied by the caller to associate request events.
 pub type BacktestHistoryRequestId = u64;
@@ -318,6 +319,7 @@ impl BacktestHistoryClientBuilder {
                 per_symbol_buffer_bytes: self.per_symbol_buffer_bytes,
                 collect_limit_bytes: self.collect_limit_bytes,
                 auth_provider: self.auth_provider,
+                source_factory: default_server_history_source_factory(),
             },
         ))
     }
@@ -353,4 +355,5 @@ pub(crate) struct BacktestHistoryClientConfig {
     pub(crate) per_symbol_buffer_bytes: usize,
     pub(crate) collect_limit_bytes: usize,
     pub(crate) auth_provider: Option<Arc<dyn BacktestHistoryAuthProvider>>,
+    pub(crate) source_factory: Arc<dyn ServerHistorySourceFactory>,
 }
