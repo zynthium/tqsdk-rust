@@ -156,6 +156,60 @@ async fn collect_enforces_its_single_request_contract() {
     assert!(matches!(error, DataError::Validation(_)));
 }
 
+#[cfg(not(all(feature = "live", feature = "services")))]
+#[tokio::test]
+async fn remote_on_miss_reports_feature_unavailability_before_loading_authentication() {
+    let client = BacktestHistoryClient::builder(std::env::temp_dir().join(format!(
+        "tqsdk-backtest-history-api-feature-gate-{}",
+        std::process::id()
+    )))
+    .build()
+    .unwrap();
+
+    let error = client
+        .query(BacktestHistoryRequest::tick(14, "SHFE.au2602", 1, 2))
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DataError::RequestFailed { message, .. }
+            if message.contains("remote backtest history fill requires")
+    ));
+}
+
+#[cfg(not(all(feature = "live", feature = "services")))]
+#[tokio::test]
+async fn remote_kq_main_metadata_miss_reports_feature_unavailability_before_loading_authentication()
+{
+    let calls = Arc::new(AtomicUsize::new(0));
+    let client = BacktestHistoryClient::builder(std::env::temp_dir().join(format!(
+        "tqsdk-backtest-history-api-kq-main-feature-gate-{}",
+        std::process::id()
+    )))
+    .auth_provider(CountingAuthProvider {
+        calls: Arc::clone(&calls),
+    })
+    .build()
+    .unwrap();
+
+    let error = client
+        .query(BacktestHistoryRequest::tick(15, "KQ.m@SHFE.au", 1, 2))
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DataError::RequestFailed { message, .. }
+            if message.contains("remote backtest history fill requires")
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
 struct CountingAuthProvider {
     calls: Arc<AtomicUsize>,
 }

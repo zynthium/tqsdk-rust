@@ -1,13 +1,17 @@
 //! Async, cache-backed historical market-data queries for local backtests.
 
+mod executor;
 mod fill;
 mod metadata;
+mod planner;
 mod report;
 mod request;
+mod store_worker;
 mod telemetry;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -73,6 +77,7 @@ impl BacktestHistoryClient {
         let mut validated = Vec::new();
         for request in requests {
             let request = request.validate()?;
+            planner::validate_source_policy(&request)?;
             if !seen_request_ids.insert(request.request_id) {
                 return Err(DataError::Validation(format!(
                     "backtest history batch contains duplicate request_id {}",
@@ -82,39 +87,33 @@ impl BacktestHistoryClient {
             validated.push(request);
         }
 
-        Ok(self.closed_run(validated))
+        Ok(self.start_run(validated))
     }
 
-    fn closed_run(&self, requests: Vec<ValidatedBacktestHistoryRequest>) -> BacktestHistoryRun {
+    fn start_run(&self, requests: Vec<ValidatedBacktestHistoryRequest>) -> BacktestHistoryRun {
         let request_kinds = requests
             .iter()
             .map(|request| (request.request_id, (request.kind, request.duration_ns)))
             .collect();
-        let failures = requests
-            .iter()
-            .map(|request| BacktestHistoryRequestFailure {
-                request_id: request.request_id,
-                symbol: request.symbol.clone(),
-                error: self.initial_unavailable_message(request),
-                emitted_rows: 0,
-            })
-            .collect::<Vec<_>>();
-        let (event_sender, event_receiver) = mpsc::channel(failures.len().max(1));
+        let event_capacity = self.config.logical_concurrency.saturating_mul(2).max(1);
+        let (event_sender, event_receiver) = mpsc::channel(event_capacity);
         let telemetry = telemetry::TelemetryHub::new();
-        telemetry.close();
-
         let report = Arc::new(Mutex::new(BacktestHistoryBatchReport::default()));
         let report_for_task = Arc::clone(&report);
+        let config = Arc::clone(&self.config);
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let cancellation_for_task = Arc::clone(&cancellation);
+        let telemetry_for_task = telemetry.clone();
         let coordinator = tokio::spawn(async move {
-            let report = BacktestHistoryBatchReport {
-                completed: Vec::new(),
-                failed: failures,
-            };
-            for failure in &report.failed {
-                let _ = event_sender
-                    .send(BacktestHistoryEvent::RequestFailed(failure.clone()))
-                    .await;
-            }
+            let report = executor::execute_batch(
+                config,
+                requests,
+                event_sender,
+                telemetry_for_task.clone(),
+                cancellation_for_task,
+            )
+            .await;
+            telemetry_for_task.close();
             let mut stored = report_for_task
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -129,18 +128,8 @@ impl BacktestHistoryClient {
             request_kinds,
             collect_limit_bytes: self.config.collect_limit_bytes,
             telemetry: Some(telemetry.stream()),
+            cancellation,
         }
-    }
-
-    fn initial_unavailable_message(&self, request: &ValidatedBacktestHistoryRequest) -> String {
-        let source = match self.config.policy {
-            BacktestHistoryPolicy::CacheOnly => "CacheOnly",
-            BacktestHistoryPolicy::RemoteOnMiss => "RemoteOnMiss",
-        };
-        format!(
-            "{source} backtest history query for {} in [{}, {}) is not attached to the cache planner yet",
-            request.symbol, request.start_ns, request.end_ns
-        )
     }
 }
 
@@ -152,6 +141,13 @@ pub struct BacktestHistoryRun {
     request_kinds: BTreeMap<BacktestHistoryRequestId, (BacktestHistoryKind, Option<i64>)>,
     collect_limit_bytes: usize,
     telemetry: Option<BacktestHistoryTelemetryStream>,
+    cancellation: Arc<AtomicBool>,
+}
+
+impl Drop for BacktestHistoryRun {
+    fn drop(&mut self) {
+        self.cancellation.store(true, Ordering::Release);
+    }
 }
 
 impl BacktestHistoryRun {
@@ -219,32 +215,60 @@ impl BacktestHistoryRun {
                     .map(|rows| (*request_id, rows))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
-        let mut retained_bytes = 0_usize;
+        let mut retained_bytes = rows_by_request.values().try_fold(0_usize, |total, rows| {
+            total
+                .checked_add(rows.estimated_heap_bytes()?)
+                .ok_or(DataError::CollectLimitExceeded {
+                    limit_bytes: max_total_bytes,
+                    attempted_bytes: usize::MAX,
+                })
+        })?;
+        if retained_bytes > max_total_bytes {
+            return Err(DataError::CollectLimitExceeded {
+                limit_bytes: max_total_bytes,
+                attempted_bytes: retained_bytes,
+            });
+        }
 
         while let Some(event) = self.next().await {
             match event {
                 BacktestHistoryEvent::Chunk(chunk) => {
-                    let chunk_bytes = chunk.rows.estimated_heap_bytes()?;
-                    let attempted_bytes = retained_bytes.checked_add(chunk_bytes).ok_or(
-                        DataError::CollectLimitExceeded {
-                            limit_bytes: max_total_bytes,
-                            attempted_bytes: usize::MAX,
-                        },
-                    )?;
-                    if attempted_bytes > max_total_bytes {
-                        return Err(DataError::CollectLimitExceeded {
-                            limit_bytes: max_total_bytes,
-                            attempted_bytes,
-                        });
-                    }
                     let rows = rows_by_request.get_mut(&chunk.request_id).ok_or_else(|| {
                         DataError::Validation(format!(
                             "backtest history received chunk for unknown request_id {}",
                             chunk.request_id
                         ))
                     })?;
+                    let previous_bytes = rows.estimated_heap_bytes()?;
+                    let projected_bytes = rows.projected_heap_bytes_after_append(&chunk.rows)?;
+                    let attempted_bytes = retained_bytes
+                        .checked_sub(previous_bytes)
+                        .and_then(|total| total.checked_add(projected_bytes))
+                        .ok_or(DataError::CollectLimitExceeded {
+                            limit_bytes: max_total_bytes,
+                            attempted_bytes: usize::MAX,
+                        })?;
+                    if attempted_bytes > max_total_bytes {
+                        return Err(DataError::CollectLimitExceeded {
+                            limit_bytes: max_total_bytes,
+                            attempted_bytes,
+                        });
+                    }
                     rows.append(chunk.rows)?;
-                    retained_bytes = attempted_bytes;
+                    let actual_bytes = rows.estimated_heap_bytes()?;
+                    retained_bytes = retained_bytes
+                        .checked_sub(previous_bytes)
+                        .and_then(|total| total.checked_add(actual_bytes))
+                        .ok_or(DataError::CollectLimitExceeded {
+                            limit_bytes: max_total_bytes,
+                            attempted_bytes: usize::MAX,
+                        })?;
+                    if retained_bytes > max_total_bytes {
+                        return Err(DataError::CollectLimitExceeded {
+                            limit_bytes: max_total_bytes,
+                            attempted_bytes: retained_bytes,
+                        });
+                    }
                 }
                 BacktestHistoryEvent::RequestCompleted(_) => {}
                 BacktestHistoryEvent::RequestFailed(failure) => {

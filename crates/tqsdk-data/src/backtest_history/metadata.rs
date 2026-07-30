@@ -1,14 +1,22 @@
+#[cfg(all(feature = "live", feature = "services"))]
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::NaiveDate;
+#[cfg(all(feature = "live", feature = "services"))]
+use chrono::{Days, FixedOffset, TimeZone, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+#[cfg(all(feature = "live", feature = "services"))]
+use tqsdk_core::TradingTime;
 
 use crate::{DataError, KlineSessionTemplate, Result};
+#[cfg(all(feature = "live", feature = "services"))]
+use crate::{HistoricalContUnderlyingSegment, KlineSessionWindow, TradingCalendarRow};
 
 use super::{
     BacktestHistoryAuthProvider, BacktestHistoryCredentials, BacktestHistoryPhysicalSegment,
@@ -202,6 +210,533 @@ impl BacktestHistoryMetadataCache {
     }
 }
 
+/// Ensures that a logical symbol has a persisted metadata snapshot covering a
+/// remote-query range. This is intentionally crate-private: callers reach it
+/// only after the query path has proved that a remote operation is needed.
+///
+/// A present snapshot remains authoritative regardless of its age. We refresh
+/// only when it does not cover the requested range; `CacheOnly` callers never
+/// call this function and consequently remain fully offline.
+pub(crate) async fn ensure_metadata_for_remote_miss(
+    cache_dir: &Path,
+    auth_provider: Option<&Arc<dyn BacktestHistoryAuthProvider>>,
+    symbol: &str,
+    start_ns: i64,
+    end_ns: i64,
+) -> Result<BacktestHistoryMetadataSnapshot> {
+    validate_metadata_refresh_request(symbol, start_ns, end_ns)?;
+    let read_only = BacktestHistoryMetadataCache::open_read_only(cache_dir);
+    if let Some(snapshot) = read_only.load_active(symbol)?
+        && metadata_snapshot_covers_range(&snapshot, (start_ns, end_ns))
+    {
+        return Ok(snapshot);
+    }
+
+    #[cfg(all(feature = "live", feature = "services"))]
+    {
+        let provider = auth_provider.ok_or_else(|| {
+            DataError::Validation(
+                "remote backtest metadata refresh requires auth_env() or auth_provider()"
+                    .to_string(),
+            )
+        })?;
+        let credentials = provider.load().await?;
+        let cache = BacktestHistoryMetadataCache::open(cache_dir)?;
+        if let Some(snapshot) = cache.load_active(symbol)?
+            && metadata_snapshot_covers_range(&snapshot, (start_ns, end_ns))
+        {
+            return Ok(snapshot);
+        }
+        refresh_metadata_from_official(&cache, credentials, symbol, start_ns, end_ns).await
+    }
+
+    #[cfg(not(all(feature = "live", feature = "services")))]
+    {
+        let _ = auth_provider;
+        Err(DataError::RemoteBacktestHistoryFillUnavailable)
+    }
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+async fn refresh_metadata_from_official(
+    cache: &BacktestHistoryMetadataCache,
+    credentials: BacktestHistoryCredentials,
+    symbol: &str,
+    start_ns: i64,
+    end_ns: i64,
+) -> Result<BacktestHistoryMetadataSnapshot> {
+    validate_metadata_refresh_request(symbol, start_ns, end_ns)?;
+    let (calendar_start, calendar_end) = metadata_calendar_bounds(start_ns, end_ns)?;
+    let data_client = crate::DataClient::new();
+    let calendar = data_client
+        .query_trading_calendar(calendar_start, calendar_end)
+        .await?;
+    let mapping_days = calendar.iter().filter(|day| day.trading).count();
+    if mapping_days == 0 {
+        return Err(DataError::InvalidResponse(
+            "official trading calendar returned no trading days for metadata refresh".to_string(),
+        ));
+    }
+
+    let historical_segments = if is_main_continuous_contract(symbol) {
+        data_client
+            .query_his_cont_underlying_segments(symbol, mapping_days, Some(calendar_end))
+            .await?
+    } else {
+        Vec::new()
+    };
+    let physical_segments = physical_segments_for_snapshot(
+        symbol,
+        (start_ns, end_ns),
+        calendar.as_slice(),
+        historical_segments.as_slice(),
+    )?;
+
+    let (user, pass) = credentials.into_parts();
+    let session = tqsdk_session::SessionClientBuilder::new(user, pass)
+        .enable_query()
+        .futures_backtest_market()
+        .build()?;
+    let session =
+        session_template_from_official_metadata(&session, symbol, &physical_segments).await?;
+    let snapshot = BacktestHistoryMetadataSnapshot {
+        schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+        market_kind: BacktestHistoryMarketKind::Futures,
+        logical_symbol: symbol.to_string(),
+        captured_at_ns: Utc::now().timestamp_nanos_opt().ok_or_else(|| {
+            DataError::InvalidResponse(
+                "current timestamp overflowed while recording backtest metadata".to_string(),
+            )
+        })?,
+        trading_days: metadata_trading_days(calendar.as_slice())?,
+        session,
+        physical_segments,
+        snapshot_hash: String::new(),
+    };
+    cache.store_snapshot(snapshot)
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+async fn session_template_from_official_metadata(
+    session: &tqsdk_session::SessionClient,
+    logical_symbol: &str,
+    physical_segments: &[BacktestHistoryPhysicalSegment],
+) -> Result<KlineSessionTemplate> {
+    let mut symbols = Vec::with_capacity(physical_segments.len().saturating_add(1));
+    let mut seen = BTreeSet::new();
+    for symbol in std::iter::once(logical_symbol).chain(
+        physical_segments
+            .iter()
+            .map(|segment| segment.physical_symbol.as_str()),
+    ) {
+        if seen.insert(symbol) {
+            symbols.push(symbol);
+        }
+    }
+    let infos = session.query_symbol_info(symbols.as_slice()).await?;
+    let logical_info = infos
+        .iter()
+        .find(|info| info.instrument_id.as_str() == logical_symbol)
+        .ok_or_else(|| {
+            DataError::InvalidResponse(format!(
+                "official metadata did not return the requested symbol {logical_symbol}"
+            ))
+        })?;
+    validate_futures_symbol_info(logical_symbol, logical_info.class)?;
+    let session_info = infos
+        .iter()
+        .find(|info| {
+            is_supported_futures_class(info.class)
+                && (!info.trading_time.day.is_empty() || !info.trading_time.night.is_empty())
+        })
+        .unwrap_or(logical_info);
+    validate_futures_symbol_info(session_info.instrument_id.as_str(), session_info.class)?;
+    session_template_from_trading_time(
+        &session_info.trading_time,
+        session_info.instrument_id.as_str(),
+    )
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn validate_futures_symbol_info(symbol: &str, class: tqsdk_session::InstrumentClass) -> Result<()> {
+    if is_supported_futures_class(class) {
+        Ok(())
+    } else {
+        Err(DataError::Validation(format!(
+            "backtest history metadata for {symbol} is not a futures instrument"
+        )))
+    }
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn is_supported_futures_class(class: tqsdk_session::InstrumentClass) -> bool {
+    matches!(
+        class,
+        tqsdk_session::InstrumentClass::Future
+            | tqsdk_session::InstrumentClass::Continuous
+            | tqsdk_session::InstrumentClass::Index
+    )
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn session_template_from_trading_time(
+    trading_time: &TradingTime,
+    symbol: &str,
+) -> Result<KlineSessionTemplate> {
+    let mut windows = Vec::with_capacity(trading_time.day.len() + trading_time.night.len());
+    for (index, pair) in trading_time.night.iter().enumerate() {
+        let (start, end) = parse_trading_time_pair(pair, symbol, "night", index)?;
+        windows.push(KlineSessionWindow::new(
+            trading_time_offset_ns(start)?,
+            trading_time_offset_ns(end)?,
+        )?);
+    }
+    for (index, pair) in trading_time.day.iter().enumerate() {
+        let (start, end) = parse_trading_time_pair(pair, symbol, "day", index)?;
+        windows.push(KlineSessionWindow::new(
+            trading_time_offset_ns(start)?,
+            trading_time_offset_ns(end)?,
+        )?);
+    }
+    if windows.is_empty() {
+        return Err(DataError::InvalidResponse(format!(
+            "official metadata for {symbol} has no trading_time windows"
+        )));
+    }
+    windows.sort_by_key(|window| (window.start_offset_ns, window.end_offset_ns));
+    let snapshot_hash = format!(
+        "official-trading-time-v1-{:x}",
+        Sha1::digest(serde_json::to_vec(windows.as_slice()).map_err(|error| {
+            DataError::InvalidResponse(format!(
+                "cannot encode official trading_time for {symbol}: {error}"
+            ))
+        })?)
+    );
+    KlineSessionTemplate::new(snapshot_hash, windows)
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn parse_trading_time_pair(
+    pair: &[String],
+    symbol: &str,
+    session_kind: &str,
+    index: usize,
+) -> Result<(i64, i64)> {
+    let [start, end] = pair else {
+        return Err(DataError::InvalidResponse(format!(
+            "official {session_kind} trading_time window {index} for {symbol} must contain exactly two endpoints"
+        )));
+    };
+    Ok((
+        parse_trading_time_endpoint(start, symbol, session_kind, index)?,
+        parse_trading_time_endpoint(end, symbol, session_kind, index)?,
+    ))
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn parse_trading_time_endpoint(
+    value: &str,
+    symbol: &str,
+    session_kind: &str,
+    index: usize,
+) -> Result<i64> {
+    let mut pieces = value.split(':');
+    let hour = pieces
+        .next()
+        .and_then(|part| part.parse::<i64>().ok())
+        .filter(|hour| (0..48).contains(hour));
+    let minute = pieces
+        .next()
+        .and_then(|part| part.parse::<i64>().ok())
+        .filter(|minute| (0..60).contains(minute));
+    let second = pieces
+        .next()
+        .and_then(|part| part.parse::<i64>().ok())
+        .filter(|second| (0..60).contains(second));
+    if pieces.next().is_some() || hour.is_none() || minute.is_none() || second.is_none() {
+        return Err(DataError::InvalidResponse(format!(
+            "official {session_kind} trading_time endpoint {value:?} at index {index} for {symbol} is invalid"
+        )));
+    }
+    let seconds = hour
+        .and_then(|hour| hour.checked_mul(60 * 60))
+        .and_then(|seconds| minute.and_then(|minute| seconds.checked_add(minute * 60)))
+        .and_then(|seconds| second.and_then(|second| seconds.checked_add(second)))
+        .ok_or_else(|| {
+            DataError::InvalidResponse(format!(
+                "official {session_kind} trading_time endpoint {value:?} at index {index} for {symbol} overflowed"
+            ))
+        })?;
+    Ok(seconds)
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn trading_time_offset_ns(seconds_since_midnight: i64) -> Result<i64> {
+    const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
+    const TRADING_DAY_START_SECONDS: i64 = 18 * 60 * 60;
+    let timestamp_seconds = if seconds_since_midnight < TRADING_DAY_START_SECONDS {
+        seconds_since_midnight.checked_add(SECONDS_PER_DAY)
+    } else {
+        Some(seconds_since_midnight)
+    }
+    .ok_or_else(|| {
+        DataError::InvalidResponse("official trading_time offset overflowed".to_string())
+    })?;
+    let offset_seconds = timestamp_seconds
+        .checked_sub(TRADING_DAY_START_SECONDS)
+        .ok_or_else(|| {
+            DataError::InvalidResponse(
+                "official trading_time predates trading-day start".to_string(),
+            )
+        })?;
+    let offset_ns = offset_seconds.checked_mul(1_000_000_000).ok_or_else(|| {
+        DataError::InvalidResponse("official trading_time nanosecond offset overflowed".to_string())
+    })?;
+    if !(0..=24 * 60 * 60 * 1_000_000_000).contains(&offset_ns) {
+        return Err(DataError::InvalidResponse(
+            "official trading_time exceeds the canonical CST trading day".to_string(),
+        ));
+    }
+    Ok(offset_ns)
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn metadata_calendar_bounds(start_ns: i64, end_ns: i64) -> Result<(NaiveDate, NaiveDate)> {
+    let start_date = cst_date_from_timestamp_ns(start_ns)?;
+    let end_date = cst_date_from_timestamp_ns(end_ns.checked_sub(1).ok_or_else(|| {
+        DataError::Validation("metadata refresh end_ns underflowed".to_string())
+    })?)?;
+    let lower = start_date.checked_sub_days(Days::new(14)).ok_or_else(|| {
+        DataError::Validation("metadata refresh calendar start predates chrono range".to_string())
+    })?;
+    let upper = end_date.checked_add_days(Days::new(14)).ok_or_else(|| {
+        DataError::Validation("metadata refresh calendar end exceeds chrono range".to_string())
+    })?;
+    Ok((lower, upper))
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn metadata_trading_days(
+    calendar: &[TradingCalendarRow],
+) -> Result<Vec<BacktestHistoryTradingDay>> {
+    if calendar.is_empty() {
+        return Err(DataError::InvalidResponse(
+            "official trading calendar returned no rows for metadata refresh".to_string(),
+        ));
+    }
+    calendar
+        .iter()
+        .map(|row| {
+            let date = parse_calendar_date(row.date.as_str())?;
+            let start_ns = cst_datetime_ns(date, 0, 0, 0)?;
+            let end_ns = cst_datetime_ns(
+                date.checked_add_days(Days::new(1)).ok_or_else(|| {
+                    DataError::InvalidResponse(
+                        "official trading calendar date exceeds chrono range".to_string(),
+                    )
+                })?,
+                0,
+                0,
+                0,
+            )?;
+            Ok(BacktestHistoryTradingDay {
+                date: row.date.clone(),
+                is_trading_day: row.trading,
+                start_ns,
+                end_ns,
+            })
+        })
+        .collect()
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn physical_segments_for_snapshot(
+    logical_symbol: &str,
+    requested_range: (i64, i64),
+    calendar: &[TradingCalendarRow],
+    historical_segments: &[HistoricalContUnderlyingSegment],
+) -> Result<Vec<BacktestHistoryPhysicalSegment>> {
+    if !is_main_continuous_contract(logical_symbol) {
+        return Ok(vec![BacktestHistoryPhysicalSegment {
+            physical_symbol: logical_symbol.to_string(),
+            start_ns: requested_range.0,
+            end_ns: requested_range.1,
+        }]);
+    }
+
+    let mut segments = Vec::with_capacity(historical_segments.len());
+    for segment in historical_segments {
+        if segment.symbol != logical_symbol {
+            return Err(DataError::InvalidResponse(format!(
+                "official continuous mapping symbol {} does not match {logical_symbol}",
+                segment.symbol
+            )));
+        }
+        if segment.underlying.trim().is_empty() {
+            return Err(DataError::InvalidResponse(format!(
+                "official continuous mapping for {logical_symbol} has an empty underlying"
+            )));
+        }
+        let start_date = parse_calendar_date(segment.start_date.as_str())?;
+        let end_date = parse_calendar_date(segment.end_date.as_str())?;
+        let start_ns = continuous_segment_start_ns(start_date, calendar)?;
+        let end_ns = continuous_segment_end_ns(end_date, calendar)?;
+        if end_ns <= start_ns {
+            return Err(DataError::InvalidResponse(format!(
+                "official continuous mapping segment {} for {logical_symbol} has an invalid range",
+                segment.underlying
+            )));
+        }
+        if end_ns > requested_range.0 && start_ns < requested_range.1 {
+            segments.push(BacktestHistoryPhysicalSegment {
+                physical_symbol: segment.underlying.clone(),
+                start_ns,
+                end_ns,
+            });
+        }
+    }
+    segments.sort_by(|left, right| {
+        left.start_ns
+            .cmp(&right.start_ns)
+            .then_with(|| left.end_ns.cmp(&right.end_ns))
+            .then_with(|| left.physical_symbol.cmp(&right.physical_symbol))
+    });
+    if !physical_segments_cover_range(segments.as_slice(), requested_range) {
+        return Err(DataError::InvalidResponse(format!(
+            "official continuous mapping does not cover [{}, {}) for {logical_symbol}",
+            requested_range.0, requested_range.1
+        )));
+    }
+    Ok(segments)
+}
+
+pub(crate) fn metadata_snapshot_covers_range(
+    snapshot: &BacktestHistoryMetadataSnapshot,
+    range: (i64, i64),
+) -> bool {
+    physical_segments_cover_range(snapshot.physical_segments.as_slice(), range)
+}
+
+fn physical_segments_cover_range(
+    segments: &[BacktestHistoryPhysicalSegment],
+    range: (i64, i64),
+) -> bool {
+    if range.0 >= range.1 {
+        return false;
+    }
+    let mut cursor = range.0;
+    for segment in segments {
+        if segment.end_ns <= cursor || segment.start_ns >= range.1 {
+            continue;
+        }
+        if segment.start_ns > cursor {
+            return false;
+        }
+        cursor = cursor.max(segment.end_ns);
+        if cursor >= range.1 {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn continuous_segment_start_ns(date: NaiveDate, calendar: &[TradingCalendarRow]) -> Result<i64> {
+    let position = calendar
+        .iter()
+        .position(|row| row.date == date.format("%Y-%m-%d").to_string() && row.trading)
+        .ok_or_else(|| {
+            DataError::InvalidResponse(format!(
+                "official trading calendar does not contain continuous segment trading day {}",
+                date.format("%Y-%m-%d")
+            ))
+        })?;
+    let previous = calendar[..position]
+        .iter()
+        .rev()
+        .find(|row| row.trading)
+        .ok_or_else(|| {
+            DataError::InvalidResponse(format!(
+                "official trading calendar has no prior trading day before {}",
+                date.format("%Y-%m-%d")
+            ))
+        })?;
+    cst_datetime_ns(parse_calendar_date(previous.date.as_str())?, 18, 0, 0)
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn continuous_segment_end_ns(date: NaiveDate, calendar: &[TradingCalendarRow]) -> Result<i64> {
+    let present = calendar
+        .iter()
+        .any(|row| row.date == date.format("%Y-%m-%d").to_string() && row.trading);
+    if !present {
+        return Err(DataError::InvalidResponse(format!(
+            "official trading calendar does not contain continuous segment trading day {}",
+            date.format("%Y-%m-%d")
+        )));
+    }
+    cst_datetime_ns(date, 18, 0, 0)
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn cst_date_from_timestamp_ns(timestamp_ns: i64) -> Result<NaiveDate> {
+    let seconds = timestamp_ns.div_euclid(1_000_000_000);
+    let nanoseconds = timestamp_ns.rem_euclid(1_000_000_000) as u32;
+    let timestamp = Utc
+        .timestamp_opt(seconds, nanoseconds)
+        .single()
+        .ok_or_else(|| {
+            DataError::Validation(
+                "metadata refresh timestamp cannot be represented in UTC".to_string(),
+            )
+        })?;
+    Ok(timestamp.with_timezone(&cst_offset()).date_naive())
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn cst_datetime_ns(date: NaiveDate, hour: u32, minute: u32, second: u32) -> Result<i64> {
+    let local = date.and_hms_opt(hour, minute, second).ok_or_else(|| {
+        DataError::InvalidResponse("failed to build CST metadata timestamp".to_string())
+    })?;
+    cst_offset()
+        .from_local_datetime(&local)
+        .single()
+        .ok_or_else(|| {
+            DataError::InvalidResponse("failed to resolve CST metadata timestamp".to_string())
+        })?
+        .timestamp_nanos_opt()
+        .ok_or_else(|| DataError::InvalidResponse("CST metadata timestamp overflowed".to_string()))
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn cst_offset() -> FixedOffset {
+    FixedOffset::east_opt(8 * 60 * 60).expect("China Standard Time offset must be valid")
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn parse_calendar_date(value: &str) -> Result<NaiveDate> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|error| {
+        DataError::InvalidResponse(format!(
+            "official trading calendar date {value:?} is invalid: {error}"
+        ))
+    })
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn is_main_continuous_contract(symbol: &str) -> bool {
+    symbol.starts_with("KQ.m@")
+}
+
+fn validate_metadata_refresh_request(symbol: &str, start_ns: i64, end_ns: i64) -> Result<()> {
+    validate_logical_symbol(symbol)?;
+    if start_ns >= end_ns {
+        return Err(DataError::Validation(
+            "metadata refresh requires start_ns < end_ns".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Explicit-only metadata maintenance entry point.
 ///
 /// Query APIs do not expose refresh or purge operations. The server resolver is
@@ -262,29 +797,26 @@ impl BacktestHistoryMaintenanceClient {
     }
 
     /// Explicitly refreshes metadata from the official source.
-    ///
-    /// This pre-integration implementation keeps auth lazy and fails rather
-    /// than silently replacing a local snapshot. Task 5 attaches the official
-    /// server-backtest metadata resolver to this same API.
     pub async fn refresh_metadata(
         &self,
         symbol: &str,
         start_ns: i64,
         end_ns: i64,
     ) -> Result<BacktestHistoryMetadataSnapshot> {
-        validate_logical_symbol(symbol)?;
-        if start_ns >= end_ns {
-            return Err(DataError::Validation(
-                "metadata refresh requires start_ns < end_ns".to_string(),
-            ));
-        }
+        validate_metadata_refresh_request(symbol, start_ns, end_ns)?;
         let provider = self.auth_provider.as_ref().ok_or(DataError::InvalidState(
             "backtest metadata refresh requires an explicit auth provider",
         ))?;
-        let _credentials = provider.load().await?;
-        Err(DataError::InvalidState(
-            "backtest metadata refresh is not attached to the server resolver yet",
-        ))
+        let credentials = provider.load().await?;
+        #[cfg(all(feature = "live", feature = "services"))]
+        {
+            refresh_metadata_from_official(&self.cache, credentials, symbol, start_ns, end_ns).await
+        }
+        #[cfg(not(all(feature = "live", feature = "services")))]
+        {
+            let _ = credentials;
+            Err(DataError::RemoteBacktestHistoryFillUnavailable)
+        }
     }
 }
 
@@ -647,4 +1179,108 @@ fn is_sha1_hex(value: &str) -> bool {
 
 fn metadata_response_error(reason: impl AsRef<str>) -> DataError {
     DataError::InvalidResponse(format!("backtest history metadata: {}", reason.as_ref()))
+}
+
+#[cfg(all(test, feature = "live", feature = "services"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn official_trading_time_uses_the_canonical_18h_trading_day_anchor() {
+        let template = session_template_from_trading_time(
+            &TradingTime {
+                night: vec![vec!["21:00:00".to_string(), "02:30:00".to_string()]],
+                day: vec![
+                    vec!["09:00:00".to_string(), "10:15:00".to_string()],
+                    vec!["10:30:00".to_string(), "11:30:00".to_string()],
+                    vec!["13:30:00".to_string(), "15:00:00".to_string()],
+                ],
+            },
+            "KQ.i@SHFE.au",
+        )
+        .unwrap();
+
+        let hour_ns = 60 * 60 * 1_000_000_000;
+        assert_eq!(
+            template.windows(),
+            &[
+                KlineSessionWindow::new(3 * hour_ns, 8 * hour_ns + 30 * 60 * 1_000_000_000)
+                    .unwrap(),
+                KlineSessionWindow::new(15 * hour_ns, 16 * hour_ns + 15 * 60 * 1_000_000_000)
+                    .unwrap(),
+                KlineSessionWindow::new(
+                    16 * hour_ns + 30 * 60 * 1_000_000_000,
+                    17 * hour_ns + 30 * 60 * 1_000_000_000
+                )
+                .unwrap(),
+                KlineSessionWindow::new(19 * hour_ns + 30 * 60 * 1_000_000_000, 21 * hour_ns)
+                    .unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn continuous_mapping_uses_the_previous_real_trading_day_at_18h() {
+        let calendar = vec![
+            calendar_row("2026-01-01", false),
+            calendar_row("2026-01-02", true),
+            calendar_row("2026-01-03", false),
+            calendar_row("2026-01-04", false),
+            calendar_row("2026-01-05", true),
+            calendar_row("2026-01-06", true),
+        ];
+        let requested = (
+            cst_datetime_ns(date("2026-01-02"), 18, 0, 0).unwrap(),
+            cst_datetime_ns(date("2026-01-06"), 18, 0, 0).unwrap(),
+        );
+        let segments = physical_segments_for_snapshot(
+            "KQ.m@SHFE.au",
+            requested,
+            calendar.as_slice(),
+            &[
+                HistoricalContUnderlyingSegment {
+                    symbol: "KQ.m@SHFE.au".to_string(),
+                    underlying: "SHFE.au2602".to_string(),
+                    start_date: "2026-01-05".to_string(),
+                    end_date: "2026-01-05".to_string(),
+                    trading_days: 1,
+                },
+                HistoricalContUnderlyingSegment {
+                    symbol: "KQ.m@SHFE.au".to_string(),
+                    underlying: "SHFE.au2604".to_string(),
+                    start_date: "2026-01-06".to_string(),
+                    end_date: "2026-01-06".to_string(),
+                    trading_days: 1,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            segments,
+            vec![
+                BacktestHistoryPhysicalSegment {
+                    physical_symbol: "SHFE.au2602".to_string(),
+                    start_ns: requested.0,
+                    end_ns: cst_datetime_ns(date("2026-01-05"), 18, 0, 0).unwrap(),
+                },
+                BacktestHistoryPhysicalSegment {
+                    physical_symbol: "SHFE.au2604".to_string(),
+                    start_ns: cst_datetime_ns(date("2026-01-05"), 18, 0, 0).unwrap(),
+                    end_ns: requested.1,
+                },
+            ]
+        );
+    }
+
+    fn calendar_row(date: &str, trading: bool) -> TradingCalendarRow {
+        TradingCalendarRow {
+            date: date.to_string(),
+            trading,
+        }
+    }
+
+    fn date(value: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(value, "%Y-%m-%d").unwrap()
+    }
 }

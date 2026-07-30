@@ -209,6 +209,13 @@ pub(crate) trait ServerHistorySource: Send {
 
 /// Factory for an official server-backtest history source.
 pub(crate) trait ServerHistorySourceFactory: Send + Sync {
+    /// Whether this build can open a real server-backtest history source.
+    /// Test factories deliberately inherit `true` so cache coordination remains
+    /// independently testable without the production live feature set.
+    fn is_available(&self) -> bool {
+        true
+    }
+
     fn open<'a>(
         &'a self,
         credentials: BacktestHistoryCredentials,
@@ -265,6 +272,10 @@ struct UnavailableServerHistorySourceFactory;
 
 #[cfg(not(all(feature = "live", feature = "services")))]
 impl ServerHistorySourceFactory for UnavailableServerHistorySourceFactory {
+    fn is_available(&self) -> bool {
+        false
+    }
+
     fn open<'a>(
         &'a self,
         _credentials: BacktestHistoryCredentials,
@@ -307,6 +318,9 @@ impl RemoteFillCoordinator {
             return Err(DataError::InvalidState(
                 "backtest history cache coverage is incomplete",
             ));
+        }
+        if !self.config.source_factory.is_available() {
+            return Err(DataError::RemoteBacktestHistoryFillUnavailable);
         }
 
         let mut subscriptions = Vec::new();

@@ -36,19 +36,12 @@ impl BacktestHistoryRows {
     /// The estimate intentionally uses capacity instead of length so collection
     /// limits reserve enough space for the vectors retained by callers.
     pub fn estimated_heap_bytes(&self) -> Result<usize> {
-        let rows_bytes = match self {
-            Self::Ticks(rows) => rows
-                .capacity()
-                .checked_mul(size_of::<Tick>())
-                .ok_or_else(collect_size_overflow)?,
-            Self::Klines { rows, .. } => rows
-                .capacity()
-                .checked_mul(size_of::<Kline>())
-                .ok_or_else(collect_size_overflow)?,
-        };
-        size_of::<Self>()
-            .checked_add(rows_bytes)
-            .ok_or_else(collect_size_overflow)
+        match self {
+            Self::Ticks(rows) => estimated_rows_heap_bytes(rows.capacity(), size_of::<Tick>()),
+            Self::Klines { rows, .. } => {
+                estimated_rows_heap_bytes(rows.capacity(), size_of::<Kline>())
+            }
+        }
     }
 
     pub(crate) fn empty_for_kind(
@@ -72,6 +65,7 @@ impl BacktestHistoryRows {
     pub(crate) fn append(&mut self, other: Self) -> Result<()> {
         match (self, other) {
             (Self::Ticks(current), Self::Ticks(mut incoming)) => {
+                reserve_for_append(current, incoming.len())?;
                 current.append(&mut incoming);
                 Ok(())
             }
@@ -85,6 +79,7 @@ impl BacktestHistoryRows {
                     mut rows,
                 },
             ) if *current_duration == incoming_duration => {
+                reserve_for_append(current, rows.len())?;
                 current.append(&mut rows);
                 Ok(())
             }
@@ -94,6 +89,73 @@ impl BacktestHistoryRows {
             )),
         }
     }
+
+    /// Estimates the retained allocation after appending compatible rows.
+    ///
+    /// The result deliberately excludes the incoming vector's allocation: its
+    /// elements are moved into `self` and the incoming buffer is dropped.
+    pub(crate) fn projected_heap_bytes_after_append(&self, incoming: &Self) -> Result<usize> {
+        match (self, incoming) {
+            (Self::Ticks(current), Self::Ticks(incoming)) => projected_rows_heap_bytes(
+                current.len(),
+                current.capacity(),
+                incoming.len(),
+                size_of::<Tick>(),
+            ),
+            (
+                Self::Klines {
+                    duration_ns: current_duration,
+                    rows: current,
+                },
+                Self::Klines {
+                    duration_ns: incoming_duration,
+                    rows: incoming,
+                },
+            ) if current_duration == incoming_duration => projected_rows_heap_bytes(
+                current.len(),
+                current.capacity(),
+                incoming.len(),
+                size_of::<Kline>(),
+            ),
+            _ => Err(DataError::Validation(
+                "backtest history chunks for one request must have the same row kind and duration"
+                    .to_string(),
+            )),
+        }
+    }
+}
+
+fn reserve_for_append<T>(rows: &mut Vec<T>, incoming_len: usize) -> Result<()> {
+    let required_len = rows
+        .len()
+        .checked_add(incoming_len)
+        .ok_or_else(collect_size_overflow)?;
+    if required_len > rows.capacity() {
+        rows.try_reserve_exact(required_len - rows.len())
+            .map_err(|_| collect_size_overflow())?;
+    }
+    Ok(())
+}
+
+fn projected_rows_heap_bytes(
+    current_len: usize,
+    current_capacity: usize,
+    incoming_len: usize,
+    row_size: usize,
+) -> Result<usize> {
+    let required_len = current_len
+        .checked_add(incoming_len)
+        .ok_or_else(collect_size_overflow)?;
+    estimated_rows_heap_bytes(current_capacity.max(required_len), row_size)
+}
+
+fn estimated_rows_heap_bytes(capacity: usize, row_size: usize) -> Result<usize> {
+    let rows_bytes = capacity
+        .checked_mul(row_size)
+        .ok_or_else(collect_size_overflow)?;
+    size_of::<BacktestHistoryRows>()
+        .checked_add(rows_bytes)
+        .ok_or_else(collect_size_overflow)
 }
 
 fn collect_size_overflow() -> DataError {
