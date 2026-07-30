@@ -340,8 +340,7 @@ pub(crate) fn default_blocking_workers() -> usize {
     std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1)
-        .min(8)
-        .max(1)
+        .clamp(1, 8)
 }
 
 #[allow(dead_code)]
