@@ -1470,6 +1470,7 @@ fn test_live_client_with_components(
         handle: handle.clone(),
         reader: handle.reader(),
         runtime: SessionRuntime::new(handle, SessionBootstrap::new()),
+        market_target: config.market_target,
         query_lock: Arc::new(TokioMutex::new(())),
         market_interests: Arc::new(TokioMutex::new(MarketInterestRegistry::default())),
         order_intents: Arc::new(Mutex::new(std::collections::HashMap::new())),

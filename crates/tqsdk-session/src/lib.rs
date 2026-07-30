@@ -24,6 +24,7 @@
 //! assert!(builder.query_enabled());
 //! ```
 
+mod backtest_history;
 mod builder;
 mod client;
 mod direct_query;
@@ -48,6 +49,11 @@ mod tq_auth;
 #[cfg(feature = "tq-auth")]
 mod tqkq;
 
+pub use backtest_history::{
+    SERVER_BACKTEST_CANONICAL_MINUTE_NS, ServerBacktestHistoryChart, ServerBacktestHistoryEvent,
+    ServerBacktestHistoryKind, ServerBacktestHistoryRequest, ServerBacktestHistoryStream,
+    ServerBacktestMarketKind,
+};
 pub use builder::SessionClientBuilder;
 pub use client::{
     MarketChartLease, MarketQuoteLease, MarketTradingStatusLease, SessionClient, SessionProgress,

@@ -1,6 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use tqsdk_core::{OutboundDispatch, RuntimeHandle};
+use tqsdk_core::{MarketSessionTarget, OutboundDispatch, RuntimeHandle};
 
 use crate::{Result, SessionClient};
 
@@ -19,6 +19,17 @@ impl ManualSession {
     pub fn from_runtime(handle: RuntimeHandle) -> Self {
         Self {
             client: SessionClient::new_manual_with_handle(handle),
+        }
+    }
+
+    /// Build a manual session with an explicit market target.
+    #[must_use]
+    pub fn from_runtime_with_market_target(
+        handle: RuntimeHandle,
+        market_target: MarketSessionTarget,
+    ) -> Self {
+        Self {
+            client: SessionClient::new_manual_with_handle_and_market_target(handle, market_target),
         }
     }
 

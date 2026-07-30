@@ -18,8 +18,8 @@ use tqsdk_core::internal::DefaultRouteConnector;
 use tqsdk_core::internal::{DynAuthProvider, SessionBootstrap};
 use tqsdk_core::internal::{RouteRequestExecutor, SessionRun, SessionRuntime};
 use tqsdk_core::{
-    AdapterRegistry, AuthContext, CommandId, OutboundDispatch, OutboundFrame, RuntimeHandle,
-    RuntimeReader, SessionConfig, SessionRouteConnector, SessionRouteEndpoint,
+    AdapterRegistry, AuthContext, CommandId, MarketSessionTarget, OutboundDispatch, OutboundFrame,
+    RuntimeHandle, RuntimeReader, SessionConfig, SessionRouteConnector, SessionRouteEndpoint,
     SessionTopologyResolver, TradeSessionTarget,
 };
 #[cfg(any(test, feature = "live"))]
@@ -280,6 +280,7 @@ pub struct SessionClient {
     handle: RuntimeHandle,
     reader: RuntimeReader,
     runtime: SessionRuntime,
+    market_target: MarketSessionTarget,
     query_lock: Arc<Mutex<()>>,
     market_interests: Arc<Mutex<market_interest::MarketInterestRegistry>>,
     order_intents: Arc<StdMutex<HashMap<(String, String), OrderIntentRecord>>>,
@@ -300,6 +301,7 @@ impl SessionClient {
         config: SessionConfig,
         trade_targets: Vec<TradeSessionTarget>,
     ) -> crate::error::Result<Self> {
+        let market_target = config.market_target;
         let reader = handle.reader();
         let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
         let provider = Arc::new(
@@ -331,6 +333,7 @@ impl SessionClient {
             handle,
             reader,
             runtime,
+            market_target,
             query_lock: Arc::new(Mutex::new(())),
             market_interests: Arc::new(Mutex::new(
                 market_interest::MarketInterestRegistry::default(),
@@ -369,7 +372,11 @@ impl SessionClient {
         ))
     }
 
-    fn new_without_io(handle: RuntimeHandle, context: SessionClientContext) -> Self {
+    fn new_without_io(
+        handle: RuntimeHandle,
+        context: SessionClientContext,
+        market_target: MarketSessionTarget,
+    ) -> Self {
         #[cfg(not(any(feature = "services", all(test, feature = "live"))))]
         let _ = context;
 
@@ -379,6 +386,7 @@ impl SessionClient {
             handle,
             reader,
             runtime,
+            market_target,
             query_lock: Arc::new(Mutex::new(())),
             market_interests: Arc::new(Mutex::new(
                 market_interest::MarketInterestRegistry::default(),
@@ -407,6 +415,12 @@ impl SessionClient {
     #[must_use]
     pub fn reader_clone(&self) -> RuntimeReader {
         self.reader.clone()
+    }
+
+    /// Returns the market target configured for this session.
+    #[must_use]
+    pub fn market_target(&self) -> MarketSessionTarget {
+        self.market_target
     }
 
     pub(crate) fn drain_manual_dispatches(&self) -> crate::error::Result<Vec<OutboundDispatch>> {
@@ -508,6 +522,16 @@ impl SessionClient {
     }
 
     pub(crate) fn new_manual_with_handle(handle: RuntimeHandle) -> Self {
+        Self::new_manual_with_handle_and_market_target(
+            handle,
+            MarketSessionTarget::futures_backtest(),
+        )
+    }
+
+    pub(crate) fn new_manual_with_handle_and_market_target(
+        handle: RuntimeHandle,
+        market_target: MarketSessionTarget,
+    ) -> Self {
         Self::new_without_io(
             handle,
             SessionClientContext::new(
@@ -515,6 +539,7 @@ impl SessionClient {
                 String::new(),
                 tqsdk_core::EndpointConfig::default(),
             ),
+            market_target,
         )
     }
 
