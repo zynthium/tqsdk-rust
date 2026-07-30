@@ -4,6 +4,7 @@ use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::backtest_history::BacktestHistoryRequestId;
 use crate::history_series_cache::HistorySeriesCacheMiss;
 
 /// Result alias for `tqsdk-data`.
@@ -13,6 +14,7 @@ pub type Result<T> = std::result::Result<T, DataError>;
 #[derive(Debug)]
 pub enum DataError {
     Session(tqsdk_session::SessionFacadeError),
+    FeatureDisabled(&'static str),
     PermissionDenied(String),
     CacheMiss(Box<HistorySeriesCacheMiss>),
     CacheBusy {
@@ -23,6 +25,15 @@ pub enum DataError {
     InvalidState(&'static str),
     InvalidResponse(String),
     Timeout(Duration),
+    CollectLimitExceeded {
+        limit_bytes: usize,
+        attempted_bytes: usize,
+    },
+    RequestFailed {
+        request_id: BacktestHistoryRequestId,
+        message: String,
+        emitted_rows: usize,
+    },
     #[cfg(feature = "services")]
     Http(reqwest::Error),
     Io(std::io::Error),
@@ -58,6 +69,12 @@ impl Display for DataError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Session(error) => write!(f, "{error}"),
+            Self::FeatureDisabled(feature) => {
+                write!(
+                    f,
+                    "this operation requires the tqsdk-data feature {feature:?}"
+                )
+            }
             Self::PermissionDenied(message) => write!(f, "{message}"),
             Self::CacheMiss(miss) => write!(
                 f,
@@ -84,6 +101,21 @@ impl Display for DataError {
             Self::Timeout(timeout) => {
                 write!(f, "data request timed out after {timeout:?}")
             }
+            Self::CollectLimitExceeded {
+                limit_bytes,
+                attempted_bytes,
+            } => write!(
+                f,
+                "backtest history collection would use {attempted_bytes} bytes, exceeding its {limit_bytes}-byte limit"
+            ),
+            Self::RequestFailed {
+                request_id,
+                message,
+                emitted_rows,
+            } => write!(
+                f,
+                "backtest history request {request_id} failed after emitting {emitted_rows} rows: {message}"
+            ),
             #[cfg(feature = "services")]
             Self::Http(error) => write!(f, "{error}"),
             Self::Io(error) => write!(f, "{error}"),
@@ -100,13 +132,16 @@ impl std::error::Error for DataError {
             Self::Http(error) => Some(error),
             Self::Io(error) => Some(error),
             Self::Json(error) => Some(error),
-            Self::PermissionDenied(_)
+            Self::FeatureDisabled(_)
+            | Self::PermissionDenied(_)
             | Self::CacheMiss(_)
             | Self::CacheBusy { .. }
             | Self::Validation(_)
             | Self::InvalidState(_)
             | Self::InvalidResponse(_)
-            | Self::Timeout(_) => None,
+            | Self::Timeout(_)
+            | Self::CollectLimitExceeded { .. }
+            | Self::RequestFailed { .. } => None,
         }
     }
 }

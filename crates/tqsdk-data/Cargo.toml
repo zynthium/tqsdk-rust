@@ -17,6 +17,7 @@ tqbn-zstd = ["dep:zstd"]
 
 [dependencies]
 chrono.workspace = true
+futures.workspace = true
 reqwest = { workspace = true, optional = true }
 serde_json.workspace = true
 fs2 = "0.4"

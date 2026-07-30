@@ -43,6 +43,7 @@
 //! # Ok::<(), tqsdk_data::DataError>(())
 //! ```
 
+mod backtest_history;
 mod backtest_tick_cache;
 mod client;
 mod download;
@@ -77,6 +78,16 @@ pub fn __fuzz_safe_cache_file_name(raw: &str) -> String {
     name
 }
 
+pub use backtest_history::{
+    BacktestHistoryAuthProvider, BacktestHistoryBatchReport, BacktestHistoryChunk,
+    BacktestHistoryClient, BacktestHistoryClientBuilder, BacktestHistoryCollected,
+    BacktestHistoryCollectedBatch, BacktestHistoryCoverageReport, BacktestHistoryCredentials,
+    BacktestHistoryEvent, BacktestHistoryFinality, BacktestHistoryKind, BacktestHistoryPhase,
+    BacktestHistoryPhysicalSegment, BacktestHistoryPolicy, BacktestHistoryRequest,
+    BacktestHistoryRequestFailure, BacktestHistoryRequestId, BacktestHistoryRequestReport,
+    BacktestHistoryRows, BacktestHistoryRun, BacktestHistoryTelemetryEvent,
+    BacktestHistoryTelemetryStream,
+};
 pub use backtest_tick_cache::{
     BacktestCachePolicy, BacktestTickCache, BacktestTickCacheDiagnostic,
     BacktestTickCacheDiagnosticReport, BacktestTickCacheFastInventory,
