@@ -121,14 +121,22 @@ struct TqbnReader {
     rows: std::vec::IntoIter<HistorySeriesRow>,
     partition: Option<TqbnStreamingPartition>,
     spare_records: Vec<u8>,
+    read_only: bool,
 }
 
 struct TqbnStreamingPartition {
     file: File,
+    lock_file: File,
     blocks: Vec<TqbnStreamingBlockPlan>,
     next_block_index: usize,
     active: Vec<TqbnStreamingBlockCursor>,
     spare_records: Vec<u8>,
+}
+
+impl Drop for TqbnStreamingPartition {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.lock_file);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -937,6 +945,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
             rows: Vec::new().into_iter(),
             partition: None,
             spare_records: Vec::new(),
+            read_only: self.read_only,
         }))
     }
 }
@@ -971,6 +980,7 @@ impl HistorySeriesReader for TqbnReader {
                 self.range_start_ns,
                 self.range_end_ns,
                 &mut self.spare_records,
+                self.read_only,
             )? {
                 PreparedTqbnPartition::Missing => {}
                 PreparedTqbnPartition::Streaming(partition) => {
@@ -1676,7 +1686,12 @@ fn prepare_tqbn_partition(
     range_start_ns: i64,
     range_end_ns: i64,
     spare_records: &mut Vec<u8>,
+    read_only: bool,
 ) -> Result<PreparedTqbnPartition> {
+    if !path.exists() {
+        return Ok(PreparedTqbnPartition::Missing);
+    }
+    let lock_file = acquire_tqbn_shared_lock(path, read_only)?;
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -1697,6 +1712,7 @@ fn prepare_tqbn_partition(
     )? {
         return Ok(PreparedTqbnPartition::Streaming(TqbnStreamingPartition {
             file,
+            lock_file,
             blocks,
             next_block_index: 0,
             active: Vec::new(),
@@ -1704,7 +1720,7 @@ fn prepare_tqbn_partition(
         }));
     }
     Ok(PreparedTqbnPartition::Materialized(
-        parse_tqbn_rows_for_range(path, symbol, kind, range_start_ns, range_end_ns)?,
+        parse_tqbn_rows_for_range(file, symbol, kind, range_start_ns, range_end_ns)?,
     ))
 }
 
@@ -1775,17 +1791,13 @@ fn scan_tqbn_streaming_block(
 }
 
 fn parse_tqbn_rows_for_range(
-    path: &Path,
+    mut file: File,
     symbol: &str,
     kind: HistorySeriesKind,
     range_start_ns: i64,
     range_end_ns: i64,
 ) -> Result<Vec<HistorySeriesRow>> {
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
+    file.seek(SeekFrom::Start(0))?;
     let (_, offset) = read_and_validate_tqbn_prefix(&mut file, symbol, kind)?;
     file.seek(SeekFrom::Start(offset as u64))?;
     let mut state = TqbnSeriesState::default();
@@ -3305,13 +3317,57 @@ fn with_exclusive_tqbn_lock<T>(path: &Path, f: impl FnOnce() -> Result<T>) -> Re
         .truncate(false)
         .write(true)
         .open(lock_path)?;
-    lock_file.lock_exclusive()?;
+    match FileExt::try_lock_exclusive(&lock_file) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::WouldBlock => {
+            return Err(DataError::CacheBusy {
+                cache_dir: lock_dir.to_path_buf(),
+                operation: "history TQBN partition write",
+            });
+        }
+        Err(error) => return Err(error.into()),
+    }
     let result = f();
     let unlock_result = fs2::FileExt::unlock(&lock_file);
     match (result, unlock_result) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(DataError::from(error)),
+    }
+}
+
+fn acquire_tqbn_shared_lock(path: &Path, read_only: bool) -> Result<File> {
+    let lock_dir = path.parent().ok_or_else(|| {
+        DataError::InvalidResponse("history TQBN lock path is invalid".to_string())
+    })?;
+    let lock_path = lock_dir.join(LOCK_FILE_NAME);
+    let lock_file = if read_only {
+        OpenOptions::new()
+            .read(true)
+            .open(lock_path)
+            .map_err(|error| {
+                if error.kind() == ErrorKind::NotFound {
+                    DataError::InvalidState("read-only history TQBN partition lock is missing")
+                } else {
+                    DataError::from(error)
+                }
+            })?
+    } else {
+        fs::create_dir_all(lock_dir)?;
+        OpenOptions::new()
+            .create(true)
+            .read(true)
+            .truncate(false)
+            .write(true)
+            .open(lock_path)?
+    };
+    match FileExt::try_lock_shared(&lock_file) {
+        Ok(()) => Ok(lock_file),
+        Err(error) if error.kind() == ErrorKind::WouldBlock => Err(DataError::CacheBusy {
+            cache_dir: lock_dir.to_path_buf(),
+            operation: "history TQBN partition read",
+        }),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -4296,6 +4352,7 @@ mod tests {
             rows: Vec::new().into_iter(),
             partition: None,
             spare_records: Vec::new(),
+            read_only: false,
         };
 
         let first = reader.next_row().unwrap().unwrap();
@@ -4346,6 +4403,7 @@ mod tests {
             rows: Vec::new().into_iter(),
             partition: None,
             spare_records: Vec::new(),
+            read_only: false,
         };
 
         let first = reader.next_row().unwrap().unwrap();
@@ -4411,6 +4469,7 @@ mod tests {
             rows: Vec::new().into_iter(),
             partition: None,
             spare_records: Vec::new(),
+            read_only: false,
         };
 
         assert_eq!(
@@ -4462,6 +4521,7 @@ mod tests {
             rows: Vec::new().into_iter(),
             partition: None,
             spare_records: Vec::new(),
+            read_only: false,
         };
 
         let first = reader.next_row().unwrap().unwrap();

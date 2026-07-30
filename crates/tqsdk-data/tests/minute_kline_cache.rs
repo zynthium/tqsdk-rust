@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{TimeZone, Utc};
 use tqsdk_core::Kline;
-use tqsdk_data::{MinuteKlineCache, MinuteKlineCacheSnapshot};
+use tqsdk_data::{DataError, MinuteKlineCache, MinuteKlineCacheSnapshot};
 
 const MINUTE_NS: i64 = 60_000_000_000;
 
@@ -36,6 +36,56 @@ fn final_60s_rows_are_partitioned_by_trading_month_and_streamed() {
     assert_eq!(reader.next_kline().unwrap().unwrap().close, 10.0);
     assert_eq!(reader.next_kline().unwrap().unwrap().close, 11.0);
     assert!(reader.next_kline().unwrap().is_none());
+}
+
+#[test]
+fn reader_holds_month_shared_lock_until_it_advances_to_the_next_month() {
+    let root = temp_dir("reader-month-lock");
+    let cache = MinuteKlineCache::open(&root).unwrap();
+    let snapshot = MinuteKlineCacheSnapshot::new(1, "calendar-v1", "session-v1").unwrap();
+    let january = utc_ns(2026, 1, 30, 9, 59);
+    let february = utc_ns(2026, 1, 30, 10, 0);
+    let end = february + MINUTE_NS;
+    cache
+        .store_final_range(
+            "SHFE.rb2601",
+            january,
+            end,
+            &snapshot,
+            &[kline(1, january, 10.0), kline(2, february, 11.0)],
+        )
+        .unwrap();
+
+    let mut reader = cache
+        .open_reader("SHFE.rb2601", january, end, &snapshot)
+        .unwrap();
+    assert_eq!(reader.next_kline().unwrap().unwrap().id, 1);
+
+    let write_error = cache
+        .store_final_range(
+            "SHFE.rb2601",
+            january,
+            february,
+            &snapshot,
+            &[kline(1, january, 10.0)],
+        )
+        .unwrap_err();
+    assert!(matches!(write_error, DataError::CacheBusy { .. }));
+    let purge_error = cache
+        .purge_range("SHFE.rb2601", january, february)
+        .unwrap_err();
+    assert!(matches!(purge_error, DataError::CacheBusy { .. }));
+
+    assert_eq!(reader.next_kline().unwrap().unwrap().id, 2);
+    cache
+        .store_final_range(
+            "SHFE.rb2601",
+            january,
+            february,
+            &snapshot,
+            &[kline(1, january, 10.0)],
+        )
+        .expect("the January lock must release before the February month is read");
 }
 
 #[test]
@@ -91,12 +141,16 @@ fn snapshot_mismatch_and_corrupt_month_file_fail_closed() {
             .is_err()
     );
 
-    std::fs::write(cache.month_file_path("SHFE.rb2601", "202601"), b"broken").unwrap();
+    let path = cache.month_file_path("SHFE.rb2601", "202601");
+    std::fs::write(&path, b"broken").unwrap();
+    let bytes_before_read = std::fs::read(&path).unwrap();
     assert!(
         cache
             .coverage("SHFE.rb2601", start, end, &snapshot)
             .is_err()
     );
+    assert!(path.exists());
+    assert_eq!(std::fs::read(path).unwrap(), bytes_before_read);
 }
 
 #[test]

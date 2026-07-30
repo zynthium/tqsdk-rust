@@ -10,6 +10,7 @@ use tqsdk_core::Tick;
 use crate::history_series_cache::{
     HistorySeriesCacheFileStatus, HistorySeriesCoverageCommit, HistorySeriesKind,
     HistorySeriesProvisionalCoverage, HistorySeriesWriteRows, HistorySeriesWriteSegment,
+    TickDataSeriesReader,
 };
 use crate::{DataError, HistorySeriesCache, Result, TickDataSeries, TickDataSeriesRequest};
 
@@ -769,6 +770,43 @@ impl BacktestTickCache {
         )?;
         self.history.read_tick_data_series(request)
     }
+
+    /// Open the cache-backed reader used by the backtest-history query path.
+    ///
+    /// The public [`Self::load_series`] API intentionally remains final-only.
+    /// An explicit provisional query can use an open-day checkpoint, but only
+    /// after its durable high-water mark covers the complete effective range.
+    #[allow(dead_code)]
+    pub(crate) fn open_history_query_reader(
+        &self,
+        request: TickDataSeriesRequest,
+        provisional_as_of_ns: Option<i64>,
+    ) -> Result<TickDataSeriesReader> {
+        let symbol = request.symbol();
+        let start_datetime_ns = request.start_datetime_ns();
+        let end_datetime_ns = request.end_datetime_ns();
+
+        if provisional_as_of_ns.is_some() {
+            let checkpoint = self
+                .provisional_coverage(symbol, start_datetime_ns, end_datetime_ns)?
+                .ok_or(DataError::InvalidState(
+                    "backtest provisional tick cache coverage is unavailable",
+                ))?;
+            if checkpoint.complete_through_ns < end_datetime_ns {
+                return Err(DataError::InvalidState(
+                    "backtest provisional tick cache coverage is incomplete",
+                ));
+            }
+        } else {
+            self.require_coverage(symbol, start_datetime_ns, end_datetime_ns)?;
+        }
+
+        self.history.open_tick_data_series_reader_unchecked(
+            symbol,
+            start_datetime_ns,
+            end_datetime_ns,
+        )
+    }
 }
 
 /// Return the canonical TQBN trading day for a timestamp in nanoseconds.
@@ -1098,9 +1136,15 @@ fn normalize_tick_rows(rows: &mut Vec<Tick>) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use chrono::NaiveDate;
     use tqsdk_core::Tick;
 
-    use super::normalize_tick_rows;
+    use super::{
+        BacktestTickCache, HistorySeriesKind, HistorySeriesWriteRows, HistorySeriesWriteSegment,
+        TickDataSeriesRequest, backtest_tick_trading_day_range, normalize_tick_rows,
+    };
 
     #[test]
     fn tick_normalization_keeps_monotonic_unique_rows_in_place() {
@@ -1150,5 +1194,55 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].id, 1);
         assert_eq!(rows[1].id, 2);
+    }
+
+    #[test]
+    fn provisional_history_query_reader_requires_checkpoint_without_relaxing_load_series() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock must be after the Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tqsdk-provisional-reader-{nanos}"));
+        let cache = BacktestTickCache::open(&root).expect("cache should open");
+        let day = backtest_tick_trading_day_range(
+            NaiveDate::from_ymd_opt(2026, 1, 5).expect("test date must be valid"),
+        )
+        .expect("trading-day range should resolve");
+        let start_ns = day.start_ns + 1_000;
+        let end_ns = start_ns + 1_000;
+        let row = Tick {
+            id: 1,
+            datetime: start_ns,
+            ..Tick::default()
+        };
+
+        cache
+            .history
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: "SHFE.rb2601",
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: None,
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&row)),
+            })
+            .expect("raw row should be durable without final coverage");
+        cache
+            .mark_provisional(
+                "SHFE.rb2601",
+                start_ns,
+                end_ns,
+                end_ns,
+                1,
+                Some((row.id, row.id)),
+            )
+            .expect("provisional checkpoint should persist");
+
+        let request = TickDataSeriesRequest::new("SHFE.rb2601", start_ns, end_ns);
+        assert!(cache.load_series(request.clone()).is_err());
+
+        let mut reader = cache
+            .open_history_query_reader(request, Some(end_ns))
+            .expect("provisional reader should accept complete checkpoint");
+        assert_eq!(reader.next_tick().unwrap().unwrap().id, 1);
+        assert!(reader.next_tick().unwrap().is_none());
     }
 }

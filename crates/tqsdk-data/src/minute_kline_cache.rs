@@ -497,6 +497,8 @@ impl MinuteKlineCache {
             })
             .collect();
         Ok(MinuteKlineReader {
+            cache_dir: self.root_dir.clone(),
+            read_only: self.read_only,
             symbol: symbol.to_string(),
             range_start_ns,
             range_end_ns,
@@ -817,13 +819,15 @@ impl MinuteKlineCache {
 
 /// Streaming 60-second rows from final monthly-minute cache files.
 pub struct MinuteKlineReader {
+    cache_dir: PathBuf,
+    read_only: bool,
     symbol: String,
     range_start_ns: i64,
     range_end_ns: i64,
     snapshot: MinuteKlineCacheSnapshot,
     paths: Vec<(String, PathBuf)>,
     next_path: usize,
-    current: Option<MonthRowReader>,
+    current: Option<LockedMonthRowReader>,
 }
 
 impl MinuteKlineReader {
@@ -845,7 +849,7 @@ impl MinuteKlineReader {
     pub fn next_kline(&mut self) -> Result<Option<Kline>> {
         loop {
             if let Some(current) = self.current.as_mut() {
-                match current.next_row()? {
+                match current.reader.next_row()? {
                     Some(row)
                         if row.datetime >= self.range_start_ns
                             && row.datetime < self.range_end_ns =>
@@ -864,13 +868,52 @@ impl MinuteKlineReader {
                 return Ok(None);
             };
             self.next_path = self.next_path.saturating_add(1);
-            self.current = Some(MonthRowReader::open(
+            let lock_file = MonthFileLock::acquire_shared(
                 path.as_path(),
-                self.symbol.as_str(),
-                trading_month.as_str(),
-                &self.snapshot,
-            )?);
+                self.cache_dir.as_path(),
+                self.read_only,
+            )?;
+            let data_file = File::open(path.as_path())?;
+            self.current = Some(LockedMonthRowReader {
+                lock_file,
+                reader: MonthRowReader::open(
+                    data_file,
+                    path.as_path(),
+                    self.symbol.as_str(),
+                    trading_month.as_str(),
+                    &self.snapshot,
+                )?,
+            });
         }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn next_kline_chunk(&mut self, target_bytes: usize) -> Result<Vec<Kline>> {
+        if target_bytes == 0 {
+            return Err(DataError::Validation(
+                "minute reader chunk target_bytes must be greater than zero".to_string(),
+            ));
+        }
+        let mut rows = Vec::new();
+        let row_bytes = std::mem::size_of::<Kline>();
+        while rows.is_empty() || rows.len().saturating_mul(row_bytes) < target_bytes {
+            let Some(row) = self.next_kline()? else {
+                break;
+            };
+            rows.push(row);
+        }
+        Ok(rows)
+    }
+}
+
+struct LockedMonthRowReader {
+    lock_file: File,
+    reader: MonthRowReader,
+}
+
+impl Drop for LockedMonthRowReader {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.lock_file);
     }
 }
 
@@ -927,12 +970,12 @@ struct MonthRowReader {
 
 impl MonthRowReader {
     fn open(
+        file: File,
         path: &Path,
         symbol: &str,
         trading_month: &str,
         snapshot: &MinuteKlineCacheSnapshot,
     ) -> Result<Self> {
-        let file = File::open(path)?;
         let file_len = file.metadata()?.len();
         let mut reader = BufReader::new(file);
         let (header, metadata_bytes) = read_file_prefix(&mut reader, path, file_len)?;
@@ -1001,6 +1044,42 @@ impl MonthFileLock {
                 Err(DataError::CacheBusy {
                     cache_dir: root_dir.to_path_buf(),
                     operation: "minute kline cache monthly write",
+                })
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn acquire_shared(path: &Path, root_dir: &Path, read_only: bool) -> Result<File> {
+        let lock_path = path.with_extension(format!("{FILE_EXTENSION}.lock"));
+        let file = if read_only {
+            OpenOptions::new()
+                .read(true)
+                .open(lock_path)
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        DataError::InvalidState("read-only minute kline monthly lock is missing")
+                    } else {
+                        DataError::from(error)
+                    }
+                })?
+        } else {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(lock_path)?
+        };
+        match FileExt::try_lock_shared(&file) {
+            Ok(()) => Ok(file),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(DataError::CacheBusy {
+                    cache_dir: root_dir.to_path_buf(),
+                    operation: "minute kline cache monthly read",
                 })
             }
             Err(error) => Err(error.into()),
@@ -1941,6 +2020,73 @@ mod tests {
 
         assert!(reject_open_or_future_final_range(range.end_ns, now).is_err());
         assert!(reject_open_or_future_final_range(range.start_ns, now).is_ok());
+    }
+
+    #[test]
+    fn minute_reader_chunk_requires_a_nonzero_target_and_shares_the_row_cursor() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock must be after the Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tqsdk-minute-chunk-reader-{nanos}"));
+        let cache = MinuteKlineCache::open(&root).expect("cache should open");
+        let snapshot = MinuteKlineCacheSnapshot::new(1, "calendar-v1", "session-v1")
+            .expect("snapshot should be valid");
+        let start = utc_ns(2026, 1, 5, 2, 0);
+        let minute_ns = 60_000_000_000;
+        let end = start + 2 * minute_ns;
+        cache
+            .store_final_range(
+                "SHFE.rb2601",
+                start,
+                end,
+                &snapshot,
+                &[
+                    Kline {
+                        id: 1,
+                        datetime: start,
+                        open: 10.0,
+                        high: 10.0,
+                        low: 10.0,
+                        close: 10.0,
+                        volume: 1,
+                        open_oi: 1,
+                        close_oi: 1,
+                        ..Kline::default()
+                    },
+                    Kline {
+                        id: 2,
+                        datetime: start + minute_ns,
+                        open: 11.0,
+                        high: 11.0,
+                        low: 11.0,
+                        close: 11.0,
+                        volume: 2,
+                        open_oi: 2,
+                        close_oi: 2,
+                        ..Kline::default()
+                    },
+                ],
+            )
+            .expect("minute rows should write");
+
+        let mut reader = cache
+            .open_reader("SHFE.rb2601", start, end, &snapshot)
+            .expect("reader should open");
+        assert!(matches!(
+            reader.next_kline_chunk(0),
+            Err(DataError::Validation(_))
+        ));
+        assert_eq!(
+            reader
+                .next_kline_chunk(std::mem::size_of::<Kline>())
+                .expect("chunk should read")
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(reader.next_kline().unwrap().unwrap().id, 2);
     }
 
     fn utc_ns(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {

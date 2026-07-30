@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use chrono::{TimeZone, Utc};
 use serde_json::json;
 use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, Kline, OutboundFrame, OutboundRequest,
@@ -119,6 +120,85 @@ fn tick_data_series_reader_reads_cached_ticks_in_order() {
     assert_eq!(reader.next_tick().unwrap().unwrap().id, 1);
     assert_eq!(reader.next_tick().unwrap().unwrap().id, 2);
     assert!(reader.next_tick().unwrap().is_none());
+}
+
+#[test]
+fn reader_holds_partition_shared_lock_until_it_advances_to_the_next_day() {
+    let dir = temp_dir("reader-partition-lock");
+    let cache = HistorySeriesCache::open(&dir).unwrap();
+    let first_day = utc_ns(2026, 1, 5, 2, 0);
+    let second_day = utc_ns(2026, 1, 6, 2, 0);
+    let end = second_day + 1_000;
+    cache
+        .write_tick_range(
+            "SHFE.rb2601",
+            first_day,
+            end,
+            &[
+                tick(1, first_day, 101.0),
+                tick(2, first_day + 1, 102.0),
+                tick(3, second_day, 103.0),
+            ],
+        )
+        .unwrap();
+
+    let mut reader = cache
+        .open_tick_data_series_reader(TickDataSeriesRequest::new("SHFE.rb2601", first_day, end))
+        .unwrap();
+    assert_eq!(reader.next_tick().unwrap().unwrap().id, 1);
+
+    let write_error = cache
+        .write_tick_range(
+            "SHFE.rb2601",
+            first_day,
+            first_day + 2,
+            &[tick(4, first_day + 1, 104.0)],
+        )
+        .unwrap_err();
+    assert!(matches!(write_error, DataError::CacheBusy { .. }));
+    let purge_error = cache.purge_tick_series("SHFE.rb2601").unwrap_err();
+    assert!(matches!(purge_error, DataError::CacheBusy { .. }));
+
+    assert_eq!(reader.next_tick().unwrap().unwrap().id, 2);
+    assert_eq!(reader.next_tick().unwrap().unwrap().id, 3);
+
+    cache
+        .write_tick_range(
+            "SHFE.rb2601",
+            first_day,
+            first_day + 2,
+            &[tick(4, first_day + 1, 104.0)],
+        )
+        .expect("the first partition lock must release before the second is read");
+}
+
+#[test]
+fn corrupt_tick_partition_fails_closed_without_mutating_its_bytes() {
+    let dir = temp_dir("reader-corrupt-partition");
+    let cache = HistorySeriesCache::open(&dir).unwrap();
+    let start = utc_ns(2026, 1, 5, 2, 0);
+    let end = start + 1_000;
+    cache
+        .write_tick_range("SHFE.rb2601", start, end, &[tick(1, start, 101.0)])
+        .unwrap();
+    let path = cache
+        .scan()
+        .unwrap()
+        .files
+        .into_iter()
+        .find(|file| file.symbol.as_deref() == Some("SHFE.rb2601") && file.duration_ns == Some(0))
+        .expect("written tick partition must be discoverable")
+        .path;
+    std::fs::write(&path, b"corrupt tick partition").unwrap();
+    let bytes_before_read = std::fs::read(&path).unwrap();
+
+    assert!(
+        cache
+            .open_tick_data_series_reader(TickDataSeriesRequest::new("SHFE.rb2601", start, end))
+            .is_err()
+    );
+    assert!(path.exists());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes_before_read);
 }
 
 #[test]
@@ -1231,6 +1311,14 @@ fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("tqsdk-data-history-series-cache-{name}-{nanos}"));
     std::fs::create_dir_all(&dir).unwrap();
     canonical_or_original(&dir)
+}
+
+fn utc_ns(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
+    Utc.with_ymd_and_hms(year, month, day, hour, minute, 0)
+        .single()
+        .unwrap()
+        .timestamp_nanos_opt()
+        .unwrap()
 }
 
 fn canonical_or_original(path: &Path) -> PathBuf {

@@ -252,6 +252,24 @@ impl TickDataSeriesReader {
             None => Ok(None),
         }
     }
+
+    #[allow(dead_code)]
+    pub(crate) fn next_tick_chunk(&mut self, target_bytes: usize) -> Result<Vec<Tick>> {
+        if target_bytes == 0 {
+            return Err(DataError::Validation(
+                "tick reader chunk target_bytes must be greater than zero".to_string(),
+            ));
+        }
+        let mut rows = Vec::new();
+        let row_bytes = std::mem::size_of::<Tick>();
+        while rows.is_empty() || rows.len().saturating_mul(row_bytes) < target_bytes {
+            let Some(row) = self.next_tick()? else {
+                break;
+            };
+            rows.push(row);
+        }
+        Ok(rows)
+    }
 }
 
 impl HistorySeriesCache {
@@ -472,14 +490,27 @@ impl HistorySeriesCache {
         request: TickDataSeriesRequest,
     ) -> Result<TickDataSeriesReader> {
         let (start_datetime_ns, end_datetime_ns) = self.validate_tick_cache_hit(&request)?;
+        self.open_tick_data_series_reader_unchecked(
+            request.symbol(),
+            start_datetime_ns,
+            end_datetime_ns,
+        )
+    }
+
+    pub(crate) fn open_tick_data_series_reader_unchecked(
+        &self,
+        symbol: &str,
+        start_datetime_ns: i64,
+        end_datetime_ns: i64,
+    ) -> Result<TickDataSeriesReader> {
         let reader = self.open_reader(HistorySeriesReadRequest {
-            symbol: request.symbol().to_string(),
+            symbol: symbol.to_string(),
             kind: HistorySeriesKind::Tick,
             range_start_ns: start_datetime_ns,
             range_end_ns: end_datetime_ns,
         })?;
         Ok(TickDataSeriesReader {
-            symbol: request.symbol().to_string(),
+            symbol: symbol.to_string(),
             start_datetime_ns,
             end_datetime_ns,
             reader,
@@ -636,4 +667,60 @@ fn merge_datetime_ranges(mut ranges: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
         merged.push(range);
     }
     merged
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use tqsdk_core::Tick;
+
+    use super::{DataError, HistorySeriesCache, TickDataSeriesRequest};
+
+    #[test]
+    fn tick_reader_chunk_requires_a_nonzero_target_and_shares_the_row_cursor() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock must be after the Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tqsdk-tick-chunk-reader-{nanos}"));
+        let cache = HistorySeriesCache::open(&root).expect("cache should open");
+        cache
+            .write_tick_range(
+                "SHFE.rb2601",
+                1_000,
+                3_000,
+                &[
+                    Tick {
+                        id: 1,
+                        datetime: 1_000,
+                        ..Tick::default()
+                    },
+                    Tick {
+                        id: 2,
+                        datetime: 2_000,
+                        ..Tick::default()
+                    },
+                ],
+            )
+            .expect("tick rows should write");
+
+        let mut reader = cache
+            .open_tick_data_series_reader(TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 3_000))
+            .expect("reader should open");
+        assert!(matches!(
+            reader.next_tick_chunk(0),
+            Err(DataError::Validation(_))
+        ));
+        assert_eq!(
+            reader
+                .next_tick_chunk(std::mem::size_of::<Tick>())
+                .expect("chunk should read")
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(reader.next_tick().unwrap().unwrap().id, 2);
+    }
 }
