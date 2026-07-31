@@ -65,7 +65,7 @@ symbol 的全部 tick 日分区 append-log；默认远端回测补缓存成功�
 | --- | --- | --- |
 | tick、quote、`<60s` K | tick cache | 按 tick 本地合成 |
 | `60s` K | server-side backtest Kline stream | v4 monthly minute cache |
-| `N × 60s` K (`N > 1`) | 已关闭的 canonical 60s K | `tqsdk-task` 本地聚合 |
+| `N × 60s` K (`N > 1`) | 已关闭的 canonical 60s K | `tqsdk-data` 按固定 CST `18:00` trading-day grid 本地聚合；盘中 break 不重置 bucket |
 
 `61s`、`90s` 等不是整数分钟的周期会在 facade 规划阶段拒绝。K-only `>=60s` 不会隐式请求
 tick history；若仅需要 quote fallback，则隐式使用 canonical 60s K，也不会回退到 tick。

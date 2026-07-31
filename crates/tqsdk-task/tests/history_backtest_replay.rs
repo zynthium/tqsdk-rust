@@ -156,6 +156,58 @@ async fn history_backtest_replay_synthesizes_main_contract_kline_from_physical_t
 }
 
 #[tokio::test]
+async fn projected_synthetic_klines_prime_volume_without_replaying_pre_request_ticks() {
+    let dir = temp_dir("projected-synthetic-priming");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let trading_day = chrono::NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+    let day_range = tqsdk_data::backtest_tick_trading_day_range(trading_day).unwrap();
+    let request_start_ns = day_range.start_ns + SUB_MINUTE_NS;
+    let request_end_ns = request_start_ns + 2_000_000_000;
+    cache
+        .store_ticks(
+            "SHFE.rb2601",
+            day_range.start_ns,
+            request_end_ns,
+            [
+                tick(1, day_range.start_ns + 1_000_000_000, 100.0, 5),
+                tick(2, request_start_ns + 1_000_000_000, 101.0, 9),
+            ],
+        )
+        .unwrap();
+
+    let mut stream =
+        HistoryBacktestReplayStream::new_projected(HistoryBacktestProjectedReplayRequest {
+            cache: HistorySeriesCache::open(&dir).unwrap(),
+            start_ns: request_start_ns,
+            end_ns: request_end_ns,
+            tick_sources: Vec::new(),
+            native_klines: Vec::new(),
+            synthetic_kline_sources: vec![HistoryBacktestSyntheticKlineSource {
+                tick_source: HistoryBacktestTickSource {
+                    replay_symbol: "SHFE.rb2601".to_string(),
+                    cache_symbol: "SHFE.rb2601".to_string(),
+                    start_ns: day_range.start_ns,
+                    end_ns: request_end_ns,
+                },
+                duration_ns: SUB_MINUTE_NS,
+            }],
+            minute_kline_sources: Vec::new(),
+        })
+        .unwrap();
+
+    let event = stream.next_event().await.unwrap().unwrap();
+    assert_eq!(event.event_time_ns(), request_start_ns + 1_000_000_000);
+    assert!(matches!(
+        event.payload(),
+        ReplayMarketPayload::Kline {
+            duration_ns: SUB_MINUTE_NS,
+            row,
+        } if row.open == 100.0 && row.close == 101.0 && row.volume == 4
+    ));
+    assert!(stream.next_event().await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn history_backtest_replay_emits_sub_minute_synthetic_klines_from_ticks() {
     let dir = temp_dir("synthetic-fifteen");
     let cache = BacktestTickCache::open(&dir).unwrap();

@@ -18,6 +18,10 @@ pub struct MinuteKlineAggregationUpdate {
 }
 
 /// Stateful `N × 60s` aggregator over final canonical minute rows.
+///
+/// Higher-period bars stay on the fixed 18:00 CST trading-day grid. Explicit
+/// session windows gate which source minutes exist, but an intra-day break does
+/// not restart a bar that spans that gap; this matches official server charts.
 #[derive(Debug, Clone)]
 pub struct MinuteKlineAggregator {
     duration_ns: i64,
@@ -28,7 +32,6 @@ pub struct MinuteKlineAggregator {
 #[derive(Debug, Clone)]
 struct MinuteAggregateBar {
     trading_day_start_ns: i64,
-    window_start_ns: i64,
     effective_bar_end_ns: i64,
     row: Kline,
 }
@@ -93,7 +96,6 @@ impl MinuteKlineAggregator {
             self.bar_bounds(closed_minute.datetime, position)?;
         let starts_new_bar = self.current.as_ref().is_none_or(|bar| {
             bar.trading_day_start_ns != position.trading_day_start_ns
-                || bar.window_start_ns != position.window_start_ns
                 || bar.row.datetime != bar_start_ns
         });
         let mut closed = starts_new_bar
@@ -114,7 +116,6 @@ impl MinuteKlineAggregator {
             };
             self.current = Some(MinuteAggregateBar {
                 trading_day_start_ns: position.trading_day_start_ns,
-                window_start_ns: position.window_start_ns,
                 effective_bar_end_ns,
                 row: row.clone(),
             });
@@ -149,7 +150,7 @@ impl MinuteKlineAggregator {
         }))
     }
 
-    /// Finalizes the active bar when its session-aligned end is inside the
+    /// Finalizes the active bar when its trading-day-grid end is inside the
     /// scanned source range.
     pub fn finish_closed_through(&mut self, source_end_ns: i64) -> Option<Kline> {
         self.current
@@ -160,19 +161,19 @@ impl MinuteKlineAggregator {
     }
 
     fn bar_bounds(&self, timestamp_ns: i64, position: KlineSessionPosition) -> Result<(i64, i64)> {
-        let window_offset_ns = timestamp_ns
-            .checked_sub(position.window_start_ns)
+        let trading_day_offset_ns = timestamp_ns
+            .checked_sub(position.trading_day_start_ns)
             .ok_or_else(|| {
-                DataError::Validation("minute predates its session window".to_string())
+                DataError::Validation("minute predates its trading-day grid".to_string())
             })?;
-        let bucket_offset_ns = window_offset_ns
+        let bucket_offset_ns = trading_day_offset_ns
             .div_euclid(self.duration_ns)
             .checked_mul(self.duration_ns)
             .ok_or_else(|| {
                 DataError::Validation("minute kline bucket offset overflow".to_string())
             })?;
         let bar_start_ns = position
-            .window_start_ns
+            .trading_day_start_ns
             .checked_add(bucket_offset_ns)
             .ok_or_else(|| {
                 DataError::Validation("aggregated kline bar timestamp overflow".to_string())
@@ -180,6 +181,9 @@ impl MinuteKlineAggregator {
         let nominal_end_ns = bar_start_ns.checked_add(self.duration_ns).ok_or_else(|| {
             DataError::Validation("aggregated kline bar end overflow".to_string())
         })?;
-        Ok((bar_start_ns, nominal_end_ns.min(position.window_end_ns)))
+        Ok((
+            bar_start_ns,
+            nominal_end_ns.min(position.trading_day_end_ns),
+        ))
     }
 }

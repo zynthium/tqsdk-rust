@@ -127,6 +127,11 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 行情 loop，并在 facade 层自动发送 replay heartbeat。底层
 `ServerReplaySession::set_speed(...)` / `heartbeat()` / `terminate()` 仍提供显式控制。
 
+`ServerBacktestHistoryStream` 是同一 session 层提供给 data 的 server-backtest history chart
+substrate：它只负责连接、chart 分页和 terminal signal，可读取 Tick 或 canonical 60s K。它不拥有
+cache directory、coverage、metadata sidecar、缺口规划、K 线聚合或 retention；这些都归
+`tqsdk-data::BacktestHistoryClient`。高周期和 sub-minute K 的本地派生也不应回流到 session。
+
 交易日历的 holiday JSON 是官方公开静态文件，请求时不会携带天勤鉴权 token。
 同一个 `SessionClient` 会缓存已解析的 holiday payload，重复
 `get_trading_calendar(...)` 不会反复下载同一文件。返回的 `TradingCalendarDay.date`

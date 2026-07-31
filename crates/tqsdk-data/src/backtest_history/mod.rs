@@ -90,6 +90,32 @@ impl BacktestHistoryClient {
         Ok(self.start_run(validated))
     }
 
+    /// Materializes durable cache coverage for facade-owned replay inputs.
+    ///
+    /// This is intentionally hidden from the ordinary query API.  It reuses
+    /// the same planner, remote fill coordinator, metadata sidecars, and
+    /// terminal coverage checks as [`Self::query_batch`], while discarding row
+    /// chunks after they have served their cache-fill purpose.  The default
+    /// facade uses it to avoid maintaining a second server-backtest cache-fill
+    /// implementation.
+    #[doc(hidden)]
+    pub async fn materialize_cache(
+        &self,
+        requests: impl IntoIterator<Item = BacktestHistoryRequest>,
+    ) -> Result<BacktestHistoryBatchReport> {
+        let mut run = self.query_batch(requests).await?;
+        while run.next().await.is_some() {}
+        let report = run.finish().await;
+        if let Some(failure) = report.failed.first() {
+            return Err(DataError::RequestFailed {
+                request_id: failure.request_id,
+                message: failure.error.clone(),
+                emitted_rows: failure.emitted_rows,
+            });
+        }
+        Ok(report)
+    }
+
     fn start_run(&self, requests: Vec<ValidatedBacktestHistoryRequest>) -> BacktestHistoryRun {
         let request_kinds = requests
             .iter()

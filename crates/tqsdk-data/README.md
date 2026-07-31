@@ -41,6 +41,39 @@
 - `DataClient::from_session(...).query_option_greeks(...)`
 - `DataClient::from_session(...).export_kline_data_csv(...)`
 - `DataClient::from_session(...).export_tick_data_csv(...)`
+- `BacktestHistoryClient::builder(...).query(...)` / `query_batch(...)`
+- `BacktestHistoryRun::next()` / `finish()` / `collect()` / `collect_all(max_total_bytes)`
+- `BacktestHistoryMetadataCache` / `BacktestHistoryMaintenanceClient`
+
+## 回测历史查询
+
+`BacktestHistoryClient` 是 local-backtest durable history 的异步入口，不是 `DataClient` 专业历史下载
+API 的别名。它统一拥有 metadata sidecar、CacheOnly/RemoteOnMiss planner、official server-backtest
+fill、跨请求 single-flight、bounded cache reader 与 K 线聚合；`tqsdk-session` 仅提供 Tick/60s
+server-history chart substrate，`tqsdk-task` 仅消费结果来安排 replay event。
+
+| 请求 | durable source | 是否新建 K 线文件 |
+| --- | --- | --- |
+| Tick | CST trading-day TQBN v2 tick partition | 否 |
+| `15s` / 其他 `<60s` K | Tick partition | 否，按 session 临时聚合 |
+| `60s` K | final canonical-minute v4 `logical symbol × trading month` partition | 是，唯一 durable K |
+| `N × 60s` | canonical-minute partition | 否，按 closed minutes 在固定 CST `18:00` trading-day grid 临时聚合 |
+
+`61s` / `90s` 被拒绝。Tick 与 60s partition 均没有自动 retention、max-byte eviction 或后台清理；
+派生 K 永不落盘，refresh/purge 是显式 destructive operation。`RemoteOnMiss` 只在 coverage 缺口时
+读取 `TQ_AUTH_*` 并调用官方 futures server-backtest source；`CacheOnly` 永不联网。
+
+`<60s` K 的 metadata trading-session window 仍是聚合边界；相反，`N × 60s` 的盘中 break 只留下
+source-minute 空洞，不会关闭、重开或重置高周期 bucket，因此一根 bar 可以跨越 break。
+
+每个 request 有 caller-supplied id。`Chunk` 在对应 `RequestCompleted` 前均为 provisional；
+`RequestFailed` 只隔离该请求。`collect()` 使用 builder 的默认 512 MiB 限制，批量
+`collect_all(max_total_bytes)` 需要调用方指定总内存预算。`KQ.m@...` 的 session/calendar/physical
+mapping 是带 snapshot hash 的持久 sidecar；CacheOnly 需要本地 sidecar 覆盖窗口，绝不会查询线上 mapping。
+当前 durable fill 只支持 futures，股票使用 facade `.disabled_cache()` 官方回测路径。
+
+storage orchestration 是 async，但 TQBN 解压/解码仍由有界 `spawn_blocking` worker 执行；不提供把
+`tokio::fs` 当作性能开关的第二条 production path。
 
 其中：
 
@@ -99,9 +132,10 @@
   它只接受官方 server-side backtest terminal 确认完成的 range（合法的零行 range 也可以 final），
   不回退到 `DataClient` 历史下载路径。当前 format id 是
   `tqsdk.minute-kline.monthly.v4`，文件按 `logical symbol × trading month` 分区，路径仍为
-  `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk`。`<60s` K 线由 `tqsdk-task` 从
-  tick rows 临时合成；`>60s` 只允许 `N × 60s`，也由 task 从 closed canonical minutes 聚合。
-  facade 不读取/写入 native higher-period `HistorySeriesCache` K 线，`61s` / `90s` 会拒绝
+  `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk`。`BacktestHistoryClient` 的 `<60s` K
+  由 tick rows 按 session 聚合，`N × 60s` K 由 closed canonical minutes 按固定 CST `18:00`
+  trading-day grid 临时聚合；盘中 break 不重置 bucket。task 仅把结果安排为 replay event。facade
+  不读取/写入 native higher-period `HistorySeriesCache` K 线，`61s` / `90s` 会拒绝
 - `MinuteKlineCache` 以 calendar/session snapshot hash fail closed，只有完成的远端 60s range
   才可记录 final coverage；当前/未来 trading day 不可 claim final。v3 文件不会自动迁移、覆盖或
   被当作 cache hit；`diagnose()` 会将其列为 `LegacyUnsupported`。它没有 retention、max-byte
@@ -178,6 +212,11 @@ Python-compatible mmap 缓存；旧 binary/mmap history cache 已从 public surf
 - `HistoryCacheStatus`
 - `HistoryPermissionStatus`
 - `BacktestCachePolicy`
+- `BacktestHistoryClient`
+- `BacktestHistoryClientBuilder`
+- `BacktestHistoryRequest` / `BacktestHistoryPolicy`
+- `BacktestHistoryEvent` / `BacktestHistoryRun` / `BacktestHistoryBatchReport`
+- `BacktestHistoryMetadataCache` / `BacktestHistoryMaintenanceClient`
 - `BacktestTickCache`
 - `BacktestTickCacheFastInventory`
 - `BacktestTickCacheFastInventorySymbol`

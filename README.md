@@ -31,7 +31,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-session`](crates/tqsdk-session) | 共享 session、lazy connection、命令推进、one-shot direct query、metadata、schema 和 service query |
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
 | [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、task-owned replay source、streaming local backtest execution、Python-compatible local backtest sim、kline default price tick、cash/equity drawdown summary、低延迟 trading desk profile |
-| [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、TQBN daily v2 (`.tqbn`) 默认 history cache、按交易日分区的 backtest tick cache、canonical final-60s K cache 和共享 universe selector |
+| [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、`BacktestHistoryClient` 异步缓存查询、TQBN daily v2 (`.tqbn`) tick cache、canonical final-60s K cache 和共享 universe selector |
 | [`tqsdk-cache`](crates/tqsdk-cache) | 可选 tick / canonical-minute cache 运维 CLI：默认文本摘要、按需 versioned JSON、inventory、coverage inspect、closed-day fill、tick 的显式当前日 provisional fill、selectable stderr progress、CacheOnly verify、deep doctor 与受控 minute purge；不进入默认策略 hot path |
 | [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端的 quote / tick / K 线请求；未配置 relay 时 SDK 仍直连天勤 |
 
@@ -164,20 +164,36 @@ stream 补齐缺口并写入持久缓存。这个补缓存路径不使用专业�
 `MarketCachePolicy::record_universe(...)` 复用同一套解析与解析器封装。显式
 `.tick(symbol, width)` 会复用 tick cache；`.kline(symbol, duration, width)` 中 `<60s` 的 K 线从本地 tick
 流合成，`60s` 从 canonical minute cache 读取，`>60s` 只允许 `N × 60s` 并从 closed minutes
-本地聚合。`61s` / `90s` 会拒绝，K-only `>=60s` 不会隐式补 tick。K 线 replay 需要 quote synthesis
+按固定 CST `18:00` trading-day grid 本地聚合。盘中 break 不会重置 bucket，break 内不会虚构 minute
+row，但同一高周期 K 线可跨 break。`61s` / `90s` 会拒绝，K-only `>=60s` 不会隐式补 tick。K 线 replay 需要 quote synthesis
 metadata；可在 backtest builder 上用 `.price_tick(...)`、`.instrument_spec(...)` 或
 `.default_price_tick(...)` 显式提供。
 
+回测历史查询的 durable source 固定如下；派生 K 线只在查询/回放期间存在，不写入另一套 cache：
+
+| 请求 | durable source | 本地处理 |
+| --- | --- | --- |
+| Tick | 按 CST trading day 的 TQBN v2 tick 分区 | 原样读取 |
+| `15s` 和其他 `<60s` K | 同一 tick 分区 | 按官方 session 从 tick 聚合 |
+| `60s` K | `logical symbol × trading month` 的 final canonical-minute v4 分区 | 原样读取 |
+| `N × 60s`（`N > 1`） | 同一 60s 分区 | 从 closed 60s K 按固定 CST `18:00` trading-day grid 聚合；盘中 break 不重置 bucket |
+
+tick 与 60s minute 分区均没有自动 retention、max-byte eviction 或后台清理；只有显式 refresh / purge
+才会删除。`tqsdk::advanced::data::BacktestHistoryClient` 是面向区间查询的异步入口：它按 request id
+流式交付 chunk，只有收到 `RequestCompleted` 后 chunk 才成为成功结果；需要一次性收集时，单请求
+`collect()` 使用配置的内存上限，批量 `collect_all(max_total_bytes)` 必须由调用方显式给出总内存预算。
+
 回测声明 `KQ.m@EX.product` 主连时，facade 会通过
-`DataClient::query_his_cont_underlying_segments(...)` 取得历史 date → concrete-contract
+`tqsdk-data` 持久化的 metadata sidecar 取得 calendar、session 与历史 date → concrete-contract
 映射，按 CST 交易日切成物理合约 tick range。缓存、coverage、remote-on-miss 和 `.warmup()`
 都以具体合约为 key：主连与同一时段的具体合约共用同一份 `.tqbn` tick 文件，replay 事件仍保留
 主连 symbol 并附带 `underlying_symbol`。minute cache 则以逻辑主连 symbol 为 key，不复制 physical
-minute 文件；主连支持 canonical 60s 和整数分钟本地聚合。映射查询不需要天勤账号，
-但主连 `.cache_only()` 仍需要取得这份公开 mapping metadata。
+minute 文件；主连支持 canonical 60s 和整数分钟本地聚合。`RemoteOnMiss` 只在 sidecar 缺失或覆盖不足时
+刷新它；`.cache_only()` 必须已有可覆盖窗口的 sidecar，且不会访问 metadata service。
 
-`Tq::stock()` 选择股票 market / server-backtest endpoint；cache-backed stock backtest 使用同一套
-canonical 60s monthly cache。futures universe selector 不适用于股票，股票策略应显式声明 symbol。
+cache-backed local backtest 当前只支持 futures；`Tq::stock().backtest(...)` 必须显式
+`.disabled_cache()` 并使用官方股票 server-backtest 行情。futures universe selector 不适用于股票，
+股票策略应显式声明 symbol。
 tick 与 minute cache 都不会因读取、写入、retention 或 max-byte 配置而自动删除数据。清除或重拉必须
 显式使用 backtest builder 的 `refresh` / purge API；`tqsdk-cache` 的 CLI purge 目前只作用于
 minute cache，且需要范围与确认。

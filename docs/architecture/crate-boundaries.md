@@ -288,6 +288,9 @@
 cached tick replay 由 `HistoryTickReplayStream` 对 owned `TickDataSeries` 做有界 heap merge。
 持久 tick 覆盖检查和文件格式归 `tqsdk-data::BacktestTickCache` / `HistorySeriesCache`，strategy
 execution 与本地撮合归 `tqsdk-task`。
+cache-backed history 的 metadata、缺口规划、官方 fill、区间扫描和 K 线聚合归 `tqsdk-data`；
+`tqsdk-task` 只消费已经选定的 Tick/60s source 并定义 replay event 的顺序、open/final 时机和
+`TqSim` 语义，不能重新实现远端回填或创建派生 K 的 durable cache。
 这是上层集成路径，不代表 strategy execution 进入 data，也不代表 task 拥有 durable history
 cache 文件格式。
 S31 trading desk profile 是例外的低延迟薄 profile：它属于 task 的执行契约，
@@ -329,13 +332,19 @@ sink、WAL、journal 或 cache writer。
   不会自动调用它。
   旧 `.tqseries` 和旧单文件 `.tqbn` layout 不再作为默认 backend，且没有兼容读取或迁移 store
 - `MinuteKlineCache`：独立 v4 `logical symbol × trading month` `.tqmk` cache，只持久化由
-  official server-side backtest terminal 确认的 final 60s K；higher periods 属于 task replay
-  aggregation。文件 format id 是 `tqsdk.minute-kline.monthly.v4`，目录名继续为
+  official server-side backtest terminal 确认的 final 60s K；`<60s` query 从 Tick 按 session 聚合，
+  `N × 60s` query 从 canonical minute 按固定 CST `18:00` trading-day grid 聚合，盘中 break 不重置
+  bucket，二者都不落盘。task 只把这些 source/result 转成 replay events。文件 format id 是
+  `tqsdk.minute-kline.monthly.v4`，目录名继续为
   `minute-kline-v3`，以便将旧 v3 文件诊断为 `LegacyUnsupported` 而不是静默迁移。它不做
   automatic retention/max-byte eviction 或后台清理，Refresh/purge 都是显式破坏性操作；
   `fast_inventory()` 是不解码、不建 root 的只读盘点，`diagnose()` 是逐月深检并区分
   readable / legacy / unsupported / corrupt
 - remote backtest cache fill 的完整性 accumulator / report 类型
+- `BacktestHistoryClient`：持久 session/calendar/continuous-mapping sidecar、CacheOnly / RemoteOnMiss
+  planner、跨 client single-flight fill、bounded `spawn_blocking` cache readers、request chunk 与
+  terminal report。production orchestration 是 async；TQBN 解压/解码仍在有界 blocking worker 中，
+  不将 `tokio::fs` 误称为吞吐优化
 - `LiveTickCacheWriter` 这类纯数据层 live tick row writer：只接收已解码 tick rows，按连续
   tick id 推进 coverage；可合并连续单 tick push，并通过 `flush()` / Drop 提交短尾，但不拥有
   session、订阅、wait loop、timer task 或后台进程

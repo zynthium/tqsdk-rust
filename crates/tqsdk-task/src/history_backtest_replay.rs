@@ -44,6 +44,10 @@ pub struct HistoryBacktestTickSource {
 }
 
 /// One synthetic kline stream sourced from a projected tick range.
+///
+/// Its Tick source may begin before the replay request's start solely to
+/// establish the cumulative-volume baseline.  Such priming rows update the
+/// aggregator but are never emitted as replay events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryBacktestSyntheticKlineSource {
     pub tick_source: HistoryBacktestTickSource,
@@ -117,7 +121,8 @@ enum CursorProducer {
     },
     SyntheticKline {
         reader: TickDataSeriesReader,
-        synth: TickKlineAggregator,
+        synth: Box<TickKlineAggregator>,
+        emit_range: (i64, i64),
     },
     NativeKline {
         events: VecDeque<QueuedEvent>,
@@ -192,7 +197,11 @@ impl HistoryBacktestReplayStream {
                 symbol: spec.symbol,
                 underlying_projection: UnderlyingProjection::None,
                 symbol_rank: 0,
-                producer: CursorProducer::SyntheticKline { reader, synth },
+                producer: CursorProducer::SyntheticKline {
+                    reader,
+                    synth: Box::new(synth),
+                    emit_range: (request.start_ns, request.end_ns),
+                },
                 next: None,
             });
         }
@@ -246,6 +255,27 @@ impl HistoryBacktestReplayStream {
     }
 
     pub fn new_projected(request: HistoryBacktestProjectedReplayRequest) -> Result<Self> {
+        Self::new_projected_with_sessions(request, BTreeMap::new())
+    }
+
+    /// Builds a projected replay using persisted data-layer session templates
+    /// for Tick-derived Klines.
+    ///
+    /// Callers that do not have persisted metadata can continue using
+    /// [`Self::new_projected`], which retains the historical CST-day fallback.
+    /// The facade uses this constructor after the data layer has resolved the
+    /// authoritative calendar/session snapshot.
+    pub fn new_projected_with_sessions(
+        request: HistoryBacktestProjectedReplayRequest,
+        sessions_by_symbol: BTreeMap<String, KlineSessionTemplate>,
+    ) -> Result<Self> {
+        Self::new_projected_inner(request, &sessions_by_symbol)
+    }
+
+    fn new_projected_inner(
+        request: HistoryBacktestProjectedReplayRequest,
+        sessions_by_symbol: &BTreeMap<String, KlineSessionTemplate>,
+    ) -> Result<Self> {
         validate_request_range(request.start_ns, request.end_ns)?;
         let mut cursors = Vec::new();
 
@@ -272,7 +302,11 @@ impl HistoryBacktestReplayStream {
         }
 
         for source in request.synthetic_kline_sources {
-            validate_projected_tick_source(&source.tick_source, request.start_ns, request.end_ns)?;
+            validate_projected_synthetic_tick_source(
+                &source.tick_source,
+                request.start_ns,
+                request.end_ns,
+            )?;
             if source.duration_ns <= 0 {
                 return Err(TaskError::InvalidState(
                     "projected synthetic kline duration_ns must be positive",
@@ -289,7 +323,10 @@ impl HistoryBacktestReplayStream {
             let synth = TickKlineAggregator::new(
                 source.tick_source.replay_symbol.clone(),
                 source.duration_ns,
-                KlineSessionTemplate::cst_trading_day(),
+                sessions_by_symbol
+                    .get(source.tick_source.replay_symbol.as_str())
+                    .cloned()
+                    .unwrap_or_else(KlineSessionTemplate::cst_trading_day),
             )
             .map_err(data_error_to_task)?;
             let underlying_projection = (source.tick_source.replay_symbol
@@ -300,7 +337,11 @@ impl HistoryBacktestReplayStream {
                 underlying_projection: underlying_projection
                     .map_or(UnderlyingProjection::None, UnderlyingProjection::Static),
                 symbol_rank: 0,
-                producer: CursorProducer::SyntheticKline { reader, synth },
+                producer: CursorProducer::SyntheticKline {
+                    reader,
+                    synth: Box::new(synth),
+                    emit_range: (request.start_ns, request.end_ns),
+                },
                 next: None,
             });
         }
@@ -452,13 +493,20 @@ impl CursorProducer {
                 };
                 tick_event(symbol, tick).map(Some)
             }
-            Self::SyntheticKline { reader, synth } => loop {
+            Self::SyntheticKline {
+                reader,
+                synth,
+                emit_range,
+            } => loop {
                 let Some(tick) = reader.next_tick().map_err(data_error_to_task)? else {
                     return Ok(None);
                 };
                 let Some(update) = synth.update(&tick).map_err(data_error_to_task)? else {
                     continue;
                 };
+                if update.event_time_ns < emit_range.0 || update.event_time_ns >= emit_range.1 {
+                    continue;
+                }
                 return synthetic_kline_event(
                     synth.symbol(),
                     synth.duration_ns(),
@@ -559,6 +607,29 @@ fn validate_projected_tick_source(
     if source.start_ns < request_start_ns || source.end_ns > request_end_ns {
         return Err(TaskError::InvalidState(
             "projected tick source must be inside replay request range",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_projected_synthetic_tick_source(
+    source: &HistoryBacktestTickSource,
+    request_start_ns: i64,
+    request_end_ns: i64,
+) -> Result<()> {
+    validate_symbol(&source.replay_symbol)?;
+    validate_symbol(&source.cache_symbol)?;
+    if source.start_ns >= source.end_ns {
+        return Err(TaskError::InvalidState(
+            "projected synthetic tick source start_ns must be less than end_ns",
+        ));
+    }
+    if source.start_ns > request_start_ns
+        || source.end_ns <= request_start_ns
+        || source.end_ns > request_end_ns
+    {
+        return Err(TaskError::InvalidState(
+            "projected synthetic tick source must begin no later than and overlap the replay request range",
         ));
     }
     Ok(())

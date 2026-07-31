@@ -1497,6 +1497,29 @@ fn facade_exposes_stock_backtest_builder_without_connecting() {
     }
 }
 
+#[tokio::test]
+async fn cache_backed_stock_backtest_is_rejected_before_any_history_fill() {
+    let result = Tq::stock()
+        .backtest(1_000, 2_000)
+        .cache_only()
+        .symbol("SSE.600000")
+        .prepare()
+        .await;
+    let error = match result {
+        Ok(_) => {
+            panic!("cache-backed stock backtests must not enter the futures-only history path")
+        }
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("cache-backed backtest history currently supports futures only"),
+        "unexpected error: {error}"
+    );
+}
+
 #[test]
 fn facade_result_accepts_session_errors() {
     let error = tqsdk_session::SessionFacadeError::InvalidState("facade contract");

@@ -103,10 +103,16 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
   - `kline_rows_with_underlying(...)` / `tick_rows_with_underlying(...)` 为手工 rows 提供同样的 quote `underlying_symbol` metadata；不需要 metadata 时仍可用 `kline_rows(...)` / `tick_rows(...)`
   - `HistoryBacktestProjectedReplayRequest` / `HistoryBacktestTickSource` 让 cache-backed
     facade 按每个物理 tick range 回放到逻辑 symbol；`KQ.m@...` 主连因此读取具体合约
-    cache file，同时为 replay quote 写入 `underlying_symbol`
+    cache file，同时为 replay quote 写入 `underlying_symbol`。source selection、coverage、metadata
+    sidecar 与远端 fill 仍归 `tqsdk-data`，本 crate 不直接管理 durable partition
+  - `HistoryBacktestSyntheticKlineSource` 可用 replay 起点之前的 Tick 前缀建立累计 volume
+    baseline；该 priming Tick 只更新聚合器，不会泄漏为 strategy replay event
   - `HistoryBacktestMinuteKlineSource` 读取独立的 logical-symbol 60s monthly cache；
-    `MinuteKlineAggregator` 只从 closed canonical minutes 合成 `N × 60s` bars。60s 在
-    row timestamp 发 open-only、在 `+60s` 发 final，higher-period bar 也不提前暴露 OHLC
+    它只安排 data 已选定的 canonical source 的 replay 时序。data 查询负责 durable-source
+    aggregation；task 的 `MinuteKlineAggregator` 仅确保回放时只从 data 聚合的 closed canonical
+    minutes 合成 `N × 60s` event。高周期按固定 CST `18:00` trading-day grid，盘中 break 不重置
+    bucket。60s 在 row timestamp 发 open-only、在 `+60s` 发 final，higher-period bar
+    也不提前暴露 OHLC
   - 暴露 deterministic replay time、`StrategyReplayCheckpoint` 和 `resume_from(...)`
   - 暴露 `StrategyReplaySpeed`，支持最快、real-time 和 scaled replay pacing
   - 暴露 `StrategyReplayCheckpointStore`，支持 JSON file-backed checkpoint persistence

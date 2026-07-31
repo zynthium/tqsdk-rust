@@ -30,6 +30,9 @@ async fn cache_only_tick_and_15s_requests_read_the_same_durable_tick_source() {
         tick(2, start_ns + 10 * SECOND_NS, 101.0, 104, 11),
         tick(3, start_ns + 16 * SECOND_NS, 102.0, 107, 12),
         tick(4, start_ns + 26 * SECOND_NS, 103.0, 111, 13),
+        // Official server-backtest charts assign an exact bucket-boundary
+        // Tick to the preceding bar while using it to open the next one.
+        tick(5, start_ns + 30 * SECOND_NS, 104.0, 113, 14),
     ];
     BacktestTickCache::open(&root)
         .unwrap()
@@ -81,8 +84,9 @@ async fn cache_only_tick_and_15s_requests_read_the_same_durable_tick_source() {
     );
     assert_eq!(
         rows.iter().map(|row| row.volume).collect::<Vec<_>>(),
-        vec![104, 7]
+        vec![104, 9]
     );
+    assert_eq!(rows[1].close_oi, 14);
 }
 
 #[tokio::test]

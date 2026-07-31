@@ -128,12 +128,12 @@ impl HistoryChartState {
 enum ReadyPage {
     Ticks {
         right_id: i64,
-        explicit_empty: bool,
+        terminal: bool,
         rows: Vec<Tick>,
     },
     CanonicalMinutes {
         right_id: i64,
-        explicit_empty: bool,
+        terminal: bool,
         rows: Vec<Kline>,
     },
 }
@@ -145,11 +145,9 @@ impl ReadyPage {
         }
     }
 
-    fn explicit_empty(&self) -> bool {
+    fn terminal(&self) -> bool {
         match self {
-            Self::Ticks { explicit_empty, .. } | Self::CanonicalMinutes { explicit_empty, .. } => {
-                *explicit_empty
-            }
+            Self::Ticks { terminal, .. } | Self::CanonicalMinutes { terminal, .. } => *terminal,
         }
     }
 }
@@ -259,8 +257,6 @@ impl ServerBacktestHistoryStream {
                 return Ok(None);
             }
 
-            let notified = self.reader.notified().notified();
-            tokio::pin!(notified);
             if self.reader.next(&mut self.cursor).is_some() {
                 continue;
             }
@@ -269,15 +265,16 @@ impl ServerBacktestHistoryStream {
                 continue;
             }
 
-            match deadline {
-                Some(deadline) => {
-                    tokio::select! {
-                        _ = &mut notified => {}
-                        _ = tokio::time::sleep_until(deadline) => return Ok(None),
-                    }
-                }
-                None => notified.await,
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Ok(None);
             }
+
+            // This stream is the sole driver for its SessionClient. Waiting
+            // for a RuntimeReader notification here can therefore deadlock:
+            // the notification is produced only by a later progress_once()
+            // call, but no call is made while this task is waiting. Yield so
+            // other Tokio work may run, then drive the session again.
+            tokio::task::yield_now().await;
         }
     }
 
@@ -320,13 +317,11 @@ impl ServerBacktestHistoryStream {
     ) -> Result<Option<ServerBacktestHistoryEvent>> {
         let old_last_page_right_id = self.charts[chart_index].last_page_right_id;
         let right_id = page.right_id();
-        let explicit_empty = page.explicit_empty();
+        let page_terminal = page.terminal();
         let mut reached_requested_end = false;
         let event = match page {
             ReadyPage::Ticks {
-                explicit_empty: _,
-                rows,
-                ..
+                terminal: _, rows, ..
             } => {
                 let (chart_id, symbol, rows) =
                     self.take_new_ticks(chart_index, rows, &mut reached_requested_end);
@@ -337,9 +332,7 @@ impl ServerBacktestHistoryStream {
                 })
             }
             ReadyPage::CanonicalMinutes {
-                explicit_empty: _,
-                rows,
-                ..
+                terminal: _, rows, ..
             } => {
                 let (chart_id, symbol, rows) =
                     self.take_new_minutes(chart_index, rows, &mut reached_requested_end);
@@ -354,7 +347,7 @@ impl ServerBacktestHistoryStream {
         let advanced = self.charts[chart_index]
             .last_emitted_id
             .is_some_and(|last_id| old_last_page_right_id.is_none_or(|old| last_id > old));
-        let terminal = explicit_empty
+        let terminal = page_terminal
             || reached_requested_end
             || !advanced
             || old_last_page_right_id.is_some_and(|old| right_id <= old);
@@ -486,51 +479,30 @@ impl ServerBacktestHistoryStream {
         {
             return Ok(None);
         }
-
-        let (root, duration) = match state.chart.kind {
-            ServerBacktestHistoryKind::Tick => ("ticks", None),
-            ServerBacktestHistoryKind::CanonicalMinute => (
-                "klines",
-                Some(SERVER_BACKTEST_CANONICAL_MINUTE_NS.to_string()),
-            ),
+        let series = match state.chart.kind {
+            ServerBacktestHistoryKind::Tick => {
+                market.get_path(&["ticks", state.chart.symbol.as_str()])
+            }
+            ServerBacktestHistoryKind::CanonicalMinute => {
+                market.get_path(&["klines", state.chart.symbol.as_str(), "60000000000"])
+            }
         };
-        let mut sequence_path = vec![root, state.chart.symbol.as_str()];
-        if let Some(duration) = duration.as_deref() {
-            sequence_path.push(duration);
-        }
-        let last_id = market
-            .get_path(&[sequence_path[0], sequence_path[1]])
-            .and_then(|value| {
-                if let Some(duration) = duration.as_deref() {
-                    value.get(duration)
-                } else {
-                    Some(value)
-                }
-            })
+        let last_id = series
             .and_then(|value| value.get("last_id"))
             .and_then(Value::as_i64);
-        let data = market
-            .get_path(&[sequence_path[0], sequence_path[1]])
-            .and_then(|value| {
-                if let Some(duration) = duration.as_deref() {
-                    value.get(duration)
-                } else {
-                    Some(value)
-                }
-            })
-            .and_then(|value| value.get("data"));
+        let data = series.and_then(|value| value.get("data"));
 
         if chart.left_id == -1 && chart.right_id == -1 {
             if last_id == Some(-1) && data.is_some_and(Value::is_object_and_empty) {
                 return Ok(Some(match state.chart.kind {
                     ServerBacktestHistoryKind::Tick => ReadyPage::Ticks {
                         right_id: -1,
-                        explicit_empty: true,
+                        terminal: true,
                         rows: Vec::new(),
                     },
                     ServerBacktestHistoryKind::CanonicalMinute => ReadyPage::CanonicalMinutes {
                         right_id: -1,
-                        explicit_empty: true,
+                        terminal: true,
                         rows: Vec::new(),
                     },
                 }));
@@ -542,37 +514,38 @@ impl ServerBacktestHistoryStream {
                 "server-backtest chart returned invalid page bounds",
             ));
         }
-        if last_id.is_none_or(|last_id| last_id < chart.right_id) {
+        let Some(last_id) = last_id else {
             return Ok(None);
-        }
+        };
+        let effective_right_id = chart.right_id.min(last_id);
+        let terminal = last_id < chart.right_id;
         let Some(data) = data.and_then(Value::as_object) else {
             return Ok(None);
         };
-
         match state.chart.kind {
             ServerBacktestHistoryKind::Tick => {
-                let rows = decode_page_rows::<Tick>(data, chart.left_id, chart.right_id)?;
-                if rows.is_empty() {
+                let rows = decode_page_rows::<Tick>(data, chart.left_id, effective_right_id)?;
+                if rows.is_empty() && !terminal {
                     return Err(validation_error(
                         "server-backtest Tick chart was ready without its page rows",
                     ));
                 }
                 Ok(Some(ReadyPage::Ticks {
-                    right_id: chart.right_id,
-                    explicit_empty: false,
+                    right_id: effective_right_id,
+                    terminal,
                     rows,
                 }))
             }
             ServerBacktestHistoryKind::CanonicalMinute => {
-                let rows = decode_page_rows::<Kline>(data, chart.left_id, chart.right_id)?;
-                if rows.is_empty() {
+                let rows = decode_page_rows::<Kline>(data, chart.left_id, effective_right_id)?;
+                if rows.is_empty() && !terminal {
                     return Err(validation_error(
                         "server-backtest canonical-minute chart was ready without its page rows",
                     ));
                 }
                 Ok(Some(ReadyPage::CanonicalMinutes {
-                    right_id: chart.right_id,
-                    explicit_empty: false,
+                    right_id: effective_right_id,
+                    terminal,
                     rows,
                 }))
             }

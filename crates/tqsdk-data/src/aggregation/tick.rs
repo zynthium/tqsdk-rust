@@ -26,6 +26,7 @@ pub struct TickKlineAggregator {
     current: Option<TickAggregateBar>,
     trading_day_start_ns: Option<i64>,
     previous_cumulative_volume: i64,
+    previous_tick_open_interest: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +62,7 @@ impl TickKlineAggregator {
             current: None,
             trading_day_start_ns: None,
             previous_cumulative_volume: 0,
+            previous_tick_open_interest: None,
         })
     }
 
@@ -88,6 +90,10 @@ impl TickKlineAggregator {
         if tick.datetime < 0 || !tick.last_price.is_finite() {
             return Ok(None);
         }
+        let opening_open_interest = self
+            .previous_tick_open_interest
+            .unwrap_or(tick.open_interest);
+        self.previous_tick_open_interest = Some(tick.open_interest);
         let Some(position) = self.session.locate(tick.datetime)? else {
             return Ok(None);
         };
@@ -96,7 +102,6 @@ impl TickKlineAggregator {
         if self.trading_day_start_ns != Some(position.trading_day_start_ns) {
             closed = self.current.take().map(|bar| bar.row);
             self.trading_day_start_ns = Some(position.trading_day_start_ns);
-            self.previous_cumulative_volume = 0;
         }
 
         let (bar_start_ns, effective_bar_end_ns) = self.bar_bounds(tick.datetime, position)?;
@@ -105,54 +110,73 @@ impl TickKlineAggregator {
                 || bar.window_start_ns != position.window_start_ns
                 || bar.row.datetime != bar_start_ns
         });
-        let opened = if starts_new_bar {
-            if closed.is_none() {
-                closed = self.current.take().map(|bar| bar.row);
-            } else {
-                self.current = None;
-            }
-            let row = Kline {
-                id: bar_start_ns,
-                datetime: bar_start_ns,
-                open: tick.last_price,
-                high: tick.last_price,
-                low: tick.last_price,
-                close: tick.last_price,
-                volume: 0,
-                open_oi: tick.open_interest,
-                close_oi: tick.open_interest,
-                ..Kline::default()
-            };
-            self.current = Some(TickAggregateBar {
-                trading_day_start_ns: position.trading_day_start_ns,
-                window_start_ns: position.window_start_ns,
-                effective_bar_end_ns,
-                row: row.clone(),
+        let mut opened = None;
+        let mut boundary_tick_closed_preceding_bar = false;
+        if starts_new_bar {
+            let preceding = self.current.take();
+            let continues_session = preceding.as_ref().is_some_and(|bar| {
+                bar.trading_day_start_ns == position.trading_day_start_ns
+                    && bar.window_start_ns == position.window_start_ns
             });
-            Some(row)
-        } else {
-            None
-        };
 
-        let volume_delta = if tick.volume >= self.previous_cumulative_volume {
-            tick.volume.saturating_sub(self.previous_cumulative_volume)
-        } else {
-            0
-        };
-        let current = self
+            if continues_session && tick.datetime == bar_start_ns {
+                let mut preceding = preceding.expect("continuing session has a preceding bar");
+                Self::apply_tick(&mut preceding.row, tick, self.volume_delta(tick.volume));
+                closed = Some(preceding.row);
+                self.previous_cumulative_volume = tick.volume;
+                let row = Self::new_tick_bar(bar_start_ns, tick, tick.open_interest);
+                opened = Some(row.clone());
+                self.current = Some(TickAggregateBar {
+                    trading_day_start_ns: position.trading_day_start_ns,
+                    window_start_ns: position.window_start_ns,
+                    effective_bar_end_ns,
+                    row,
+                });
+                boundary_tick_closed_preceding_bar = true;
+            } else {
+                let row = if continues_session {
+                    Self::new_carry_bar(
+                        bar_start_ns,
+                        &preceding
+                            .as_ref()
+                            .expect("continuing session has a preceding bar")
+                            .row,
+                    )
+                } else {
+                    Self::new_tick_bar(bar_start_ns, tick, opening_open_interest)
+                };
+                if closed.is_none() {
+                    closed = preceding.map(|bar| bar.row);
+                }
+                opened = Some(row.clone());
+                self.current = Some(TickAggregateBar {
+                    trading_day_start_ns: position.trading_day_start_ns,
+                    window_start_ns: position.window_start_ns,
+                    effective_bar_end_ns,
+                    row,
+                });
+            }
+        }
+
+        if !boundary_tick_closed_preceding_bar {
+            let volume_delta = self.volume_delta(tick.volume);
+            let current = self
+                .current
+                .as_mut()
+                .expect("valid Tick initializes a bar before aggregation");
+            Self::apply_tick(&mut current.row, tick, volume_delta);
+            self.previous_cumulative_volume = tick.volume;
+        }
+        let updated = self
             .current
-            .as_mut()
-            .expect("valid Tick initializes a bar before aggregation");
-        current.row.high = current.row.high.max(tick.last_price);
-        current.row.low = current.row.low.min(tick.last_price);
-        current.row.close = tick.last_price;
-        current.row.volume = current.row.volume.saturating_add(volume_delta);
-        current.row.close_oi = tick.open_interest;
-        self.previous_cumulative_volume = tick.volume;
+            .as_ref()
+            .expect("valid Tick initializes a bar before aggregation")
+            .row
+            .clone();
 
         Ok(Some(TickKlineAggregationUpdate {
             opened,
-            updated: current.row.clone(),
+            updated,
             closed,
             event_time_ns: tick.datetime,
         }))
@@ -188,5 +212,54 @@ impl TickKlineAggregator {
             .checked_add(self.duration_ns)
             .ok_or_else(|| DataError::Validation("tick kline bar end overflow".to_string()))?;
         Ok((bar_start_ns, nominal_end_ns.min(position.window_end_ns)))
+    }
+
+    fn volume_delta(&self, volume: i64) -> i64 {
+        if volume >= self.previous_cumulative_volume {
+            volume.saturating_sub(self.previous_cumulative_volume)
+        } else {
+            // Continuous-index Tick streams can carry their cumulative volume
+            // across weekends and holidays. A lower counter is the reliable
+            // signal that the exchange actually reset it.
+            volume.max(0)
+        }
+    }
+
+    fn new_tick_bar(bar_start_ns: i64, tick: &Tick, open_oi: i64) -> Kline {
+        Kline {
+            id: bar_start_ns,
+            datetime: bar_start_ns,
+            open: tick.last_price,
+            high: tick.last_price,
+            low: tick.last_price,
+            close: tick.last_price,
+            volume: 0,
+            open_oi,
+            close_oi: tick.open_interest,
+            ..Kline::default()
+        }
+    }
+
+    fn new_carry_bar(bar_start_ns: i64, preceding: &Kline) -> Kline {
+        Kline {
+            id: bar_start_ns,
+            datetime: bar_start_ns,
+            open: preceding.close,
+            high: preceding.close,
+            low: preceding.close,
+            close: preceding.close,
+            volume: 0,
+            open_oi: preceding.close_oi,
+            close_oi: preceding.close_oi,
+            ..Kline::default()
+        }
+    }
+
+    fn apply_tick(row: &mut Kline, tick: &Tick, volume_delta: i64) {
+        row.high = row.high.max(tick.last_price);
+        row.low = row.low.min(tick.last_price);
+        row.close = tick.last_price;
+        row.volume = row.volume.saturating_add(volume_delta);
+        row.close_oi = tick.open_interest;
     }
 }

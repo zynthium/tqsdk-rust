@@ -128,11 +128,12 @@
     `.inspect_cache()` / `.purge_cache_symbols()` 保持 tick-only 兼容，
     `.inspect_history_cache()` / `.purge_history_cache()` 返回两类 typed report；任何 retention、
     后台 timer 或 cache daemon 都不进入 task/runtime。
-    `KQ.m@...` 的 tick 在 facade 解析为 concrete-contract sources；minute cache 始终以逻辑
-    main-contract symbol 为 key，task 只把 dated mapping 写入 replay `underlying_symbol` metadata。
-    `<60s` K 从 tick cache 本地合成；`60s` 是唯一持久 canonical K，且只由官方
-    server-side backtest terminal 确认后写入；`>60s` 只允许 `N × 60s`，由
-    `MinuteKlineAggregator` 从已关闭分钟线聚合，`61s` / `90s` 会拒绝。
+    `KQ.m@...` 的 tick 在 data metadata sidecar 中解析为 concrete-contract sources；minute cache
+    始终以逻辑 main-contract symbol 为 key，task 只把 dated mapping 写入 replay
+    `underlying_symbol` metadata。data query 的 `<60s` K 从 Tick 按 session、`>60s` K 从 closed
+    canonical minutes 按固定 CST `18:00` trading-day grid 聚合；盘中 break 不重置高周期 bucket。
+    `60s` 是唯一持久 canonical K，且只由官方 server-side backtest terminal 确认后写入。
+    task 不创建派生 K cache，只决定 replay 的 open/final event 时机；`61s` / `90s` 会拒绝。
     canonical minute 在 row timestamp 发 open-only、在 `+60s` 发 final row；高周期在 bar
     start 发 open-only，随后每个关闭分钟更新一次。`HistoryBacktestReplayStream` 与 tick /
     synthetic K 线按 event time 合并，而 `StrategyBacktest` 原子批处理相同 timestamp，避免
@@ -142,6 +143,8 @@
     继续暴露 `KlineDataSeries` / `TickDataSeries` / `StrategyReplaySourceBuilder`，供上层 host
     把已有 history rows 或自定义事件转为 replay source，但 `local_backtest_*` 不再作为新的
     用户心智入口扩展
+  - cache-backed local backtest 暂限 futures；股票只允许 explicit `.disabled_cache()` 的官方
+    server-backtest stream，task 不得将股票导入 futures durable fill path
   - 当前覆盖 futures 单账户最小闭环：主连 replay symbol 到 underlying 执行 symbol 自动映射、限价穿价一次性全成、未穿价挂单、后续 quote/tick/kline checkpoint 触发成交、市价无对手盘撤单、资金不足拒单
   - `StrategyBacktestBuilder::price_tick(symbol, tick)` 只用于 kline quote synthesis；逐合约显式配置优先，其次可用已查询的 `InstrumentSpec` 或已 replay quote 的 `price_tick` metadata，最后使用 `default_price_tick(tick)` 全局 fallback；不在本地回测 builder 内自动联网 metadata 查询，不自动订阅分钟线
   - `StrategyBacktestContext` 复用 `StrategyContext` 的 quote/account/position/orders/target-pos API，并以 `finish_sim_step()` 处理当前 step 的本地模拟成交

@@ -36,16 +36,17 @@ auth，缓存缺失时通过官方 server-side backtest stream 拉取 tick 或 c
 universe 会排除当前不受本地 history cache / relay 支持的 `KQD` 外盘合约，因此 `cont:all`
 不会请求不存在的 `KQ.m@KQD.*` 历史主连映射。
 
-`KQ.m@EX.product` 主连回测会通过
-`tqsdk_data::DataClient::query_his_cont_underlying_segments(...)` 查询历史映射，并按 CST
+`KQ.m@EX.product` 主连回测通过 `tqsdk-data` 的 persisted metadata sidecar 解析历史映射，并按 CST
 交易日把逻辑主连投影到具体合约 tick range。缓存文件、coverage、remote-on-miss、refresh 和
 warmup 均使用具体合约 symbol，所以主连与相同日期的具体合约共用一份 tick cache；回放仍使用
-主连 symbol，quote 的 `underlying_symbol` 标注当时实际合约。映射查询不需天勤账号，但主连
-`.cache_only()` 仍需访问这份公开 metadata。minute K cache 则始终以逻辑 `KQ.m@...` 为 key，
-dated physical contract 只保留在 replay metadata；`60s` 与整数分钟高周期均受支持。
+主连 symbol，quote 的 `underlying_symbol` 标注当时实际合约。`RemoteOnMiss` 只在 sidecar 缺失或
+覆盖不足时刷新 metadata；`.cache_only()` 必须已有本地 sidecar，绝不访问公开 metadata 服务。
+minute K cache 则始终以逻辑 `KQ.m@...` 为 key，dated physical contract 只保留在 replay metadata；
+`60s` 与整数分钟高周期均受支持。
 
-`Tq::stock()` 选择股票 market / server-backtest endpoint；cache-backed stock backtest 使用同一套
-canonical 60s monthly cache。futures universe selector 不适用于股票，股票策略应显式声明 symbol。
+cache-backed local backtest 当前只支持 futures。`Tq::stock()` 选择股票 market / server-backtest
+endpoint，但股票回测必须显式 `.disabled_cache()`；futures universe selector 不适用于股票，股票策略
+应显式声明 symbol。
 minute 的 RemoteOnMiss / Refresh 不能为当前或未来 CST trading day 声称 final coverage，必须等该
 trading day 关闭后再填充。
 
@@ -56,11 +57,17 @@ trading day 关闭后再填充。
 
 cache-backed local backtest 可以显式声明 serial 输入：`.tick(symbol, view_width)` 复用
 tick cache；`.kline(symbol, duration, view_width)` 的 `<60s` K 从 tick 本地合成，`60s` 从
-canonical minute cache 读取，`>60s` 只能是 `N × 60s` 并在本地从已关闭分钟线聚合。
-`61s` / `90s` 会明确拒绝，K-only `>=60s` 不会隐式拉取 tick；仅需 quote fallback 时会
+canonical minute cache 读取，`>60s` 只能是 `N × 60s` 并在本地从已关闭分钟线按固定 CST `18:00`
+trading-day grid 聚合。盘中 break 不重置高周期 bucket，break 内不补造 minute row，但同一 bar 可跨
+break。`61s` / `90s` 会明确拒绝，K-only `>=60s` 不会隐式拉取 tick；仅需 quote fallback 时会
 隐式使用 60s minute。只有缺 tick 或 canonical minute 时才需要 auth。K 线 replay 需要 quote
 synthesis metadata；可在 backtest builder 上用 `.price_tick(...)`、`.instrument_spec(...)` 或
 `.default_price_tick(...)` 显式提供。
+
+需要直接按时间区间读取缓存，而非启动策略回放时，使用
+`tqsdk::advanced::data::BacktestHistoryClient`。它以 request id 的 `Chunk` / terminal event stream
+返回 Tick 或本地聚合 K 线；只有 `RequestCompleted` 后 chunk 才成功。`collect()` 有默认内存上限，
+`collect_all(max_total_bytes)` 必须显式指定批量内存预算。prelude 故意不导出该高级 API。
 
 缓存运维入口保留在同一个 builder 心智里：`.inspect_cache()` / `.purge_cache_symbols()` 是
 tick-only 兼容 API；`.inspect_history_cache()` 返回 tick 与 canonical-minute 的 typed status，

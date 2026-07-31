@@ -30,6 +30,9 @@
   默认文本摘要 / 按需 versioned JSON、calendar-aware closed-day fill、显式当前结束日期自动
   provisional fill、`--require-final` 严格保护、selectable stderr progress、report-bound verify
   与 TQBN doctor 合同。
+- [回测历史查询与缓存来源](architecture/api-data.md#回测历史查询与缓存来源)：`BacktestHistoryClient`
+  的 request/chunk/terminal contract、Tick/15s/60s/整数分钟 K 的 durable-source matrix、metadata
+  sidecar 和 CacheOnly 语义。
 
 ## AI 助手读取顺序
 

@@ -83,6 +83,43 @@
 
 这不是 `wait_update()` 或 live event 模式选择的问题。
 
+## 回测历史查询与缓存来源
+
+`BacktestHistoryClient` 是回测历史数据的公共异步查询入口。它拥有 metadata sidecar、source
+planner、official server-backtest cache fill、single-flight 协调、bounded cache scan 与 K 线聚合；
+`tqsdk-session` 只提供 server-history chart substrate，`tqsdk-task` 只拥有 replay/backtest event
+语义，`tqsdk-wait` 不参与 data fill。
+
+| 用户请求 | durable source | 派生和持久化 |
+| --- | --- | --- |
+| Tick | CST trading-day TQBN v2 tick partition | 原样返回；不复制 |
+| `15s` 与其他 `<60s` K | 同一 Tick partition | 按 metadata session 聚合；仅内存中存在 |
+| `60s` K | `logical symbol × trading month` canonical-minute v4 partition | 唯一 durable K 线 |
+| `N × 60s`（`N > 1`） | 同一 canonical-minute partition | 只从 closed 60s rows 按固定 CST `18:00` trading-day grid 聚合；仅内存中存在 |
+
+`61s`、`90s` 等既非 sub-minute、也非 60s 整数倍的周期会被拒绝。Tick 与 canonical-minute
+partition 都没有 automatic retention、max-byte eviction 或后台清理；refresh/purge 是显式 destructive
+operation，派生 K 从不落盘。
+
+`<60s` K 仍以 metadata trading-session window 划 bucket，不能跨 break；`N × 60s`（`N > 1`）
+则以官方固定 CST `18:00` trading-day grid 划 bucket。后者的盘中 break 只造成 source 60s row
+空洞，不会关闭、重开或重置高周期 bar，所以一根高周期 bar 可以跨越 break。
+
+请求使用稳定的 caller-supplied request id：`query()` / `query_batch()` 返回 `BacktestHistoryRun`，
+其中 `next()` 产生 ordered `Chunk`、`RequestCompleted`、`RequestFailed` 事件。Chunk 在相应
+`RequestCompleted` 到达前都是 provisional；一个请求失败不会取消 batch 里其他请求。`finish()` 会排空
+未消费事件并返回所有 terminal report。单请求 `collect()` 使用 builder 的默认 512 MiB 上限；批量
+`collect_all(max_total_bytes)` 必须显式给出总内存预算，避免把大范围 Tick/15s 查询无界物化。
+
+`RemoteOnMiss` 先检查 durable coverage，只有缺口时才 lazy-load auth 并使用官方 futures
+server-backtest source；`CacheOnly` 不联网。`KQ.m@...` 的 calendar、session 和 physical segment
+mapping 以 versioned snapshot sidecar 持久化，terminal report 携带 snapshot hash；CacheOnly 需要已有
+且覆盖请求窗口的 sidecar，不会向公开 metadata service 查询。当前 cache-backed fill 只支持 futures；
+股票回测必须使用 facade 的 `.disabled_cache()` 官方路径。
+
+执行图是 async orchestration 加有界 `spawn_blocking` reader：文件读取、TQBN 解压和记录解码仍是
+CPU/blocking 工作，不能仅把 API 换成 `tokio::fs` 就宣称性能提升。
+
 ## 第一阶段推荐范围
 
 当前已经落地的第一阶段范围是：
@@ -116,6 +153,12 @@
 - `DataClientBuilder::history_cache_retention_days(...)`
 - `DataClient::run_configured_history_cache_maintenance()`
 - `BacktestCachePolicy`
+- `BacktestHistoryClient`
+- `BacktestHistoryClientBuilder`
+- `BacktestHistoryRequest`
+- `BacktestHistoryPolicy`
+- `BacktestHistoryEvent` / `BacktestHistoryRun` / `BacktestHistoryBatchReport`
+- `BacktestHistoryMetadataCache` / `BacktestHistoryMaintenanceClient`
 - `BacktestTickCache`
 - `BacktestTickCoverage`
 - `BacktestTickCacheWriteReport`
@@ -284,11 +327,12 @@ tqsdk-wait        tqsdk-data
 - facade cache-backed backtest 读取同一 cache root：tick 输入经 `BacktestTickCache`；唯一持久
   K 线输入是独立 `MinuteKlineCache` 的 canonical final `60s` files。minute fill 只使用官方
   server-side backtest Kline stream，并且只在该 stream terminal 成功后写 final coverage。
-  `<60s` K 从 tick 本地合成，`>60s` 仅允许 `N × 60s`，由 `tqsdk-task` 从已关闭分钟线聚合；
-  `61s` / `90s` 会拒绝，facade 不读取或写入 native higher-period `HistorySeriesCache` K 线
-- facade 对 `KQ.m@...` 的 tick 仍使用 `DataClient::query_his_cont_underlying_segments(...)`
-  把 physical tick cache 映射到 dated underlying。minute cache 则始终以 logical symbol 为 key，
-  不复制 physical minute files
+  `<60s` K 从 tick 按 session 本地合成，`>60s` 仅允许 `N × 60s`，由 `tqsdk-data` 从已关闭分钟线
+  按固定 CST `18:00` trading-day grid 聚合；盘中 break 不重置 bucket。`61s` / `90s` 会拒绝，
+  facade 不读取或写入 native higher-period `HistorySeriesCache` K 线
+- facade 对 `KQ.m@...` 的 tick 使用 data-owned persisted metadata sidecar 把 physical tick cache
+  映射到 dated underlying；CacheOnly 读取 sidecar，不访问网络。minute cache 始终以 logical symbol
+  为 key，不复制 physical minute files
 - `MinuteKlineCache::fast_inventory()` 不解码月文件、也不创建缺失 root；`diagnose()` 以只读方式
   深检每个月文件，区分 readable v4、legacy v3、unsupported version 和 corruption。这些是 data
   layer 的 typed operator API，不会迁移、修复或删除缓存

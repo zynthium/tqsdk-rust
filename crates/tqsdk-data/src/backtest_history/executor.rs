@@ -1054,7 +1054,6 @@ mod tests {
     use tqsdk_core::{Kline, Tick};
 
     use super::super::{BacktestHistoryClient, BacktestHistoryPolicy, BacktestHistoryRequest};
-    use super::*;
     use crate::{
         BacktestTickCache, MinuteKlineCache, MinuteKlineCacheSnapshot,
         backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,

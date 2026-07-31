@@ -106,13 +106,13 @@ V1 是：
   - Python-style `.backtest(start_ns, end_ns)` 统一回测入口：默认使用 `tqsdk-data`
     共享 history cache root（`$HOME/.tqsdk/data_series_1`，可用
     `TQSDK_HISTORY_CACHE_DIR` 覆盖）；默认 `RemoteOnMiss` 先复用本地 TQBN daily
-    tick cache 与独立 canonical final-60s monthly cache，缺失时通过官方 server-side backtest
-    stream 填充对应输入并驱动本地 `TqSim`。minute cache 使用 v4 文件身份，只有远端 terminal
-    成功后才提交 final coverage；`KQ.m@...` 主连先由
-    `tqsdk-data` 的历史 segment query 解析为 dated concrete-contract tick ranges，
-    因而与具体合约共用物理 cache、coverage 和远端补缺请求；主连 mapping 本身不需 auth，
-    但 cache-only 主连路径仍需公开 metadata service；具体合约 cache hit 不需要 auth，
-    cache fill 不使用专业历史下载接口；显式 `.disabled_cache()` 才使用官方
+    tick cache 与独立 canonical final-60s monthly cache，缺失时由 `tqsdk-data`
+    `BacktestHistoryClient` 通过官方 server-side backtest stream 填充对应输入并驱动本地 `TqSim`。
+    minute cache 使用 v4 文件身份，只有远端 terminal 成功后才提交 final coverage；`KQ.m@...`
+    使用 data 持久化的 calendar/session/physical-segment metadata sidecar 解析为 dated
+    concrete-contract tick ranges，因而与具体合约共用物理 cache、coverage 和远端补缺请求。
+    `RemoteOnMiss` 只在 sidecar 缺失或不覆盖窗口时刷新；CacheOnly 必须已有 sidecar 且完全离线。
+    具体合约 cache hit 不需要 auth，cache fill 不使用专业历史下载接口；显式 `.disabled_cache()` 才使用官方
   server-side backtest market stream 且不落盘
 - `PreparedBacktest::tick_sources()` 只读暴露上述 logical-to-physical 投影及各自有效区间，
   供调用方自有多资产回放器并行读取；跨品种 barrier、截面调度和策略状态不下沉到 facade
@@ -121,8 +121,9 @@ V1 是：
     走普通 final warmup 全日重对账
   - cache-backed backtest 的显式 `.tick(...)` / `.kline(...)` serial 声明使用同一套
     本地 replay runtime：`<60s` 的 K 线从 tick cache 本地合成，`60s` 从 canonical minute
-    cache 读取，`>60s` 仅允许 `N × 60s` 并由 task 从 closed minutes 本地聚合；`61s` / `90s`
-    拒绝，且 K-only `>=60s` 不请求 tick。K 线 quote synthesis 的 price tick / instrument
+    cache 读取，`>60s` 仅允许 `N × 60s` 并由 data 查询按固定 CST `18:00` trading-day grid 聚合、
+    task 回放已关闭分钟事件；盘中 break 不重置高周期 bucket。`61s` / `90s` 拒绝，且 K-only
+    `>=60s` 不请求 tick。K 线 quote synthesis 的 price tick / instrument
     spec 由 facade 显式 builder metadata 转发，不自动联网查询
   - `.universe(...)`、`quotes_universe(...)` 和 `MarketCachePolicy::record_universe(...)`
     复用 relay 对齐的期货 universe selector 语法，支持全品种回测、实时订阅和 live/cache policy
@@ -136,6 +137,10 @@ V1 是：
     CST 交易日窗口裁剪并以具体合约缓存；同一物理 range 会合并，避免主连与具体合约重复回填
   - 主连 minute cache 以逻辑 symbol 为 key；dated physical mapping 仅进入 replay
     `underlying_symbol` metadata。`60s` 与整数分钟高周期均支持，不复制 physical minute files
+  - cache-backed local backtest 暂限 futures；股票 server-backtest 保留 `.disabled_cache()` 的官方
+    直连路径，不能误用 futures-only durable fill source
+  - tick 和 canonical 60s 分区没有自动 retention、max-byte eviction 或后台清理；派生 K 不落盘，
+    destructive refresh/purge 必须显式调用
   - 本地 `TqSim` 可基于 replay quote 的 `underlying_symbol` 将主连等 replay symbol 订单映射到 actual underlying symbol 执行，并把持仓镜像回 replay symbol
   - `advanced::*` 作为 curated escape hatch 下钻到 core/session/wait/task/data
   - 不改变能力归属，不拥有第二套 runtime、状态树或 query/task/data 实现
@@ -199,6 +204,8 @@ V1 是：
 - `tqsdk-data`
   - research/offline data crate
   - `DataClient`
+  - `BacktestHistoryClient`：metadata sidecar、source planner、single-flight official fill、
+    bounded async scan、Tick/60s aggregation 与 query terminal report 的唯一 owner
   - `query_his_cont_quotes`
   - `query_his_cont_underlyings`
   - `query_his_cont_underlying_segments`

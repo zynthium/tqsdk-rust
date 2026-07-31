@@ -160,5 +160,6 @@ rtk cargo run -p tqsdk-cache -- --help
 ```
 
 真实 fill 只在用户明确授权、使用已注入的凭证且选择历史 closed window 时运行。对少量指数合约的
-验收应同时检查 local canonical 60s 聚合出的高周期 K 与官方 server-side backtest Kline，比较
-bucket 边界、OHLC、volume 和 open interest，并只记录汇总差异或少量样本，不记录凭证。
+验收应同时检查 local canonical 60s 聚合出的高周期 K 与官方 server-side backtest Kline，比较固定
+CST `18:00` trading-day bucket、盘中 break 不重置和可跨 gap 的行为、OHLC、volume 和 open interest，
+并只记录汇总差异或少量样本，不记录凭证。

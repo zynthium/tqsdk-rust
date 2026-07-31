@@ -54,8 +54,9 @@ minute 缓存当前的 format id 是 `tqsdk.minute-kline.monthly.v4`，schema/fi
 `logical symbol × trading month` 分区。目录名有意保持 `minute-kline-v3`：旧 v3 文件不自动迁移、
 覆盖、删除或当作命中；coverage/read fail closed，deep doctor 将其分类为 `legacy_unsupported`。
 
-本地 replay 的周期合同不变：`<60s` 从 tick cache 合成，`60s` 从 canonical minute cache 读取，
-`>60s` 只允许 `N × 60s` 并从 closed 60s K 本地聚合；`61s`、`90s` 等拒绝。K-only `>=60s`
+本地 replay 的周期合同不变：`<60s` 从 tick cache 按 session 合成，`60s` 从 canonical minute cache
+读取，`>60s` 只允许 `N × 60s` 并从 closed 60s K 按固定 CST `18:00` trading-day grid 本地聚合；
+盘中 break 不重置高周期 bucket，且 break 内不虚构 60s row。`61s`、`90s` 等拒绝。K-only `>=60s`
 不会隐式补 tick。
 
 ## 各命令的读写语义
@@ -131,5 +132,6 @@ rtk cargo test -p tqsdk --lib
 
 真实验收只在用户授权、凭证已注入且使用 historical closed window 时进行。用少量指数合约填充
 canonical 60s cache 后，比较 local closed-minute 聚合的 5m/15m K 与同窗口 official server-side
-backtest Kline：检查 bucket/session 边界、OHLC、volume 与 open interest，记录 mismatch 数和少量
+backtest Kline：检查固定 CST `18:00` trading-day bucket、跨盘中 break 行为、OHLC、volume 与 open
+interest，记录 mismatch 数和少量
 脱敏样本即可。详情见 [validation.md](validation.md)。

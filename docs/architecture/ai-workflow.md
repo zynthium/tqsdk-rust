@@ -186,8 +186,9 @@ tqsdk
 - 任务层维护业务执行状态，既不是协议 substrate，也不是通用消费 facade。
 - 它可以依赖 `tqsdk-wait` 的稳定截面语义，但不得反向要求 core 改写提交模型。
 - 它拥有 `replay::ReplayMarketEvent` / `replay::ReplayMarketSource` 这类 deterministic replay
-  输入类型，并可通过 builder 接收 `tqsdk-data` 的 history series rows。不得把
-  JSONL cache storage 下沉进 data public surface，也不得把 strategy execution
+  输入类型，并可消费 `tqsdk-data` 已完成查询的 history rows。data 负责 source selection 和
+  K 线聚合；task 只负责把行转换为时间有序 replay/backtest event，不能复制缓存、远端 fill 或
+  聚合器。不得把 JSONL cache storage 下沉进 data public surface，也不得把 strategy execution
   下沉进 data。
 - 它可以在 task/data 上层组合 `backtest::StrategyBacktest + sim::TqSim`，提供 Python-compatible
   本地回测模拟账户能力；这不允许反向改变 core/session/wait 的职责边界。
@@ -207,13 +208,19 @@ tqsdk
 - TQBN daily v2 (`.tqbn`) 当前默认和 canonical 格式，按交易日分区存储
 - TQBN market-data block 的 crate-internal 时间索引与范围读取；旧/不匹配索引必须逐 block 回退
 - TQBN final coverage 与 open-day provisional checkpoint；后者只用于增量恢复，不得进入普通
-  coverage/cache-hit，final 覆盖后由 compaction 淘汰
+  coverage/cache-hit，物理淘汰仅由显式 maintenance/compaction 触发
 - 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store
 - `LiveTickCacheWriter` 只作为纯数据层 writer，接收已解码 tick rows 并写入共享回测缓存；
   它可以做有界行缓冲和显式 `flush()`，但 live 订阅、`wait_update()` 驱动、timer task 和后台进程
   不属于 `tqsdk-data`
 - history page/series/download/export
 - Greeks、历史主连等研究派生能力
+- `BacktestHistoryClient`：持久 metadata sidecar、请求 planner、official server-backtest
+  fill/single-flight、bounded async cache scan 与 Tick/60s 派生 K 线查询。它是回测数据路径的
+  唯一 cache/fill owner；`tqsdk-wait` 不参与 data fill，`tqsdk-task` 不拥有 durable partition
+- durable source 固定为 Tick daily TQBN、`<60s` 从 Tick 按 session 临时聚合、canonical 60s monthly、
+  `N × 60s` 从 canonical minutes 按固定 CST `18:00` trading-day grid 临时聚合。盘中 break 不重置
+  高周期 bucket；Tick/60s 分区没有自动清理，派生 K 不落盘
 
 设计原因：
 

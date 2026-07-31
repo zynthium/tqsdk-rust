@@ -3,7 +3,7 @@ mod fixed;
 mod format;
 mod metadata;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -65,6 +65,19 @@ const TQBN_COVERAGE_INDEX_PAYLOAD_LEN: usize = 40;
 const TQBN_RECORDS_INDEX_MAGIC: [u8; 4] = *b"TQRI";
 const TQBN_RECORDS_INDEX_VERSION: u8 = 1;
 const TQBN_RECORDS_INDEX_PAYLOAD_LEN: usize = 32;
+const TQBN_TICK_LEGACY_TIMESTAMP_SKEW_NS: i64 = 1_000;
+const TQBN_TICK_LEGACY_SAME_ID_TIMESTAMP_SKEW_NS: i64 = 20_000_000;
+// The residual legacy-page replays observed in the six-month oracle cache
+// have identical payloads up to 995ms apart. This wider window is only used
+// with both a later physical payload write and a later physical same-id row
+// whose market time is earlier, so normal in-order static quotes remain rows.
+const TQBN_TICK_LEGACY_CORROBORATED_PAYLOAD_SKEW_NS: i64 = 1_000_000_000;
+// Legacy cache fills can rebase server-local ids across one 10,000-row page.
+// Observed microsecond payload replays have a same-id counterpart up to just
+// under eight minutes away. This remains only one half of the replay predicate: a
+// directionally corroborating full-payload replay must independently identify
+// the stale physical write before a persisted row is skipped on read.
+const TQBN_TICK_LEGACY_ID_REPLAY_SKEW_NS: i64 = 10 * 60 * 1_000_000_000;
 
 #[derive(Debug, Clone)]
 pub(super) struct TqbnHistoryStore {
@@ -143,7 +156,9 @@ impl Drop for TqbnStreamingPartition {
 struct TqbnStreamingBlockPlan {
     descriptor: TqbnBlockDescriptor,
     first_id: i64,
+    last_id: i64,
     block_order: u64,
+    tick_datetime_range: Option<(i64, i64)>,
 }
 
 struct TqbnStreamingBlockCursor {
@@ -156,8 +171,87 @@ struct TqbnStreamingBlockCursor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TqbnStreamingBlockScan {
     Empty,
-    StrictlyIncreasing { first_id: i64 },
+    StrictlyIncreasing {
+        first_id: i64,
+        last_id: i64,
+        tick_datetime_range: Option<(i64, i64)>,
+    },
     NonIncreasing,
+}
+
+/// Identifies the market-data content of a Tick independently of its
+/// server-session-local row id and timestamp.
+///
+/// Server backtest sessions can replay the same Tick under different ids when
+/// overlapping cache fills are appended. Old cache writers can also preserve
+/// an otherwise identical snapshot at a shifted timestamp before a corrected
+/// snapshot is appended. Keep every persisted record, but canonicalize only
+/// demonstrated legacy replays on read and explicit compaction.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TickPayloadKey {
+    last_price: u64,
+    average: u64,
+    highest: u64,
+    lowest: u64,
+    ask_price1: u64,
+    ask_volume1: i64,
+    bid_price1: u64,
+    bid_volume1: i64,
+    ask_price2: u64,
+    ask_volume2: i64,
+    bid_price2: u64,
+    bid_volume2: i64,
+    ask_price3: u64,
+    ask_volume3: i64,
+    bid_price3: u64,
+    bid_volume3: i64,
+    ask_price4: u64,
+    ask_volume4: i64,
+    bid_price4: u64,
+    bid_volume4: i64,
+    ask_price5: u64,
+    ask_volume5: i64,
+    bid_price5: u64,
+    bid_volume5: i64,
+    volume: i64,
+    amount: u64,
+    open_interest: i64,
+    epoch: Option<i64>,
+}
+
+impl TickPayloadKey {
+    fn from_tick(row: &Tick) -> Self {
+        Self {
+            last_price: row.last_price.to_bits(),
+            average: row.average.to_bits(),
+            highest: row.highest.to_bits(),
+            lowest: row.lowest.to_bits(),
+            ask_price1: row.ask_price1.to_bits(),
+            ask_volume1: row.ask_volume1,
+            bid_price1: row.bid_price1.to_bits(),
+            bid_volume1: row.bid_volume1,
+            ask_price2: row.ask_price2.to_bits(),
+            ask_volume2: row.ask_volume2,
+            bid_price2: row.bid_price2.to_bits(),
+            bid_volume2: row.bid_volume2,
+            ask_price3: row.ask_price3.to_bits(),
+            ask_volume3: row.ask_volume3,
+            bid_price3: row.bid_price3.to_bits(),
+            bid_volume3: row.bid_volume3,
+            ask_price4: row.ask_price4.to_bits(),
+            ask_volume4: row.ask_volume4,
+            bid_price4: row.bid_price4.to_bits(),
+            bid_volume4: row.bid_volume4,
+            ask_price5: row.ask_price5.to_bits(),
+            ask_volume5: row.ask_volume5,
+            bid_price5: row.bid_price5.to_bits(),
+            bid_volume5: row.bid_volume5,
+            volume: row.volume,
+            amount: row.amount.to_bits(),
+            open_interest: row.open_interest,
+            epoch: row.epoch,
+        }
+    }
 }
 
 enum PreparedTqbnPartition {
@@ -1743,19 +1837,45 @@ fn plan_tqbn_streaming_blocks(
         &mut next_block_offset,
     )? {
         read_decoded_tqbn_block_payload_into(file, descriptor, spare_records)?;
-        let first_id =
+        let (first_id, last_id, tick_datetime_range) =
             match scan_tqbn_streaming_block(spare_records, kind, range_start_ns, range_end_ns)? {
                 TqbnStreamingBlockScan::Empty => continue,
-                TqbnStreamingBlockScan::StrictlyIncreasing { first_id } => first_id,
+                TqbnStreamingBlockScan::StrictlyIncreasing {
+                    first_id,
+                    last_id,
+                    tick_datetime_range,
+                } => (first_id, last_id, tick_datetime_range),
                 TqbnStreamingBlockScan::NonIncreasing => return Ok(None),
             };
         blocks.push(TqbnStreamingBlockPlan {
             descriptor,
             first_id,
+            last_id,
             block_order: descriptor.payload_offset,
+            tick_datetime_range,
         });
     }
     blocks.sort_unstable_by_key(|block| (block.first_id, block.block_order));
+    if kind == HistorySeriesKind::Tick {
+        let mut previous_last_id = None;
+        let mut previous_last_datetime_ns = None;
+        for block in &blocks {
+            if previous_last_id.is_some_and(|previous| block.first_id <= previous) {
+                // An overlapping id range can contain a legacy replay whose
+                // timestamp was shifted into a later otherwise-disjoint
+                // block. Stream merging cannot apply payload canonicalization.
+                return Ok(None);
+            }
+            let Some((first_datetime_ns, last_datetime_ns)) = block.tick_datetime_range else {
+                return Ok(None);
+            };
+            if previous_last_datetime_ns.is_some_and(|previous| first_datetime_ns <= previous) {
+                return Ok(None);
+            }
+            previous_last_id = Some(block.last_id);
+            previous_last_datetime_ns = Some(last_datetime_ns);
+        }
+    }
     Ok(Some(blocks))
 }
 
@@ -1767,6 +1887,8 @@ fn scan_tqbn_streaming_block(
 ) -> Result<TqbnStreamingBlockScan> {
     let mut first_id = None;
     let mut previous_id = None;
+    let mut first_tick_datetime_ns = None;
+    let mut previous_tick_datetime_ns = None;
     while !records.is_empty() {
         let decoded = decode_one_record(records)?;
         let (row, record_size) = decode_history_row_record(decoded, kind)?;
@@ -1782,12 +1904,42 @@ fn scan_tqbn_streaming_block(
         if previous_id.is_some_and(|previous_id| row_id <= previous_id) {
             return Ok(TqbnStreamingBlockScan::NonIncreasing);
         }
+        if kind == HistorySeriesKind::Tick {
+            let HistorySeriesRow::Tick(row) = &row else {
+                return Ok(TqbnStreamingBlockScan::NonIncreasing);
+            };
+            if previous_tick_datetime_ns
+                .is_some_and(|previous_datetime_ns| row.datetime <= previous_datetime_ns)
+            {
+                return Ok(TqbnStreamingBlockScan::NonIncreasing);
+            }
+            first_tick_datetime_ns.get_or_insert(row.datetime);
+            previous_tick_datetime_ns = Some(row.datetime);
+        }
         first_id.get_or_insert(row_id);
         previous_id = Some(row_id);
     }
-    Ok(first_id.map_or(TqbnStreamingBlockScan::Empty, |first_id| {
-        TqbnStreamingBlockScan::StrictlyIncreasing { first_id }
-    }))
+    let Some(first_id) = first_id else {
+        return Ok(TqbnStreamingBlockScan::Empty);
+    };
+    let last_id = previous_id.ok_or(DataError::InvalidState(
+        "TQBN streaming block lost its final row id",
+    ))?;
+    let tick_datetime_range = if kind == HistorySeriesKind::Tick {
+        let (Some(first_datetime_ns), Some(last_datetime_ns)) =
+            (first_tick_datetime_ns, previous_tick_datetime_ns)
+        else {
+            return Ok(TqbnStreamingBlockScan::NonIncreasing);
+        };
+        Some((first_datetime_ns, last_datetime_ns))
+    } else {
+        None
+    };
+    Ok(TqbnStreamingBlockScan::StrictlyIncreasing {
+        first_id,
+        last_id,
+        tick_datetime_range,
+    })
 }
 
 fn parse_tqbn_rows_for_range(
@@ -2792,18 +2944,15 @@ fn rows_for_request(
             }
             by_id.into_values().map(HistorySeriesRow::Kline).collect()
         }
-        HistorySeriesKind::Tick => {
-            let mut by_id = BTreeMap::new();
-            for row in rows {
-                if let HistorySeriesRow::Tick(row) = row
-                    && row.datetime >= range_start_ns
-                    && row.datetime < range_end_ns
-                {
-                    by_id.insert(row.id, row);
-                }
-            }
-            by_id.into_values().map(HistorySeriesRow::Tick).collect()
-        }
+        HistorySeriesKind::Tick => canonicalize_tick_rows(rows.into_iter().filter_map(|row| {
+            let HistorySeriesRow::Tick(row) = row else {
+                return None;
+            };
+            (row.datetime >= range_start_ns && row.datetime < range_end_ns).then_some(row)
+        }))
+        .into_iter()
+        .map(HistorySeriesRow::Tick)
+        .collect(),
     }
 }
 
@@ -2812,6 +2961,7 @@ fn history_rows_are_strictly_increasing(
     kind: HistorySeriesKind,
 ) -> bool {
     let mut previous_id = None;
+    let mut previous_tick_datetime_ns = None;
     for row in rows {
         let Some(row_id) = history_row_id(row, kind) else {
             return false;
@@ -2819,9 +2969,366 @@ fn history_rows_are_strictly_increasing(
         if previous_id.is_some_and(|previous_id| row_id <= previous_id) {
             return false;
         }
+        if kind == HistorySeriesKind::Tick {
+            let HistorySeriesRow::Tick(row) = row else {
+                return false;
+            };
+            if previous_tick_datetime_ns
+                .is_some_and(|previous_datetime_ns| row.datetime <= previous_datetime_ns)
+            {
+                return false;
+            }
+            previous_tick_datetime_ns = Some(row.datetime);
+        }
         previous_id = Some(row_id);
     }
     true
+}
+
+fn canonicalize_tick_rows(rows: impl IntoIterator<Item = Tick>) -> Vec<Tick> {
+    // A server-backtest Tick id is only stable within one chart session. Keep
+    // ids that recur at different timestamps, but retain last-write semantics
+    // for a true duplicate (id, datetime) record from the same session.
+    let mut by_id_and_datetime = BTreeMap::<(i64, i64), (usize, Tick)>::new();
+    for (write_order, row) in rows.into_iter().enumerate() {
+        by_id_and_datetime.insert((row.id, row.datetime), (write_order, row));
+    }
+
+    let mut rows_by_write_order = by_id_and_datetime.into_values().collect::<Vec<_>>();
+    rows_by_write_order.sort_unstable_by_key(|(write_order, _)| *write_order);
+
+    let mut rows_by_payload_then_time = rows_by_write_order
+        .into_iter()
+        .map(|(write_order, row)| {
+            (
+                TickPayloadKey::from_tick(&row),
+                row.datetime,
+                write_order,
+                row,
+            )
+        })
+        .collect::<Vec<_>>();
+    rows_by_payload_then_time.sort_unstable_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+
+    // A legacy writer can replay a snapshot with the next id at the next
+    // 500ms source cadence. Only classify a row as stale when this id replay
+    // and a nearby full-payload replay corroborate one another.
+    let mut replay_candidates_by_id = rows_by_payload_then_time
+        .iter()
+        .map(|(_, datetime, write_order, row)| (row.id, *datetime, *write_order))
+        .collect::<Vec<_>>();
+    replay_candidates_by_id.sort_unstable();
+    let mut same_id_replay_orders = BTreeSet::new();
+    for pair in replay_candidates_by_id.windows(2) {
+        let [
+            (left_id, left_datetime, left_write_order),
+            (right_id, right_datetime, right_write_order),
+        ] = pair
+        else {
+            continue;
+        };
+        if left_id == right_id
+            && right_datetime.saturating_sub(*left_datetime) <= TQBN_TICK_LEGACY_ID_REPLAY_SKEW_NS
+        {
+            // A valid corrected block can reuse an id from an older block, so
+            // this only records a candidate pair. The payload replay below
+            // supplies the direction and identifies the older stale write.
+            same_id_replay_orders.insert(*left_write_order);
+            same_id_replay_orders.insert(*right_write_order);
+        }
+    }
+    let mut payload_replay_with_later_write_orders = BTreeSet::new();
+    let mut stale_out_of_order_payload_orders = BTreeSet::new();
+    for pair in rows_by_payload_then_time.windows(2) {
+        let [
+            (left_payload, left_datetime, left_write_order, left_row),
+            (right_payload, right_datetime, right_write_order, right_row),
+        ] = pair
+        else {
+            continue;
+        };
+        if left_payload != right_payload {
+            continue;
+        }
+        let timestamp_delta_ns = right_datetime.saturating_sub(*left_datetime);
+        if timestamp_delta_ns == 0 {
+            stale_out_of_order_payload_orders.insert((*left_write_order).min(*right_write_order));
+        } else if timestamp_delta_ns <= TQBN_TICK_LEGACY_SAME_ID_TIMESTAMP_SKEW_NS
+            && left_row.id == right_row.id
+        {
+            // A legacy writer can append the same server id and full snapshot
+            // up to twenty milliseconds later. The later physical write is the
+            // repaired row; this does not apply to legal different-id repeats.
+            stale_out_of_order_payload_orders.insert((*left_write_order).min(*right_write_order));
+        } else if timestamp_delta_ns <= TQBN_TICK_LEGACY_TIMESTAMP_SKEW_NS
+            && left_write_order > right_write_order
+        {
+            stale_out_of_order_payload_orders.insert(*right_write_order);
+        }
+        if left_row.id != right_row.id {
+            let stale_order = if timestamp_delta_ns <= TQBN_TICK_LEGACY_TIMESTAMP_SKEW_NS {
+                // The legacy writer preserved a snapshot at its original
+                // timestamp and the corrected append replayed it one
+                // microsecond later under another id.
+                Some((*left_write_order).min(*right_write_order))
+            } else if timestamp_delta_ns <= TQBN_TICK_LEGACY_ID_REPLAY_SKEW_NS
+                && left_write_order > right_write_order
+            {
+                // A shifted legacy record can also appear later in market
+                // time but earlier in physical write order than the corrected
+                // snapshot. An in-order 500ms repeat is a legal unchanged
+                // quote and intentionally does not satisfy this branch.
+                Some(*right_write_order)
+            } else {
+                None
+            };
+            if let Some(stale_order) = stale_order {
+                // In a corroborated same-id collision, only the physical
+                // write identified above may be obsolete. Marking both sides
+                // would discard the valid later block when its ids overlap
+                // the legacy block's tail.
+                payload_replay_with_later_write_orders.insert(stale_order);
+            }
+        }
+    }
+    let mut stale_replay_orders = same_id_replay_orders
+        .intersection(&payload_replay_with_later_write_orders)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    stale_replay_orders.extend(stale_out_of_order_payload_orders);
+
+    // A second observed direction has the old physical row slightly before
+    // the corrected payload in market time. The generic predicate above must
+    // not widen to this case: an unchanged quote can legitimately recur in
+    // order. Require two directional witnesses instead: the payload peer was
+    // appended later, and the same id's different payload was also appended
+    // later but belongs to an earlier market timestamp.
+    let mut rows_by_id = BTreeMap::<i64, Vec<(i64, usize, TickPayloadKey)>>::new();
+    for (payload, datetime, write_order, row) in &rows_by_payload_then_time {
+        rows_by_id
+            .entry(row.id)
+            .or_default()
+            .push((*datetime, *write_order, payload.clone()));
+    }
+    for pair in rows_by_payload_then_time.windows(2) {
+        let [
+            (left_payload, left_datetime, left_write_order, left_row),
+            (right_payload, right_datetime, right_write_order, right_row),
+        ] = pair
+        else {
+            continue;
+        };
+        if left_payload != right_payload
+            || right_datetime.saturating_sub(*left_datetime)
+                > TQBN_TICK_LEGACY_CORROBORATED_PAYLOAD_SKEW_NS
+        {
+            continue;
+        }
+        let (
+            candidate_payload,
+            candidate_datetime,
+            candidate_write_order,
+            candidate_row,
+            payload_peer_row,
+        ) = if left_write_order < right_write_order {
+            (
+                left_payload,
+                left_datetime,
+                left_write_order,
+                left_row,
+                right_row,
+            )
+        } else {
+            (
+                right_payload,
+                right_datetime,
+                right_write_order,
+                right_row,
+                left_row,
+            )
+        };
+        if candidate_row.id == payload_peer_row.id {
+            continue;
+        }
+        let has_later_earlier_same_id = rows_by_id.get(&candidate_row.id).is_some_and(|id_rows| {
+            id_rows
+                .iter()
+                .any(|(peer_datetime, peer_write_order, peer_payload)| {
+                    *peer_write_order > *candidate_write_order
+                        && *peer_datetime < *candidate_datetime
+                        && (*candidate_datetime).saturating_sub(*peer_datetime)
+                            <= TQBN_TICK_LEGACY_ID_REPLAY_SKEW_NS
+                        && peer_payload != candidate_payload
+                })
+        });
+        if has_later_earlier_same_id {
+            stale_replay_orders.insert(*candidate_write_order);
+        }
+    }
+
+    // A corrected page can differ from the old page at its beginning (for
+    // example after the server repairs the opening low/volume), while the
+    // remaining page rows are byte-for-byte payload replays. Do not choose a
+    // global last write for same-timestamp rows: instead, use two already
+    // proven stale rows as an anchor and extend only the *leading contiguous
+    // page block* whose rows each have a later same-timestamp peer.
+    let confirmed_stale_orders = stale_replay_orders.clone();
+    let mut rows_by_write_order = rows_by_payload_then_time
+        .iter()
+        .map(|(_, datetime, write_order, row)| (*write_order, *datetime, row.id))
+        .collect::<Vec<_>>();
+    rows_by_write_order.sort_unstable_by_key(|(write_order, _, _)| *write_order);
+    let mut write_orders_by_datetime = BTreeMap::<i64, Vec<usize>>::new();
+    for (write_order, datetime, _) in &rows_by_write_order {
+        write_orders_by_datetime
+            .entry(*datetime)
+            .or_default()
+            .push(*write_order);
+    }
+    let mut same_timestamp_overlay_orders = BTreeSet::new();
+    for mut write_orders in write_orders_by_datetime.into_values() {
+        write_orders.sort_unstable();
+        let old_overlay_rows = write_orders.len().saturating_sub(1);
+        same_timestamp_overlay_orders.extend(write_orders.into_iter().take(old_overlay_rows));
+    }
+
+    // The corrected page can omit one old source row altogether. It is safe
+    // to recover that single in-page gap only when both immediate neighbours
+    // are independently payload-confirmed overlays; this is not a generic
+    // deletion of a row merely because its timestamp looks unusual.
+    for window in rows_by_write_order.windows(3) {
+        let [
+            (first_order, first_datetime, first_id),
+            (second_order, second_datetime, second_id),
+            (third_order, third_datetime, third_id),
+        ] = window
+        else {
+            continue;
+        };
+        if confirmed_stale_orders.contains(first_order)
+            && !stale_replay_orders.contains(second_order)
+            && confirmed_stale_orders.contains(third_order)
+            && same_timestamp_overlay_orders.contains(first_order)
+            && same_timestamp_overlay_orders.contains(third_order)
+            && *second_order == first_order.saturating_add(1)
+            && *third_order == second_order.saturating_add(1)
+            && *second_id == first_id.saturating_add(1)
+            && *third_id == second_id.saturating_add(1)
+            && *first_datetime < *second_datetime
+            && *second_datetime < *third_datetime
+            && second_datetime.saturating_sub(*first_datetime) <= TQBN_TICK_LEGACY_ID_REPLAY_SKEW_NS
+            && third_datetime.saturating_sub(*second_datetime) <= TQBN_TICK_LEGACY_ID_REPLAY_SKEW_NS
+        {
+            stale_replay_orders.insert(*second_order);
+        }
+    }
+
+    // An older page can begin one source tick before the first two rows whose
+    // payload replays independently prove that the page is obsolete. Preserve
+    // the narrow historical rule for that leading orphan: it needs two
+    // immutable stale witnesses, contiguous physical writes and ids, and a
+    // sub-legacy-window market-time progression. Unlike corrected overlays,
+    // this shape has no same-timestamp peer for its first row.
+    for window in rows_by_write_order.windows(3) {
+        let [
+            (first_order, first_datetime, first_id),
+            (second_order, second_datetime, second_id),
+            (third_order, third_datetime, third_id),
+        ] = window
+        else {
+            continue;
+        };
+        if !confirmed_stale_orders.contains(first_order)
+            && confirmed_stale_orders.contains(second_order)
+            && confirmed_stale_orders.contains(third_order)
+            && *second_order == first_order.saturating_add(1)
+            && *third_order == second_order.saturating_add(1)
+            && *second_id == first_id.saturating_add(1)
+            && *third_id == second_id.saturating_add(1)
+            && *first_datetime < *second_datetime
+            && *second_datetime <= *third_datetime
+            && second_datetime.saturating_sub(*first_datetime) <= TQBN_TICK_LEGACY_ID_REPLAY_SKEW_NS
+        {
+            stale_replay_orders.insert(*first_order);
+        }
+    }
+
+    // A corrected overlay can end one synthetic sub-microsecond Tick before
+    // its old page ends. Its two preceding rows are still independently
+    // confirmed by exact same-timestamp overlays; remove only this one
+    // contiguous page-tail orphan. Do not extend the rule to normal 500ms
+    // source cadence or use it as a recursive page deletion.
+    for window in rows_by_write_order.windows(3) {
+        let [
+            (first_order, first_datetime, first_id),
+            (second_order, second_datetime, second_id),
+            (third_order, third_datetime, third_id),
+        ] = window
+        else {
+            continue;
+        };
+        if confirmed_stale_orders.contains(first_order)
+            && confirmed_stale_orders.contains(second_order)
+            && !stale_replay_orders.contains(third_order)
+            && same_timestamp_overlay_orders.contains(first_order)
+            && same_timestamp_overlay_orders.contains(second_order)
+            && *second_order == first_order.saturating_add(1)
+            && *third_order == second_order.saturating_add(1)
+            && *second_id == first_id.saturating_add(1)
+            && *third_id == second_id.saturating_add(1)
+            && *first_datetime < *second_datetime
+            && *second_datetime < *third_datetime
+            && second_datetime.saturating_sub(*first_datetime) <= TQBN_TICK_LEGACY_TIMESTAMP_SKEW_NS
+            && third_datetime.saturating_sub(*second_datetime) <= TQBN_TICK_LEGACY_TIMESTAMP_SKEW_NS
+        {
+            stale_replay_orders.insert(*third_order);
+        }
+    }
+
+    let mut extended = true;
+    while extended {
+        extended = false;
+        for window in rows_by_write_order.windows(3).rev() {
+            let [
+                (first_order, first_datetime, first_id),
+                (second_order, second_datetime, second_id),
+                (third_order, third_datetime, third_id),
+            ] = window
+            else {
+                continue;
+            };
+            if stale_replay_orders.contains(first_order)
+                || !stale_replay_orders.contains(second_order)
+                || !stale_replay_orders.contains(third_order)
+                || !same_timestamp_overlay_orders.contains(first_order)
+                || *second_order != first_order.saturating_add(1)
+                || *third_order != second_order.saturating_add(1)
+                || *second_id != first_id.saturating_add(1)
+                || *third_id != second_id.saturating_add(1)
+                || *first_datetime >= *second_datetime
+                || *second_datetime > *third_datetime
+                || second_datetime.saturating_sub(*first_datetime)
+                    > TQBN_TICK_LEGACY_ID_REPLAY_SKEW_NS
+            {
+                continue;
+            }
+            extended = stale_replay_orders.insert(*first_order) || extended;
+        }
+    }
+
+    let mut rows = rows_by_payload_then_time
+        .into_iter()
+        .filter_map(|(_, _, write_order, row)| {
+            (!stale_replay_orders.contains(&write_order)).then_some(row)
+        })
+        .collect::<Vec<_>>();
+    rows.sort_unstable_by_key(|row| (row.datetime, row.id));
+    rows
 }
 
 fn history_row_id(row: &HistorySeriesRow, kind: HistorySeriesKind) -> Option<i64> {
@@ -3230,13 +3737,13 @@ fn compact_rows(rows: Vec<HistorySeriesRow>, kind: HistorySeriesKind) -> Vec<His
             by_id.into_values().map(HistorySeriesRow::Kline).collect()
         }
         HistorySeriesKind::Tick => {
-            let mut by_id = BTreeMap::new();
-            for row in rows {
-                if let HistorySeriesRow::Tick(row) = row {
-                    by_id.insert(row.id, row);
-                }
-            }
-            by_id.into_values().map(HistorySeriesRow::Tick).collect()
+            canonicalize_tick_rows(rows.into_iter().filter_map(|row| match row {
+                HistorySeriesRow::Tick(row) => Some(row),
+                HistorySeriesRow::Kline(_) => None,
+            }))
+            .into_iter()
+            .map(HistorySeriesRow::Tick)
+            .collect()
         }
     }
 }
@@ -4409,13 +4916,13 @@ mod tests {
         let first = reader.next_row().unwrap().unwrap();
         assert_eq!(history_row_id(&first, kind), Some(1));
         assert!(
-            reader.partition.is_some(),
-            "overlapping ordered blocks must stay on the streaming merge path"
+            reader.partition.is_none(),
+            "overlapping Tick blocks must materialize for payload canonicalization"
         );
         assert_eq!(
             reader.rows.len(),
-            0,
-            "streaming merge must not materialize future rows"
+            3,
+            "materialized Tick reads retain the remaining canonical rows"
         );
 
         let mut rows = vec![first];
@@ -4435,6 +4942,75 @@ mod tests {
         );
         assert_eq!(ticks[1].last_price, 628.6);
         assert_eq!(ticks[2].last_price, 628.7);
+    }
+
+    #[test]
+    fn tqbn_reader_materializes_nonoverlapping_id_replay_blocks_for_payload_canonicalization() {
+        let store = tqbn_store("reader_materializes_id_replay_blocks");
+        let kind = HistorySeriesKind::Tick;
+        let original = tick5(519, 1_500_000_000, 618.5, 623.5);
+        let corrected = tick5(523, 3_000_001_000, 628.5, 633.5);
+        let stale = Tick {
+            id: original.id,
+            datetime: 3_000_000_000,
+            ..corrected.clone()
+        };
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind,
+                declared_range_ns: None,
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&original)),
+            })
+            .unwrap();
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind,
+                declared_range_ns: None,
+                rows: HistorySeriesWriteRows::Ticks(&[stale, corrected.clone()]),
+            })
+            .unwrap();
+
+        let path = store.partition_series_path("19700101", SYMBOL, kind);
+        let mut reader = TqbnReader {
+            paths: vec![path],
+            path_index: 0,
+            symbol: SYMBOL.to_string(),
+            kind,
+            range_start_ns: 1_000_000_000,
+            range_end_ns: 4_000_000_000,
+            rows: Vec::new().into_iter(),
+            partition: None,
+            spare_records: Vec::new(),
+            read_only: false,
+        };
+
+        let first = reader.next_row().unwrap().unwrap();
+        assert!(
+            reader.partition.is_none(),
+            "id-replay Tick blocks must materialize for payload canonicalization"
+        );
+
+        let mut rows = vec![first];
+        while let Some(row) = reader.next_row().unwrap() {
+            rows.push(row);
+        }
+        let ticks = rows
+            .into_iter()
+            .map(|row| match row {
+                HistorySeriesRow::Tick(row) => row,
+                HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ticks.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![original.id, corrected.id]
+        );
+        assert_eq!(
+            ticks.iter().map(|row| row.datetime).collect::<Vec<_>>(),
+            vec![original.datetime, corrected.datetime]
+        );
     }
 
     #[test]
@@ -4525,14 +5101,14 @@ mod tests {
         };
 
         let first = reader.next_row().unwrap().unwrap();
-        assert_eq!(history_row_id(&first, kind), Some(1));
+        assert_eq!(history_row_id(&first, kind), Some(2));
         assert_eq!(
             reader.rows.len(),
             1,
-            "out-of-order partitions must retain materialized last-write-wins rows"
+            "out-of-order partitions must retain materialized time-ordered rows"
         );
         let second = reader.next_row().unwrap().unwrap();
-        assert_eq!(history_row_id(&second, kind), Some(2));
+        assert_eq!(history_row_id(&second, kind), Some(1));
         assert!(reader.next_row().unwrap().is_none());
     }
 
@@ -4560,6 +5136,910 @@ mod tests {
             vec![1, 2, 3]
         );
         assert_eq!(ticks[2].last_price, 618.7);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_canonicalizes_cross_session_duplicate_payloads() {
+        let kind = HistorySeriesKind::Tick;
+        let first = tick5(1, 1_000, 618.5, 623.5);
+        let later = tick5(2, 2_000, 618.6, 623.6);
+        let duplicate = Tick {
+            id: 3,
+            ..first.clone()
+        };
+        let rows = vec![
+            HistorySeriesRow::Tick(first),
+            HistorySeriesRow::Tick(later),
+            HistorySeriesRow::Tick(duplicate),
+        ];
+
+        let ticks = rows_for_request(rows, kind, 1_000, 3_000)
+            .into_iter()
+            .map(|row| match row {
+                HistorySeriesRow::Tick(row) => row,
+                HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 2);
+        assert_eq!(
+            ticks.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![3, 2]
+        );
+        assert_eq!(
+            ticks.iter().map(|row| row.datetime).collect::<Vec<_>>(),
+            vec![1_000, 2_000]
+        );
+    }
+
+    #[test]
+    fn tqbn_tick_reader_keeps_last_write_for_duplicate_id() {
+        let kind = HistorySeriesKind::Tick;
+        let first = tick5(7, 1_000, 618.5, 623.5);
+        let replacement = tick5(7, 1_000, 628.5, 633.5);
+
+        let ticks = rows_for_request(
+            vec![
+                HistorySeriesRow::Tick(first),
+                HistorySeriesRow::Tick(replacement.clone()),
+            ],
+            kind,
+            1_000,
+            2_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].id, replacement.id);
+        assert_eq!(ticks[0].last_price, replacement.last_price);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_preserves_session_local_id_reuse_at_distinct_timestamps() {
+        let kind = HistorySeriesKind::Tick;
+        let first = tick5(7, 1_000, 618.5, 623.5);
+        let later = tick5(7, 2_000, 628.5, 633.5);
+
+        let ticks = rows_for_request(
+            vec![
+                HistorySeriesRow::Tick(first.clone()),
+                HistorySeriesRow::Tick(later.clone()),
+            ],
+            kind,
+            1_000,
+            3_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 2);
+        assert_eq!(ticks[0].datetime, first.datetime);
+        assert_eq!(ticks[1].datetime, later.datetime);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_prefers_later_write_for_legacy_microsecond_timestamp_skew() {
+        let kind = HistorySeriesKind::Tick;
+        let legacy = tick5(7, 1_001_000, 618.5, 623.5);
+        let corrected = Tick {
+            id: 8,
+            datetime: 1_000_000,
+            ..legacy.clone()
+        };
+
+        let ticks = rows_for_request(
+            vec![
+                HistorySeriesRow::Tick(legacy),
+                HistorySeriesRow::Tick(corrected.clone()),
+            ],
+            kind,
+            1_000_000,
+            1_002_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].id, corrected.id);
+        assert_eq!(ticks[0].datetime, corrected.datetime);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_drops_legacy_subsecond_id_replay() {
+        let kind = HistorySeriesKind::Tick;
+        let original = tick5(7, 1_000_000_000, 618.5, 623.5);
+        let legacy_replay = Tick {
+            id: 9,
+            datetime: 1_500_000_000,
+            ..original.clone()
+        };
+        let corrected = tick5(9, 2_000_000_000, 628.5, 633.5);
+
+        let ticks = rows_for_request(
+            vec![
+                HistorySeriesRow::Tick(original.clone()),
+                HistorySeriesRow::Tick(legacy_replay),
+                HistorySeriesRow::Tick(original.clone()),
+                HistorySeriesRow::Tick(corrected.clone()),
+            ],
+            kind,
+            1_000_000_000,
+            3_000_000_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 2);
+        assert_eq!(ticks[0].id, original.id);
+        assert_eq!(ticks[0].datetime, original.datetime);
+        assert_eq!(ticks[1].id, corrected.id);
+        assert_eq!(ticks[1].datetime, corrected.datetime);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_drops_legacy_delayed_id_replay_with_microsecond_payload_replay() {
+        let kind = HistorySeriesKind::Tick;
+        let original = tick5(519, 1_500_000_000, 618.5, 623.5);
+        let corrected = tick5(523, 3_000_001_000, 628.5, 633.5);
+        let stale = Tick {
+            id: original.id,
+            datetime: 3_000_000_000,
+            ..corrected.clone()
+        };
+
+        let ticks = rows_for_request(
+            vec![
+                // An old physical block first wrote a shifted snapshot with
+                // the next id; a corrected block was appended afterwards.
+                HistorySeriesRow::Tick(stale),
+                HistorySeriesRow::Tick(original.clone()),
+                HistorySeriesRow::Tick(corrected.clone()),
+            ],
+            kind,
+            1_000_000_000,
+            4_000_000_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 2);
+        assert_eq!(ticks[0].id, original.id);
+        assert_eq!(ticks[0].datetime, original.datetime);
+        assert_eq!(ticks[1].id, corrected.id);
+        assert_eq!(ticks[1].datetime, corrected.datetime);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_drops_later_appended_delayed_id_replay_with_microsecond_payload_replay() {
+        let kind = HistorySeriesKind::Tick;
+        let original = tick5(519, 1_500_000_000, 618.5, 623.5);
+        let corrected = tick5(523, 3_000_001_000, 628.5, 633.5);
+        let stale = Tick {
+            id: original.id,
+            datetime: 3_000_000_000,
+            ..corrected.clone()
+        };
+
+        let ticks = rows_for_request(
+            vec![
+                // The good row was already persisted when a later append
+                // replayed this id with the corrected snapshot's payload.
+                HistorySeriesRow::Tick(original.clone()),
+                HistorySeriesRow::Tick(stale),
+                HistorySeriesRow::Tick(corrected.clone()),
+            ],
+            kind,
+            1_000_000_000,
+            4_000_000_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 2);
+        assert_eq!(ticks[0].id, original.id);
+        assert_eq!(ticks[0].datetime, original.datetime);
+        assert_eq!(ticks[1].id, corrected.id);
+        assert_eq!(ticks[1].datetime, corrected.datetime);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_drops_two_and_a_half_second_id_replay_with_microsecond_payload_replay() {
+        let kind = HistorySeriesKind::Tick;
+        let original = tick5(519, 500_000_000, 618.5, 623.5);
+        let corrected = tick5(523, 3_000_001_000, 628.5, 633.5);
+        let stale = Tick {
+            id: original.id,
+            datetime: 3_000_000_000,
+            ..corrected.clone()
+        };
+
+        let ticks = rows_for_request(
+            vec![
+                // This is the observed legacy append order: the valid row,
+                // then an old id replay, then the corrected payload replay.
+                HistorySeriesRow::Tick(original.clone()),
+                HistorySeriesRow::Tick(stale),
+                HistorySeriesRow::Tick(corrected.clone()),
+            ],
+            kind,
+            500_000_000,
+            4_000_000_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 2);
+        assert_eq!(ticks[0].id, original.id);
+        assert_eq!(ticks[0].datetime, original.datetime);
+        assert_eq!(ticks[1].id, corrected.id);
+        assert_eq!(ticks[1].datetime, corrected.datetime);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_drops_five_minute_id_replay_with_microsecond_payload_replay() {
+        let kind = HistorySeriesKind::Tick;
+        let original = tick5(719, 500_000_000, 618.5, 623.5);
+        let corrected = tick5(723, 300_500_001_000, 628.5, 633.5);
+        let stale = Tick {
+            id: original.id,
+            datetime: 300_500_000_000,
+            ..corrected.clone()
+        };
+
+        let ticks = rows_for_request(
+            vec![
+                HistorySeriesRow::Tick(original.clone()),
+                HistorySeriesRow::Tick(stale),
+                HistorySeriesRow::Tick(corrected.clone()),
+            ],
+            kind,
+            500_000_000,
+            301_000_000_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 2);
+        assert_eq!(ticks[0].id, original.id);
+        assert_eq!(ticks[0].datetime, original.datetime);
+        assert_eq!(ticks[1].id, corrected.id);
+        assert_eq!(ticks[1].datetime, corrected.datetime);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_preserves_in_order_half_second_payload_repeat_across_same_id_reuse() {
+        let kind = HistorySeriesKind::Tick;
+        let first = tick5(100, 1_000_000_000, 618.5, 623.5);
+        let unchanged = Tick {
+            id: 101,
+            datetime: 1_500_000_000,
+            ..first.clone()
+        };
+        let reused_id = tick5(100, 4_000_000_000, 628.5, 633.5);
+
+        let ticks = rows_for_request(
+            vec![
+                HistorySeriesRow::Tick(first.clone()),
+                HistorySeriesRow::Tick(unchanged.clone()),
+                HistorySeriesRow::Tick(reused_id.clone()),
+            ],
+            kind,
+            1_000_000_000,
+            5_000_000_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 3);
+        assert_eq!(ticks[0].id, first.id);
+        assert_eq!(ticks[1].id, unchanged.id);
+        assert_eq!(ticks[2].id, reused_id.id);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_drops_legacy_early_timestamp_id_replay_with_delayed_payload_replay() {
+        let kind = HistorySeriesKind::Tick;
+        let original = tick5(519, 1_500_000_000, 618.5, 623.5);
+        let corrected = tick5(523, 3_082_000_000, 628.5, 633.5);
+        let stale = Tick {
+            id: original.id,
+            datetime: 3_000_000_000,
+            ..corrected.clone()
+        };
+
+        let ticks = rows_for_request(
+            vec![
+                // An old physical block emitted the stale row first. The
+                // corrected block later reuses its id at an earlier market
+                // time and replays its payload 82ms later.
+                HistorySeriesRow::Tick(stale),
+                HistorySeriesRow::Tick(original.clone()),
+                HistorySeriesRow::Tick(corrected.clone()),
+            ],
+            kind,
+            1_000_000_000,
+            4_000_000_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 2);
+        assert_eq!(ticks[0].id, original.id);
+        assert_eq!(ticks[0].datetime, original.datetime);
+        assert_eq!(ticks[1].id, corrected.id);
+        assert_eq!(ticks[1].datetime, corrected.datetime);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_drops_legacy_early_timestamp_id_replay_with_near_second_payload_replay() {
+        let kind = HistorySeriesKind::Tick;
+        let original = tick5(719, 500_000_000, 618.5, 623.5);
+        let corrected = tick5(723, 3_995_000_000, 628.5, 633.5);
+        let stale = Tick {
+            id: original.id,
+            datetime: 3_000_000_000,
+            ..corrected.clone()
+        };
+
+        let ticks = rows_for_request(
+            vec![
+                HistorySeriesRow::Tick(stale),
+                HistorySeriesRow::Tick(original.clone()),
+                HistorySeriesRow::Tick(corrected.clone()),
+            ],
+            kind,
+            500_000_000,
+            4_000_000_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 2);
+        assert_eq!(ticks[0].id, original.id);
+        assert_eq!(ticks[1].id, corrected.id);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_preserves_in_order_eighty_ms_payload_repeat_across_same_id_reuse() {
+        let kind = HistorySeriesKind::Tick;
+        let first = tick5(100, 1_000_000_000, 618.5, 623.5);
+        let unchanged = Tick {
+            id: 101,
+            datetime: 1_082_000_000,
+            ..first.clone()
+        };
+        let reused_id = tick5(100, 4_000_000_000, 628.5, 633.5);
+
+        let ticks = rows_for_request(
+            vec![
+                HistorySeriesRow::Tick(first.clone()),
+                HistorySeriesRow::Tick(unchanged.clone()),
+                HistorySeriesRow::Tick(reused_id.clone()),
+            ],
+            kind,
+            1_000_000_000,
+            5_000_000_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 3);
+        assert_eq!(ticks[0].id, first.id);
+        assert_eq!(ticks[1].id, unchanged.id);
+        assert_eq!(ticks[2].id, reused_id.id);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_drops_leading_orphan_before_confirmed_legacy_block() {
+        let kind = HistorySeriesKind::Tick;
+        let orphan = tick5(10, 1_000_000_000, 610.0, 615.0);
+        let stale_first = tick5(11, 1_500_000_000, 618.5, 623.5);
+        let stale_second = tick5(12, 2_000_000_000, 628.5, 633.5);
+        let corrected_first = Tick {
+            id: 21,
+            ..stale_first.clone()
+        };
+        let corrected_second = Tick {
+            id: 22,
+            ..stale_second.clone()
+        };
+
+        let ticks = rows_for_request(
+            vec![
+                HistorySeriesRow::Tick(orphan),
+                HistorySeriesRow::Tick(stale_first),
+                HistorySeriesRow::Tick(stale_second),
+                HistorySeriesRow::Tick(corrected_first.clone()),
+                HistorySeriesRow::Tick(corrected_second.clone()),
+            ],
+            kind,
+            1_000_000_000,
+            3_000_000_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 2);
+        assert_eq!(ticks[0].id, corrected_first.id);
+        assert_eq!(ticks[1].id, corrected_second.id);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_drops_trailing_microsecond_orphan_after_confirmed_legacy_block() {
+        let kind = HistorySeriesKind::Tick;
+        let stale_first = tick5(100, 1_000_000_000, 618.5, 623.5);
+        let stale_second = tick5(101, 1_000_000_001, 628.5, 633.5);
+        let trailing_orphan = tick5(102, 1_000_000_002, 638.5, 643.5);
+        let corrected_first = Tick {
+            id: 200,
+            ..stale_first.clone()
+        };
+        let corrected_second = Tick {
+            id: 201,
+            ..stale_second.clone()
+        };
+
+        let ticks = rows_for_request(
+            vec![
+                HistorySeriesRow::Tick(stale_first),
+                HistorySeriesRow::Tick(stale_second),
+                HistorySeriesRow::Tick(trailing_orphan),
+                HistorySeriesRow::Tick(corrected_first.clone()),
+                HistorySeriesRow::Tick(corrected_second.clone()),
+            ],
+            kind,
+            1_000_000_000,
+            1_000_000_003,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 2);
+        assert_eq!(ticks[0].id, corrected_first.id);
+        assert_eq!(ticks[1].id, corrected_second.id);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_keeps_non_microsecond_successor_after_confirmed_legacy_block() {
+        let kind = HistorySeriesKind::Tick;
+        let stale_first = tick5(100, 1_000_000_000, 618.5, 623.5);
+        let stale_second = tick5(101, 1_500_000_000, 628.5, 633.5);
+        let successor = tick5(102, 2_000_000_000, 638.5, 643.5);
+        let corrected_first = Tick {
+            id: 200,
+            ..stale_first.clone()
+        };
+        let corrected_second = Tick {
+            id: 201,
+            ..stale_second.clone()
+        };
+
+        let ticks = rows_for_request(
+            vec![
+                HistorySeriesRow::Tick(stale_first),
+                HistorySeriesRow::Tick(stale_second),
+                HistorySeriesRow::Tick(successor.clone()),
+                HistorySeriesRow::Tick(corrected_first.clone()),
+                HistorySeriesRow::Tick(corrected_second.clone()),
+            ],
+            kind,
+            1_000_000_000,
+            2_500_000_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 3);
+        assert_eq!(ticks[0].id, corrected_first.id);
+        assert_eq!(ticks[1].id, corrected_second.id);
+        assert_eq!(ticks[2].id, successor.id);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_drops_later_page_replay_with_ten_minute_id_skew() {
+        let kind = HistorySeriesKind::Tick;
+        let historical = tick5(100, 130_500_000_000, 608.5, 613.5);
+        let stale = tick5(100, 600_000_000_000, 618.5, 623.5);
+        let corrected = Tick {
+            id: 200,
+            datetime: 600_023_000_000,
+            ..stale.clone()
+        };
+
+        let ticks = rows_for_request(
+            vec![
+                HistorySeriesRow::Tick(stale),
+                HistorySeriesRow::Tick(corrected.clone()),
+                HistorySeriesRow::Tick(historical.clone()),
+            ],
+            kind,
+            0,
+            601_000_000_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 2);
+        assert_eq!(ticks[0].id, historical.id);
+        assert_eq!(ticks[1].id, corrected.id);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_drops_leading_payload_corrected_overlay_block() {
+        let kind = HistorySeriesKind::Tick;
+        let old_rows = (0_i64..5)
+            .map(|index| {
+                tick5(
+                    100 + index,
+                    1_000_000_000 + index * 500_000_000,
+                    618.5 + index as f64,
+                    623.5 + index as f64,
+                )
+            })
+            .collect::<Vec<_>>();
+        let corrected_rows = old_rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| Tick {
+                id: row.id + 100,
+                // The first three rows are a genuine server correction; the
+                // final two retain their full payload and establish the page
+                // overlay as a corroborated replay.
+                last_price: if index < 3 {
+                    row.last_price - 10.0
+                } else {
+                    row.last_price
+                },
+                ..row.clone()
+            })
+            .collect::<Vec<_>>();
+
+        let ticks = rows_for_request(
+            old_rows
+                .iter()
+                .cloned()
+                .chain(corrected_rows.iter().cloned())
+                .map(HistorySeriesRow::Tick)
+                .collect(),
+            kind,
+            1_000_000_000,
+            4_000_000_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), corrected_rows.len());
+        for (actual, expected) in ticks.iter().zip(corrected_rows) {
+            assert_eq!(actual.id, expected.id);
+            assert_eq!(actual.datetime, expected.datetime);
+            assert_eq!(actual.last_price, expected.last_price);
+        }
+    }
+
+    #[test]
+    fn tqbn_tick_reader_drops_single_omitted_row_inside_confirmed_overlay_block() {
+        let kind = HistorySeriesKind::Tick;
+        let old_rows = (0_i64..5)
+            .map(|index| {
+                tick5(
+                    100 + index,
+                    1_000_000_000 + index * 500_000_000,
+                    618.5 + index as f64,
+                    623.5 + index as f64,
+                )
+            })
+            .collect::<Vec<_>>();
+        let corrected_rows = old_rows
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != 2)
+            .map(|(_, row)| Tick {
+                id: row.id + 100,
+                ..row.clone()
+            })
+            .collect::<Vec<_>>();
+
+        let ticks = rows_for_request(
+            old_rows
+                .iter()
+                .cloned()
+                .chain(corrected_rows.iter().cloned())
+                .map(HistorySeriesRow::Tick)
+                .collect(),
+            kind,
+            1_000_000_000,
+            4_000_000_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), corrected_rows.len());
+        for (actual, expected) in ticks.iter().zip(corrected_rows) {
+            assert_eq!(actual.id, expected.id);
+            assert_eq!(actual.datetime, expected.datetime);
+        }
+    }
+
+    #[test]
+    fn tqbn_tick_reader_preserves_same_timestamp_rows_without_confirmed_overlay_block() {
+        let kind = HistorySeriesKind::Tick;
+        let old_rows = (0_i64..3)
+            .map(|index| {
+                tick5(
+                    100 + index,
+                    1_000_000_000 + index * 500_000_000,
+                    618.5 + index as f64,
+                    623.5 + index as f64,
+                )
+            })
+            .collect::<Vec<_>>();
+        let later_rows = old_rows
+            .iter()
+            .map(|row| Tick {
+                id: row.id + 100,
+                last_price: row.last_price - 10.0,
+                ..row.clone()
+            })
+            .collect::<Vec<_>>();
+
+        let ticks = rows_for_request(
+            old_rows
+                .iter()
+                .cloned()
+                .chain(later_rows.iter().cloned())
+                .map(HistorySeriesRow::Tick)
+                .collect(),
+            kind,
+            1_000_000_000,
+            3_000_000_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), old_rows.len() + later_rows.len());
+    }
+
+    #[test]
+    fn tqbn_tick_reader_preserves_later_overlap_after_two_and_a_half_second_id_replay() {
+        let kind = HistorySeriesKind::Tick;
+        let legacy_rows = (0..7)
+            .map(|index| {
+                tick5(
+                    100 + index,
+                    1_000_000_000 + index * 500_000_000,
+                    618.5 + index as f64,
+                    623.5 + index as f64,
+                )
+            })
+            .collect::<Vec<_>>();
+        let corrected_rows = legacy_rows
+            .iter()
+            .map(|row| Tick {
+                id: row.id + 5,
+                ..row.clone()
+            })
+            .collect::<Vec<_>>();
+
+        let ticks = rows_for_request(
+            legacy_rows
+                .iter()
+                .cloned()
+                .chain(corrected_rows.iter().cloned())
+                .map(HistorySeriesRow::Tick)
+                .collect(),
+            kind,
+            1_000_000_000,
+            4_500_000_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), corrected_rows.len());
+        for (actual, expected) in ticks.iter().zip(corrected_rows) {
+            assert_eq!(actual.id, expected.id);
+            assert_eq!(actual.datetime, expected.datetime);
+            assert_eq!(actual.volume, expected.volume);
+        }
+    }
+
+    #[test]
+    fn tqbn_tick_reader_keeps_later_write_for_same_id_subsecond_payload_replay() {
+        let kind = HistorySeriesKind::Tick;
+        let legacy = tick5(905, 1_500_000_000, 618.5, 623.5);
+        let corrected = Tick {
+            datetime: 1_520_000_000,
+            ..legacy.clone()
+        };
+
+        let ticks = rows_for_request(
+            vec![
+                HistorySeriesRow::Tick(legacy),
+                HistorySeriesRow::Tick(corrected.clone()),
+            ],
+            kind,
+            1_500_000_000,
+            1_521_000_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].id, corrected.id);
+        assert_eq!(ticks[0].datetime, corrected.datetime);
+    }
+
+    #[test]
+    fn tqbn_tick_reader_preserves_in_order_subsecond_duplicate_payloads() {
+        let kind = HistorySeriesKind::Tick;
+        let first = tick5(7, 1_000_000_000, 618.5, 623.5);
+        let second = Tick {
+            id: 8,
+            datetime: 1_000_001_000,
+            ..first.clone()
+        };
+
+        let ticks = rows_for_request(
+            vec![
+                HistorySeriesRow::Tick(first.clone()),
+                HistorySeriesRow::Tick(second.clone()),
+            ],
+            kind,
+            1_000_000_000,
+            1_000_002_000,
+        )
+        .into_iter()
+        .map(|row| match row {
+            HistorySeriesRow::Tick(row) => row,
+            HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(ticks.len(), 2);
+        assert_eq!(ticks[0].id, first.id);
+        assert_eq!(ticks[1].id, second.id);
+    }
+
+    #[test]
+    fn tqbn_tick_compaction_canonicalizes_cross_session_duplicate_payloads() {
+        let store = tqbn_store("tick_compaction_cross_session_duplicates");
+        let kind = HistorySeriesKind::Tick;
+        let first = tick5(1, 1_000, 618.5, 623.5);
+        let later = tick5(2, 2_000, 618.6, 623.6);
+        let duplicate = Tick {
+            id: 3,
+            ..first.clone()
+        };
+        let first_block = [first, later];
+
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind,
+                declared_range_ns: None,
+                rows: HistorySeriesWriteRows::Ticks(&first_block),
+            })
+            .unwrap();
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind,
+                declared_range_ns: None,
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&duplicate)),
+            })
+            .unwrap();
+        store
+            .append_coverage(HistorySeriesCoverageCommit {
+                symbol: SYMBOL.to_string(),
+                kind,
+                range_start_ns: 1_000,
+                range_end_ns: 3_000,
+                rows: 3,
+                id_range: Some((1, 3)),
+            })
+            .unwrap();
+        store.compact_series(SYMBOL, kind).unwrap();
+
+        let cache = HistorySeriesCache::from_store(Arc::new(store));
+        let ticks = cache
+            .read_tick_data_series(TickDataSeriesRequest::new(SYMBOL, 1_000, 3_000))
+            .unwrap()
+            .rows()
+            .to_vec();
+
+        assert_eq!(ticks.len(), 2);
+        assert_eq!(
+            ticks.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![3, 2]
+        );
+        assert_eq!(
+            ticks.iter().map(|row| row.datetime).collect::<Vec<_>>(),
+            vec![1_000, 2_000]
+        );
     }
 
     #[test]

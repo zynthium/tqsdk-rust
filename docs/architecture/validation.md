@@ -165,6 +165,9 @@ rtk cargo test -p tqsdk-data
 rtk cargo test -p tqsdk-data --test backtest_tick_cache_ops
 rtk cargo test -p tqsdk-data --test minute_kline_cache
 rtk cargo test -p tqsdk-data --test minute_kline_cache_ops
+rtk cargo test -p tqsdk-data --test backtest_history_api
+rtk cargo test -p tqsdk-data --test backtest_history_metadata
+rtk cargo test -p tqsdk-data --test backtest_history_query
 rtk cargo test -p tqsdk-cache
 rtk cargo clippy -p tqsdk-cache --all-targets -- -D warnings
 rtk cargo clippy -p tqsdk-data --all-targets -- -D warnings
@@ -182,9 +185,26 @@ rtk cargo check -p tqsdk --example api_contract_s44_facade_backtest_remote_on_mi
 rtk cargo check -p tqsdk --example api_contract_s45_facade_backtest_cache_warmup
 rtk cargo check -p tqsdk --example api_contract_s46_facade_record_ticks
 rtk cargo check -p tqsdk --example api_contract_s47_facade_market_cache_policy
+rtk cargo check -p tqsdk-data --example api_contract_s48_backtest_history_query
+rtk cargo check -p tqsdk-data --no-default-features --example api_contract_s48_backtest_history_query
 rtk python3 scripts/smoke_market_cache_e2e.py --symbols KQ.i@SHFE.au --timeout-secs 300
 rtk python3 scripts/bench_backtest_tick_cache.py --profile release --tqbn-zstd --cargo-offline --verify-existing-cache --cache-root <existing-zstd-cache-root> --batch-sizes 32 --slice-secs none
 ```
+
+backtest-history query 的 feature matrix（不需要真实凭证）必须保持：
+
+```bash
+rtk cargo check -p tqsdk-data --no-default-features
+rtk cargo check -p tqsdk-data --no-default-features --examples
+rtk cargo test -p tqsdk-session --no-default-features
+rtk cargo check -p tqsdk --no-default-features --examples
+rtk cargo check -p tqsdk-data --all-features --examples
+```
+
+`BacktestHistoryClient` 的 reader 使用 async orchestration 加有界 blocking TQBN decode worker；
+任何未来 native-async storage 替换必须以可复现的 CacheOnly cold/warm、1/32 concurrency benchmark
+证明吞吐和 p95 都提高至少 20%、单查询不退化超过 5%、且逐行结果一致，不能留下运行时 backend
+切换或把 `tokio::fs` 当作未经测量的性能优化。
 
 `history_series_single_file_store`、`history_series_cache`、`history_series_tqbn_compaction`
 和 `history_series_tqbn_corruption` 覆盖当前默认 TQBN history cache 行为、embedded coverage、
@@ -211,8 +231,8 @@ final coverage；`facade_contract` 还覆盖
 partition、snapshot hash fail-closed、current-day final-coverage guard、streaming reader、Refresh 只移除
 相交月文件、缺失 root 的 read-only fast inventory，以及 readable v4 / legacy v3
 `LegacyUnsupported` diagnosis。旧 v3 不得被自动迁移、覆盖或当作 cache hit。
-`minute_kline_aggregate` 和 `history_backtest_replay` 覆盖 60s open/final、`N × 60s` session-aware
-聚合、same-timestamp batch、以及主连 minute cache 保持 logical key 而 replay 保留 dated
+`minute_kline_aggregate` 和 `history_backtest_replay` 覆盖 60s open/final、`N × 60s` 固定 CST `18:00`
+trading-day grid 聚合（盘中 break 不重置 bucket）、same-timestamp batch、以及主连 minute cache 保持 logical key 而 replay 保留 dated
 `underlying_symbol`。`tqsdk-cache` tests 还覆盖 minute/tick/all kind routing、minute logical-symbol
 inspect、stock minute fill 拒绝 futures universe、tick fill 拒绝 stock market、CacheOnly minute dry-run、
 minute report-bound verify、safe purge 与 schema-v2 `cache_kind` JSONL progress。facade contract 还覆盖
@@ -264,7 +284,8 @@ window、不得连接交易账户或输出 `TQ_AUTH_*`。至少选取少量实�
 
 1. 从本地 canonical 60s cache 聚合 5m 与 15m bars；
 2. 通过 official server-side backtest Kline stream 获取同周期 bars；
-3. 按 bar bucket 与 session 边界对齐，比较 timestamp、open/high/low/close、volume、open interest；
+3. 对 `<60s` 按 session 边界、对 `N × 60s` 按固定 CST `18:00` trading-day bucket（允许跨盘中 break）
+   对齐，比较 timestamp、open/high/low/close、volume、open interest；
 4. 仅记录总 bar 数、mismatch 数与少量脱敏样本。
 
 仓库提供了凭证门控的回归入口；它会填充两个指数合约的 canonical 60s cache，并逐根比较本地
@@ -274,7 +295,22 @@ window、不得连接交易账户或输出 `TQ_AUTH_*`。至少选取少量实�
 rtk cargo test -p tqsdk --test facade_contract canonical_minute_aggregation_matches_remote_index_klines -- --ignored --nocapture
 ```
 
-任何明显的 bucket/session 偏移、未来 OHLC 泄漏或成片 OHLC/volume/open-interest 差异都应阻止发布。
+完整的 durable-source acceptance 使用 `KQ.i@SHFE.au` 的最近六个完整 CST 月：先通过
+`RemoteOnMiss` 物化 Tick 与 canonical 60s 覆盖，再强制 `CacheOnly` 查询本地 15s、60s、5m、15m、
+30m、60m K；官方 oracle 以避免 chart 10,000-row 上限的四自然日分片读取相同六个周期。逐根比较
+datetime、OHLC（以服务端 quote `price_decs` 规范化）、volume、open_oi、close_oi，不比较 row id；
+失败最多输出 20 个差异。该 ignored test 不删除任何 cache partition：
+
+```bash
+rtk cargo test -p tqsdk --features live,services --test backtest_history_live kqi_au_six_complete_months_matches_server_oracle -- --ignored --nocapture
+```
+
+验收通过条件是六个周期的所有 mismatch 计数为零。它只使用市场/metadata route，不连接交易账户、
+不下单且不输出 `TQ_AUTH_*`。第一次运行可能持续较久，因为六个月 Tick coverage 必须完整落盘；
+后续同窗口应以 CacheOnly 命中复用这些分区。
+
+任何明显的固定 grid/session 偏移、盘中 break 错误重置高周期 bucket、未来 OHLC 泄漏或成片
+OHLC/volume/open-interest 差异都应阻止发布。
 对 remote minute fill 的回归还必须确认：只有 terminal-success batch 才提交 final coverage；合法空
 range 可以提交 coverage；取消、超时和失败 batch 留下缺口，不能污染 final coverage。
 

@@ -292,11 +292,7 @@ async fn refresh_metadata_from_official(
         historical_segments.as_slice(),
     )?;
 
-    let (user, pass) = credentials.into_parts();
-    let session = tqsdk_session::SessionClientBuilder::new(user, pass)
-        .enable_query()
-        .futures_backtest_market()
-        .build()?;
+    let session = metadata_query_session_builder(credentials).build()?;
     let session =
         session_template_from_official_metadata(&session, symbol, &physical_segments).await?;
     let snapshot = BacktestHistoryMetadataSnapshot {
@@ -314,6 +310,20 @@ async fn refresh_metadata_from_official(
         snapshot_hash: String::new(),
     };
     cache.store_snapshot(snapshot)
+}
+
+/// Metadata direct-query helpers travel over the stock market websocket when
+/// no dedicated query URL is configured. This session is intentionally
+/// separate from the futures server-backtest stream used to fill Tick/60s
+/// cache partitions.
+#[cfg(all(feature = "live", feature = "services"))]
+fn metadata_query_session_builder(
+    credentials: BacktestHistoryCredentials,
+) -> tqsdk_session::SessionClientBuilder {
+    let (user, pass) = credentials.into_parts();
+    tqsdk_session::SessionClientBuilder::new(user, pass)
+        .enable_query()
+        .stock_market()
 }
 
 #[cfg(all(feature = "live", feature = "services"))]
@@ -1184,6 +1194,19 @@ fn metadata_response_error(reason: impl AsRef<str>) -> DataError {
 #[cfg(all(test, feature = "live", feature = "services"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_query_session_uses_stock_target_for_websocket_query_helpers() {
+        let builder = metadata_query_session_builder(BacktestHistoryCredentials::new(
+            "test-user",
+            "test-pass",
+        ));
+        let target = builder.market_target_ref();
+
+        assert!(builder.query_enabled());
+        assert!(target.stock);
+        assert!(!target.backtest);
+    }
 
     #[test]
     fn official_trading_time_uses_the_canonical_18h_trading_day_anchor() {

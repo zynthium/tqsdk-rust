@@ -345,6 +345,92 @@ async fn canonical_minute_reads_only_the_60_second_kline_path() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn canonical_minute_terminal_page_allows_last_id_before_chart_right_id() {
+    let session = manual_session();
+    let mut stream = ServerBacktestHistoryStream::open(
+        session.client_clone(),
+        request(vec![chart(
+            "minutes-au",
+            "SHFE.au2608",
+            ServerBacktestHistoryKind::CanonicalMinute,
+        )]),
+    )
+    .await
+    .unwrap();
+    let _ = transport_bodies(&session);
+
+    ingest(
+        &session,
+        json!({
+            "aid": "rtn_data",
+            "data": [{
+                "mdhis_more_data": false,
+                "charts": {
+                    "minutes-au": {
+                        "state": {
+                            "aid": "set_chart",
+                            "chart_id": "minutes-au",
+                            "ins_list": "SHFE.au2608",
+                            "duration": MINUTE_NS,
+                            "view_width": PAGE_WIDTH,
+                            "focus_datetime": 1_000,
+                            "focus_position": 0,
+                        },
+                        "left_id": 1,
+                        "right_id": 2,
+                        "ready": true,
+                        "more_data": false,
+                    }
+                },
+                "klines": {
+                    "SHFE.au2608": {
+                        (MINUTE_NS.to_string()): {
+                            "last_id": 1,
+                            "data": {
+                                "1": {
+                                    "id": 1,
+                                    "datetime": 1_000,
+                                    "open": 1.0,
+                                    "high": 2.0,
+                                    "low": 1.0,
+                                    "close": 2.0,
+                                }
+                            }
+                        }
+                    }
+                }
+            }]
+        }),
+    );
+
+    let event = stream
+        .next_event(Some(Instant::now() + Duration::from_millis(20)))
+        .await
+        .unwrap()
+        .expect("terminal page should emit its available canonical minute");
+    let ServerBacktestHistoryEvent::CanonicalMinutes { rows, .. } = event else {
+        panic!("expected canonical-minute rows");
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, 1);
+
+    assert!(matches!(
+        stream
+            .next_event(Some(Instant::now() + Duration::from_millis(20)))
+            .await
+            .unwrap(),
+        Some(ServerBacktestHistoryEvent::ChartCompleted { .. })
+    ));
+    assert!(matches!(
+        stream
+            .next_event(Some(Instant::now() + Duration::from_millis(20)))
+            .await
+            .unwrap(),
+        Some(ServerBacktestHistoryEvent::StreamCompleted)
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn history_stream_rejects_a_non_backtest_session_target() {
     let session = manual_session_with_target(MarketSessionTarget::futures_live());
     let result = ServerBacktestHistoryStream::open(

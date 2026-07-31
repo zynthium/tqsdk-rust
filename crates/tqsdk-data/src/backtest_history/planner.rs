@@ -1,12 +1,12 @@
 //! Deterministic source selection and cache-range expansion for backtest
 //! history requests.
 
-use crate::aggregation::KlineSessionTemplate;
+use crate::aggregation::{KlineSessionPosition, KlineSessionTemplate};
 use crate::backtest_tick_cache::{
     backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
 };
 use crate::minute_kline_cache::{MINUTE_KLINE_DURATION_NS, MinuteKlineCacheSnapshot};
-use crate::{BacktestHistoryMetadataCache, DataError, Result};
+use crate::{BacktestHistoryMetadataCache, BacktestHistoryTradingDay, DataError, Result};
 
 use super::report::{
     BacktestHistoryFinality, BacktestHistoryPhysicalSegment, BacktestHistoryRequestReport,
@@ -115,42 +115,50 @@ pub(crate) fn plan_request(
         ));
     }
 
-    let (session, minute_snapshot, snapshot_hash, physical_segments, source_mapping_segments) =
-        match metadata {
-            Some(snapshot) => {
-                let minute_snapshot = MinuteKlineCacheSnapshot::new(
-                    snapshot.schema_version,
-                    snapshot.snapshot_hash.clone(),
-                    snapshot.session.snapshot_hash().to_string(),
-                )?;
-                let source_mapping_segments = snapshot.physical_segments.clone();
-                (
-                    snapshot.session,
-                    minute_snapshot,
-                    snapshot.snapshot_hash,
-                    intersect_segments(
-                        source_mapping_segments.clone(),
-                        (request.start_ns, effective_end_ns),
-                    ),
-                    source_mapping_segments,
-                )
-            }
-            None => {
-                let session = KlineSessionTemplate::cst_trading_day();
-                let physical_segments = vec![BacktestHistoryPhysicalSegment {
-                    physical_symbol: request.symbol.clone(),
-                    start_ns: request.start_ns,
-                    end_ns: effective_end_ns,
-                }];
-                (
-                    session,
-                    MinuteKlineCacheSnapshot::cst_v1(),
-                    "cst-trading-day-v1".to_string(),
-                    physical_segments.clone(),
-                    physical_segments,
-                )
-            }
-        };
+    let (
+        session,
+        trading_days,
+        minute_snapshot,
+        snapshot_hash,
+        physical_segments,
+        source_mapping_segments,
+    ) = match metadata {
+        Some(snapshot) => {
+            let minute_snapshot = MinuteKlineCacheSnapshot::new(
+                snapshot.schema_version,
+                snapshot.snapshot_hash.clone(),
+                snapshot.session.snapshot_hash().to_string(),
+            )?;
+            let source_mapping_segments = snapshot.physical_segments.clone();
+            (
+                snapshot.session,
+                Some(snapshot.trading_days),
+                minute_snapshot,
+                snapshot.snapshot_hash,
+                intersect_segments(
+                    source_mapping_segments.clone(),
+                    (request.start_ns, effective_end_ns),
+                ),
+                source_mapping_segments,
+            )
+        }
+        None => {
+            let session = KlineSessionTemplate::cst_trading_day();
+            let physical_segments = vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: request.symbol.clone(),
+                start_ns: request.start_ns,
+                end_ns: effective_end_ns,
+            }];
+            (
+                session,
+                None,
+                MinuteKlineCacheSnapshot::cst_v1(),
+                "cst-trading-day-v1".to_string(),
+                physical_segments.clone(),
+                physical_segments,
+            )
+        }
+    };
     if !segments_cover_range(
         physical_segments.as_slice(),
         (request.start_ns, effective_end_ns),
@@ -171,7 +179,12 @@ pub(crate) fn plan_request(
             })
             .enumerate()
             .map(|(rank, (segment, requested))| {
-                let expanded = expand_tick_source_range(requested, request.duration_ns, &session)?;
+                let expanded = expand_tick_source_range(
+                    requested,
+                    request.duration_ns,
+                    &session,
+                    trading_days.as_deref(),
+                )?;
                 let range = (
                     expanded.0.max(segment.start_ns),
                     expanded.1.min(segment.end_ns),
@@ -194,6 +207,7 @@ pub(crate) fn plan_request(
                 (request.start_ns, effective_end_ns),
                 request.duration_ns,
                 &session,
+                trading_days.as_deref(),
             )?,
             physical_rank: 0,
         }],
@@ -300,13 +314,61 @@ fn expand_tick_source_range(
     requested: (i64, i64),
     duration_ns: Option<i64>,
     session: &KlineSessionTemplate,
+    trading_days: Option<&[BacktestHistoryTradingDay]>,
 ) -> Result<(i64, i64)> {
     let day = backtest_tick_trading_day_for_timestamp_ns(requested.0)?;
     let day_range = backtest_tick_trading_day_range(day)?;
+    let warmup_start_ns = duration_ns
+        .map(|_| preceding_trading_day_cycle_start(requested.0, session, trading_days))
+        .transpose()?
+        .flatten();
     let end_ns = duration_ns.map_or(Ok(requested.1), |duration_ns| {
-        expanded_bar_end(requested.1, duration_ns, session)
+        // Official server-backtest charts assign a Tick exactly at a derived
+        // bar's end to that preceding bar. Source scans are half-open, so
+        // include that one nanosecond without changing public Tick ranges.
+        expanded_bar_end(requested.1, duration_ns, session)?
+            .checked_add(1)
+            .ok_or_else(|| DataError::Validation("tick kline source end overflow".to_string()))
     })?;
-    Ok((day_range.start_ns.min(requested.0), end_ns.max(requested.1)))
+    Ok((
+        warmup_start_ns
+            .unwrap_or(day_range.start_ns)
+            .min(day_range.start_ns)
+            .min(requested.0),
+        end_ns.max(requested.1),
+    ))
+}
+
+/// Finds the complete prior real trading cycle needed to seed a Tick-derived
+/// Kline's opening price and open interest. Metadata spans at least fourteen
+/// calendar days around every remote request, but an older sidecar may not;
+/// lacking a matching day deliberately falls back to the Tick partition start.
+fn preceding_trading_day_cycle_start(
+    timestamp_ns: i64,
+    session: &KlineSessionTemplate,
+    trading_days: Option<&[BacktestHistoryTradingDay]>,
+) -> Result<Option<i64>> {
+    let Some(trading_days) = trading_days else {
+        return Ok(None);
+    };
+    let (cycle_start_ns, cycle_end_ns) = session.cycle_bounds(timestamp_ns)?;
+    let Some(current_day_start_ns) = trading_days
+        .iter()
+        .find(|day| day.start_ns > cycle_start_ns && day.start_ns < cycle_end_ns)
+        .map(|day| day.start_ns)
+    else {
+        return Ok(None);
+    };
+    let Some(previous_trading_day) = trading_days
+        .iter()
+        .rev()
+        .find(|day| day.is_trading_day && day.end_ns <= current_day_start_ns)
+    else {
+        return Ok(None);
+    };
+    session
+        .cycle_bounds(previous_trading_day.start_ns)
+        .map(|(start_ns, _)| Some(start_ns))
 }
 
 fn expand_minute_source_range(
@@ -327,17 +389,15 @@ fn expanded_bar_start(
     let Some(position) = session.locate(timestamp_ns)? else {
         return Ok(timestamp_ns);
     };
-    let offset = timestamp_ns
-        .checked_sub(position.window_start_ns)
-        .ok_or_else(|| {
-            DataError::Validation("kline source start predates its session".to_string())
-        })?;
+    let (grid_start_ns, _) = kline_bar_grid_bounds(duration_ns, position);
+    let offset = timestamp_ns.checked_sub(grid_start_ns).ok_or_else(|| {
+        DataError::Validation("kline source start predates its bar grid".to_string())
+    })?;
     let bucket = offset
         .div_euclid(duration_ns)
         .checked_mul(duration_ns)
         .ok_or_else(|| DataError::Validation("kline source bucket overflow".to_string()))?;
-    position
-        .window_start_ns
+    grid_start_ns
         .checked_add(bucket)
         .ok_or_else(|| DataError::Validation("kline source start overflow".to_string()))
 }
@@ -347,10 +407,11 @@ fn expanded_bar_end(end_ns: i64, duration_ns: i64, session: &KlineSessionTemplat
     let Some(position) = session.locate(last_ns)? else {
         return Ok(end_ns);
     };
+    let (_, grid_end_ns) = kline_bar_grid_bounds(duration_ns, position);
     let start_ns = expanded_bar_start(last_ns, duration_ns, session)?;
     start_ns
         .checked_add(duration_ns)
-        .map(|end| end.min(position.window_end_ns))
+        .map(|end| end.min(grid_end_ns))
         .ok_or_else(|| DataError::Validation("kline source end overflow".to_string()))
 }
 
@@ -364,18 +425,34 @@ pub(crate) fn bar_end_ns(
             .checked_add(duration_ns)
             .ok_or_else(|| DataError::Validation("kline bar end overflow".to_string()));
     };
+    let (_, grid_end_ns) = kline_bar_grid_bounds(duration_ns, position);
     start_ns
         .checked_add(duration_ns)
-        .map(|end| end.min(position.window_end_ns))
+        .map(|end| end.min(grid_end_ns))
         .ok_or_else(|| DataError::Validation("kline bar end overflow".to_string()))
+}
+
+fn kline_bar_grid_bounds(duration_ns: i64, position: KlineSessionPosition) -> (i64, i64) {
+    if duration_ns > MINUTE_KLINE_DURATION_NS {
+        (position.trading_day_start_ns, position.trading_day_end_ns)
+    } else {
+        (position.window_start_ns, position.window_end_ns)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use chrono::{TimeZone, Utc};
 
     use super::*;
+    use crate::aggregation::KlineSessionWindow;
     use crate::backtest_history::request::BacktestHistoryRequest;
+    use crate::{
+        BACKTEST_HISTORY_METADATA_SCHEMA_VERSION, BacktestHistoryMarketKind,
+        BacktestHistoryMetadataSnapshot,
+    };
 
     #[test]
     fn source_policy_accepts_the_declared_duration_matrix() {
@@ -419,5 +496,166 @@ mod tests {
             .validate()
             .unwrap();
         assert!(validate_source_policy(&minute).is_err());
+    }
+
+    #[test]
+    fn subminute_plan_warms_from_the_previous_real_trading_cycle() {
+        let root = temp_dir("subminute-warmup");
+        let symbol = "KQ.i@SHFE.au";
+        let requested_start_ns = utc_ns(2026, 1, 5, 1, 0, 0);
+        let requested_end_ns = requested_start_ns + 15 * 1_000_000_000;
+        let previous_cycle_start_ns = utc_ns(2026, 1, 1, 10, 0, 0);
+        let snapshot = BacktestHistoryMetadataSnapshot {
+            schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+            market_kind: BacktestHistoryMarketKind::Futures,
+            logical_symbol: symbol.to_string(),
+            captured_at_ns: requested_start_ns,
+            trading_days: vec![
+                trading_day("2026-01-02", true, utc_ns(2026, 1, 1, 16, 0, 0)),
+                trading_day("2026-01-03", false, utc_ns(2026, 1, 2, 16, 0, 0)),
+                trading_day("2026-01-04", false, utc_ns(2026, 1, 3, 16, 0, 0)),
+                trading_day("2026-01-05", true, utc_ns(2026, 1, 4, 16, 0, 0)),
+            ],
+            session: KlineSessionTemplate::cst_trading_day(),
+            physical_segments: vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: symbol.to_string(),
+                start_ns: previous_cycle_start_ns,
+                end_ns: requested_end_ns,
+            }],
+            snapshot_hash: String::new(),
+        };
+        BacktestHistoryMetadataCache::open(&root)
+            .unwrap()
+            .store_snapshot(snapshot)
+            .unwrap();
+
+        let plan = plan_request(
+            &root,
+            BacktestHistoryRequest::kline(
+                1,
+                symbol,
+                Duration::from_secs(15),
+                requested_start_ns,
+                requested_end_ns,
+            )
+            .validate()
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(plan.source_slices.len(), 1);
+        assert_eq!(plan.source_slices[0].range.0, previous_cycle_start_ns);
+    }
+
+    #[test]
+    fn subminute_main_continuous_plan_never_warms_across_a_physical_segment() {
+        let root = temp_dir("subminute-main-warmup");
+        let logical_symbol = "KQ.m@SHFE.au";
+        let physical_symbol = "SHFE.au2602";
+        let requested_start_ns = utc_ns(2026, 1, 5, 1, 0, 0);
+        let requested_end_ns = requested_start_ns + 15 * 1_000_000_000;
+        let snapshot = BacktestHistoryMetadataSnapshot {
+            schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+            market_kind: BacktestHistoryMarketKind::Futures,
+            logical_symbol: logical_symbol.to_string(),
+            captured_at_ns: requested_start_ns,
+            trading_days: vec![
+                trading_day("2026-01-02", true, utc_ns(2026, 1, 1, 16, 0, 0)),
+                trading_day("2026-01-03", false, utc_ns(2026, 1, 2, 16, 0, 0)),
+                trading_day("2026-01-04", false, utc_ns(2026, 1, 3, 16, 0, 0)),
+                trading_day("2026-01-05", true, utc_ns(2026, 1, 4, 16, 0, 0)),
+            ],
+            session: KlineSessionTemplate::cst_trading_day(),
+            physical_segments: vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: physical_symbol.to_string(),
+                start_ns: requested_start_ns,
+                end_ns: requested_end_ns,
+            }],
+            snapshot_hash: String::new(),
+        };
+        BacktestHistoryMetadataCache::open(&root)
+            .unwrap()
+            .store_snapshot(snapshot)
+            .unwrap();
+
+        let plan = plan_request(
+            &root,
+            BacktestHistoryRequest::kline(
+                1,
+                logical_symbol,
+                Duration::from_secs(15),
+                requested_start_ns,
+                requested_end_ns,
+            )
+            .validate()
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(plan.source_slices.len(), 1);
+        assert_eq!(plan.source_slices[0].cache_symbol, physical_symbol);
+        assert_eq!(plan.source_slices[0].range.0, requested_start_ns);
+    }
+
+    #[test]
+    fn higher_minute_ranges_keep_the_trading_day_grid_across_breaks() {
+        const MINUTE_NS: i64 = 60 * 1_000_000_000;
+        const HOUR_NS: i64 = 60 * MINUTE_NS;
+        let session = KlineSessionTemplate::new(
+            "shfe-day-breaks",
+            vec![
+                KlineSessionWindow::new(15 * HOUR_NS, 16 * HOUR_NS + 15 * MINUTE_NS).unwrap(),
+                KlineSessionWindow::new(
+                    16 * HOUR_NS + 30 * MINUTE_NS,
+                    17 * HOUR_NS + 30 * MINUTE_NS,
+                )
+                .unwrap(),
+                KlineSessionWindow::new(19 * HOUR_NS + 30 * MINUTE_NS, 21 * HOUR_NS).unwrap(),
+            ],
+        )
+        .unwrap();
+        let ten_am = utc_ns(2026, 1, 5, 2, 0, 0);
+        let ten_thirty_am = utc_ns(2026, 1, 5, 2, 30, 0);
+        let eleven_am = utc_ns(2026, 1, 5, 3, 0, 0);
+
+        assert_eq!(
+            expanded_bar_start(ten_thirty_am, HOUR_NS, &session).unwrap(),
+            ten_am
+        );
+        assert_eq!(
+            expanded_bar_end(ten_thirty_am + MINUTE_NS, HOUR_NS, &session).unwrap(),
+            eleven_am
+        );
+        assert_eq!(bar_end_ns(ten_am, HOUR_NS, &session).unwrap(), eleven_am);
+    }
+
+    fn trading_day(date: &str, is_trading_day: bool, start_ns: i64) -> BacktestHistoryTradingDay {
+        BacktestHistoryTradingDay {
+            date: date.to_string(),
+            is_trading_day,
+            start_ns,
+            end_ns: start_ns + 24 * 60 * 60 * 1_000_000_000,
+        }
+    }
+
+    fn utc_ns(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> i64 {
+        Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
+            .single()
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap()
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "tqsdk-backtest-history-planner-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
     }
 }

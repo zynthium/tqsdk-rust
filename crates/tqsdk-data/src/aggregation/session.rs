@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    DataError, Result, backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
-};
+use crate::{DataError, Result};
 
-/// One half-open trading session, expressed from the canonical trading-day
-/// start used by the Tick cache.
+const NANOS_PER_SECOND: i64 = 1_000_000_000;
+const NANOS_PER_DAY: i64 = 24 * 60 * 60 * NANOS_PER_SECOND;
+const CST_SESSION_ANCHOR_UTC_NS: i64 = 10 * 60 * 60 * NANOS_PER_SECOND;
+
+/// One half-open trading session, expressed from the fixed CST 18:00
+/// prior-natural-day anchor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KlineSessionWindow {
     pub start_offset_ns: i64,
@@ -84,44 +86,44 @@ impl KlineSessionTemplate {
         self.windows.as_slice()
     }
 
-    /// Locates a timestamp in its canonical trading day and session window.
+    /// Locates a timestamp in its canonical session cycle and session window.
     ///
+    /// The cycle is always the 24 hours beginning at 18:00 CST on the prior
+    /// natural day. It deliberately differs from the Tick cache's partition
+    /// range, which crosses weekends and holidays for storage purposes.
     /// Timestamps inside a configured break return `Ok(None)`.
     pub fn locate(&self, timestamp_ns: i64) -> Result<Option<KlineSessionPosition>> {
-        let trading_day = backtest_tick_trading_day_for_timestamp_ns(timestamp_ns)?;
-        let range = backtest_tick_trading_day_range(trading_day)?;
+        let (trading_day_start_ns, trading_day_end_ns) = self.cycle_bounds(timestamp_ns)?;
         if self.windows.is_empty() {
             return Ok(Some(KlineSessionPosition {
-                trading_day_start_ns: range.start_ns,
-                trading_day_end_ns: range.end_ns,
-                window_start_ns: range.start_ns,
-                window_end_ns: range.end_ns,
+                trading_day_start_ns,
+                trading_day_end_ns,
+                window_start_ns: trading_day_start_ns,
+                window_end_ns: trading_day_end_ns,
             }));
         }
         for window in &self.windows {
-            let window_start_ns = range
-                .start_ns
+            let window_start_ns = trading_day_start_ns
                 .checked_add(window.start_offset_ns)
                 .ok_or_else(|| {
                     DataError::Validation(
                         "kline session window start timestamp overflow".to_string(),
                     )
                 })?;
-            let window_end_ns = range
-                .start_ns
+            let window_end_ns = trading_day_start_ns
                 .checked_add(window.end_offset_ns)
                 .ok_or_else(|| {
                     DataError::Validation("kline session window end timestamp overflow".to_string())
                 })?;
-            if window_end_ns > range.end_ns {
+            if window_end_ns > trading_day_end_ns {
                 return Err(DataError::Validation(
                     "kline session window exceeds its canonical trading day".to_string(),
                 ));
             }
             if timestamp_ns >= window_start_ns && timestamp_ns < window_end_ns {
                 return Ok(Some(KlineSessionPosition {
-                    trading_day_start_ns: range.start_ns,
-                    trading_day_end_ns: range.end_ns,
+                    trading_day_start_ns,
+                    trading_day_end_ns,
                     window_start_ns,
                     window_end_ns,
                 }));
@@ -129,6 +131,27 @@ impl KlineSessionTemplate {
         }
         Ok(None)
     }
+
+    /// Resolves the canonical 18:00 CST session cycle even when `timestamp_ns`
+    /// lies in a configured trading break.
+    pub(crate) fn cycle_bounds(&self, timestamp_ns: i64) -> Result<(i64, i64)> {
+        canonical_session_cycle_bounds(timestamp_ns)
+    }
+}
+
+fn canonical_session_cycle_bounds(timestamp_ns: i64) -> Result<(i64, i64)> {
+    let shifted = timestamp_ns
+        .checked_sub(CST_SESSION_ANCHOR_UTC_NS)
+        .ok_or_else(|| DataError::Validation("kline session timestamp underflow".to_string()))?;
+    let trading_day_start_ns = shifted
+        .div_euclid(NANOS_PER_DAY)
+        .checked_mul(NANOS_PER_DAY)
+        .and_then(|day_start_ns| day_start_ns.checked_add(CST_SESSION_ANCHOR_UTC_NS))
+        .ok_or_else(|| DataError::Validation("kline session timestamp overflow".to_string()))?;
+    let trading_day_end_ns = trading_day_start_ns
+        .checked_add(NANOS_PER_DAY)
+        .ok_or_else(|| DataError::Validation("kline session end timestamp overflow".to_string()))?;
+    Ok((trading_day_start_ns, trading_day_end_ns))
 }
 
 /// Resolved trading-day and session bounds for one input row.

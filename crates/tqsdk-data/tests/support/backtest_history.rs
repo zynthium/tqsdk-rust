@@ -1,3 +1,8 @@
+#![allow(
+    dead_code,
+    reason = "shared helpers are compiled independently by each integration-test target"
+)]
+
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
