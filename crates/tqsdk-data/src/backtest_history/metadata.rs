@@ -628,6 +628,16 @@ fn physical_segments_for_snapshot(
             .then_with(|| left.end_ns.cmp(&right.end_ns))
             .then_with(|| left.physical_symbol.cmp(&right.physical_symbol))
     });
+    if let Some(first) = segments.first_mut()
+        && first.start_ns > requested_range.0
+    {
+        // The official table has no active underlying before a newly listed
+        // product's first mapping. Project that leading prefix onto the first
+        // physical contract so the server-backtest source can confirm it as a
+        // terminal zero-row range. Only the leading edge is extended; gaps
+        // between later mappings remain invalid below.
+        first.start_ns = requested_range.0;
+    }
     if !physical_segments_cover_range(segments.as_slice(), requested_range) {
         return Err(DataError::InvalidResponse(format!(
             "official continuous mapping does not cover [{}, {}) for {logical_symbol}",
@@ -1343,6 +1353,95 @@ mod tests {
                 end_ns: requested.1,
             }]
         );
+    }
+
+    #[test]
+    fn continuous_mapping_covers_a_pre_listing_prefix_with_the_first_contract() {
+        let calendar = vec![
+            calendar_row("2025-07-11", true),
+            calendar_row("2025-07-14", true),
+            calendar_row("2025-07-15", true),
+            calendar_row("2025-07-16", true),
+            calendar_row("2025-07-17", true),
+            calendar_row("2025-07-18", true),
+            calendar_row("2025-07-21", true),
+            calendar_row("2025-07-22", true),
+            calendar_row("2025-07-23", true),
+        ];
+        let requested = (
+            cst_datetime_ns(date("2025-07-11"), 18, 0, 0).unwrap(),
+            cst_datetime_ns(date("2025-07-23"), 18, 0, 0).unwrap(),
+        );
+
+        let segments = physical_segments_for_snapshot(
+            "KQ.m@CZCE.PL",
+            requested,
+            calendar.as_slice(),
+            &[HistoricalContUnderlyingSegment {
+                symbol: "KQ.m@CZCE.PL".to_string(),
+                underlying: "CZCE.PL601".to_string(),
+                start_date: "2025-07-22".to_string(),
+                end_date: "2025-07-23".to_string(),
+                trading_days: 2,
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            segments,
+            vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: "CZCE.PL601".to_string(),
+                start_ns: requested.0,
+                end_ns: requested.1,
+            }]
+        );
+    }
+
+    #[test]
+    fn continuous_mapping_still_rejects_an_internal_gap() {
+        let calendar = vec![
+            calendar_row("2025-12-31", true),
+            calendar_row("2026-01-01", false),
+            calendar_row("2026-01-02", true),
+            calendar_row("2026-01-03", true),
+            calendar_row("2026-01-04", false),
+            calendar_row("2026-01-05", false),
+            calendar_row("2026-01-06", true),
+            calendar_row("2026-01-07", true),
+        ];
+        let requested = (
+            cst_datetime_ns(date("2025-12-31"), 18, 0, 0).unwrap(),
+            cst_datetime_ns(date("2026-01-07"), 18, 0, 0).unwrap(),
+        );
+
+        let error = physical_segments_for_snapshot(
+            "KQ.m@CZCE.PL",
+            requested,
+            calendar.as_slice(),
+            &[
+                HistoricalContUnderlyingSegment {
+                    symbol: "KQ.m@CZCE.PL".to_string(),
+                    underlying: "CZCE.PL601".to_string(),
+                    start_date: "2026-01-02".to_string(),
+                    end_date: "2026-01-03".to_string(),
+                    trading_days: 2,
+                },
+                HistoricalContUnderlyingSegment {
+                    symbol: "KQ.m@CZCE.PL".to_string(),
+                    underlying: "CZCE.PL603".to_string(),
+                    start_date: "2026-01-07".to_string(),
+                    end_date: "2026-01-07".to_string(),
+                    trading_days: 1,
+                },
+            ],
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            DataError::InvalidResponse(message)
+                if message.contains("official continuous mapping does not cover")
+        ));
     }
 
     fn calendar_row(date: &str, trading: bool) -> TradingCalendarRow {
