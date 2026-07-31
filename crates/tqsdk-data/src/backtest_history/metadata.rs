@@ -591,13 +591,30 @@ fn physical_segments_for_snapshot(
         let end_date = parse_calendar_date(segment.end_date.as_str())?;
         let start_ns = continuous_segment_start_ns(start_date, calendar)?;
         let end_ns = continuous_segment_end_ns(end_date, calendar)?;
-        if end_ns <= start_ns {
+        if start_ns.is_some_and(|start_ns| end_ns <= start_ns) {
             return Err(DataError::InvalidResponse(format!(
                 "official continuous mapping segment {} for {logical_symbol} has an invalid range",
                 segment.underlying
             )));
         }
-        if end_ns > requested_range.0 && start_ns < requested_range.1 {
+        if end_ns <= requested_range.0 {
+            continue;
+        }
+        let start_ns = match start_ns {
+            Some(start_ns) => start_ns.max(requested_range.0),
+            None => {
+                let first_known_end_ns = cst_datetime_ns(start_date, 18, 0, 0)?;
+                if requested_range.0 < first_known_end_ns {
+                    return Err(DataError::InvalidResponse(format!(
+                        "official trading calendar has no prior trading day before {} and the requested range cannot be clipped to the truncated mapping",
+                        start_date.format("%Y-%m-%d")
+                    )));
+                }
+                requested_range.0
+            }
+        };
+        let end_ns = end_ns.min(requested_range.1);
+        if start_ns < end_ns {
             segments.push(BacktestHistoryPhysicalSegment {
                 physical_symbol: segment.underlying.clone(),
                 start_ns,
@@ -651,7 +668,10 @@ fn physical_segments_cover_range(
 }
 
 #[cfg(all(feature = "live", feature = "services"))]
-fn continuous_segment_start_ns(date: NaiveDate, calendar: &[TradingCalendarRow]) -> Result<i64> {
+fn continuous_segment_start_ns(
+    date: NaiveDate,
+    calendar: &[TradingCalendarRow],
+) -> Result<Option<i64>> {
     let position = calendar
         .iter()
         .position(|row| row.date == date.format("%Y-%m-%d").to_string() && row.trading)
@@ -661,17 +681,10 @@ fn continuous_segment_start_ns(date: NaiveDate, calendar: &[TradingCalendarRow])
                 date.format("%Y-%m-%d")
             ))
         })?;
-    let previous = calendar[..position]
-        .iter()
-        .rev()
-        .find(|row| row.trading)
-        .ok_or_else(|| {
-            DataError::InvalidResponse(format!(
-                "official trading calendar has no prior trading day before {}",
-                date.format("%Y-%m-%d")
-            ))
-        })?;
-    cst_datetime_ns(parse_calendar_date(previous.date.as_str())?, 18, 0, 0)
+    let Some(previous) = calendar[..position].iter().rev().find(|row| row.trading) else {
+        return Ok(None);
+    };
+    cst_datetime_ns(parse_calendar_date(previous.date.as_str())?, 18, 0, 0).map(Some)
 }
 
 #[cfg(all(feature = "live", feature = "services"))]
@@ -1293,6 +1306,42 @@ mod tests {
                     end_ns: requested.1,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn continuous_mapping_clips_truncated_first_segment_to_requested_start() {
+        let calendar = vec![
+            calendar_row("2025-06-27", true),
+            calendar_row("2025-07-10", true),
+            calendar_row("2025-07-11", true),
+        ];
+        let requested = (
+            cst_datetime_ns(date("2025-07-10"), 18, 0, 0).unwrap(),
+            cst_datetime_ns(date("2025-07-11"), 18, 0, 0).unwrap(),
+        );
+
+        let segments = physical_segments_for_snapshot(
+            "KQ.m@SHFE.au",
+            requested,
+            calendar.as_slice(),
+            &[HistoricalContUnderlyingSegment {
+                symbol: "KQ.m@SHFE.au".to_string(),
+                underlying: "SHFE.au2508".to_string(),
+                start_date: "2025-06-27".to_string(),
+                end_date: "2025-07-11".to_string(),
+                trading_days: 3,
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            segments,
+            vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: "SHFE.au2508".to_string(),
+                start_ns: requested.0,
+                end_ns: requested.1,
+            }]
         );
     }
 
