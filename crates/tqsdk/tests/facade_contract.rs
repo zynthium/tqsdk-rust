@@ -1093,6 +1093,75 @@ async fn facade_backtest_warmup_cache_only_reports_missing_ranges() {
 }
 
 #[tokio::test]
+async fn facade_backtest_warmup_reports_missing_canonical_minutes_in_remote_fill_plan() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let observed_events = Arc::new(Mutex::new(Vec::new()));
+    let callback_events = Arc::clone(&observed_events);
+
+    let report = Tq::futures()
+        .backtest(0, 60_000_000_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .cache_only()
+        .kline(symbol, Duration::from_secs(60), 1)
+        .unwrap()
+        .on_remote_fill_telemetry(move |event| {
+            callback_events.lock().unwrap().push(event.clone());
+        })
+        .warmup()
+        .await
+        .unwrap();
+
+    let events = observed_events.lock().unwrap().clone();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].phase(), BacktestRemoteFillPhase::PlanReady);
+    let plan = events[0].plan().unwrap();
+    assert_eq!(plan.logical_symbols(), &[symbol.to_string()]);
+    assert_eq!(plan.logical_batches(), 1);
+    assert!(plan.requires_remote_fill());
+    assert!(matches!(
+        plan.physical_symbols(),
+        [minute] if minute.physical_symbol() == symbol
+            && minute.requested_ranges() == [(0, 60_000_000_000)]
+            && minute.missing_ranges() == [(0, 60_000_000_000)]
+    ));
+    assert!(matches!(
+        &report.minute_kline_symbols[..],
+        [minute] if minute.symbol == symbol
+            && minute.action == BacktestCacheWarmupAction::MissingCacheOnly
+    ));
+}
+
+#[tokio::test]
+async fn facade_backtest_warmup_keeps_tick_and_canonical_minute_batches_distinct() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let observed_events = Arc::new(Mutex::new(Vec::new()));
+    let callback_events = Arc::clone(&observed_events);
+
+    Tq::futures()
+        .backtest(0, 60_000_000_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol(symbol)
+        .cache_only()
+        .kline(symbol, Duration::from_secs(60), 1)
+        .unwrap()
+        .on_remote_fill_telemetry(move |event| {
+            callback_events.lock().unwrap().push(event.clone());
+        })
+        .warmup()
+        .await
+        .unwrap();
+
+    let events = observed_events.lock().unwrap().clone();
+    let plan = events.last().and_then(|event| event.plan()).unwrap();
+    assert_eq!(plan.logical_batches(), 2);
+    assert!(plan.requires_remote_fill());
+}
+
+#[tokio::test]
 async fn facade_backtest_warmup_remote_on_miss_requires_auth_when_missing() {
     let cache_dir = temp_cache_dir();
 

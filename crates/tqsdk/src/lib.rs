@@ -2392,6 +2392,12 @@ impl BacktestBuilder {
             }
             minute_before_by_symbol.insert(symbol.clone(), (before, input.snapshot.clone()));
         }
+        let minute_missing_ranges_by_symbol = minute_before_by_symbol
+            .iter()
+            .map(|(symbol, (status, _snapshot))| {
+                (symbol.clone(), status.missing_ranges.clone())
+            })
+            .collect::<BTreeMap<_, _>>();
 
         remote_fill_runtime.emit_plan(build_remote_fill_plan(
             (self.start_ns, self.end_ns),
@@ -2399,6 +2405,8 @@ impl BacktestBuilder {
             &physical_ranges,
             &before_by_range,
             &fill_requests,
+            &minute_fill_requests,
+            &minute_missing_ranges_by_symbol,
             remote_fill_runtime.config(),
         )?);
 
@@ -2974,13 +2982,31 @@ fn build_remote_fill_plan(
     logical_symbols: Vec<String>,
     physical_ranges: &[(String, i64, i64)],
     before_by_range: &BTreeMap<(String, i64, i64), BacktestTickCacheStatus>,
-    fill_requests: &[backtest_remote::RemoteBacktestCacheFillRequest],
+    tick_fill_requests: &[backtest_remote::RemoteBacktestCacheFillRequest],
+    minute_fill_requests: &[backtest_remote::BacktestMinuteKlineFillRequest],
+    minute_missing_ranges_by_symbol: &BTreeMap<String, Vec<(i64, i64)>>,
     config: BacktestRemoteFillConfig,
 ) -> Result<backtest_remote::RemoteFillPlan> {
-    let logical_batches = backtest_remote::remote_fill_logical_batch_count(
-        fill_requests.to_vec(),
+    let tick_logical_batches = backtest_remote::remote_fill_logical_batch_count(
+        tick_fill_requests.to_vec(),
         config.symbol_batch_size,
     )?;
+    let minute_logical_batches = backtest_remote::remote_fill_logical_batch_count(
+        minute_fill_requests
+            .iter()
+            .map(|request| {
+                backtest_remote::RemoteBacktestCacheFillRequest::new(
+                    request.symbol.clone(),
+                    request.start_ns,
+                    request.end_ns,
+                )
+            })
+            .collect(),
+        config.symbol_batch_size,
+    )?;
+    let logical_batches = tick_logical_batches
+        .checked_add(minute_logical_batches)
+        .ok_or_else(|| data_validation("remote fill plan batch count overflowed"))?;
     let mut by_symbol = BTreeMap::<String, (Vec<(i64, i64)>, Vec<(i64, i64)>)>::new();
     for (symbol, start_ns, end_ns) in physical_ranges {
         let status = before_by_range
@@ -2990,9 +3016,18 @@ fn build_remote_fill_plan(
         entry.0.push((*start_ns, *end_ns));
         entry.1.extend(status.missing_ranges.iter().copied());
     }
+    for (symbol, missing_ranges) in minute_missing_ranges_by_symbol {
+        let entry = by_symbol.entry(symbol.clone()).or_default();
+        entry.0.push(requested_range);
+        entry.1.extend(missing_ranges.iter().copied());
+    }
     let physical_symbols = by_symbol
         .into_iter()
-        .map(|(symbol, (requested_ranges, missing_ranges))| {
+        .map(|(symbol, (mut requested_ranges, mut missing_ranges))| {
+            requested_ranges.sort_unstable();
+            requested_ranges.dedup();
+            missing_ranges.sort_unstable();
+            missing_ranges.dedup();
             backtest_remote::RemoteFillPlanSymbol::new(symbol, requested_ranges, missing_ranges)
         })
         .collect();
