@@ -1184,6 +1184,9 @@ async fn fill_minute(
         FillProgressSession::new(args.progress, args.progress_max_bars, "minute");
     let reporter = progress_session.observer();
     reporter.planning("inspecting final canonical-minute coverage");
+    if resolved.calendar.snapshot.is_some() {
+        reporter.calendar_ready(resolved.calendar.progress_calendar(&window)?);
+    }
     let cancellation = BacktestRemoteFillCancellation::new();
     let signal_cancellation = cancellation.clone();
     let signal_task = tokio::spawn(async move {

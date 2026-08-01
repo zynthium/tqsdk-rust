@@ -6,9 +6,10 @@ use tqsdk_data::{
     BACKTEST_HISTORY_METADATA_SCHEMA_VERSION, BacktestHistoryMarketKind,
     BacktestHistoryMetadataCache, BacktestHistoryMetadataSnapshot, BacktestHistoryPhysicalSegment,
     BacktestHistoryTradingDay, BacktestTickCache, KlineSessionTemplate, MinuteKlineCache,
-    MinuteKlineCacheSnapshot, backtest_tick_trading_day_for_timestamp_ns,
+    MinuteKlineCacheSnapshot, TradingCalendarRow, backtest_tick_trading_day_for_timestamp_ns,
     backtest_tick_trading_day_range,
 };
+use tqsdk_cache::{TradingCalendarSnapshot, write_trading_calendar_snapshot};
 
 fn v3_result<'a>(json: &'a Value, command: &str, status: &str, exit_code: i32) -> &'a Value {
     assert_eq!(json["schema_version"], 3);
@@ -514,6 +515,76 @@ fn minute_fill_progress_jsonl_uses_v2_and_identifies_the_cache_kind() {
         "minute fill should leave the planning phase after receiving its plan telemetry"
     );
     assert_eq!(records.last().unwrap()["event"], "complete");
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn minute_fill_progress_uses_the_resolved_trading_calendar() {
+    let cache_dir = temp_dir("minute-progress-calendar");
+    let start_day = day(2026, 7, 17);
+    let end_day = day(2026, 7, 20);
+    let start_range = backtest_tick_trading_day_range(start_day).unwrap();
+    let end_range = backtest_tick_trading_day_range(end_day).unwrap();
+    let cache = MinuteKlineCache::open(&cache_dir).unwrap();
+    cache
+        .store_final_range(
+            "SHFE.rb2601",
+            start_range.start_ns,
+            end_range.end_ns,
+            &MinuteKlineCacheSnapshot::cst_v1(),
+            &[],
+        )
+        .unwrap();
+    let calendar = TradingCalendarSnapshot::from_rows(vec![
+        TradingCalendarRow {
+            date: "2026-07-17".to_string(),
+            trading: true,
+        },
+        TradingCalendarRow {
+            date: "2026-07-18".to_string(),
+            trading: false,
+        },
+        TradingCalendarRow {
+            date: "2026-07-19".to_string(),
+            trading: false,
+        },
+        TradingCalendarRow {
+            date: "2026-07-20".to_string(),
+            trading: true,
+        },
+    ])
+    .unwrap();
+    write_trading_calendar_snapshot(&cache_dir, &calendar).unwrap();
+
+    let output = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2026-07-17",
+        "--end-day",
+        "2026-07-20",
+        "--progress",
+        "jsonl",
+    ]);
+
+    assert!(output.status.success());
+    let records = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let snapshot = records
+        .iter()
+        .find(|record| record["event"] == "snapshot")
+        .expect("minute fill should emit a plan snapshot");
+    assert_eq!(snapshot["calendar"]["source"], "local");
+    assert_eq!(snapshot["coverage"]["covered_days"], 2);
+    assert_eq!(snapshot["coverage"]["planned_days"], 2);
 
     let _ = std::fs::remove_dir_all(cache_dir);
 }
