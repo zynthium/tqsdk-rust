@@ -16,8 +16,9 @@ use chrono::NaiveDate;
 use tokio::task::JoinSet;
 use tqsdk_data::{
     BacktestHistoryAuthProvider, BacktestHistoryBatchReport, BacktestHistoryClient,
-    BacktestHistoryCredentials, BacktestHistoryEvent, BacktestHistoryPolicy,
-    BacktestHistoryRequest, BacktestHistoryRows, BacktestTickCache, DataError, MinuteKlineCache,
+    BacktestHistoryCredentials, BacktestHistoryEvent, BacktestHistoryPhase, BacktestHistoryPolicy,
+    BacktestHistoryRequest, BacktestHistoryRows, BacktestHistoryTelemetryEvent, BacktestTickCache,
+    DataError, MinuteKlineCache,
 };
 
 use crate::{Auth, Result, data_validation};
@@ -1094,6 +1095,7 @@ async fn materialize_cache_with_runtime(
     let mut telemetry = run.take_telemetry();
     let mut last_activity = tokio::time::Instant::now();
     let mut accepted_rows_by_symbol = BTreeMap::<String, usize>::new();
+    let mut history_progress = MaterializedHistoryProgress::default();
     loop {
         tokio::select! {
             event = run.next() => match event {
@@ -1121,8 +1123,16 @@ async fn materialize_cache_with_runtime(
                     None => std::future::pending().await,
                 }
             } => {
-                if telemetry_event.is_some() {
+                if let Some(event) = telemetry_event {
                     last_activity = tokio::time::Instant::now();
+                    observe_materialized_telemetry(
+                        runtime,
+                        logical_batch_id,
+                        batch,
+                        &mut history_progress,
+                        event,
+                        started.elapsed(),
+                    );
                 } else {
                     telemetry = None;
                 }
@@ -1148,6 +1158,79 @@ async fn materialize_cache_with_runtime(
         });
     }
     Ok(report)
+}
+
+/// Translates the data layer's cache-fill telemetry before its rows are read
+/// back from disk.  Canonical-minute fills are split into bounded remote
+/// windows, so waiting for [`BacktestHistoryEvent::Chunk`] would otherwise
+/// leave the CLI at zero until every window for the whole request has reached
+/// a terminal and the cache reader starts.
+fn observe_materialized_telemetry(
+    runtime: &RemoteBacktestFillRuntime,
+    logical_batch_id: usize,
+    batch: &RemoteFillBatch,
+    history_progress: &mut MaterializedHistoryProgress,
+    event: BacktestHistoryTelemetryEvent,
+    elapsed: Duration,
+) {
+    let phase = match event.phase {
+        BacktestHistoryPhase::Retry => BacktestRemoteFillPhase::Retrying,
+        BacktestHistoryPhase::Fill
+        | BacktestHistoryPhase::Read
+        | BacktestHistoryPhase::Aggregate => BacktestRemoteFillPhase::Streaming,
+        BacktestHistoryPhase::Inspect | BacktestHistoryPhase::WaitForFill => {
+            BacktestRemoteFillPhase::Started
+        }
+    };
+    let accepted_rows = history_progress.observe(&event);
+    runtime.emit_telemetry(BacktestRemoteFillTelemetry::lifecycle(
+        RemoteFillTelemetryUpdate {
+            phase,
+            logical_batch_id: logical_batch_id.saturating_add(1),
+            attempt: 1,
+            physical_symbol: event.symbol,
+            requested_range: (batch.start_ns, batch.end_ns),
+            accepted_rows,
+            latest_cursor_ns: None,
+            elapsed,
+            error: None,
+        },
+    ));
+}
+
+/// The data layer reports rows cumulatively within one official-server window.
+/// A large minute request may begin a following window at zero, so retain a
+/// monotonic total for the facade/UI while accepting that reset.
+#[derive(Debug, Default)]
+struct MaterializedHistoryProgress {
+    previous_fill_rows: BTreeMap<String, usize>,
+    accepted_rows: BTreeMap<String, usize>,
+}
+
+impl MaterializedHistoryProgress {
+    fn observe(&mut self, event: &BacktestHistoryTelemetryEvent) -> usize {
+        if event.phase == BacktestHistoryPhase::Fill {
+            let previous = self
+                .previous_fill_rows
+                .entry(event.symbol.clone())
+                .or_default();
+            let added_rows = if event.completed_rows >= *previous {
+                event.completed_rows.saturating_sub(*previous)
+            } else {
+                // A new bounded source window starts its counter from zero.
+                event.completed_rows
+            };
+            *previous = event.completed_rows;
+            let accepted = self.accepted_rows.entry(event.symbol.clone()).or_default();
+            *accepted = accepted.saturating_add(added_rows);
+        } else if event.phase == BacktestHistoryPhase::Retry {
+            self.previous_fill_rows.insert(event.symbol.clone(), 0);
+        }
+        self.accepted_rows
+            .get(event.symbol.as_str())
+            .copied()
+            .unwrap_or_default()
+    }
 }
 
 fn observe_materialized_chunk(
@@ -1416,13 +1499,14 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        BacktestRemoteFillConfig, FacadeHistoryFillKind, RemoteBacktestCacheFillRequest,
-        RemoteCacheCommitMode, parse_remote_fill_allow_empty_idle, parse_remote_fill_batch_timeout,
-        parse_remote_fill_idle_timeout, parse_remote_fill_slice_ns,
-        parse_remote_fill_symbol_batch_size, parse_remote_fill_symbol_concurrency,
-        remote_fill_batches, remote_fill_logical_batch_count, remote_fill_ranges,
-        should_reject_empty_remote_tick_fill, split_remote_fill_requests,
+        BacktestRemoteFillConfig, FacadeHistoryFillKind, MaterializedHistoryProgress,
+        RemoteBacktestCacheFillRequest, RemoteCacheCommitMode, parse_remote_fill_allow_empty_idle,
+        parse_remote_fill_batch_timeout, parse_remote_fill_idle_timeout,
+        parse_remote_fill_slice_ns, parse_remote_fill_symbol_batch_size,
+        parse_remote_fill_symbol_concurrency, remote_fill_batches, remote_fill_logical_batch_count,
+        remote_fill_ranges, should_reject_empty_remote_tick_fill, split_remote_fill_requests,
     };
+    use tqsdk_data::{BacktestHistoryPhase, BacktestHistoryTelemetryEvent};
 
     #[test]
     fn remote_fill_config_normalizes_legacy_values() {
@@ -1509,5 +1593,23 @@ mod tests {
             false,
             false,
         ));
+    }
+
+    #[test]
+    fn materialized_history_progress_keeps_minute_windows_monotonic() {
+        let mut progress = MaterializedHistoryProgress::default();
+        let event = |completed_rows| BacktestHistoryTelemetryEvent {
+            request_id: Some(1),
+            symbol: "KQ.m@SHFE.au".to_string(),
+            phase: BacktestHistoryPhase::Fill,
+            completed_rows,
+            message: "buffering canonical-minute rows".to_string(),
+        };
+
+        assert_eq!(progress.observe(&event(80)), 80);
+        assert_eq!(progress.observe(&event(120)), 120);
+        // The following bounded official-server window restarts at zero.
+        assert_eq!(progress.observe(&event(0)), 120);
+        assert_eq!(progress.observe(&event(60)), 180);
     }
 }
