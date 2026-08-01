@@ -956,11 +956,15 @@ async fn fill_backtest_history_cache(
             errors.join(" | ")
         )));
     }
+    // Successful data-layer batches are reported only after an explicit
+    // server terminal has durably committed coverage. Such a terminal
+    // zero-row window is valid (for example, a holiday or pre-listing range).
     if should_reject_empty_remote_tick_fill(
         kind,
         rows_by_symbol.values().copied().sum(),
         all_requests_provisional,
         config.allow_empty_idle,
+        completed_batches == total_batches,
     ) {
         return Err(data_validation(format!(
             "remote backtest cache fill completed without accepted ticks for {requested_symbols} symbols; refusing to mark complete empty coverage"
@@ -974,11 +978,13 @@ fn should_reject_empty_remote_tick_fill(
     accepted_rows: usize,
     all_requests_provisional: bool,
     allow_empty_idle: bool,
+    terminal_confirmed: bool,
 ) -> bool {
     kind == FacadeHistoryFillKind::Tick
         && accepted_rows == 0
         && !all_requests_provisional
         && !allow_empty_idle
+        && !terminal_confirmed
 }
 
 async fn fill_backtest_history_batch(
@@ -1467,28 +1473,39 @@ mod tests {
     }
 
     #[test]
-    fn empty_final_tick_fill_retains_legacy_opt_in_guard() {
+    fn explicitly_terminal_empty_tick_fill_does_not_require_legacy_opt_in() {
+        assert!(!should_reject_empty_remote_tick_fill(
+            FacadeHistoryFillKind::Tick,
+            0,
+            false,
+            false,
+            true,
+        ));
         assert!(should_reject_empty_remote_tick_fill(
             FacadeHistoryFillKind::Tick,
             0,
             false,
             false,
+            false,
         ));
         assert!(!should_reject_empty_remote_tick_fill(
             FacadeHistoryFillKind::Tick,
             0,
             false,
             true,
+            false,
         ));
         assert!(!should_reject_empty_remote_tick_fill(
             FacadeHistoryFillKind::Tick,
             0,
             true,
+            false,
             false,
         ));
         assert!(!should_reject_empty_remote_tick_fill(
             FacadeHistoryFillKind::CanonicalMinute,
             0,
+            false,
             false,
             false,
         ));
