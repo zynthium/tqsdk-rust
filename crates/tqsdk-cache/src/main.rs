@@ -18,8 +18,9 @@ use tqsdk_cache::{
     write_trading_calendar_snapshot,
 };
 use tqsdk_data::{
-    BacktestTickCache, DataClient, DataError, HistorySeriesCacheFileStatus, MinuteKlineCache,
-    MinuteKlineCacheSnapshot, TradingCalendarRow, backtest_tick_trading_day_for_timestamp_ns,
+    BacktestHistoryMetadataCache, BacktestTickCache, DataClient, DataError,
+    HistorySeriesCacheFileStatus, MinuteKlineCache, MinuteKlineCacheSnapshot, TradingCalendarRow,
+    backtest_tick_trading_day_for_timestamp_ns,
 };
 
 mod progress;
@@ -1055,10 +1056,12 @@ fn inspect(
             .collect::<Result<Vec<_>, _>>()?,
         CacheKind::Minute => {
             let minute_cache = MinuteKlineCache::open_read_only(&cache_dir);
-            let snapshot = tqsdk_data::MinuteKlineCacheSnapshot::cst_v1();
+            let metadata_cache = BacktestHistoryMetadataCache::open_read_only(&cache_dir);
             symbols
                 .iter()
                 .map(|symbol| {
+                    let snapshot =
+                        minute_cache_snapshot_for_symbol(&metadata_cache, symbol.as_str())?;
                     minute_cache
                         .inspect(symbol, window.start_ns, window.end_ns, &snapshot)
                         .map(|status| minute_cache_status_json(&status))
@@ -1139,8 +1142,6 @@ async fn fill_minute(
         symbols: selector_symbols,
         universe,
     };
-    let snapshot = MinuteKlineCacheSnapshot::cst_v1();
-
     if args.dry_run {
         if args.report.is_some() {
             return Err(CliError::Usage(
@@ -1149,9 +1150,13 @@ async fn fill_minute(
             ));
         }
         let cache = MinuteKlineCache::open_read_only(&canonical_cache_dir);
+        let metadata_cache = BacktestHistoryMetadataCache::open_read_only(&canonical_cache_dir);
         let statuses = symbols
             .iter()
-            .map(|symbol| cache.inspect(symbol, window.start_ns, window.end_ns, &snapshot))
+            .map(|symbol| {
+                let snapshot = minute_cache_snapshot_for_symbol(&metadata_cache, symbol.as_str())?;
+                cache.inspect(symbol, window.start_ns, window.end_ns, &snapshot)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let report = minute_cache_only_report(
             canonical_cache_dir.as_path(),
@@ -1185,13 +1190,15 @@ async fn fill_minute(
         wait_for_shutdown_signal(signal_cancellation).await;
     });
     let progress_callback = reporter.clone();
+    let telemetry_callback = reporter.clone();
     let mut builder = builder_with_market_environment_auth(market, false)?
         .backtest(window.start_ns, window.end_ns)
         .cache_dir(&canonical_cache_dir)?
         .remote_on_miss()
         .remote_fill_config(config)
         .remote_fill_cancellation(cancellation.clone())
-        .on_remote_fill_progress(move |event| progress_callback.observe_progress(event));
+        .on_remote_fill_progress(move |event| progress_callback.observe_progress(event))
+        .on_remote_fill_telemetry(move |event| telemetry_callback.observe_telemetry(event));
     if let Some(wait_secs) = args.lock_wait_secs {
         builder = builder.remote_fill_lock_wait(Duration::from_secs(wait_secs));
     }
@@ -1268,6 +1275,20 @@ async fn fill_minute(
         }),
         exit_code: if report.complete { 0 } else { 1 },
     })
+}
+
+fn minute_cache_snapshot_for_symbol(
+    metadata_cache: &BacktestHistoryMetadataCache,
+    symbol: &str,
+) -> Result<MinuteKlineCacheSnapshot, DataError> {
+    let Some(metadata) = metadata_cache.load_active(symbol)? else {
+        return Ok(MinuteKlineCacheSnapshot::cst_v1());
+    };
+    MinuteKlineCacheSnapshot::new(
+        metadata.schema_version,
+        metadata.snapshot_hash,
+        metadata.session.snapshot_hash(),
+    )
 }
 
 async fn resolve_minute_fill_symbols(

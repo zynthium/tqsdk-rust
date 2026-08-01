@@ -41,6 +41,11 @@ const NONE_EPOCH: i64 = i64::MIN;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
+#[cfg(test)]
+std::thread_local! {
+    static TEST_MONTH_SCAN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Compatibility identity for a cache file's calendar and session definition.
 ///
 /// A reader must provide the same snapshot that wrote a month.  A mismatch is
@@ -403,7 +408,10 @@ impl MinuteKlineCache {
         snapshot: &MinuteKlineCacheSnapshot,
     ) -> Result<MinuteKlineCacheStatus> {
         let symbol = symbol.as_ref();
-        let coverage = self.coverage(symbol, range_start_ns, range_end_ns, snapshot)?;
+        validate_range(symbol, range_start_ns, range_end_ns)?;
+        snapshot.validate()?;
+
+        let mut cached_ranges = Vec::new();
         let mut months = Vec::new();
         for slice in split_trading_month_range(range_start_ns, range_end_ns)? {
             let path = self.month_file_path_unchecked(symbol, slice.trading_month.as_str());
@@ -414,13 +422,18 @@ impl MinuteKlineCache {
                 snapshot,
             )?;
             months.push(match scan {
-                Some(scan) => MinuteKlineCacheMonthReport {
-                    trading_month: slice.trading_month,
-                    path,
-                    present: true,
-                    rows: scan.rows,
-                    cached_ranges: scan.coverage,
-                },
+                Some(scan) => {
+                    cached_ranges.extend(scan.coverage.iter().filter_map(|range| {
+                        intersect_ranges(*range, (slice.start_ns, slice.end_ns))
+                    }));
+                    MinuteKlineCacheMonthReport {
+                        trading_month: slice.trading_month,
+                        path,
+                        present: true,
+                        rows: scan.rows,
+                        cached_ranges: scan.coverage,
+                    }
+                }
                 None => MinuteKlineCacheMonthReport {
                     trading_month: slice.trading_month,
                     path,
@@ -430,6 +443,8 @@ impl MinuteKlineCache {
                 },
             });
         }
+        let cached_ranges = merge_ranges(cached_ranges);
+        let missing_ranges = missing_ranges(range_start_ns, range_end_ns, &cached_ranges);
         Ok(MinuteKlineCacheStatus {
             format_id: self.format_id(),
             cache_dir: self.root_dir.clone(),
@@ -437,8 +452,8 @@ impl MinuteKlineCache {
             symbol: symbol.to_string(),
             range_start_ns,
             range_end_ns,
-            cached_ranges: coverage.cached_ranges,
-            missing_ranges: coverage.missing_ranges,
+            cached_ranges,
+            missing_ranges,
             months,
         })
     }
@@ -1141,6 +1156,9 @@ fn scan_month_file(
 }
 
 fn scan_month_file_unchecked(path: &Path) -> Result<MonthScan> {
+    #[cfg(test)]
+    TEST_MONTH_SCAN_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+
     let file = File::open(path)?;
     let file_len = file.metadata()?.len();
     let mut reader = BufReader::new(file);
@@ -2087,6 +2105,32 @@ mod tests {
             vec![1]
         );
         assert_eq!(reader.next_kline().unwrap().unwrap().id, 2);
+    }
+
+    #[test]
+    fn inspect_scans_each_present_month_once() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock must be after the Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tqsdk-minute-inspect-scan-{nanos}"));
+        let cache = MinuteKlineCache::open(&root).expect("cache should open");
+        let snapshot = MinuteKlineCacheSnapshot::new(1, "calendar-v1", "session-v1")
+            .expect("snapshot should be valid");
+        let start = utc_ns(2026, 1, 5, 2, 0);
+        let end = start + MINUTE_KLINE_DURATION_NS;
+        cache
+            .store_final_range("SHFE.rb2601", start, end, &snapshot, &[])
+            .expect("minute coverage should write");
+
+        TEST_MONTH_SCAN_COUNT.with(|count| count.set(0));
+        cache
+            .inspect("SHFE.rb2601", start, end, &snapshot)
+            .expect("minute cache should inspect");
+        let scans = TEST_MONTH_SCAN_COUNT.with(std::cell::Cell::get);
+
+        assert_eq!(scans, 1, "inspect should decode each selected month once");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn utc_ns(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {

@@ -3,8 +3,11 @@ use std::process::Command;
 use chrono::NaiveDate;
 use serde_json::Value;
 use tqsdk_data::{
-    BacktestTickCache, MinuteKlineCache, MinuteKlineCacheSnapshot,
-    backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
+    BACKTEST_HISTORY_METADATA_SCHEMA_VERSION, BacktestHistoryMarketKind,
+    BacktestHistoryMetadataCache, BacktestHistoryMetadataSnapshot, BacktestHistoryPhysicalSegment,
+    BacktestHistoryTradingDay, BacktestTickCache, KlineSessionTemplate, MinuteKlineCache,
+    MinuteKlineCacheSnapshot, backtest_tick_trading_day_for_timestamp_ns,
+    backtest_tick_trading_day_range,
 };
 
 fn v3_result<'a>(json: &'a Value, command: &str, status: &str, exit_code: i32) -> &'a Value {
@@ -121,6 +124,35 @@ fn minute_inspect_uses_the_logical_symbol_as_its_cache_key() {
 }
 
 #[test]
+fn minute_inspect_uses_the_persisted_metadata_snapshot() {
+    let cache_dir = temp_dir("minute-inspect-metadata-snapshot");
+    let symbol = "KQ.i@SHFE.au";
+    store_metadata_backed_minute_coverage(&cache_dir, symbol, day(2020, 1, 2));
+
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "inspect",
+        "--symbol",
+        symbol,
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+    ]);
+
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "inspect", "success", 0);
+    assert_eq!(result["statuses"][0]["symbol"], symbol);
+    assert_eq!(result["statuses"][0]["complete"], true);
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
 fn minute_doctor_reports_the_v4_month_file_without_touching_tick_cache() {
     let cache_dir = temp_dir("minute-doctor");
     let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
@@ -181,6 +213,36 @@ fn minute_fill_dry_run_is_cache_only_and_does_not_create_the_root() {
     assert_eq!(result["report"]["cache_kind"], "minute");
     assert_eq!(result["report"]["remote_used"], false);
     assert_eq!(result["report"]["complete"], false);
+}
+
+#[test]
+fn minute_fill_dry_run_uses_the_persisted_metadata_snapshot() {
+    let cache_dir = temp_dir("minute-fill-dry-run-metadata-snapshot");
+    let symbol = "KQ.i@SHFE.au";
+    store_metadata_backed_minute_coverage(&cache_dir, symbol, day(2020, 1, 2));
+
+    let output = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "fill",
+        "--symbol",
+        symbol,
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--dry-run",
+    ]);
+
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "fill", "success", 0);
+    assert_eq!(result["report"]["complete"], true);
+    assert_eq!(result["report"]["remote_used"], false);
+
+    let _ = std::fs::remove_dir_all(cache_dir);
 }
 
 #[test]
@@ -447,6 +509,10 @@ fn minute_fill_progress_jsonl_uses_v2_and_identifies_the_cache_kind() {
             && record["kind"] == "tqsdk-cache.progress"
             && record["cache_kind"] == "minute"
     }));
+    assert!(
+        records.iter().any(|record| record["event"] == "snapshot"),
+        "minute fill should leave the planning phase after receiving its plan telemetry"
+    );
     assert_eq!(records.last().unwrap()["event"], "complete");
 
     let _ = std::fs::remove_dir_all(cache_dir);
@@ -1135,6 +1201,46 @@ fn current_time_ns() -> i64 {
         .unwrap()
         .as_nanos();
     i64::try_from(now_ns).unwrap()
+}
+
+fn store_metadata_backed_minute_coverage(
+    cache_dir: &std::path::Path,
+    symbol: &str,
+    day: NaiveDate,
+) {
+    let range = backtest_tick_trading_day_range(day).unwrap();
+    let stored = BacktestHistoryMetadataCache::open(cache_dir)
+        .unwrap()
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+            market_kind: BacktestHistoryMarketKind::Futures,
+            logical_symbol: symbol.to_string(),
+            captured_at_ns: range.end_ns,
+            trading_days: vec![BacktestHistoryTradingDay {
+                date: day.to_string(),
+                is_trading_day: true,
+                start_ns: range.start_ns,
+                end_ns: range.end_ns,
+            }],
+            session: KlineSessionTemplate::cst_trading_day(),
+            physical_segments: vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: symbol.to_string(),
+                start_ns: range.start_ns,
+                end_ns: range.end_ns,
+            }],
+            snapshot_hash: String::new(),
+        })
+        .unwrap();
+    let snapshot = MinuteKlineCacheSnapshot::new(
+        stored.schema_version,
+        stored.snapshot_hash,
+        stored.session.snapshot_hash(),
+    )
+    .unwrap();
+    MinuteKlineCache::open(cache_dir)
+        .unwrap()
+        .store_final_range(symbol, range.start_ns, range.end_ns, &snapshot, &[])
+        .unwrap();
 }
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
