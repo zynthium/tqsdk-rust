@@ -41,6 +41,10 @@ const DEFAULT_HOLIDAY_URL: &str = "https://files.shinnytech.com/shinny_chinese_h
 const DEFAULT_CONTINUOUS_TABLE_URL: &str = "https://files.shinnytech.com/continuous_table.json";
 const DEFAULT_HISTORY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_HISTORY_PAGE_VIEW_WIDTH: usize = 2_000;
+#[cfg(feature = "services")]
+const DATA_SERVICE_HTTP_SEND_ATTEMPTS: usize = 3;
+#[cfg(feature = "services")]
+const DATA_SERVICE_HTTP_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 pub(crate) const MAX_HISTORY_VIEW_WIDTH: usize = 10_000;
 #[cfg(feature = "services")]
 const DIRECT_HTTPS_HOSTS: &[(&str, &str)] = &[
@@ -414,7 +418,9 @@ impl DataClient {
 
     #[cfg(feature = "services")]
     async fn fetch_json(&self, url: &str) -> Result<Value> {
-        let response = self.http.get(url).send().await?.error_for_status()?;
+        let response = send_data_service_request_with_retry(|| self.http.get(url))
+            .await?
+            .error_for_status()?;
         Ok(response.json::<Value>().await?)
     }
 
@@ -424,6 +430,34 @@ impl DataClient {
             "tqsdk-data services feature is disabled",
         ))
     }
+}
+
+#[cfg(feature = "services")]
+async fn send_data_service_request_with_retry(
+    mut request: impl FnMut() -> reqwest::RequestBuilder,
+) -> std::result::Result<reqwest::Response, reqwest::Error> {
+    let mut attempt = 1_usize;
+    loop {
+        match request().send().await {
+            Ok(response) => return Ok(response),
+            Err(error)
+                if attempt < DATA_SERVICE_HTTP_SEND_ATTEMPTS
+                    && is_retryable_data_service_send_error(&error) =>
+            {
+                tokio::time::sleep(
+                    DATA_SERVICE_HTTP_RETRY_BASE_DELAY.saturating_mul(attempt as u32),
+                )
+                .await;
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(feature = "services")]
+fn is_retryable_data_service_send_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect() || error.is_request()
 }
 
 #[derive(Clone, Default)]
@@ -547,6 +581,34 @@ mod tests {
     use tqsdk_session::SessionClient;
 
     use super::*;
+
+    #[cfg(feature = "services")]
+    #[test]
+    fn fetch_json_retries_a_transient_send_failure() {
+        run_on_tokio(async {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                for attempt in 0..2 {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let _ = read_http_request(&mut stream);
+                    if attempt == 0 {
+                        continue;
+                    }
+                    write_http_ok(&mut stream, r#"{"status":"ok"}"#);
+                }
+            });
+            let client = DataClient::new();
+
+            let payload = client
+                .fetch_json(&format!("http://{addr}/flaky.json"))
+                .await
+                .expect("transient send failure should be retried");
+
+            assert_eq!(payload, json!({"status": "ok"}));
+            server.join().unwrap();
+        });
+    }
 
     #[cfg(feature = "services")]
     #[test]

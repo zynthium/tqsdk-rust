@@ -21,6 +21,8 @@ const DEFAULT_AUTH_URL: &str = "https://auth.shinnytech.com";
 const DEFAULT_NAME_SERVICE_URL: &str = "https://api.shinnytech.com/ns";
 const DEFAULT_BROKER_BASE_URL: &str = "https://files.shinnytech.com";
 const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.8.1";
+const HTTP_SEND_ATTEMPTS: usize = 3;
+const HTTP_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 // These are ShinnyTech's public OAuth2 client identifiers, not user
 // credentials. User passwords and access tokens still come from the runtime
 // authentication flow; if the platform rotates this public client, a builder
@@ -148,20 +150,22 @@ impl TqAuthProvider {
     async fn request_access_token(&self) -> Result<String> {
         self.run_http(async {
             let client = self.build_http_client(None)?;
-            let response = client
-                .post(self.token_url())
-                .form(&[
-                    ("client_id", CLIENT_ID),
-                    ("client_secret", CLIENT_SECRET),
-                    ("grant_type", "password"),
-                    ("username", self.credentials.username.as_str()),
-                    ("password", self.credentials.password.as_str()),
-                ])
-                .header(USER_AGENT, DEFAULT_USER_AGENT)
-                .header(ACCEPT, "application/json")
-                .send()
-                .await
-                .map_err(|err| ContractError::auth(format_reqwest_error("token request", err)))?;
+            let token_url = self.token_url();
+            let response = send_http_request_with_retry(|| {
+                client
+                    .post(&token_url)
+                    .form(&[
+                        ("client_id", CLIENT_ID),
+                        ("client_secret", CLIENT_SECRET),
+                        ("grant_type", "password"),
+                        ("username", self.credentials.username.as_str()),
+                        ("password", self.credentials.password.as_str()),
+                    ])
+                    .header(USER_AGENT, DEFAULT_USER_AGENT)
+                    .header(ACCEPT, "application/json")
+            })
+            .await
+            .map_err(|err| ContractError::auth(format_reqwest_error("token request", err)))?;
             let payload = self.read_json_response(response, "token request").await?;
             let access_token = payload
                 .get("access_token")
@@ -225,17 +229,16 @@ impl TqAuthProvider {
     ) -> Result<String> {
         self.run_http(async {
             let client = self.build_http_client(Some(self.auth_headers(auth)?))?;
-            let response = client
-                .get(&self.name_service_url)
-                .query(&[
-                    ("stock", stock.to_string()),
-                    ("backtest", backtest.to_string()),
-                ])
-                .send()
-                .await
-                .map_err(|err| {
-                    ContractError::auth(format_reqwest_error("market endpoint request", err))
-                })?;
+            let query = [
+                ("stock", stock.to_string()),
+                ("backtest", backtest.to_string()),
+            ];
+            let response =
+                send_http_request_with_retry(|| client.get(&self.name_service_url).query(&query))
+                    .await
+                    .map_err(|err| {
+                        ContractError::auth(format_reqwest_error("market endpoint request", err))
+                    })?;
             let payload = self
                 .read_json_response(response, "market endpoint request")
                 .await?;
@@ -314,6 +317,26 @@ fn require_tokio_runtime() -> Result<()> {
         ContractError::validation("tq auth provider requires an active Tokio runtime")
     })?;
     Ok(())
+}
+
+async fn send_http_request_with_retry(
+    mut request: impl FnMut() -> reqwest::RequestBuilder,
+) -> std::result::Result<reqwest::Response, reqwest::Error> {
+    let mut attempt = 1_usize;
+    loop {
+        match request().send().await {
+            Ok(response) => return Ok(response),
+            Err(error) if attempt < HTTP_SEND_ATTEMPTS && is_retryable_http_send_error(&error) => {
+                tokio::time::sleep(HTTP_RETRY_BASE_DELAY.saturating_mul(attempt as u32)).await;
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn is_retryable_http_send_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect() || error.is_request()
 }
 
 fn format_reqwest_error(context: &str, err: reqwest::Error) -> String {
@@ -580,6 +603,43 @@ mod tests {
             !message.contains("TAIL_MARKER"),
             "body was not truncated: {message}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn access_token_request_retries_a_transient_send_failure() {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("test listener should have an address");
+        let server = std::thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().expect("test connection should arrive");
+                let mut request = [0_u8; 2048];
+                let _ = stream.read(&mut request);
+                if attempt == 0 {
+                    continue;
+                }
+
+                let body = br#"{"access_token":"test-access-token"}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("headers should write");
+                stream.write_all(body).expect("body should write");
+            }
+        });
+        let provider = test_provider().with_auth_url(format!("http://{addr}"));
+
+        let access_token = provider
+            .request_access_token()
+            .await
+            .expect("transient send failure should be retried");
+
+        assert_eq!(access_token, "test-access-token");
+        server.join().expect("test server should finish");
     }
 
     fn test_provider() -> TqAuthProvider {
