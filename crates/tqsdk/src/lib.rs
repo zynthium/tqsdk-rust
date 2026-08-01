@@ -2394,9 +2394,7 @@ impl BacktestBuilder {
         }
         let minute_missing_ranges_by_symbol = minute_before_by_symbol
             .iter()
-            .map(|(symbol, (status, _snapshot))| {
-                (symbol.clone(), status.missing_ranges.clone())
-            })
+            .map(|(symbol, (status, _snapshot))| (symbol.clone(), status.missing_ranges.clone()))
             .collect::<BTreeMap<_, _>>();
 
         remote_fill_runtime.emit_plan(build_remote_fill_plan(

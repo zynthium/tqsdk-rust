@@ -240,6 +240,7 @@ struct SymbolProgress {
     rows_by_stream: BTreeMap<(usize, usize, i64, i64), usize>,
     active: bool,
     phase: Option<BacktestRemoteFillPhase>,
+    last_event_sequence: u64,
     latest_trading_day: Option<NaiveDate>,
     retries: usize,
     split_fallback: bool,
@@ -333,8 +334,10 @@ impl ProgressState {
         let Some(range) = event.requested_range() else {
             return;
         };
+        let event_sequence = self.revision;
         let entry = self.symbols.entry(symbol.to_string()).or_default();
         entry.phase = Some(event.phase());
+        entry.last_event_sequence = event_sequence;
         entry.active = !matches!(
             event.phase(),
             BacktestRemoteFillPhase::Finished
@@ -414,6 +417,49 @@ impl ProgressState {
                 .received_days
                 .retain(|day| symbol.missing_days.contains(day));
         }
+    }
+
+    fn visible_symbols(&self) -> Vec<String> {
+        let mut active = self
+            .symbols
+            .iter()
+            .filter(|(_, state)| state.active)
+            .collect::<Vec<_>>();
+        active.sort_by(|(left_symbol, left), (right_symbol, right)| {
+            right
+                .last_event_sequence
+                .cmp(&left.last_event_sequence)
+                .then_with(|| left_symbol.cmp(right_symbol))
+        });
+
+        let mut terminal = self
+            .symbols
+            .iter()
+            .filter(|(_, state)| {
+                !state.active
+                    && matches!(
+                        state.phase,
+                        Some(
+                            BacktestRemoteFillPhase::Finished
+                                | BacktestRemoteFillPhase::Failed
+                                | BacktestRemoteFillPhase::Cancelled
+                        )
+                    )
+            })
+            .collect::<Vec<_>>();
+        terminal.sort_by(|(left_symbol, left), (right_symbol, right)| {
+            right
+                .last_event_sequence
+                .cmp(&left.last_event_sequence)
+                .then_with(|| left_symbol.cmp(right_symbol))
+        });
+
+        active
+            .into_iter()
+            .chain(terminal)
+            .take(self.max_bars)
+            .map(|(symbol, _)| symbol.clone())
+            .collect()
     }
 
     fn coverage_counts(&self) -> (usize, usize, usize, usize, usize) {
@@ -719,18 +765,16 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
                     multi.remove(&planning);
                     planning_visible = false;
                 }
-                let active = snapshot
+                let active_count = snapshot
                     .symbols
                     .iter()
                     .filter(|(_, state)| state.active)
-                    .map(|(symbol, _)| symbol.clone())
-                    .collect::<Vec<_>>();
-                let visible = active
-                    .iter()
-                    .take(snapshot.max_bars)
-                    .cloned()
+                    .count();
+                let visible = snapshot
+                    .visible_symbols()
+                    .into_iter()
                     .collect::<BTreeSet<_>>();
-                let additional_active = active.len().saturating_sub(visible.len());
+                let additional_active = active_count.saturating_sub(snapshot.max_bars);
                 if global.is_none() {
                     let bar = multi.add(ProgressBar::new(snapshot.total_batches as u64));
                     bar.set_style(global_style());
@@ -861,6 +905,7 @@ mod tests {
         completed_days_through_cursor, days_for_ranges, resolve_mode,
     };
     use chrono::NaiveDate;
+    use tqsdk::BacktestRemoteFillPhase;
     use tqsdk_cache::FillReportSymbolDayStats;
     use tqsdk_data::backtest_tick_trading_day_range;
 
@@ -977,5 +1022,40 @@ mod tests {
     #[test]
     fn explicit_tty_mode_bypasses_terminal_auto_detection() {
         assert_eq!(resolve_mode(ProgressMode::Tty), ResolvedProgressMode::Tty);
+    }
+
+    #[test]
+    fn visible_symbols_keep_the_most_recent_terminal_result_after_active_work() {
+        let mut state = ProgressState::new(super::ResolvedProgressMode::Tty, 2);
+        state.symbols.insert(
+            "KQ.m@GFEX.pd".to_string(),
+            SymbolProgress {
+                active: true,
+                phase: Some(BacktestRemoteFillPhase::Started),
+                last_event_sequence: 1,
+                ..SymbolProgress::default()
+            },
+        );
+        state.symbols.insert(
+            "KQ.m@GFEX.ps".to_string(),
+            SymbolProgress {
+                phase: Some(BacktestRemoteFillPhase::Finished),
+                last_event_sequence: 2,
+                ..SymbolProgress::default()
+            },
+        );
+        state.symbols.insert(
+            "KQ.m@GFEX.pt".to_string(),
+            SymbolProgress {
+                phase: Some(BacktestRemoteFillPhase::Finished),
+                last_event_sequence: 3,
+                ..SymbolProgress::default()
+            },
+        );
+
+        assert_eq!(
+            state.visible_symbols(),
+            vec!["KQ.m@GFEX.pd".to_string(), "KQ.m@GFEX.pt".to_string()]
+        );
     }
 }

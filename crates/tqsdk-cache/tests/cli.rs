@@ -2,6 +2,7 @@ use std::process::Command;
 
 use chrono::NaiveDate;
 use serde_json::Value;
+use tqsdk_cache::{TradingCalendarSnapshot, write_trading_calendar_snapshot};
 use tqsdk_data::{
     BACKTEST_HISTORY_METADATA_SCHEMA_VERSION, BacktestHistoryMarketKind,
     BacktestHistoryMetadataCache, BacktestHistoryMetadataSnapshot, BacktestHistoryPhysicalSegment,
@@ -9,7 +10,6 @@ use tqsdk_data::{
     MinuteKlineCacheSnapshot, TradingCalendarRow, backtest_tick_trading_day_for_timestamp_ns,
     backtest_tick_trading_day_range,
 };
-use tqsdk_cache::{TradingCalendarSnapshot, write_trading_calendar_snapshot};
 
 fn v3_result<'a>(json: &'a Value, command: &str, status: &str, exit_code: i32) -> &'a Value {
     assert_eq!(json["schema_version"], 3);
