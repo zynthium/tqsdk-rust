@@ -327,6 +327,55 @@ fn minute_stock_fill_rejects_futures_universe_selectors() {
 }
 
 #[test]
+fn repair_stale_is_explicitly_limited_to_mutating_minute_fills() {
+    let tick = run_json([
+        "--kind",
+        "tick",
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-03",
+        "--dry-run",
+        "--repair-stale",
+    ]);
+    assert_eq!(tick.status.code(), Some(2));
+    let tick_json: Value = serde_json::from_slice(&tick.stdout).unwrap();
+    assert_eq!(tick_json["error"]["code"], "usage");
+    assert!(
+        tick_json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--kind minute")
+    );
+
+    let minute = run_json([
+        "--kind",
+        "minute",
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-03",
+        "--dry-run",
+        "--repair-stale",
+    ]);
+    assert_eq!(minute.status.code(), Some(2));
+    let minute_json: Value = serde_json::from_slice(&minute.stdout).unwrap();
+    assert_eq!(minute_json["error"]["code"], "usage");
+    assert!(
+        minute_json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--dry-run")
+    );
+}
+
+#[test]
 fn tick_fill_rejects_stock_market_instead_of_silently_using_futures() {
     let output = run_json([
         "--kind",

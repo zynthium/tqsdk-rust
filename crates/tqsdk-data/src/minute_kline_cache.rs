@@ -155,6 +155,18 @@ impl MinuteKlineCacheStatus {
     }
 }
 
+/// Internal compatibility scan for an explicit stale-partition repair.
+///
+/// Normal cache reads intentionally stop at the first snapshot mismatch. This
+/// scan instead records only exact snapshot mismatches so an opt-in operator
+/// repair can remove those monthly partitions before retrying the ordinary,
+/// fail-closed read path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MinuteKlineCacheSnapshotCompatibility {
+    pub(crate) matching_month_count: usize,
+    pub(crate) mismatched_ranges: Vec<(i64, i64)>,
+}
+
 /// Result of explicit v4 monthly-minute cache deletion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MinuteKlineCachePurgeReport {
@@ -455,6 +467,41 @@ impl MinuteKlineCache {
             cached_ranges,
             missing_ranges,
             months,
+        })
+    }
+
+    pub(crate) fn snapshot_compatibility(
+        &self,
+        symbol: impl AsRef<str>,
+        range_start_ns: i64,
+        range_end_ns: i64,
+        snapshot: &MinuteKlineCacheSnapshot,
+    ) -> Result<MinuteKlineCacheSnapshotCompatibility> {
+        let symbol = symbol.as_ref();
+        validate_range(symbol, range_start_ns, range_end_ns)?;
+        snapshot.validate()?;
+
+        let mut matching_month_count = 0_usize;
+        let mut mismatched_ranges = Vec::new();
+        for slice in split_trading_month_range(range_start_ns, range_end_ns)? {
+            let path = self.month_file_path_unchecked(symbol, slice.trading_month.as_str());
+            match scan_existing_month(
+                path.as_path(),
+                symbol,
+                slice.trading_month.as_str(),
+                snapshot,
+            ) {
+                Ok(Some(_)) => matching_month_count = matching_month_count.saturating_add(1),
+                Ok(None) => {}
+                Err(error) if is_snapshot_mismatch(&error) => {
+                    mismatched_ranges.push((slice.start_ns, slice.end_ns));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(MinuteKlineCacheSnapshotCompatibility {
+            matching_month_count,
+            mismatched_ranges,
         })
     }
 
@@ -1617,6 +1664,14 @@ fn validate_expected_metadata(
         ));
     }
     Ok(())
+}
+
+fn is_snapshot_mismatch(error: &DataError) -> bool {
+    matches!(
+        error,
+        DataError::InvalidResponse(message)
+            if message.contains("calendar/session snapshot mismatch")
+    )
 }
 
 fn encode_string(bytes: &mut Vec<u8>, value: &str) -> Result<()> {

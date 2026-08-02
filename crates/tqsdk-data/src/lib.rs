@@ -84,8 +84,6 @@ pub use aggregation::{
     MinuteKlineAggregationUpdate, MinuteKlineAggregator, TickKlineAggregationUpdate,
     TickKlineAggregator,
 };
-#[doc(hidden)]
-pub use backtest_history::resolve_minute_cache_metadata_snapshot;
 pub use backtest_history::{
     BACKTEST_HISTORY_METADATA_FORMAT_ID, BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
     BacktestHistoryAuthProvider, BacktestHistoryBatchReport, BacktestHistoryChunk,
@@ -98,6 +96,10 @@ pub use backtest_history::{
     BacktestHistoryRequest, BacktestHistoryRequestFailure, BacktestHistoryRequestId,
     BacktestHistoryRequestReport, BacktestHistoryRows, BacktestHistoryRun,
     BacktestHistoryTelemetryEvent, BacktestHistoryTelemetryStream, BacktestHistoryTradingDay,
+};
+#[doc(hidden)]
+pub use backtest_history::{
+    plan_minute_cache_stale_partition_repair, resolve_minute_cache_metadata_snapshot,
 };
 pub use backtest_tick_cache::{
     BacktestCachePolicy, BacktestTickCache, BacktestTickCacheDiagnostic,

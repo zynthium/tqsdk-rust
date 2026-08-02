@@ -31,14 +31,17 @@ minute 的 format id 为 `tqsdk.minute-kline.monthly.v4`，但 namespace 有意�
 每个 v4 月文件绑定写入时的 immutable metadata snapshot。active metadata pointer 随后前移不会单独
 使已有分区失效：`inspect`、`fill --dry-run` 和 `verify` 只会在一个保留 snapshot 覆盖整个窗口、
 schema/session identity 与 active 相同并能精确验证现有月文件时使用它。不能满足这些条件的旧、损坏或
-混合分区仍 fail closed；CLI 不会为此自动删除、重写或重新下载数据。
+混合分区仍默认 fail closed；CLI 不会为此自动删除、重写或重新下载数据。只有操作者显式传
+`--kind minute fill --repair-stale` 时，CLI 才选择覆盖窗口且匹配最多月文件的 retained snapshot，
+删除与它冲突的整月分区后再走普通 remote-on-miss 补齐；该 flag 不支持 tick 或 `--dry-run`。
 
 `--market futures|stock` 只影响 `--kind minute fill` 的 server-side backtest endpoint：
 futures 是默认值，允许 `--universe`；stock 必须提供一个或多个显式 `--symbol`，不支持 futures
 universe selector。tick fill 不支持 stock market；`--kind tick --market stock` 是 usage error。
 
 tick 与 minute cache 都没有自动 retention、max-byte eviction 或后台清理。读写、普通回测和
-`--kind minute fill` 都不会删除已有数据。
+普通 `--kind minute fill` 都不会删除已有数据；`--repair-stale` 是唯一用于混合 snapshot 的显式、
+受控删除例外。
 
 ## 常用命令
 
@@ -75,6 +78,14 @@ cargo run -p tqsdk-cache -- \
   --symbol KQ.i@SHFE.au \
   --start-day 2026-06-01 --end-day 2026-06-30 \
   --symbol-concurrency 2
+
+# 仅在已确认 mixed snapshot 时显式修复冲突整月分区，再由同一次 fill 补齐。
+TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history --kind minute fill \
+  --symbol KQ.m@SHFE.au \
+  --start-day 2026-06-01 --end-day 2026-06-30 \
+  --repair-stale
 
 # stock minute fill 必须显式给出 symbol，不能传 --universe。
 TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
@@ -235,9 +246,10 @@ canonical root、range 和 symbols 为准。
 
 ## 显式破坏性维护
 
-CLI 目前只提供 minute purge：必须恰好一个 `--symbol`、完整的 `--start-day` / `--end-day` window
-以及 `--yes`。`--dry-run` 不写入，只列出将删除的月文件、路径和大小；真实 purge 会删除与请求窗口
-相交的整个 monthly partition，而不是单条 K 线。
+CLI 的常规显式维护是 minute purge：必须恰好一个 `--symbol`、完整的 `--start-day` / `--end-day`
+window 以及 `--yes`。`--dry-run` 不写入，只列出将删除的月文件、路径和大小；真实 purge 会删除与请求
+窗口相交的整个 monthly partition，而不是单条 K 线。`fill --repair-stale` 是另一条更窄的显式维护路径：
+它只针对已判定为 mixed snapshot 的月文件，并立刻用同一次 remote fill 补齐；不能和 `--dry-run` 使用。
 
 ```bash
 # 先看会删除哪些整月分区。

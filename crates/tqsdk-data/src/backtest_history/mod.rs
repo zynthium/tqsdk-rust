@@ -21,13 +21,15 @@ use tokio::task::JoinHandle;
 
 use crate::error::{DataError, Result};
 
-#[doc(hidden)]
-pub use metadata::resolve_minute_cache_metadata_snapshot;
 pub use metadata::{
     BACKTEST_HISTORY_METADATA_FORMAT_ID, BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
     BacktestHistoryMaintenanceClient, BacktestHistoryMaintenanceClientBuilder,
     BacktestHistoryMarketKind, BacktestHistoryMetadataCache, BacktestHistoryMetadataSnapshot,
     BacktestHistoryTradingDay,
+};
+#[doc(hidden)]
+pub use metadata::{
+    plan_minute_cache_stale_partition_repair, resolve_minute_cache_metadata_snapshot,
 };
 pub use report::{
     BacktestHistoryBatchReport, BacktestHistoryChunk, BacktestHistoryCollected,

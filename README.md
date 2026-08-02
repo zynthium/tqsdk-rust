@@ -198,14 +198,18 @@ minute 文件；主连支持 canonical 60s 和整数分钟本地聚合。`Remote
 每个 `.tqmk` 月分区绑定写入时的 immutable metadata snapshot；active pointer 后续前移本身不会使
 旧分区失效。读取方只会在该历史 snapshot 覆盖整个请求窗口、schema 与 session identity 仍和 active
 snapshot 一致、且现存月文件可用该 snapshot 精确验证时回退使用它；缺少保留 snapshot、session 变化、
-损坏文件或无法由同一 snapshot 解释的混合分区仍 fail closed，不会自动删除、重写或拼接数据。
+损坏文件或无法由同一 snapshot 解释的混合分区仍默认 fail closed，不会自动删除、重写或拼接数据。只有
+操作者显式传 `tqsdk-cache --kind minute fill --repair-stale` 时，CLI 才会选择覆盖窗口且匹配月文件最多的
+retained snapshot，删除该窗口内与它冲突的整月分区，再走普通 `remote-on-miss` 补齐；它不适用于 tick 或
+`--dry-run`，普通读取与 fill 仍不会删除数据。
 
 cache-backed local backtest 当前只支持 futures；`Tq::stock().backtest(...)` 必须显式
 `.disabled_cache()` 并使用官方股票 server-backtest 行情。futures universe selector 不适用于股票，
 股票策略应显式声明 symbol。
 tick 与 minute cache 都不会因读取、写入、retention 或 max-byte 配置而自动删除数据。清除或重拉必须
 显式使用 backtest builder 的 `refresh` / purge API；`tqsdk-cache` 的 CLI purge 目前只作用于
-minute cache，且需要范围与确认。
+minute cache，且需要范围与确认。混合 minute snapshot 的受控重拉可显式使用 minute fill 的
+`--repair-stale`，它只删除已定位的冲突整月分区。
 
 自有多资产调度器可在 `.prepare().await?` 后读取 `PreparedBacktest::tick_sources()`，
 复用同一 logical-to-physical 投影；必须按每项的半开有效区间读取物理 cache。

@@ -14,6 +14,7 @@ use sha1::{Digest, Sha1};
 #[cfg(all(feature = "live", feature = "services"))]
 use tqsdk_core::TradingTime;
 
+use crate::minute_kline_cache::MinuteKlineCacheSnapshotCompatibility;
 use crate::{DataError, KlineSessionTemplate, MinuteKlineCache, MinuteKlineCacheSnapshot, Result};
 #[cfg(all(feature = "live", feature = "services"))]
 use crate::{HistoricalContUnderlyingSegment, KlineSessionWindow, TradingCalendarRow};
@@ -58,6 +59,18 @@ pub struct BacktestHistoryMetadataSnapshot {
     pub session: KlineSessionTemplate,
     pub physical_segments: Vec<BacktestHistoryPhysicalSegment>,
     pub snapshot_hash: String,
+}
+
+/// Explicit operator repair plan for mixed canonical-minute cache snapshots.
+///
+/// The normal reader remains fail-closed. This plan only identifies monthly
+/// partitions an operator may explicitly purge before a remote fill retries
+/// with the retained snapshot that already validates the most cache months.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MinuteCacheStalePartitionRepairPlan {
+    pub snapshot_hash: String,
+    pub stale_ranges: Vec<(i64, i64)>,
 }
 
 impl BacktestHistoryMetadataSnapshot {
@@ -337,6 +350,81 @@ pub fn resolve_minute_cache_metadata_snapshot(
     }
 
     Err(active_error)
+}
+
+/// Plans an explicit repair for monthly partitions that conflict with a
+/// retained, otherwise-compatible metadata snapshot.
+///
+/// This never writes or removes cache data. Callers must keep the ordinary
+/// fail-closed reader as the default and invoke a destructive purge only after
+/// an explicit operator choice.
+#[doc(hidden)]
+pub fn plan_minute_cache_stale_partition_repair(
+    cache_dir: &Path,
+    logical_symbol: &str,
+    start_ns: i64,
+    end_ns: i64,
+) -> Result<Option<MinuteCacheStalePartitionRepairPlan>> {
+    validate_logical_symbol(logical_symbol)?;
+    if start_ns >= end_ns {
+        return Err(DataError::Validation(
+            "minute cache stale repair requires start_ns < end_ns".to_string(),
+        ));
+    }
+    let metadata_cache = BacktestHistoryMetadataCache::open_read_only(cache_dir);
+    let Some(active) = metadata_cache.load_active(logical_symbol)? else {
+        return Ok(None);
+    };
+    let mut candidates = vec![(true, active.clone())];
+    candidates.extend(
+        metadata_cache
+            .load_snapshots(logical_symbol)?
+            .into_iter()
+            .filter(|snapshot| snapshot.snapshot_hash != active.snapshot_hash)
+            .map(|snapshot| (false, snapshot)),
+    );
+
+    let minute_cache = MinuteKlineCache::open_read_only(cache_dir);
+    let mut selected: Option<(
+        bool,
+        BacktestHistoryMetadataSnapshot,
+        MinuteKlineCacheSnapshotCompatibility,
+    )> = None;
+    for (is_active, candidate) in candidates {
+        if candidate.schema_version != active.schema_version
+            || candidate.session.snapshot_hash() != active.session.snapshot_hash()
+            || !candidate.covers_range((start_ns, end_ns))
+        {
+            continue;
+        }
+        let snapshot = minute_cache_snapshot_from_metadata(&candidate)?;
+        let compatibility =
+            minute_cache.snapshot_compatibility(logical_symbol, start_ns, end_ns, &snapshot)?;
+        let replace_selected = match &selected {
+            None => true,
+            Some((selected_is_active, _, selected_compatibility)) => {
+                compatibility.matching_month_count > selected_compatibility.matching_month_count
+                    || (compatibility.matching_month_count
+                        == selected_compatibility.matching_month_count
+                        && is_active
+                        && !*selected_is_active)
+            }
+        };
+        if replace_selected {
+            selected = Some((is_active, candidate, compatibility));
+        }
+    }
+
+    let Some((_, snapshot, compatibility)) = selected else {
+        return Ok(None);
+    };
+    if compatibility.mismatched_ranges.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(MinuteCacheStalePartitionRepairPlan {
+        snapshot_hash: snapshot.snapshot_hash,
+        stale_ranges: compatibility.mismatched_ranges,
+    }))
 }
 
 fn minute_cache_snapshot_from_metadata(

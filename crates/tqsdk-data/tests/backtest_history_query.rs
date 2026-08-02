@@ -12,6 +12,7 @@ use tqsdk_data::{
     BacktestHistoryRequest, BacktestHistoryRows, BacktestHistoryTradingDay, BacktestTickCache,
     KlineSessionTemplate, MinuteKlineCache, MinuteKlineCacheSnapshot,
     backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
+    plan_minute_cache_stale_partition_repair, resolve_minute_cache_metadata_snapshot,
 };
 
 #[path = "support/backtest_history.rs"]
@@ -346,6 +347,122 @@ async fn remote_on_miss_minute_query_uses_a_complete_historical_snapshot_without
     };
     assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![1]);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn minute_stale_repair_targets_only_outlier_months_for_the_dominant_snapshot() {
+    let root = temp_dir("minute-stale-repair");
+    let symbol = "KQ.m@SHFE.au";
+    let january_start = utc_ns(2020, 1, 2, 1, 0, 0);
+    let february_start = utc_ns(2020, 2, 3, 1, 0, 0);
+    let march_start = utc_ns(2020, 3, 2, 1, 0, 0);
+    let end_ns = march_start + MINUTE_NS;
+    let metadata_cache = BacktestHistoryMetadataCache::open(&root).unwrap();
+    let snapshot_body = BacktestHistoryMetadataSnapshot {
+        schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+        market_kind: BacktestHistoryMarketKind::Futures,
+        logical_symbol: symbol.to_string(),
+        captured_at_ns: january_start,
+        trading_days: vec![BacktestHistoryTradingDay {
+            date: "2020-01-02".to_string(),
+            is_trading_day: true,
+            start_ns: january_start,
+            end_ns,
+        }],
+        session: KlineSessionTemplate::cst_trading_day(),
+        physical_segments: vec![BacktestHistoryPhysicalSegment {
+            physical_symbol: symbol.to_string(),
+            start_ns: january_start,
+            end_ns,
+        }],
+        snapshot_hash: String::new(),
+    };
+    let retained = metadata_cache
+        .store_snapshot(snapshot_body.clone())
+        .unwrap();
+    let retained_snapshot = MinuteKlineCacheSnapshot::new(
+        retained.schema_version,
+        retained.snapshot_hash.clone(),
+        retained.session.snapshot_hash(),
+    )
+    .unwrap();
+    let cache = MinuteKlineCache::open(&root).unwrap();
+    for (id, start_ns) in [(1, january_start), (2, february_start)] {
+        cache
+            .store_final_range(
+                symbol,
+                start_ns,
+                start_ns + MINUTE_NS,
+                &retained_snapshot,
+                &[kline(id, start_ns, 10.0)],
+            )
+            .unwrap();
+    }
+
+    let outlier = metadata_cache
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            captured_at_ns: january_start + 1,
+            snapshot_hash: String::new(),
+            ..snapshot_body.clone()
+        })
+        .unwrap();
+    let outlier_snapshot = MinuteKlineCacheSnapshot::new(
+        outlier.schema_version,
+        outlier.snapshot_hash.clone(),
+        outlier.session.snapshot_hash(),
+    )
+    .unwrap();
+    cache
+        .store_final_range(
+            symbol,
+            march_start,
+            end_ns,
+            &outlier_snapshot,
+            &[kline(3, march_start, 10.0)],
+        )
+        .unwrap();
+
+    metadata_cache
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            captured_at_ns: january_start + 2,
+            snapshot_hash: String::new(),
+            ..snapshot_body
+        })
+        .unwrap();
+
+    let repair = plan_minute_cache_stale_partition_repair(&root, symbol, january_start, end_ns)
+        .unwrap()
+        .expect("mixed cache snapshots should produce an explicit repair plan");
+    assert_eq!(repair.snapshot_hash, retained.snapshot_hash);
+    assert_eq!(repair.stale_ranges.len(), 1);
+    assert!(repair.stale_ranges[0].0 <= march_start);
+    assert_eq!(repair.stale_ranges[0].1, end_ns);
+
+    cache
+        .purge_range(symbol, repair.stale_ranges[0].0, repair.stale_ranges[0].1)
+        .unwrap();
+    assert!(cache.month_file_path(symbol, "202001").exists());
+    assert!(cache.month_file_path(symbol, "202002").exists());
+    assert!(!cache.month_file_path(symbol, "202003").exists());
+    let resolved = resolve_minute_cache_metadata_snapshot(&root, symbol, january_start, end_ns)
+        .unwrap()
+        .expect("the retained snapshot should read the remaining months");
+    assert_eq!(resolved.snapshot_hash, retained.snapshot_hash);
+    assert!(
+        cache
+            .inspect(
+                symbol,
+                january_start,
+                end_ns,
+                &MinuteKlineCacheSnapshot::new(
+                    resolved.schema_version,
+                    resolved.snapshot_hash,
+                    resolved.session.snapshot_hash(),
+                )
+                .unwrap(),
+            )
+            .is_ok()
+    );
 }
 
 #[tokio::test]

@@ -236,6 +236,8 @@ partition、snapshot hash fail-closed、current-day final-coverage guard、strea
 前移后，完整历史 minute 分区由覆盖整个窗口且 session/schema identity 相同的 immutable snapshot
 继续离线读取；`RemoteOnMiss` 完整命中不得读取 auth。`verify` 必须使用 metadata-backed snapshot，
 而不是固定 CST 默认值；缺失保留 snapshot、session 变化、损坏或混合分区仍必须 fail closed。
+显式 `fill --repair-stale` 仅在 retained snapshot 覆盖完整窗口时选择匹配最多的候选，并只 purge
+冲突整月分区；tick 与 `--dry-run` 必须拒绝该 destructive flag。
 `minute_kline_aggregate` 和 `history_backtest_replay` 覆盖 60s open/final、`N × 60s` 固定 CST `18:00`
 trading-day grid 聚合（盘中 break 不重置 bucket）、same-timestamp batch、以及主连 minute cache 保持 logical key 而 replay 保留 dated
 `underlying_symbol`。`tqsdk-cache` tests 还覆盖 minute/tick/all kind routing、minute logical-symbol

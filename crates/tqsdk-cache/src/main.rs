@@ -21,6 +21,7 @@ use tqsdk_cache::{
 use tqsdk_data::{
     BacktestTickCache, DataClient, DataError, HistorySeriesCacheFileStatus, MinuteKlineCache,
     MinuteKlineCacheSnapshot, TradingCalendarRow, backtest_tick_trading_day_for_timestamp_ns,
+    plan_minute_cache_stale_partition_repair,
 };
 
 mod progress;
@@ -221,6 +222,9 @@ struct FillArgs {
     /// Resolve and inspect coverage without acquiring a fill lock or requesting remote data.
     #[arg(long)]
     dry_run: bool,
+    /// Explicitly purge only stale canonical-minute month partitions before remote fill retries.
+    #[arg(long)]
+    repair_stale: bool,
     /// Allow a current-day tick fill. Unsupported for --kind minute.
     #[arg(
         long,
@@ -1244,6 +1248,9 @@ async fn fill(
     args: FillArgs,
 ) -> Result<CommandOutcome, CliError> {
     match kind {
+        CacheKind::Tick if args.repair_stale => Err(CliError::Usage(
+            "--repair-stale is supported only for --kind minute fill".to_string(),
+        )),
         CacheKind::Tick if matches!(market, MarketKind::Stock) => Err(CliError::Usage(
             "--market stock is supported only for --kind minute fill".to_string(),
         )),
@@ -1259,6 +1266,12 @@ async fn fill_minute(
     args: FillArgs,
 ) -> Result<CommandOutcome, CliError> {
     let config = fill_config(&args);
+    if args.repair_stale && args.dry_run {
+        return Err(CliError::Usage(
+            "--repair-stale cannot be used with --dry-run because dry-run never removes cache partitions"
+                .to_string(),
+        ));
+    }
     if args.include_open_day {
         return Err(CliError::Usage(
             "--include-open-day is not supported for --kind minute; minute coverage is final-only"
@@ -1345,6 +1358,31 @@ async fn fill_minute(
     if resolved.calendar.snapshot.is_some() {
         reporter.calendar_ready(resolved.calendar.progress_calendar(&window)?);
     }
+    let repaired_stale_partitions = if args.repair_stale {
+        reporter.planning("removing explicitly requested stale canonical-minute partitions");
+        match repair_stale_minute_partitions(
+            canonical_cache_dir.as_path(),
+            symbols.as_slice(),
+            window.start_ns,
+            window.end_ns,
+        ) {
+            Ok(removed) => {
+                reporter.planning(format!(
+                    "removed {removed} stale canonical-minute partitions; checking final coverage"
+                ));
+                removed
+            }
+            Err(error) => {
+                progress_session.finish(
+                    ProgressTerminalStatus::Failed,
+                    "minute stale-partition repair failed; no remote fill was started",
+                );
+                return Err(error);
+            }
+        }
+    } else {
+        0
+    };
     let cancellation = BacktestRemoteFillCancellation::new();
     let signal_cancellation = cancellation.clone();
     let signal_task = tokio::spawn(async move {
@@ -1431,11 +1469,34 @@ async fn fill_minute(
             "market": market.as_str(),
             "cache_dir": canonical_cache_dir,
             "dry_run": false,
+            "repaired_stale_partitions": repaired_stale_partitions,
             "report_path": report_path,
             "report": report,
         }),
         exit_code: if report.complete { 0 } else { 1 },
     })
+}
+
+fn repair_stale_minute_partitions(
+    cache_dir: &Path,
+    symbols: &[String],
+    start_ns: i64,
+    end_ns: i64,
+) -> Result<usize, CliError> {
+    let cache = MinuteKlineCache::open(cache_dir)?;
+    let mut removed = 0_usize;
+    for symbol in symbols {
+        let Some(plan) =
+            plan_minute_cache_stale_partition_repair(cache_dir, symbol.as_str(), start_ns, end_ns)?
+        else {
+            continue;
+        };
+        for (range_start_ns, range_end_ns) in plan.stale_ranges {
+            let report = cache.purge_range(symbol.as_str(), range_start_ns, range_end_ns)?;
+            removed = removed.saturating_add(report.removed_files);
+        }
+    }
+    Ok(removed)
 }
 
 fn minute_cache_snapshot_for_symbol(

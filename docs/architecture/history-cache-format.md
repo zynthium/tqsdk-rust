@@ -89,7 +89,9 @@ range（包括合法的零行 range）才可标记 final coverage；当前或未
 因此 active pointer 后续移动不会单独使已完成分区失效。读取方可以选择保留的历史 snapshot，但必须同时
 证明它覆盖完整请求窗口、schema version 与 session identity 仍和 active snapshot 一致，并用它精确验证
 现存月文件。缺失保留 snapshot、session 变化、损坏文件或不能由同一个 snapshot 解释的混合分区仍 fail
-closed；该回退绝不自动 purge、重写或拼接数据。
+closed；该回退绝不自动 purge、重写或拼接数据。仅 operator 显式使用
+`tqsdk-cache --kind minute fill --repair-stale` 时，才会选择覆盖窗口且匹配最多月文件的 retained
+snapshot，删除其冲突的整月分区并由该次 remote fill 补齐；这不改变普通 reader 的 fail-closed 合同。
 
 目录名继续保留 `minute-kline-v3`，但它承载的是 v4 文件身份。这是刻意的诊断兼容策略：
 旧 v3 文件不会被静默忽略、迁移或覆盖；读取/coverage 会 fail closed，`diagnose()` 将其报告为
@@ -104,7 +106,8 @@ event 的 `underlying_symbol` metadata，用于撮合和 quote 解释；它不�
 复制 minute 文件。
 
 minute cache 没有 retention、max-byte eviction 或后台清理。`Refresh` 是显式的破坏性操作，
-仅删除与请求窗口相交的 monthly files；显式 `purge_range` / `purge_symbol` 才可删除数据。
+仅删除与请求窗口相交的 monthly files；显式 `purge_range` / `purge_symbol` 才可删除数据。CLI 的
+`fill --repair-stale` 也是显式确认的窄范围维护操作，而非自动 reader recovery。
 `CacheOnly` inspection 使用 read-only open，不创建 namespace、目录或文件。
 
 ## TQBN daily v2 File Identity
