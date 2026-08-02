@@ -27,6 +27,10 @@ daemon。
 `--kind all` 与 `inspect`、`fill`、`verify`、`purge` 组合是 usage error。`purge` 当前只支持
 `--kind minute`。
 
+`query` 不使用 `--kind`：它以 `--series tick|kline` 表达所需 rows，并可同时读取 Tick 与
+canonical-minute durable sources；`--kind minute|all query` 是 usage error，避免把运维 cache family
+误当成用户查询的 row shape。
+
 minute 的 `--market futures|stock` 仅在 minute `fill` 时选择 server-side backtest endpoint：
 
 - `futures` 是默认值，可用 `--symbol` 与 futures `--universe`；dynamic universe 仍复用 SDK resolver。
@@ -64,6 +68,35 @@ snapshot 覆盖完整窗口、schema/session identity 与 active 一致、并能
 读取，`>60s` 只允许 `N × 60s` 并从 closed 60s K 按固定 CST `18:00` trading-day grid 本地聚合；
 盘中 break 不重置高周期 bucket，且 break 内不虚构 60s row。`61s`、`90s` 等拒绝。K-only `>=60s`
 不会隐式补 tick。
+
+## 区间查询
+
+`tqsdk-cache query` 是 `BacktestHistoryClient` 的 CLI adapter，不直接解析 TQBN、不会创建新的
+metadata/store/session owner，也不复制数据进入 query-specific cache。每个请求都是 RFC 3339 半开
+区间 `[start, end)`，按 request id 交给 `query_batch(...).collect_all(max_memory_bytes)`；因此 LLM
+输出在 emit 前已具备明确的内存上限和每个 request 的 terminal report。
+
+默认 `--policy remote-on-miss` 按 durable coverage 先读 cache；只有确认缺口后才懒加载
+`TQ_AUTH_USER` / `TQ_AUTH_PASS`，通过官方 futures server-backtest stream 补齐并复用既有 cache fill
+协调。`--policy cache-only` 严格不联网。cache-backed query 当前只支持 futures，stock 不会暗中改走
+另一条历史下载路径。
+
+普通 flags 表达同质 batch（可重复 `--symbol`）；`--request-file` TOML 的 `version = 1` / 多个
+`[[request]]` 表达异质 batch。每个 request 可指定 `symbol`、`series`、`start`、`end`、Kline `period`、
+strict `fields`、`weight` 与可选 `price_tick`。`weight` 只影响 LLM 预算分配，不改变查询或 cache
+coverage。`query schema --series tick|kline` 是字段和 alias 的发现入口。
+
+query 只在每个 request 取得 terminal report 后输出。每个 emitted block 的 finality 必须为 `Final`，且
+`cached_ranges` 与 `remote_filled_ranges` 的并集必须完整覆盖请求 `[start, end)`；non-final 或 coverage
+不完整都是 hard failure。`--allow-partial` 只允许其他 request failure（以及下述 LLM metadata failure）
+以 `gap` 形式出现，不放宽上述 finality/coverage gate。
+
+主连及 session-sensitive Kline 的 metadata 沿用 immutable sidecar。JSONL 会如实标记缺失的 sidecar；
+`llm-csv` 还必须能由 active snapshot 验证 terminal report 的 snapshot hash，才会输出 session
+reference、physical segments 和可供模型解释的 block。这是 LLM export 特有的更严格 fail-closed 规则：
+底层 retained-snapshot reader 在 active pointer 前移后仍可读取符合其验证条件的历史分区，但该 export
+不会把它们当作带当前 session reference 的模型输入。缺失或不匹配时默认 fail closed；
+`--allow-partial` 可以省略该 block 并记录 gap，绝不伪造 session。
 
 ## 各命令的读写语义
 
@@ -107,6 +140,28 @@ minute fill 没有 provisional 语义：当前或未来 trading day 一律不能
   `<cache-root>/reports/minute/tqsdk-cache-minute-fill-<utc>-<pid>.json`。
 - `--progress jsonl` 始终写 stderr，schema 为 v2、kind 为 `tqsdk-cache.progress`，并含
   `cache_kind: "tick" | "minute"`。脚本不得继续按 schema v1 解析。
+
+`query` 的 raw format 只适用于 query 命令，stdout 是 data、stderr 是诊断：
+
+| format | stable protocol | 语义 |
+| --- | --- | --- |
+| `jsonl` | `tqsdk-history-jsonl/1` | lossless rows，附 `manifest`、每 block 的 `block` / 零或多个 `row` / `complete`、可选 `gap`、最终 `end` records；不压缩 |
+| `llm-csv` | `tqllm-csv/1` | GPT-5.6-oriented CSV-like blocks；行区无自由文本，metadata 提供 coverage、session、segments、summary、query/hash/drill-down IDs |
+
+两者都遵守 strict `--fields` projection：输入可使用长 alias，输出固定为 canonical short alias 和
+schema order。默认 row timestamp 是完整 ISO 8601；`--timestamp offset` 改为相对 block start 的整数
+ns，reference 始终写在 block metadata。默认数字为 decimal；`--number-format scaled-int` 必须显式
+给出有效的 `price_tick`，非有限数为 missing 而不是零。
+`block.fields` 是唯一有序 projection；JSON `row.data` object 的成员顺序不是 contract，consumer 必须按
+字段名和 `fields` 解析。
+
+`llm-csv` 是原子产物：terminal success、coverage、metadata、summary、data hash 和 token budget
+决策都完成后才写出。`--data-token-budget` 采用保守本地 GPT-5.6 estimate；不做模型/API 调用。若 full
+payload 超预算，`--compression auto` 会按每 block weight 分配 metadata/summary 之外的残余，以
+`balanced|price|volume-oi|microstructure` 确定性保留行，并将输出标为 `lossy`；`off` 则错误退出。
+这不是精确 tokenizer 的替代品，最终 payload 的精确计数属于上游 agent/API。CLI 会在写出前完整构建
+payload，但 stdout 本身没有 atomic-write 保证；`--output PATH` 仅用于 raw formats，stdout 随之为空，
+并以同目录临时文件写完、sync 后 rename 原子发布，成功提示写入 stderr。
 
 ## 锁、取消与显式维护
 

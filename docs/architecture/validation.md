@@ -169,6 +169,7 @@ rtk cargo test -p tqsdk-data --test backtest_history_api
 rtk cargo test -p tqsdk-data --test backtest_history_metadata
 rtk cargo test -p tqsdk-data --test backtest_history_query
 rtk cargo test -p tqsdk-cache
+rtk cargo test -p tqsdk-cache --test cli query_
 rtk cargo clippy -p tqsdk-cache --all-targets -- -D warnings
 rtk cargo clippy -p tqsdk-data --all-targets -- -D warnings
 rtk cargo test -p tqsdk-data --test universe_selector
@@ -243,6 +244,14 @@ minute report-bound verify、safe purge 与 schema-v2 `cache_kind` JSONL progres
 61s/90s rejection、K-only minute path 不请求 tick、CacheOnly 不创建 minute namespace、typed history
 inspect/purge、stock backtest builder selection，以及 `DataClient` 的 retention/max-byte 配置只在显式
 `run_configured_history_cache_maintenance()` 时执行；任何 tick/minute history read/write 都不能自动删除数据。
+
+`tqsdk-cache query` 的离线 CLI tests 必须在移除 `TQ_AUTH_*` 后覆盖同一
+`BacktestHistoryClient` 路径的 CacheOnly Tick 与 canonical-minute Kline：`tqsdk-history-jsonl/1` 的
+manifest/block/row/complete/gap/end、canonical fields、timestamp/number codecs、final coverage、source 与
+data hash；以及 `tqllm-csv/1` 的 verified session snapshot/segments、无预算 lossless、预算内
+deterministic lossy selection、`--compression off` 超预算失败和 `--output` 原子发布。metadata 缺失或
+active hash 与 terminal report 不一致时，LLM 默认 fail closed；`--allow-partial` 只能以 `gap` 省略整个
+block。non-Final 或不完整 coverage 必须 hard fail，不能由 `--allow-partial` 放宽。
 
 `facade_contract` 覆盖 `record_ticks(...)` 和 `MarketCachePolicy` 在 live/session mode 下把显式
 symbol 或 selector 解析出的 tick serial 写入同一份 `BacktestTickCache`，并通过

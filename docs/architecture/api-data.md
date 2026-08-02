@@ -117,6 +117,14 @@ mapping 以 versioned snapshot sidecar 持久化，terminal report 携带 snapsh
 且覆盖请求窗口的 sidecar，不会向公开 metadata service 查询。当前 cache-backed fill 只支持 futures；
 股票回测必须使用 facade 的 `.disabled_cache()` 官方路径。
 
+可选 `tqsdk-cache query` 只是这个 public query surface 的 CLI adapter：它使用
+`BacktestHistoryClient::query_batch(...).collect_all(...)` 和既有 `BacktestHistoryMetadataCache`，不新增
+data API、cache format、direct TQBN reader 或独立 session owner。它的 `cache-only` / `remote-on-miss`
+语义与 client 对齐；`jsonl` 适合作为 lossless row stream，`tqllm-csv/1` 则是 CLI-only 的 token-aware
+presentation contract，不会在 `tqsdk-data` 中引入模型依赖或 prompt API。
+CLI 只会把通过 `Final` 与完整 coverage 校验的 terminal report materialize 为 block；它不把
+`BacktestHistoryRun` 的 provisional `Chunk` 扩展成另一种 streaming query contract。
+
 每个 canonical-minute 月文件绑定写入时的 immutable metadata snapshot。active pointer 变更不单独使
 旧分区不可读：当且仅当保留 snapshot 覆盖整个请求窗口、schema/session identity 与 active snapshot
 一致，并能精确验证现存月文件时，planner 才选择它。缺少保留 snapshot、session 变化、损坏文件或不能由

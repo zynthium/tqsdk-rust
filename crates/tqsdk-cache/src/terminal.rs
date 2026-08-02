@@ -22,6 +22,7 @@ pub(crate) fn write_result(
         "verify" => write_verify(&mut output, value)?,
         "doctor" => write_doctor(&mut output, value)?,
         "purge" => write_purge(&mut output, value)?,
+        "query" => write_query(&mut output, value)?,
         _ => writeln!(output, "No terminal summary is available for this command.")?,
     }
 
@@ -307,6 +308,76 @@ fn write_purge(output: &mut impl Write, value: &Value) -> io::Result<()> {
     Ok(())
 }
 
+fn write_query(output: &mut impl Write, value: &Value) -> io::Result<()> {
+    if string(value, "subcommand") == Some("schema") {
+        writeln!(output, "Series: {}", string(value, "series").unwrap_or("-"))?;
+        let defaults = array(value, "default_fields")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        writeln!(output, "Default fields: {defaults}")?;
+        writeln!(output, "Fields ({})", array(value, "fields").len())?;
+        for field in array(value, "fields") {
+            let aliases = array(field, "aliases")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("|");
+            writeln!(
+                output,
+                "  {}: {} ({})",
+                string(field, "name").unwrap_or("-"),
+                string(field, "value_kind").unwrap_or("-"),
+                aliases,
+            )?;
+        }
+        return Ok(());
+    }
+    if let Some(cache_dir) = string(value, "cache_dir") {
+        writeln!(output, "Cache: {cache_dir}")?;
+    }
+    writeln!(
+        output,
+        "Query: {}",
+        string(value, "query_id").unwrap_or("-")
+    )?;
+    writeln!(output, "Policy: {}", string(value, "policy").unwrap_or("-"))?;
+    writeln!(
+        output,
+        "Blocks: {} | Partial: {}",
+        array(value, "blocks").len(),
+        if boolean(value, "partial") {
+            "yes"
+        } else {
+            "no"
+        },
+    )?;
+    for block in array(value, "blocks") {
+        writeln!(
+            output,
+            "  {} {} {}: {} rows | {}",
+            string(block, "block_id").unwrap_or("-"),
+            string(block, "symbol").unwrap_or("-"),
+            string(block, "series").unwrap_or("-"),
+            number(block, "rows"),
+            string(block, "source").unwrap_or("-"),
+        )?;
+    }
+    for failure in array(value, "failures") {
+        writeln!(
+            output,
+            "  gap {}: {}",
+            string(failure, "symbol").unwrap_or("-"),
+            string(failure, "code").unwrap_or("unknown"),
+        )?;
+    }
+    writeln!(
+        output,
+        "Raw rows: --output-format jsonl | LLM context: --output-format llm-csv"
+    )
+}
+
 fn write_cache_header(output: &mut impl Write, value: &Value) -> io::Result<()> {
     if let Some(cache_dir) = string(value, "cache_dir") {
         writeln!(output, "Cache: {cache_dir}")?;
@@ -506,6 +577,36 @@ mod tests {
         assert_eq!(format_bytes(0), "0 B");
         assert_eq!(format_bytes(1_024), "1.00 KiB");
         assert_eq!(format_bytes(1_048_576), "1.00 MiB");
+    }
+
+    #[test]
+    fn query_summary_points_to_raw_formats() {
+        let value = json!({
+            "command": "query",
+            "cache_dir": "/tmp/cache",
+            "query_id": "query-123",
+            "policy": "cache-only",
+            "partial": false,
+            "blocks": [{
+                "block_id": "b1",
+                "symbol": "KQ.m@SHFE.au",
+                "series": "tick",
+                "rows": 8,
+                "source": "cache",
+            }],
+            "failures": [],
+        });
+        let mut output = Vec::new();
+
+        write_result(&mut output, &value, "success", 0, 12).unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Query: query-123"));
+        assert!(output.contains("b1 KQ.m@SHFE.au tick: 8 rows | cache"));
+        assert!(
+            output
+                .contains("Raw rows: --output-format jsonl | LLM context: --output-format llm-csv")
+        );
     }
 
     #[test]

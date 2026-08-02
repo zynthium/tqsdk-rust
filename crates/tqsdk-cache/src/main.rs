@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -23,11 +24,13 @@ use tqsdk_data::{
 };
 
 mod progress;
+mod query;
 mod terminal;
 
 use progress::{
     FillProgress, FillProgressSession, ProgressCalendar, ProgressMode, ProgressTerminalStatus,
 };
+use query::{QueryArgs, QueryExecution, QueryRawOutput};
 use terminal::{write_error as write_terminal_error, write_result as write_terminal_result};
 
 #[derive(Debug, Parser)]
@@ -68,6 +71,8 @@ enum OutputSchema {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum OutputFormat {
     Json,
+    Jsonl,
+    LlmCsv,
     Text,
 }
 
@@ -117,6 +122,8 @@ enum Command {
     Doctor,
     /// Explicitly remove canonical-minute month partitions.
     Purge(PurgeArgs),
+    /// Query cache-backed history and emit raw JSONL or token-aware LLM CSV context.
+    Query(QueryArgs),
 }
 
 impl Command {
@@ -128,6 +135,7 @@ impl Command {
             Self::Verify(_) => "verify",
             Self::Doctor => "doctor",
             Self::Purge(_) => "purge",
+            Self::Query(_) => "query",
         }
     }
 }
@@ -759,6 +767,9 @@ async fn main() {
                         eprintln!("tqsdk-cache: {write_error}");
                     }
                 }
+                OutputFormat::Jsonl | OutputFormat::LlmCsv => {
+                    let _ = error.print();
+                }
             }
             std::process::exit(exit_code);
         }
@@ -767,16 +778,91 @@ async fn main() {
     let output_schema_is_explicit = cli.output_schema.is_some();
     let output_schema = cli.output_schema.unwrap_or(OutputSchema::V3);
     let command = cli.command.name();
-    if matches!(cli.output_format, OutputFormat::Text) && (pretty || output_schema_is_explicit) {
+    if !matches!(cli.output_format, OutputFormat::Json) && (pretty || output_schema_is_explicit) {
         let error = CliError::Usage(
             "--pretty and --output-schema require --output-format json".to_string(),
         );
-        if let Err(write_error) = write_terminal_error_output(command, &error) {
+        let write_error = if matches!(
+            cli.output_format,
+            OutputFormat::Jsonl | OutputFormat::LlmCsv
+        ) {
+            eprintln!("tqsdk-cache {command}: {error}");
+            Ok(())
+        } else {
+            write_terminal_error_output(command, &error)
+        };
+        if let Err(write_error) = write_error {
             eprintln!("tqsdk-cache: {write_error}");
         }
         std::process::exit(error.exit_code());
     }
     let output_format = cli.output_format;
+    if let Command::Query(args) = &cli.command {
+        let query = query::execute(
+            cli.cache_dir.as_deref(),
+            cli.kind,
+            cli.market,
+            output_format,
+            args.clone(),
+        )
+        .await;
+        match query {
+            Ok(QueryExecution::Raw(raw)) => {
+                let exit_code = raw.exit_code;
+                if let Err(error) = write_query_raw_output(raw) {
+                    eprintln!("tqsdk-cache query: {error}");
+                    std::process::exit(error.exit_code());
+                }
+                if exit_code != 0 {
+                    std::process::exit(exit_code);
+                }
+            }
+            Ok(QueryExecution::Summary(outcome)) => {
+                let exit_code = outcome.exit_code;
+                let write_result = match output_format {
+                    OutputFormat::Text => write_terminal_output(&outcome, started_at),
+                    OutputFormat::Json => match output_schema {
+                        OutputSchema::V2 => write_output(&outcome.value, pretty),
+                        OutputSchema::V3 => {
+                            write_output(&result_envelope(&outcome, started_at), pretty)
+                        }
+                    },
+                    OutputFormat::Jsonl | OutputFormat::LlmCsv => Err(CliError::Usage(
+                        "query raw output was not produced for the requested format".to_string(),
+                    )),
+                };
+                if let Err(error) = write_result {
+                    eprintln!("tqsdk-cache query: {error}");
+                    std::process::exit(error.exit_code());
+                }
+                if exit_code != 0 {
+                    std::process::exit(exit_code);
+                }
+            }
+            Err(error) => {
+                let write_error = match output_format {
+                    OutputFormat::Text => write_terminal_error_output(command, &error),
+                    OutputFormat::Json if matches!(output_schema, OutputSchema::V2) => {
+                        eprintln!("tqsdk-cache: {error}");
+                        Ok(())
+                    }
+                    OutputFormat::Json => write_output(
+                        &error_envelope(Some(command), &error, error.exit_code(), started_at),
+                        pretty,
+                    ),
+                    OutputFormat::Jsonl | OutputFormat::LlmCsv => {
+                        eprintln!("tqsdk-cache query: {error}");
+                        Ok(())
+                    }
+                };
+                if let Err(write_error) = write_error {
+                    eprintln!("tqsdk-cache: {write_error}");
+                }
+                std::process::exit(error.exit_code());
+            }
+        }
+        return;
+    }
     match run(cli).await {
         Ok(outcome) => {
             let exit_code = outcome.exit_code;
@@ -789,6 +875,9 @@ async fn main() {
                         write_output(&output, pretty)
                     }
                 },
+                OutputFormat::Jsonl | OutputFormat::LlmCsv => Err(CliError::Usage(
+                    "--output-format jsonl and llm-csv are supported only by query".to_string(),
+                )),
             };
             if let Err(error) = write_result {
                 eprintln!("tqsdk-cache: {error}");
@@ -809,6 +898,10 @@ async fn main() {
                     &error_envelope(Some(command), &error, error.exit_code(), started_at),
                     pretty,
                 ),
+                OutputFormat::Jsonl | OutputFormat::LlmCsv => {
+                    eprintln!("tqsdk-cache {command}: {error}");
+                    Ok(())
+                }
             };
             if let Err(write_error) = write_error {
                 eprintln!("tqsdk-cache: {write_error}");
@@ -856,6 +949,8 @@ fn output_preferences_from_process_args() -> OutputPreferences {
 fn parse_output_format(value: &str) -> Option<OutputFormat> {
     match value {
         "json" => Some(OutputFormat::Json),
+        "jsonl" => Some(OutputFormat::Jsonl),
+        "llm-csv" => Some(OutputFormat::LlmCsv),
         "text" => Some(OutputFormat::Text),
         _ => None,
     }
@@ -892,6 +987,62 @@ fn write_terminal_error_output(command: &str, error: &CliError) -> Result<(), Cl
         error.exit_code(),
         error.retryable(),
     )?;
+    Ok(())
+}
+
+fn write_query_raw_output(raw: QueryRawOutput) -> Result<(), CliError> {
+    if let Some(path) = raw.output_path {
+        write_atomically(path.as_path(), raw.payload.as_slice())?;
+        eprintln!("tqsdk-cache query: wrote {}", path.display());
+        return Ok(());
+    }
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    stdout.write_all(raw.payload.as_slice())?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+    if path.as_os_str().is_empty() || path.file_name().is_none() {
+        return Err(CliError::Usage(
+            "--output must name a file, not a directory".to_string(),
+        ));
+    }
+    if fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+        return Err(CliError::Usage(
+            "--output must name a file, not a directory".to_string(),
+        ));
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| CliError::Usage("--output filename must be valid UTF-8".to_string()))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| CliError::Usage("system clock is before UNIX epoch".to_string()))?
+        .as_nanos();
+    let temporary = parent.join(format!(".{file_name}.{}.{}", std::process::id(), nonce));
+    let write_result = (|| -> Result<(), io::Error> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -962,6 +1113,7 @@ async fn run(cli: Cli) -> Result<CommandOutcome, CliError> {
         Command::Verify(args) => verify(cli.cache_dir.as_deref(), cli.kind, args).await,
         Command::Doctor => doctor(cli.cache_dir.as_deref(), cli.kind),
         Command::Purge(args) => purge(cli.cache_dir.as_deref(), cli.kind, args),
+        Command::Query(_) => unreachable!("main dispatches query output separately"),
     }
 }
 

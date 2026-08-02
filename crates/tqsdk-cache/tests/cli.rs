@@ -1,7 +1,9 @@
+use std::fs;
 use std::process::Command;
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, TimeZone, Utc};
 use serde_json::Value;
+use tqsdk::advanced::core::{Kline, Tick};
 use tqsdk_cache::{TradingCalendarSnapshot, write_trading_calendar_snapshot};
 use tqsdk_data::{
     BACKTEST_HISTORY_METADATA_SCHEMA_VERSION, BacktestHistoryMarketKind,
@@ -1315,6 +1317,310 @@ fn fill_progress_jsonl_emits_versioned_stderr_records() {
     let _ = std::fs::remove_dir_all(cache_dir);
 }
 
+#[test]
+fn query_jsonl_reads_a_cache_only_main_contract_and_canonicalizes_fields() {
+    let cache_dir = temp_dir("query-jsonl-cache-only");
+    let fixture = seed_query_fixture(&cache_dir, 8, false);
+    let start = rfc3339(fixture.start_ns);
+    let end = rfc3339(fixture.tick_end_ns);
+    let output = run_query_without_auth(&[
+        "--cache-dir".to_string(),
+        cache_dir.display().to_string(),
+        "--output-format".to_string(),
+        "jsonl".to_string(),
+        "query".to_string(),
+        "--symbol".to_string(),
+        fixture.logical_symbol.clone(),
+        "--series".to_string(),
+        "tick".to_string(),
+        "--start".to_string(),
+        start,
+        "--end".to_string(),
+        end,
+        "--policy".to_string(),
+        "cache-only".to_string(),
+        "--timestamp".to_string(),
+        "offset".to_string(),
+        "--fields".to_string(),
+        "last_price,time,volume".to_string(),
+    ]);
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let records = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(records[0]["record"], "manifest");
+    assert_eq!(records[0]["protocol"], "tqsdk-history-jsonl/1");
+    let block = records
+        .iter()
+        .find(|record| record["record"] == "block")
+        .unwrap();
+    assert_eq!(block["metadata"]["status"], "verified");
+    assert_eq!(block["fields"], serde_json::json!(["t", "lp", "v"]));
+    let row = records
+        .iter()
+        .find(|record| record["record"] == "row")
+        .unwrap();
+    let keys = row["data"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(keys, vec!["lp", "t", "v"]);
+    assert_eq!(row["data"]["t"], 0);
+    assert_eq!(records.last().unwrap()["status"], "success");
+
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn query_llm_csv_is_lossless_without_a_budget_and_writes_atomically() {
+    let cache_dir = temp_dir("query-llm-atomic");
+    let fixture = seed_query_fixture(&cache_dir, 8, false);
+    let output_path = cache_dir.join("analysis.csv");
+    let output = run_query_without_auth(&[
+        "--cache-dir".to_string(),
+        cache_dir.display().to_string(),
+        "--output-format".to_string(),
+        "llm-csv".to_string(),
+        "query".to_string(),
+        "--symbol".to_string(),
+        fixture.logical_symbol.clone(),
+        "--series".to_string(),
+        "tick".to_string(),
+        "--start".to_string(),
+        rfc3339(fixture.start_ns),
+        "--end".to_string(),
+        rfc3339(fixture.tick_end_ns),
+        "--policy".to_string(),
+        "cache-only".to_string(),
+        "--fields".to_string(),
+        "last_price,time,volume,open_interest".to_string(),
+        "--output".to_string(),
+        output_path.display().to_string(),
+    ]);
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("wrote"));
+    let content = fs::read_to_string(&output_path).unwrap();
+    assert!(content.starts_with("protocol,tqllm-csv/1\n"));
+    assert!(content.contains("compression,lossless"));
+    assert!(content.contains("session,b1"));
+    assert!(content.contains("\nt,lp,v,oi\n"));
+    assert!(content.ends_with('\n'));
+
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn query_llm_csv_compresses_deterministically_within_a_token_budget() {
+    let cache_dir = temp_dir("query-llm-budget");
+    let fixture = seed_query_fixture(&cache_dir, 128, false);
+    let output = run_query_without_auth(&[
+        "--cache-dir".to_string(),
+        cache_dir.display().to_string(),
+        "--output-format".to_string(),
+        "llm-csv".to_string(),
+        "query".to_string(),
+        "--symbol".to_string(),
+        fixture.logical_symbol.clone(),
+        "--series".to_string(),
+        "tick".to_string(),
+        "--start".to_string(),
+        rfc3339(fixture.start_ns),
+        "--end".to_string(),
+        rfc3339(fixture.tick_end_ns),
+        "--policy".to_string(),
+        "cache-only".to_string(),
+        "--data-token-budget".to_string(),
+        "900".to_string(),
+        "--focus".to_string(),
+        "price".to_string(),
+    ]);
+
+    assert!(output.status.success());
+    let content = String::from_utf8(output.stdout).unwrap();
+    assert!(content.contains("compression,lossy"));
+    assert!(content.contains("focus,price"));
+    assert!(content.contains("rows_original,128"));
+    assert!(!content.contains("rows_emitted,128"));
+
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn query_request_file_supports_mixed_tick_and_kline_blocks() {
+    let cache_dir = temp_dir("query-request-file");
+    let fixture = seed_query_fixture(&cache_dir, 8, true);
+    let request_file = cache_dir.join("query.toml");
+    fs::write(
+        &request_file,
+        format!(
+            "version = 1\n\n[[request]]\nsymbol = \"{}\"\nseries = \"tick\"\nstart = \"{}\"\nend = \"{}\"\nfields = [\"time\", \"last_price\"]\nweight = 2\n\n[[request]]\nsymbol = \"{}\"\nseries = \"kline\"\nperiod = \"60s\"\nstart = \"{}\"\nend = \"{}\"\nfields = [\"close\", \"time\"]\n",
+            fixture.logical_symbol,
+            rfc3339(fixture.start_ns),
+            rfc3339(fixture.tick_end_ns),
+            fixture.logical_symbol,
+            rfc3339(fixture.start_ns),
+            rfc3339(fixture.kline_end_ns),
+        ),
+    )
+    .unwrap();
+    let output = run_query_without_auth(&[
+        "--cache-dir".to_string(),
+        cache_dir.display().to_string(),
+        "--output-format".to_string(),
+        "json".to_string(),
+        "query".to_string(),
+        "--request-file".to_string(),
+        request_file.display().to_string(),
+        "--policy".to_string(),
+        "cache-only".to_string(),
+    ]);
+
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "query", "success", 0);
+    assert_eq!(result["blocks"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        result["blocks"][0]["fields"],
+        serde_json::json!(["t", "lp"])
+    );
+    assert_eq!(result["blocks"][1]["series"], "kline");
+    assert_eq!(result["blocks"][1]["fields"], serde_json::json!(["t", "c"]));
+
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn query_llm_csv_requires_verified_metadata_unless_partial_is_explicit() {
+    let cache_dir = temp_dir("query-llm-metadata");
+    let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    let start_ns = range.start_ns + 60 * 1_000_000_000;
+    let end_ns = start_ns + 2 * 1_000_000_000;
+    BacktestTickCache::open(&cache_dir)
+        .unwrap()
+        .store_ticks(
+            "SHFE.au2002",
+            range.start_ns,
+            range.end_ns,
+            vec![Tick {
+                id: 1,
+                datetime: start_ns,
+                last_price: 100.0,
+                volume: 1,
+                open_interest: 1,
+                ..Tick::default()
+            }],
+        )
+        .unwrap();
+    let output = run_query_without_auth(&[
+        "--cache-dir".to_string(),
+        cache_dir.display().to_string(),
+        "--output-format".to_string(),
+        "llm-csv".to_string(),
+        "query".to_string(),
+        "--symbol".to_string(),
+        "SHFE.au2002".to_string(),
+        "--series".to_string(),
+        "tick".to_string(),
+        "--start".to_string(),
+        rfc3339(start_ns),
+        "--end".to_string(),
+        rfc3339(end_ns),
+        "--policy".to_string(),
+        "cache-only".to_string(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("verified metadata sidecars"));
+
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn query_llm_csv_partial_metadata_failure_emits_a_gap() {
+    let cache_dir = temp_dir("query-llm-partial-metadata");
+    let fixture = seed_query_fixture(&cache_dir, 8, false);
+    let output = run_query_without_auth(&[
+        "--cache-dir".to_string(),
+        cache_dir.display().to_string(),
+        "--output-format".to_string(),
+        "llm-csv".to_string(),
+        "query".to_string(),
+        "--symbol".to_string(),
+        "SHFE.au2002".to_string(),
+        "--series".to_string(),
+        "tick".to_string(),
+        "--start".to_string(),
+        rfc3339(fixture.start_ns),
+        "--end".to_string(),
+        rfc3339(fixture.tick_end_ns),
+        "--policy".to_string(),
+        "cache-only".to_string(),
+        "--allow-partial".to_string(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    let content = String::from_utf8(output.stdout).unwrap();
+    assert!(content.starts_with("protocol,tqllm-csv/1\n"));
+    assert!(content.contains("gap,1,SHFE.au2002,metadata_unavailable,"));
+    assert!(content.contains("end,status,partial,"));
+
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn query_llm_csv_budget_fails_closed_when_compression_is_off() {
+    let cache_dir = temp_dir("query-llm-compression-off");
+    let fixture = seed_query_fixture(&cache_dir, 128, false);
+    let output = run_query_without_auth(&[
+        "--cache-dir".to_string(),
+        cache_dir.display().to_string(),
+        "--output-format".to_string(),
+        "llm-csv".to_string(),
+        "query".to_string(),
+        "--symbol".to_string(),
+        fixture.logical_symbol,
+        "--series".to_string(),
+        "tick".to_string(),
+        "--start".to_string(),
+        rfc3339(fixture.start_ns),
+        "--end".to_string(),
+        rfc3339(fixture.tick_end_ns),
+        "--policy".to_string(),
+        "cache-only".to_string(),
+        "--data-token-budget".to_string(),
+        "900".to_string(),
+        "--compression".to_string(),
+        "off".to_string(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("enable compression"));
+
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn query_rejects_cache_management_kind_and_stock_market() {
+    let kind = run(["--kind", "minute", "query"]);
+    assert_eq!(kind.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&kind.stderr).contains("query does not use --kind"));
+
+    let market = run(["--market", "stock", "query"]);
+    assert_eq!(market.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&market.stderr).contains("only --market futures"));
+}
+
 fn run_json<const N: usize>(args: [&str; N]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_tqsdk-cache"))
         .args(["--output-format", "json"])
@@ -1338,6 +1644,123 @@ fn run_without_auth_json<const N: usize>(args: [&str; N]) -> std::process::Outpu
         .args(args)
         .output()
         .unwrap()
+}
+
+fn run_query_without_auth(args: &[String]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_tqsdk-cache"))
+        .env_remove("TQ_AUTH_USER")
+        .env_remove("TQ_AUTH_PASS")
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+struct QueryFixture {
+    logical_symbol: String,
+    start_ns: i64,
+    tick_end_ns: i64,
+    kline_end_ns: i64,
+}
+
+fn seed_query_fixture(
+    cache_dir: &std::path::Path,
+    tick_rows: usize,
+    include_minutes: bool,
+) -> QueryFixture {
+    let logical_symbol = "KQ.m@SHFE.au";
+    let physical_symbol = "SHFE.au2002";
+    let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    let start_ns = range.start_ns + 60 * 60 * 1_000_000_000;
+    let tick_end_ns = start_ns + i64::try_from(tick_rows + 1).unwrap() * 1_000_000_000;
+    let kline_end_ns = start_ns + 3 * 60 * 1_000_000_000;
+    let snapshot = BacktestHistoryMetadataCache::open(cache_dir)
+        .unwrap()
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+            market_kind: BacktestHistoryMarketKind::Futures,
+            logical_symbol: logical_symbol.to_string(),
+            captured_at_ns: start_ns,
+            trading_days: vec![BacktestHistoryTradingDay {
+                date: day(2020, 1, 2).to_string(),
+                is_trading_day: true,
+                start_ns: range.start_ns,
+                end_ns: range.end_ns,
+            }],
+            session: KlineSessionTemplate::cst_trading_day(),
+            physical_segments: vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: physical_symbol.to_string(),
+                start_ns: range.start_ns,
+                end_ns: range.end_ns,
+            }],
+            snapshot_hash: String::new(),
+        })
+        .unwrap();
+    let ticks = (0..tick_rows)
+        .map(|offset| Tick {
+            id: i64::try_from(offset + 1).unwrap(),
+            datetime: start_ns + i64::try_from(offset).unwrap() * 1_000_000_000,
+            last_price: 100.0 + offset as f64 * 0.1,
+            ask_price1: 100.1 + offset as f64 * 0.1,
+            ask_volume1: 10 + i64::try_from(offset).unwrap(),
+            bid_price1: 99.9 + offset as f64 * 0.1,
+            bid_volume1: 9 + i64::try_from(offset).unwrap(),
+            volume: 100 + i64::try_from(offset).unwrap(),
+            amount: 10_000.0 + offset as f64,
+            open_interest: 1_000 + i64::try_from(offset).unwrap(),
+            ..Tick::default()
+        })
+        .collect::<Vec<_>>();
+    BacktestTickCache::open(cache_dir)
+        .unwrap()
+        .store_ticks(physical_symbol, range.start_ns, range.end_ns, ticks)
+        .unwrap();
+    if include_minutes {
+        let minute_snapshot = MinuteKlineCacheSnapshot::new(
+            snapshot.schema_version,
+            snapshot.snapshot_hash.clone(),
+            snapshot.session.snapshot_hash(),
+        )
+        .unwrap();
+        let rows = (0..3)
+            .map(|offset| Kline {
+                id: i64::from(offset + 1),
+                datetime: start_ns + i64::from(offset) * 60 * 1_000_000_000,
+                open: 100.0 + f64::from(offset),
+                high: 101.0 + f64::from(offset),
+                low: 99.0 + f64::from(offset),
+                close: 100.5 + f64::from(offset),
+                volume: 10 + i64::from(offset),
+                open_oi: 100 + i64::from(offset),
+                close_oi: 101 + i64::from(offset),
+                ..Kline::default()
+            })
+            .collect::<Vec<_>>();
+        MinuteKlineCache::open(cache_dir)
+            .unwrap()
+            .store_final_range(
+                logical_symbol,
+                range.start_ns,
+                range.end_ns,
+                &minute_snapshot,
+                &rows,
+            )
+            .unwrap();
+    }
+    QueryFixture {
+        logical_symbol: logical_symbol.to_string(),
+        start_ns,
+        tick_end_ns,
+        kline_end_ns,
+    }
+}
+
+fn rfc3339(timestamp_ns: i64) -> String {
+    let seconds = timestamp_ns.div_euclid(1_000_000_000);
+    let nanos = u32::try_from(timestamp_ns.rem_euclid(1_000_000_000)).unwrap();
+    Utc.timestamp_opt(seconds, nanos)
+        .single()
+        .unwrap()
+        .to_rfc3339()
 }
 
 fn day(year: i32, month: u32, day: u32) -> NaiveDate {

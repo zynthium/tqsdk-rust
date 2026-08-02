@@ -1,8 +1,9 @@
 # `tqsdk-cache`
 
 `tqsdk-cache` 是 `tqsdk-rust` 的可选 cache operator CLI。它管理同一 history root 中的
-daily TQBN tick cache 和 canonical final-60s Kline cache；它是 workspace member，但不属于
-Cargo default-members，也不会进入普通策略、回测或 live 行情的 hot path。
+daily TQBN tick cache 和 canonical final-60s Kline cache，也可通过同一份回测历史查询合同导出
+时间区间；它是 workspace member，但不属于 Cargo default-members，也不会进入普通策略、回测或
+live 行情的 hot path。
 
 ```bash
 cargo run -p tqsdk-cache -- --help
@@ -88,6 +89,95 @@ cargo run -p tqsdk-cache -- \
 不使用 `tq_dl` 或专业历史下载权限。minute 只请求 60-second Kline stream；每个 batch 必须收到
 远端 terminal 成功才写 final coverage，合法的零行窗口也可成为 final。取消、超时或失败 batch
 不会标记其未完成范围。
+
+## 历史查询与 LLM 上下文
+
+`query` 直接复用 `tqsdk-data::BacktestHistoryClient`，不解析 `.tqbn` 文件，也不增加另一份
+history store。它接受 RFC 3339 的半开区间 `[start, end)`，支持 Tick、任意合法 Kline 周期，以及
+主连所需的 logical → physical segment 投影。当前 cache-backed query 只支持 futures。
+行类型由 `--series tick|kline` 选择；query 保留默认 `--kind tick`，而 `--kind minute|all` 和
+`--market stock` 都是 usage error，避免把 cache 运维选择器误当成 row shape 或另一条数据源。
+
+默认 `--policy remote-on-miss`：先检查本地 durable coverage，只有缺口才懒加载
+`TQ_AUTH_USER` / `TQ_AUTH_PASS` 并走官方 server-side backtest stream。`--policy cache-only`
+严格离线，不读取认证、不联网也不补写 cache；缺 coverage、终态失败或损坏 metadata 都不会偷偷返回
+不完整数据。远端补齐只有在 terminal success 后才获得 final coverage。
+
+```bash
+# 可逐行解析的 lossless JSONL；字段别名会规范化为 t/lp/v。
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history --output-format jsonl query \
+  --symbol KQ.m@SHFE.au --series tick \
+  --start 2026-06-01T00:00:00Z --end 2026-06-01T01:00:00Z \
+  --policy cache-only --timestamp offset \
+  --fields time,last_price,volume
+
+# 输出面向 GPT-5.6 的类 CSV 上下文；超过预算时按 price focus 确定性压缩。
+TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history --output-format llm-csv query \
+  --symbol KQ.i@SHFE.au --series kline --period 5m \
+  --start 2026-06-01T00:00:00Z --end 2026-06-01T04:00:00Z \
+  --fields time,open,high,low,close,volume,close_oi \
+  --data-token-budget 12000 --focus price
+
+# 发现可选字段及其长别名。
+cargo run -p tqsdk-cache -- query schema --series tick
+```
+
+`--fields` 是严格 projection：只输出所选字段，长别名可输入、输出固定使用短别名与 schema 顺序。
+默认时间是完整 ISO 8601；`--timestamp offset` 改为相对于 block start 的整数纳秒，并在 metadata
+中保留 reference。默认数字是可读 decimal；`--number-format scaled-int` 必须显式传
+`--price-tick`（或在 request file 的对应 block 提供），避免猜测合约精度；price tick 必须有限且为正，
+价格必须是 tick 的整数倍，CLI 不会静默四舍五入。缺失或非有限浮点以空 CSV cell / JSON `null` 表示，
+真实零值始终为 `0`。
+
+`--output-format jsonl` 的稳定协议为 `tqsdk-history-jsonl/1`。`--output-format llm-csv` 的稳定
+协议为 `tqllm-csv/1`：每个 symbol × series × period 是独立 block，带 finality、coverage source、
+physical segments、session snapshot、query/hash/drill-down id 与结构化 summary；它不调用模型、也不
+读取 OpenAI 凭证。两种 raw format 都会先通过 `collect_all()` 收齐 batch（默认
+`--max-memory-bytes 128 MiB`）再生成完整 payload，因此 JSONL 是逐行格式而非在线 streaming export。
+LLM 输出会先收齐所有 terminal success、校验完整 coverage 和 active metadata snapshot，再一次性生成
+摘要、哈希与可能的 `lossy` 压缩；默认缺失即失败。`--allow-partial` 是唯一允许已完成 sibling block
+输出的 opt-in，明确输出 `gap` 且仍以 exit code `1` 结束；它不放宽 finality 或完整 coverage gate。
+
+`--data-token-budget` 使用保守的本地估算，不替代上游 agent/API 的精确 token 计数。预算不足时，
+`--compression auto` 按 block weight（简单 CLI 默认相等；TOML 可设 `weight`）分配残余，并保留
+首尾、focus 关键行和每 block summary；`--compression off` 则 fail closed。原始 `jsonl` 不做压缩。
+raw data 默认写 stdout、诊断写 stderr；`text` / `json` 只提供摘要。传 `--output PATH` 时仅
+`jsonl` / `llm-csv` 可用，stdout 为空，并以同目录临时文件 + sync + rename 原子写入；stdout 本身
+不提供原子发布保证。`--pretty` / `--output-schema` 只适用于 JSON 摘要。
+
+简单同质批次可重复 `--symbol`；混合 symbol、series、period 或字段时使用 `--request-file`。TOML 必须
+有 `version = 1` 和至少一个 `[[request]]`，未知字段会拒绝；它不能与 `--symbol`、`--series`、
+`--start`、`--end`、`--period` 或 `--fields` 混用。`weight` 只影响 LLM 预算分配，block 内的
+`price_tick` 会覆盖全局值：
+
+```toml
+version = 1
+
+[[request]]
+symbol = "KQ.m@SHFE.au"
+series = "tick"
+start = "2026-06-01T00:00:00Z"
+end = "2026-06-01T01:00:00Z"
+fields = ["time", "last_price", "volume"]
+weight = 2
+
+[[request]]
+symbol = "KQ.i@SHFE.au"
+series = "kline"
+period = "5m"
+start = "2026-06-01T00:00:00Z"
+end = "2026-06-01T04:00:00Z"
+fields = ["time", "open", "high", "low", "close", "volume"]
+```
+
+```bash
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history --output-format llm-csv query \
+  --request-file analysis.toml --policy cache-only --data-token-budget 12000
+```
 
 ## Inspect、verify 与 doctor
 
