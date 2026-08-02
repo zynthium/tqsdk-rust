@@ -2090,28 +2090,31 @@ fn purge(
     let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
     if args.dry_run {
         let cache = MinuteKlineCache::open_read_only(&canonical_cache_dir);
-        let snapshot = minute_cache_snapshot_for_symbol(
-            &canonical_cache_dir,
-            &symbol,
-            window.start_ns,
-            window.end_ns,
-        )?;
-        let status = cache.inspect(&symbol, window.start_ns, window.end_ns, &snapshot)?;
-        let would_remove_files = status
-            .months
-            .iter()
-            .filter(|month| month.present)
-            .map(|month| {
-                let size_bytes = std::fs::metadata(&month.path)
-                    .map(|metadata| metadata.len())
-                    .unwrap_or_default();
-                json!({
-                    "trading_month": month.trading_month,
-                    "path": month.path,
-                    "size_bytes": size_bytes,
-                })
-            })
-            .collect::<Vec<_>>();
+        let start_day = parse_window_day(&window.start_day)?;
+        let end_day = parse_window_day(&window.end_day)?;
+        let trading_months = partition_days_between(start_day, end_day)?
+            .into_iter()
+            .map(|day| day.format("%Y%m").to_string())
+            .collect::<BTreeSet<_>>();
+        let mut would_remove_files = Vec::new();
+        for trading_month in trading_months {
+            let path = cache.month_file_path(&symbol, &trading_month);
+            match fs::metadata(&path) {
+                Ok(metadata) if metadata.is_file() => would_remove_files.push(json!({
+                    "trading_month": trading_month,
+                    "path": path,
+                    "size_bytes": metadata.len(),
+                })),
+                Ok(_) => {
+                    return Err(CliError::Data(DataError::InvalidResponse(format!(
+                        "minute kline cache purge target {} is not a regular file",
+                        path.display()
+                    ))));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         return Ok(CommandOutcome {
             value: json!({
                 "schema_version": REPORT_SCHEMA_VERSION,

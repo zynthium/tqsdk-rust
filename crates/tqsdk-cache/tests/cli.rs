@@ -553,6 +553,80 @@ fn minute_purge_requires_yes_and_dry_run_only_lists_the_month_partition() {
 }
 
 #[test]
+fn minute_purge_dry_run_lists_a_stale_snapshot_month_partition() {
+    let cache_dir = temp_dir("minute-purge-stale-snapshot");
+    let symbol = "KQ.m@SHFE.au";
+    let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    let cache = MinuteKlineCache::open(&cache_dir).unwrap();
+    cache
+        .store_final_range(
+            symbol,
+            range.start_ns,
+            range.end_ns,
+            &MinuteKlineCacheSnapshot::cst_v1(),
+            &[],
+        )
+        .unwrap();
+    let month_path = cache.month_file_path(symbol, "202001");
+
+    BacktestHistoryMetadataCache::open(&cache_dir)
+        .unwrap()
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+            market_kind: BacktestHistoryMarketKind::Futures,
+            logical_symbol: symbol.to_string(),
+            captured_at_ns: range.end_ns,
+            trading_days: vec![BacktestHistoryTradingDay {
+                date: day(2020, 1, 2).to_string(),
+                is_trading_day: true,
+                start_ns: range.start_ns,
+                end_ns: range.end_ns,
+            }],
+            session: KlineSessionTemplate::new("changed-session", Vec::new()).unwrap(),
+            physical_segments: vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: symbol.to_string(),
+                start_ns: range.start_ns,
+                end_ns: range.end_ns,
+            }],
+            snapshot_hash: String::new(),
+        })
+        .unwrap();
+
+    let dry_run = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "purge",
+        "--symbol",
+        symbol,
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--dry-run",
+    ]);
+
+    assert!(
+        dry_run.status.success(),
+        "dry-run failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&dry_run.stdout),
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
+    assert!(month_path.exists());
+    let json: Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    let result = v3_result(&json, "purge", "success", 0);
+    assert_eq!(result["would_remove_files"].as_array().unwrap().len(), 1);
+    let canonical_month_path = fs::canonicalize(&month_path).unwrap();
+    assert_eq!(
+        result["would_remove_files"][0]["path"],
+        canonical_month_path.to_string_lossy().as_ref()
+    );
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
 fn minute_fill_progress_jsonl_uses_v2_and_identifies_the_cache_kind() {
     let cache_dir = temp_dir("minute-progress-jsonl");
     let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
