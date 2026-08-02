@@ -350,7 +350,7 @@ async fn remote_on_miss_minute_query_uses_a_complete_historical_snapshot_without
 }
 
 #[test]
-fn minute_stale_repair_targets_only_outlier_months_for_the_dominant_snapshot() {
+fn minute_stale_repair_targets_only_months_stale_against_the_active_snapshot() {
     let root = temp_dir("minute-stale-repair");
     let symbol = "KQ.m@SHFE.au";
     let january_start = utc_ns(2020, 1, 2, 1, 0, 0);
@@ -422,32 +422,42 @@ fn minute_stale_repair_targets_only_outlier_months_for_the_dominant_snapshot() {
         )
         .unwrap();
 
-    metadata_cache
-        .store_snapshot(BacktestHistoryMetadataSnapshot {
-            captured_at_ns: january_start + 2,
-            snapshot_hash: String::new(),
-            ..snapshot_body
-        })
-        .unwrap();
-
     let repair = plan_minute_cache_stale_partition_repair(&root, symbol, january_start, end_ns)
         .unwrap()
         .expect("mixed cache snapshots should produce an explicit repair plan");
-    assert_eq!(repair.snapshot_hash, retained.snapshot_hash);
-    assert_eq!(repair.stale_ranges.len(), 1);
-    assert!(repair.stale_ranges[0].0 <= march_start);
-    assert_eq!(repair.stale_ranges[0].1, end_ns);
+    assert_eq!(repair.snapshot_hash, outlier.snapshot_hash);
+    assert_eq!(repair.stale_ranges.len(), 2);
+    assert!(
+        repair
+            .stale_ranges
+            .iter()
+            .any(|range| range.0 <= january_start)
+    );
+    assert!(
+        repair
+            .stale_ranges
+            .iter()
+            .any(|range| range.0 <= february_start)
+    );
+    assert!(
+        repair
+            .stale_ranges
+            .iter()
+            .all(|range| range.1 <= march_start)
+    );
 
-    cache
-        .purge_range(symbol, repair.stale_ranges[0].0, repair.stale_ranges[0].1)
-        .unwrap();
-    assert!(cache.month_file_path(symbol, "202001").exists());
-    assert!(cache.month_file_path(symbol, "202002").exists());
-    assert!(!cache.month_file_path(symbol, "202003").exists());
+    for (range_start_ns, range_end_ns) in repair.stale_ranges {
+        cache
+            .purge_range(symbol, range_start_ns, range_end_ns)
+            .unwrap();
+    }
+    assert!(!cache.month_file_path(symbol, "202001").exists());
+    assert!(!cache.month_file_path(symbol, "202002").exists());
+    assert!(cache.month_file_path(symbol, "202003").exists());
     let resolved = resolve_minute_cache_metadata_snapshot(&root, symbol, january_start, end_ns)
         .unwrap()
-        .expect("the retained snapshot should read the remaining months");
-    assert_eq!(resolved.snapshot_hash, retained.snapshot_hash);
+        .expect("the active snapshot should read the remaining months");
+    assert_eq!(resolved.snapshot_hash, outlier.snapshot_hash);
     assert!(
         cache
             .inspect(

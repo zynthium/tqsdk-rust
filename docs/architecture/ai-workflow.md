@@ -225,7 +225,7 @@ tqsdk
   使旧分区失效；只有保留 snapshot 覆盖完整请求窗口、schema/session identity 与 active 相同并精确验证
   月文件时才可读取它。缺失、session 变化、损坏或无法由同一 snapshot 解释的混合分区必须 fail closed，
   不得自动删除、重写或拼接缓存。唯一例外是 operator 显式传 `tqsdk-cache --kind minute fill
-  --repair-stale`：它选择覆盖窗口且匹配最多分区的 retained snapshot，仅删除其冲突整月分区后由同一次
+  --repair-stale`：active snapshot 覆盖窗口时，它仅删除与 active snapshot 冲突的整月分区，随后由同一次
   remote-on-miss fill 重建；这不是 reader 或普通 fill 的自动修复
 
 设计原因：

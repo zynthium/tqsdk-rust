@@ -62,8 +62,8 @@ minute 缓存当前的 format id 是 `tqsdk.minute-kline.monthly.v4`，schema/fi
 月文件失效：minute `inspect`、`fill --dry-run`、`verify` 和 cache-backed reader 仅会在一个保留
 snapshot 覆盖完整窗口、schema/session identity 与 active 一致、并能精确验证现存月文件时选择它。
 缺少保留 snapshot、session 变化、损坏文件或不能由单一 snapshot 解释的混合分区仍 fail closed，且不会
-自动 purge、重写、下载或拼接数据。唯一例外是显式的 `--kind minute fill --repair-stale`：它选择覆盖
-窗口且匹配月文件最多的 retained snapshot，删除该窗口内与其冲突的整月文件后，才由同一次
+自动 purge、重写、下载或拼接数据。唯一例外是显式的 `--kind minute fill --repair-stale`：active snapshot
+覆盖窗口时，它删除该窗口内与 active snapshot 冲突的整月文件后，才由同一次
 remote-on-miss fill 重建缺口；普通 `fill`、`inspect`、`verify` 和 cache-backed reader 仍 fail closed。
 
 本地 replay 的周期合同不变：`<60s` 从 tick cache 按 session 合成，`60s` 从 canonical minute cache
@@ -190,7 +190,7 @@ tick 和 minute 都没有自动 retention、max-byte eviction 或后台 cleanup�
 `--dry-run` 只列出会移除的月文件、路径与大小，不写任何内容。真实 purge 删除所有与请求 window
 相交的整月分区，并以每月文件锁执行；它不是跨 cache family 的 root-wide transaction。
 `fill --repair-stale` 是另一条显式 minute maintenance path，不能和 `--dry-run` 或 tick 使用；它只删除
-已由 retained snapshot 比较定位的冲突整月分区，并立刻由同一 remote fill 请求补齐。
+已由 active snapshot 比较定位的冲突整月分区，并立刻由同一 remote fill 请求补齐。
 
 ## 验收
 

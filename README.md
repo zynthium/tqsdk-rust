@@ -199,8 +199,8 @@ minute 文件；主连支持 canonical 60s 和整数分钟本地聚合。`Remote
 旧分区失效。读取方只会在该历史 snapshot 覆盖整个请求窗口、schema 与 session identity 仍和 active
 snapshot 一致、且现存月文件可用该 snapshot 精确验证时回退使用它；缺少保留 snapshot、session 变化、
 损坏文件或无法由同一 snapshot 解释的混合分区仍默认 fail closed，不会自动删除、重写或拼接数据。只有
-操作者显式传 `tqsdk-cache --kind minute fill --repair-stale` 时，CLI 才会选择覆盖窗口且匹配月文件最多的
-retained snapshot，删除该窗口内与它冲突的整月分区，再走普通 `remote-on-miss` 补齐；它不适用于 tick 或
+操作者显式传 `tqsdk-cache --kind minute fill --repair-stale` 时，CLI 才会在 active snapshot 覆盖窗口时，
+删除该窗口内与它冲突的整月分区，再走普通 `remote-on-miss` 补齐；它不适用于 tick 或
 `--dry-run`，普通读取与 fill 仍不会删除数据。
 
 cache-backed local backtest 当前只支持 futures；`Tq::stock().backtest(...)` 必须显式

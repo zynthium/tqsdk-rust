@@ -163,7 +163,6 @@ impl MinuteKlineCacheStatus {
 /// fail-closed read path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MinuteKlineCacheSnapshotCompatibility {
-    pub(crate) matching_month_count: usize,
     pub(crate) mismatched_ranges: Vec<(i64, i64)>,
 }
 
@@ -481,7 +480,6 @@ impl MinuteKlineCache {
         validate_range(symbol, range_start_ns, range_end_ns)?;
         snapshot.validate()?;
 
-        let mut matching_month_count = 0_usize;
         let mut mismatched_ranges = Vec::new();
         for slice in split_trading_month_range(range_start_ns, range_end_ns)? {
             let path = self.month_file_path_unchecked(symbol, slice.trading_month.as_str());
@@ -491,18 +489,14 @@ impl MinuteKlineCache {
                 slice.trading_month.as_str(),
                 snapshot,
             ) {
-                Ok(Some(_)) => matching_month_count = matching_month_count.saturating_add(1),
-                Ok(None) => {}
+                Ok(Some(_)) | Ok(None) => {}
                 Err(error) if is_snapshot_mismatch(&error) => {
                     mismatched_ranges.push((slice.start_ns, slice.end_ns));
                 }
                 Err(error) => return Err(error),
             }
         }
-        Ok(MinuteKlineCacheSnapshotCompatibility {
-            matching_month_count,
-            mismatched_ranges,
-        })
+        Ok(MinuteKlineCacheSnapshotCompatibility { mismatched_ranges })
     }
 
     /// Store a server-confirmed final 60-second range.
