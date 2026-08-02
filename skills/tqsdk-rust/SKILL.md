@@ -1,6 +1,6 @@
 ---
 name: tqsdk-rust
-description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实时行情/quote/盘口/K线/tick、品种/合约列表、主连/连续合约、期权链、合约规格、metadata/direct query、历史数据下载/缓存/CSV/Greeks、回测/实盘共享 tick cache、交易账户/下单/撤单/订单状态、TargetPosTask/风控/多账户/策略执行、低延迟交易柜台/trading desk、fan-out/event consumers、replay/backtest/live-sim-replay；也用于智能体需要实时或历史量化数据、交易执行 substrate、交易柜台能力时，即使未明确提到 TQSDK。
+description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实时行情/quote/盘口/K线/tick、品种/合约列表、metadata/direct query、历史数据下载/缓存/CSV/命令行历史查询/JSONL/LLM CSV、回测/实盘共享 tick cache、交易账户/下单/撤单、TargetPosTask/风控/多账户/策略执行、低延迟柜台、fan-out/event consumers、replay/backtest/live-sim-replay；也用于智能体需要实时或历史量化数据、交易执行 substrate 或模型行情输入时，即使未明确提到 TQSDK。
 ---
 
 # TQSDK Rust
@@ -26,6 +26,7 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 - 默认 facade 放在 `tqsdk`；one-shot query 放在 `tqsdk-session`，Python-style live ref 放在 `tqsdk-wait`，执行工具放在 `tqsdk-task`，离线/历史数据放在 `tqsdk-data`。多消费者 event/fan-out 是调用方基于 `tqsdk-session + RuntimeReader/UpdateCursor` 自建的集成层。
 - 默认 facade 回测入口统一为 `.backtest(start_ns, end_ns)`：默认使用共享持久 tick cache（`$HOME/.tqsdk/data_series_1`，可用 `TQSDK_HISTORY_CACHE_DIR` 覆盖）和 `RemoteOnMiss`。已知或静态解析 symbol 的 cache hit 不需要 auth；只有缺 tick range 时才需 auth，并通过官方 server-side backtest stream 补洞后在本地 `TqSim` 回放。`.cache_dir(...)`、`.cache_store(...)` 或 `.market_cache(...)` 覆盖默认 cache；只有 `.disabled_cache()` 才是纯官方服务端回测且不落盘。
 - 用户要按时间区间取得历史 Tick / Kline rows，且明确优先回测或回测缓存时，优先用 `tqsdk::advanced::data::BacktestHistoryClient` + `BacktestHistoryRequest`，不要先路由到 `DataClient`。`BacktestHistoryPolicy::RemoteOnMiss` 先读共享回测缓存，缺口才走官方 server-side backtest stream 并写回；完整缓存后改用 `BacktestHistoryPolicy::CacheOnly`。`Tq::backtest(...)` 留给策略回放，`DataClient` 留给显式 generic 历史下载、CSV/研究工作流，或回测缓存合同不覆盖的来源。
+- 用户要从命令行按 RFC 3339 区间导出同一份回测缓存，尤其是给脚本或大模型输入时，使用可选 `tqsdk-cache query`，它是 `BacktestHistoryClient` 的 CLI adapter，不直接解析 `.tqbn`。用 `--series tick|kline` 选 row family；`--output-format jsonl` 给无损 `tqsdk-history-jsonl/1` rows，`--output-format llm-csv` 给 token-aware `tqllm-csv/1` blocks。`--policy cache-only` 严格离线且缺 coverage 即失败；默认 `remote-on-miss` 只在真正缺口时读取 `TQ_AUTH_USER` / `TQ_AUTH_PASS` 并补齐 durable cache。查询只支持 futures，不能把 `--kind minute|all` 或 `--market stock` 当成查询入口。
 - 不要再生成或推荐 `server_backtest(...)`。该 public 兼容 alias 已删除；旧代码统一迁移为 `.backtest(start_ns, end_ns)`，需要本地严格只读时加 `.cache_only()`，只有有意禁用缓存时才加 `.disabled_cache()`；自定义数据源使用 `.replay_backtest(...)`。
 - `DataClient` 的 history-series cache 默认 opt-in；这不改变 facade `.backtest(...)` 默认共享 tick cache 的语义。持久化 live tick 必须显式使用 `MarketCachePolicy` / `Tq::record_ticks(cache_dir, symbols)`；`HistorySeriesCache` 仍只服务 offline data-series。
 - `MarketCachePolicy` 是默认 facade 维护“live 增量记录 + 回测共享缓存”的首选入口：`MarketCachePolicy::new(cache_dir).record_ticks(symbols)` 或 `.record_universe(expression)?` + `TqBuilder::market_cache(policy)` 会在 live `connect()` 后启动 tick recording，也会给 `.backtest(...)` 提供默认 cache 目录和 symbol 集合。
@@ -45,13 +46,28 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 ## 历史 Tick 缓存补齐
 
 - 区间历史 rows 的回测优先路径：`BacktestHistoryClient::builder(cache_dir)` 配置 `RemoteOnMiss` 和 `.auth_env()`，再以 `BacktestHistoryRequest::tick(...)` / `.kline(...)` 调用 `query()`；调用方可消费 chunk/terminal event，或对单请求使用 `collect()`。它命中同一份回测缓存，只有缺口才使用官方回测流并持久化；预热或成功读取后，后续 reader 用 `CacheOnly`。这不是策略循环；策略回放继续用 `.backtest(...)`。
+- CLI 导出：已有 coverage 时，给模型的 5 分钟 K 线可直接运行：
+
+  ```bash
+  cargo run -p tqsdk-cache -- \
+    --cache-dir /var/lib/tqsdk/history --output-format llm-csv query \
+    --symbol KQ.m@SHFE.au --series kline --period 5m \
+    --start 2026-06-01T00:00:00Z --end 2026-06-01T04:00:00Z \
+    --policy cache-only --fields time,open,high,low,close,volume,close_oi
+  ```
+
+  `jsonl` 是无损逐行协议；`llm-csv` 在 terminal success、Final/full coverage 和匹配的 active metadata
+  snapshot 都验证后才生成 block，可设置 `--data-token-budget` 与 `--focus` 进行确定性压缩。默认缺失即
+  fail closed；`--allow-partial` 仅以 `gap` 省略失败 block，并仍以 exit code `1` 结束。raw data 写 stdout，
+  diagnostics 写 stderr；`--output PATH` 只用于 raw formats，使用原子文件发布。字段 discovery 用
+  `tqsdk-cache query schema --series tick|kline`；混合 batch 用 `--request-file` TOML。
 - 按需补齐：单个策略可直接使用默认 `.backtest(...)`；完整缓存直接本地回放，缺口由默认 `RemoteOnMiss` 补齐。这个路径不使用 `tq_dl` / 专业历史下载权限，但实际远端补数需要 `.auth_env()?`。
 - 预热作业：对固定 cache root 和明确的 symbol/universe，使用 `.remote_on_miss().warmup().await?`。它只填每个 symbol 的 `missing_ranges`，连续 tick id 的成功 slice 才提交 coverage；失败或未确认尾部保留缺口，下一次 warmup 可继续补齐。
-- operator CLI：固定 root 的 inventory、closed-day fill、report-bound verify 或 TQBN doctor 使用可选
-  `tqsdk-cache` binary（`cargo run -p tqsdk-cache -- --help`）。它只编排已有 facade/data cache
-  合同，不是 relay、守护进程或 custom store；normal fill 的 cache hit 不需 auth，缺口才使用
-  `TQ_AUTH_USER` / `TQ_AUTH_PASS`。默认输出摘要；需要脚本 JSON 时显式使用
-  `--output-format json`，stderr 才是进度；
+- operator CLI：固定 root 的 inventory、closed-day fill、report-bound verify、TQBN doctor、受控 minute
+  purge 或上述区间 `query` 使用可选 `tqsdk-cache` binary（`cargo run -p tqsdk-cache -- --help`）。它只编排
+  已有 facade/data cache 合同，不是 relay、守护进程或 custom store；normal fill/query 的 complete cache
+  hit 不需 auth，缺口才使用 `TQ_AUTH_USER` / `TQ_AUTH_PASS`。默认输出摘要；管理命令需要脚本 JSON 时显式
+  使用 `--output-format json`，query raw rows 则使用 `jsonl` / `llm-csv`，stderr 才是诊断或进度；
   `fill --dry-run` 不加锁、不写文件、不远端补数，V1 拒绝 current open day。operator 需要最近
   N 日时优先用 `fill --last-trading-days N --calendar auto`；它先复用 root 的
   `meta/trading-calendar-v1.json`，日历只用于 selector/进度，不是 coverage truth。`--calendar off`
@@ -69,7 +85,10 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 - 多策略/生产：每个 cache root 只安排一个定时远端 warmup owner；策略实例复用同一 root 并用 `.cache_only()`。文件锁可串行化 TQBN 写入，但不是跨进程远端补数调度器，多个 `RemoteOnMiss` 实例仍可能重复下载。
 - 实时增量：用 `MarketCachePolicy::record_ticks(...)` / `.record_universe(...)` 加 `.market_cache(...)`。只记录 policy 声明的 symbol，且必须持续 `next()` / `wait_update()`；首次初始化或失败重扫之外，每个 update 只解码变更集命中的 tick serial，连续 rows 每 symbol 按 `128` 行或约 `250 ms` 批量写入，首批、跳号和正常对象销毁会 flush。断线、跳号和异常退出前未提交尾部留下的 coverage gap 交给后续 warmup 补齐。
 - 不要手工改写 `.tqbn`，也不要把 relay 当作 canonical historical-cache owner。缓存检查、清理和补齐走 `.inspect_cache()`、`.purge_cache_symbols()`、`.warmup()` 或 `.remote_on_miss()`。
-- tick cache 与 native K 线 cache 分开：`duration <= 60s` K 线从 tick 合成；`duration > 60s` 使用 `HistorySeriesCache` 的另一条补齐路径。
+- cache-backed `BacktestHistoryClient` / `tqsdk-cache query` 的 durable source 固定为：Tick 和 `<60s` K 线
+  从 daily TQBN tick 分区读取或聚合，`60s` K 线从 canonical-minute 分区读取，`N × 60s`（`N > 1`）从
+  canonical 60s K 按固定 CST `18:00` trading-day grid 聚合；`61s` / `90s` 等不合法周期会拒绝。不要把
+  此路径误导到只服务 generic offline data-series 的 `HistorySeriesCache`。
 
 完整示例见 [references/code-patterns.md](references/code-patterns.md) 的 `Shared Live/Backtest Tick Cache`。
 

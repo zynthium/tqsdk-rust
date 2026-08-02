@@ -24,6 +24,10 @@
 
 用户明确要按区间获取历史 Tick/Kline，且优先走回测或回测缓存时，先用 `tqsdk::advanced::data::BacktestHistoryClient`。`RemoteOnMiss` 先读 shared backtest cache，缺口才通过官方 server-side backtest stream 获取并持久化；`CacheOnly` 用于后续离线 reader。它返回 owned chunk/rows，不是 live ref，也不替代策略 `.backtest(...)` 回放。只有需要 generic history page/series/download、CSV export、option Greeks，或回测缓存合同不覆盖的来源时，才用 `tqsdk-data::DataClient`。`HistorySeriesCache` 是 offline `data_series` cache 和 cache-only reader，不是 live 最新行情 API；`BacktestTickCache` 是 tick-only 回测共享缓存，普通 live/backtest 组合入口在 `tqsdk::MarketCachePolicy`，纯 row writer 才下钻 `LiveTickCacheWriter`。
 
+用户明确要 shell/CLI 导出或 token-aware 模型行情输入时，改用可选 `tqsdk-cache query`：它复用同一
+`BacktestHistoryClient` 合同，`jsonl` 给无损 rows，`llm-csv` 给已验证 coverage/session metadata 的紧凑
+blocks；先由 `scenario-router.md` 选择 `cache-only` 或 `remote-on-miss`，不要手读 `.tqbn`。
+
 契约锚点：S17、S28-S30。Replay integration：S16；S18 JSONL local market cache 已移出当前核心 SDK public API。
 
 ## Strategy Execution

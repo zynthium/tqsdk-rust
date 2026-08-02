@@ -333,7 +333,10 @@ async fn warm_then_prepare(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
 
 每个 cache root 只安排一个远端 warmup owner。TQBN 文件锁只保证写入互斥，不能去重跨进程
 `RemoteOnMiss` 请求；不要直接改写 `.tqbn`，也不要把 relay 当作历史缓存的唯一 owner。
-`duration > 60s` 的 native K 线使用 `HistorySeriesCache`，不在本段 tick cache 流程内。
+cache-backed `BacktestHistoryClient` 的 `<60s` K 线从 tick 聚合，`60s` 从 canonical-minute cache 读取，
+`N × 60s`（`N > 1`）从 canonical 60s K 按固定 CST `18:00` trading-day grid 聚合；`61s` / `90s` 等
+不合法周期会拒绝。不要将这一回测缓存路径误导到只服务 generic offline data-series 的
+`HistorySeriesCache`。
 调用方需要计划或进度 reducer 时，在 warmup builder 上安装 `.on_remote_fill_telemetry(...)`：
 `PlanReady` 给出逻辑请求、物理 cache symbol、请求区间和缺口，随后 lifecycle event 给出
 physical symbol、batch、cursor、retry/split 和终态。handler 位于远端填充路径，应该只更新内存状态，
@@ -351,6 +354,22 @@ physical symbol、batch、cursor、retry/split 和终态。handler 位于远端�
 固定共享 root 的 cache 运维不必把策略进程改成 downloader。可选 `tqsdk-cache` binary 复用同一套
 remote-on-miss / CacheOnly 合同：默认输出摘要；cron 或 CI 需要 versioned JSON 时显式传入
 `--output-format json`。进度只写 stderr；它不是 relay 或守护进程。
+
+按时间区间把同一份缓存交给 shell pipeline 或大模型时，使用 `query`，不要直接解析 `.tqbn`：
+
+```bash
+# 已完整缓存的 5 分钟 K 线 LLM context；cache-only 不读取凭证、不联网也不写 cache。
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history --output-format llm-csv query \
+  --symbol KQ.m@SHFE.au --series kline --period 5m \
+  --start 2026-06-01T00:00:00Z --end 2026-06-01T04:00:00Z \
+  --policy cache-only --fields time,open,high,low,close,volume,close_oi \
+  --data-token-budget 12000 --focus price
+```
+
+无损 row stream 使用 `--output-format jsonl`；`llm-csv` 在 Final/full coverage 和匹配 active metadata
+snapshot 后才输出 block，默认 fail closed。仅在有意用默认 `remote-on-miss` 填补缺口时才提供
+`TQ_AUTH_USER` / `TQ_AUTH_PASS`，并事先取得对目标 cache root 写入和联网的授权。
 
 ```bash
 # 预检不会请求远端 tick、写 cache 或获取 fill lock。
