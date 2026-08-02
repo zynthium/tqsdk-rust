@@ -147,14 +147,17 @@ minute fill 没有 provisional 语义：当前或未来 trading day 一律不能
 | format | stable protocol | 语义 |
 | --- | --- | --- |
 | `jsonl` | `tqsdk-history-jsonl/1` | lossless rows，附 `manifest`、每 block 的 `block` / 零或多个 `row` / `complete`、可选 `gap`、最终 `end` records；不压缩 |
-| `llm-csv` | `tqllm-csv/2` | GPT-5.6-oriented CSV-like blocks；每 block 依次写 `block` / `time` / `columns` / 可选 `segment` / `summary` / `data` / `block_end`，最终以 `document_end` 收尾；默认省略内部 query/session/blob provenance |
+| `llm-csv` | `tqllm-csv/3` | GPT-5.6-oriented CSV-like blocks；每 block 依次写 `block` / `time` / `columns` / 可选 `segment` / `summary` / `data` / `block_end`，最终以 `document_end` 收尾；默认省略内部 query/session/blob provenance |
 
 两者都遵守 strict `--fields` projection：输入可使用长 alias，输出固定为 canonical short alias 和
 schema order。JSONL 默认 row timestamp 是完整 ISO 8601；`--timestamp offset` 改为相对 block start
-的整数 ns。LLM CSV 的 `--llm-time iso|offset|both` 默认 `iso`：它按该 block 的最小无损 UTC 精度写出
-时间（分钟 Kline 不填充秒/纳秒）；`offset` 用 `time.ref` 加声明的 `time.unit` 表示整数 `t`；`both` 在
+的整数 ns。LLM CSV 的 `--llm-time iso|offset|both` 默认 `iso`：它按该 block 的最小无损精度以
+`Asia/Shanghai` 的显式 `+08:00` 写出时间（分钟 Kline 不填充秒/纳秒），`time.timezone` 固定说明时区；
+`--llm-timezone utc` 可覆写为 UTC。`offset` 用 `time.ref` 加声明的 `time.unit` 表示整数 `t`；`both` 在
 已选择 `t` 后额外写派生 `dt` 以供对照。未显式指定时 `--timestamp offset` 选择 LLM `offset` 模式。
 `time.end_exclusive=true` 固定表达半开区间，Kline 的 `time.bar_time=start` 明确其 bar timestamp 语义。
+显示时区仅改变同一 instant 的文本表示，绝不改变 cache range、server-backtest 输入或 night session 的
+trading day 归属。
 默认数字为 decimal；`--number-format scaled-int` 必须显式给出有效的 `price_tick`，非有限数为 missing
 而不是零；LLM CSV 会把该缩放比例仅写在相关 block。LLM `columns` 是其唯一有序 projection（`both`
 的派生 `dt` 是显式 opt-in 例外）；JSONL 的有序 projection 仍是 `block.fields`，JSON `row.data` object

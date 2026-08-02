@@ -193,7 +193,7 @@ minute 文件；主连支持 canonical 60s 和整数分钟本地聚合。`Remote
 
 需要从命令行导出同一份回测缓存时，使用可选 `tqsdk-cache query`：它只是
 `BacktestHistoryClient` 的 CLI adapter，可输出 lossless JSONL，或为模型上下文压缩的
-`tqllm-csv/2`；详情见 [`tqsdk-cache` README](crates/tqsdk-cache/README.md)。
+`tqllm-csv/3`；详情见 [`tqsdk-cache` README](crates/tqsdk-cache/README.md)。
 
 每个 `.tqmk` 月分区绑定写入时的 immutable metadata snapshot；active pointer 后续前移本身不会使
 旧分区失效。读取方只会在该历史 snapshot 覆盖整个请求窗口、schema 与 session identity 仍和 active

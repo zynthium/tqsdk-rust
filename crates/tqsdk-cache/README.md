@@ -128,10 +128,13 @@ cargo run -p tqsdk-cache -- query schema --series tick
 `--fields` 是严格 projection：只输出所选字段，长别名可输入、输出固定使用短别名与 schema 顺序。
 JSONL 的默认时间是完整 ISO 8601；`--timestamp offset` 改为相对于 block start 的整数纳秒。
 LLM CSV 使用 `--llm-time iso|offset|both`：默认 `iso` 按 block 实际精度无损裁剪（例如分钟 K
-线为 `2026-07-31T01:00Z`，不填充无意义纳秒）；`offset` 将已选择的 `t` 列改为相对于 `ref`
+线为 `2026-07-31T09:00+08:00`，不填充无意义纳秒）；默认 `--llm-timezone shanghai`，在 `time`
+行显式写为 `timezone,Asia/Shanghai`，不使用有歧义的 `CST`；可传 `--llm-timezone utc` 保持 UTC。
+`offset` 将已选择的 `t` 列改为相对于 `ref`
 的整数，并声明精确 `unit`（例如 `1m`）；`both` 仅在选择 `t` 时紧随它增加派生 `dt` 列，便于
 人工与模型逐行对照。未显式传 `--llm-time` 时，`--timestamp offset` 仍会选择 LLM 的 `offset`
-模式。所有 LLM 时间区间都显式标明 `end_exclusive=true`，Kline 还会标明其时间是 bar start。
+模式。所有 LLM 时间区间都显式标明 `end_exclusive=true`，Kline 还会标明其时间是 bar start；显示
+时区绝不改变 UTC instant、cache coverage 或夜盘的 trading day 语义。
 默认数字是可读 decimal；`--number-format scaled-int` 必须显式传
 `--price-tick`（或在 request file 的对应 block 提供），避免猜测合约精度；price tick 必须有限且为正，
 价格必须是 tick 的整数倍，CLI 不会静默四舍五入。缺失或非有限浮点以空 CSV cell / JSON `null` 表示，
@@ -139,7 +142,7 @@ LLM CSV 使用 `--llm-time iso|offset|both`：默认 `iso` 按 block 实际精�
 缩放比例。
 
 `--output-format jsonl` 的稳定协议为 `tqsdk-history-jsonl/1`。`--output-format llm-csv` 的稳定
-协议为 `tqllm-csv/2`：每个 symbol × series × period 是独立 block，按 `block`、`time`、`columns`、
+协议为 `tqllm-csv/3`：每个 symbol × series × period 是独立 block，按 `block`、`time`、`columns`、
 `summary`、`data`、`block_end` 和 `document_end` 组织。`period` 使用 `1m` 这类人类单位，`columns`
 一次性定义短字段名与语义（包括 Kline `bar_volume` / Tick `cumulative_volume`）；source 只报告实际
 `cache`、`remote` 或 `cache+remote`。默认不输出 query ID/hash、token estimate、drill-down ID、coverage

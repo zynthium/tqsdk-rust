@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -19,7 +19,7 @@ use crate::{CacheKind, CliError, CommandOutcome, MarketKind, OutputFormat};
 
 const QUERY_SCHEMA_VERSION: u8 = 1;
 const JSONL_PROTOCOL: &str = "tqsdk-history-jsonl/1";
-const LLM_CSV_PROTOCOL: &str = "tqllm-csv/2";
+const LLM_CSV_PROTOCOL: &str = "tqllm-csv/3";
 const DEFAULT_MAX_MEMORY_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Debug, Clone, Args)]
@@ -75,6 +75,9 @@ struct QueryRequestArgs {
     /// Time representation for LLM CSV. Defaults to compact ISO, or to offset when --timestamp offset is set.
     #[arg(long, value_enum)]
     llm_time: Option<LlmTimeMode>,
+    /// Time zone for LLM CSV timestamps. Defaults to Asia/Shanghai; use utc for UTC output.
+    #[arg(long, value_enum)]
+    llm_timezone: Option<LlmTimezone>,
     /// Number codec for row data. scaled-int requires --price-tick.
     #[arg(long, value_enum, default_value_t = NumberFormat::Decimal)]
     number_format: NumberFormat,
@@ -177,6 +180,23 @@ impl LlmTimeMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum LlmTimezone {
+    /// China Standard Time, rendered as the unambiguous Asia/Shanghai +08:00 offset.
+    Shanghai,
+    /// Coordinated Universal Time.
+    Utc,
+}
+
+impl LlmTimezone {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Shanghai => "Asia/Shanghai",
+            Self::Utc => "UTC",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum NumberFormat {
     Decimal,
     ScaledInt,
@@ -241,6 +261,7 @@ struct QuerySettings {
     policy: QueryPolicy,
     timestamp: TimestampMode,
     llm_time: Option<LlmTimeMode>,
+    llm_timezone: Option<LlmTimezone>,
     number_format: NumberFormat,
     max_memory_bytes: usize,
     allow_partial: bool,
@@ -258,6 +279,13 @@ impl QuerySettings {
                 TimestampMode::Full => LlmTimeMode::Iso,
                 TimestampMode::Offset => LlmTimeMode::Offset,
             },
+        }
+    }
+
+    const fn llm_timezone(&self) -> LlmTimezone {
+        match self.llm_timezone {
+            Some(timezone) => timezone,
+            None => LlmTimezone::Shanghai,
         }
     }
 }
@@ -570,27 +598,49 @@ impl LlmTimestampPrecision {
         }
     }
 
-    fn format(self, value: i64) -> Result<String, CliError> {
+    fn format(self, value: i64, timezone: LlmTimezone) -> Result<String, CliError> {
         let seconds = value.div_euclid(1_000_000_000);
         let nanos = u32::try_from(value.rem_euclid(1_000_000_000)).map_err(|_| {
             CliError::Usage("timestamp nanosecond remainder is invalid".to_string())
         })?;
-        let datetime = DateTime::<Utc>::from_timestamp(seconds, nanos).ok_or_else(|| {
+        let utc = DateTime::<Utc>::from_timestamp(seconds, nanos).ok_or_else(|| {
             CliError::Usage(format!("timestamp {value} is outside RFC 3339 range"))
         })?;
-        Ok(match self {
+        Ok(match timezone {
+            LlmTimezone::Utc => self.format_utc(utc),
+            LlmTimezone::Shanghai => {
+                let shanghai = FixedOffset::east_opt(8 * 60 * 60)
+                    .expect("Asia/Shanghai UTC+08:00 offset must be valid");
+                self.format_shanghai(utc.with_timezone(&shanghai))
+            }
+        })
+    }
+
+    fn format_utc(self, datetime: DateTime<Utc>) -> String {
+        match self {
             Self::Minute => datetime.format("%Y-%m-%dT%H:%MZ").to_string(),
             Self::Second => datetime.to_rfc3339_opts(SecondsFormat::Secs, true),
             Self::Millisecond => datetime.to_rfc3339_opts(SecondsFormat::Millis, true),
             Self::Microsecond => datetime.to_rfc3339_opts(SecondsFormat::Micros, true),
             Self::Nanosecond => datetime.to_rfc3339_opts(SecondsFormat::Nanos, true),
-        })
+        }
+    }
+
+    fn format_shanghai(self, datetime: DateTime<FixedOffset>) -> String {
+        match self {
+            Self::Minute => datetime.format("%Y-%m-%dT%H:%M%:z").to_string(),
+            Self::Second => datetime.to_rfc3339_opts(SecondsFormat::Secs, true),
+            Self::Millisecond => datetime.to_rfc3339_opts(SecondsFormat::Millis, true),
+            Self::Microsecond => datetime.to_rfc3339_opts(SecondsFormat::Micros, true),
+            Self::Nanosecond => datetime.to_rfc3339_opts(SecondsFormat::Nanos, true),
+        }
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 struct LlmTimeCodec {
     mode: LlmTimeMode,
+    timezone: LlmTimezone,
     precision: LlmTimestampPrecision,
     reference_ns: i64,
     offset_unit_ns: i64,
@@ -601,6 +651,7 @@ impl LlmTimeCodec {
         let timestamps = llm_timestamps(block);
         Self {
             mode: settings.llm_time_mode(),
+            timezone: settings.llm_timezone(),
             precision: LlmTimestampPrecision::from_timestamps(timestamps.as_slice()),
             reference_ns: block.spec.start_ns,
             offset_unit_ns: llm_offset_unit_ns(block, timestamps.as_slice()),
@@ -608,7 +659,7 @@ impl LlmTimeCodec {
     }
 
     fn format_timestamp(self, value: i64) -> Result<String, CliError> {
-        self.precision.format(value)
+        self.precision.format(value, self.timezone)
     }
 
     fn offset(self, value: i64) -> String {
@@ -623,7 +674,6 @@ impl LlmTimeCodec {
 
 #[derive(Debug, Clone)]
 struct LlmBlock {
-    block_id: String,
     weight: u32,
     row_lines: Vec<String>,
     important_indices: Vec<usize>,
@@ -787,6 +837,7 @@ fn parse_request(args: QueryRequestArgs) -> Result<(QuerySettings, Vec<QuerySpec
         policy: args.policy,
         timestamp: args.timestamp,
         llm_time: args.llm_time,
+        llm_timezone: args.llm_timezone,
         number_format: args.number_format,
         max_memory_bytes: args.max_memory_bytes,
         allow_partial: args.allow_partial,
@@ -950,6 +1001,11 @@ fn validate_output_settings(
     if settings.llm_time.is_some() && !matches!(output_format, OutputFormat::LlmCsv) {
         return Err(CliError::Usage(
             "--llm-time requires --output-format llm-csv".to_string(),
+        ));
+    }
+    if settings.llm_timezone.is_some() && !matches!(output_format, OutputFormat::LlmCsv) {
+        return Err(CliError::Usage(
+            "--llm-timezone requires --output-format llm-csv".to_string(),
         ));
     }
     if matches!(settings.compression, CompressionMode::Off)
@@ -1516,7 +1572,6 @@ impl LlmBlock {
             prefix_lines.push(summary);
         }
         Ok(Self {
-            block_id: block.block_id.clone(),
             weight: block.spec.weight,
             important_indices: important_indices(block, artifact.settings.focus),
             row_lines: rows,
@@ -1555,6 +1610,8 @@ fn llm_time_line(block: &QueryBlock, codec: LlmTimeCodec) -> Result<String, CliE
         "time".to_string(),
         "mode".to_string(),
         codec.mode.as_str().to_string(),
+        "timezone".to_string(),
+        codec.timezone.label().to_string(),
     ];
     if matches!(codec.mode, LlmTimeMode::Iso | LlmTimeMode::Both) {
         cells.extend(["precision".to_string(), codec.precision.label().to_string()]);

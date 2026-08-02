@@ -248,7 +248,8 @@ inspect/purge、stock backtest builder selection，以及 `DataClient` 的 reten
 `tqsdk-cache query` 的离线 CLI tests 必须在移除 `TQ_AUTH_*` 后覆盖同一
 `BacktestHistoryClient` 路径的 CacheOnly Tick 与 canonical-minute Kline：`tqsdk-history-jsonl/1` 的
 manifest/block/row/complete/gap/end、canonical fields、timestamp/number codecs、final coverage、source 与
-data hash；以及 `tqllm-csv/2` 的 verified metadata gate、紧凑 ISO / 有单位 offset / both 时间模式、
+data hash；以及 `tqllm-csv/3` 的 verified metadata gate、默认 Asia/Shanghai / 可覆写 UTC、紧凑 ISO /
+有单位 offset / both 时间模式、
 无预算 lossless、预算内 deterministic lossy selection、`--compression off` 超预算失败和 `--output`
 原子发布。metadata 缺失或 active hash 与 terminal report 不一致时，LLM 默认 fail closed；
 `--allow-partial` 只能以 `gap` 省略整个 block。non-Final 或不完整 coverage 必须 hard fail，不能由
