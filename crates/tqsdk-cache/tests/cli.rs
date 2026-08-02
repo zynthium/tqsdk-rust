@@ -154,6 +154,60 @@ fn minute_inspect_uses_the_persisted_metadata_snapshot() {
 }
 
 #[test]
+fn minute_inspect_keeps_using_a_cached_immutable_snapshot_after_active_metadata_moves() {
+    let cache_dir = temp_dir("minute-inspect-historical-metadata-snapshot");
+    let symbol = "KQ.i@SHFE.au";
+    let trading_day = day(2020, 1, 2);
+    let initial = store_metadata_backed_minute_coverage(&cache_dir, symbol, trading_day);
+    let range = backtest_tick_trading_day_range(trading_day).unwrap();
+
+    let advanced = BacktestHistoryMetadataCache::open(&cache_dir)
+        .unwrap()
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+            market_kind: BacktestHistoryMarketKind::Futures,
+            logical_symbol: symbol.to_string(),
+            captured_at_ns: range.end_ns.saturating_add(1),
+            trading_days: vec![BacktestHistoryTradingDay {
+                date: trading_day.to_string(),
+                is_trading_day: true,
+                start_ns: range.start_ns,
+                end_ns: range.end_ns,
+            }],
+            session: KlineSessionTemplate::cst_trading_day(),
+            physical_segments: vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: symbol.to_string(),
+                start_ns: range.start_ns,
+                end_ns: range.end_ns,
+            }],
+            snapshot_hash: String::new(),
+        })
+        .unwrap();
+    assert_ne!(initial.snapshot_hash, advanced.snapshot_hash);
+
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "inspect",
+        "--symbol",
+        symbol,
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+    ]);
+
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "inspect", "success", 0);
+    assert_eq!(result["statuses"][0]["complete"], true);
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
 fn minute_doctor_reports_the_v4_month_file_without_touching_tick_cache() {
     let cache_dir = temp_dir("minute-doctor");
     let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
@@ -388,6 +442,34 @@ fn minute_verify_uses_a_minute_fill_report_and_reads_final_coverage() {
     let result = v3_result(&json, "verify", "success", 0);
     assert_eq!(result["cache_kind"], "minute");
     assert_eq!(result["source_report"], "bound");
+    assert_eq!(result["coverage_complete"], true);
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn minute_verify_uses_the_persisted_metadata_snapshot() {
+    let cache_dir = temp_dir("minute-verify-metadata-snapshot");
+    let symbol = "KQ.i@SHFE.au";
+    store_metadata_backed_minute_coverage(&cache_dir, symbol, day(2020, 1, 2));
+
+    let verified = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "verify",
+        "--symbol",
+        symbol,
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+    ]);
+
+    assert!(verified.status.success());
+    let json: Value = serde_json::from_slice(&verified.stdout).unwrap();
+    let result = v3_result(&json, "verify", "success", 0);
     assert_eq!(result["coverage_complete"], true);
 
     let _ = std::fs::remove_dir_all(cache_dir);
@@ -1278,7 +1360,7 @@ fn store_metadata_backed_minute_coverage(
     cache_dir: &std::path::Path,
     symbol: &str,
     day: NaiveDate,
-) {
+) -> BacktestHistoryMetadataSnapshot {
     let range = backtest_tick_trading_day_range(day).unwrap();
     let stored = BacktestHistoryMetadataCache::open(cache_dir)
         .unwrap()
@@ -1304,7 +1386,7 @@ fn store_metadata_backed_minute_coverage(
         .unwrap();
     let snapshot = MinuteKlineCacheSnapshot::new(
         stored.schema_version,
-        stored.snapshot_hash,
+        stored.snapshot_hash.clone(),
         stored.session.snapshot_hash(),
     )
     .unwrap();
@@ -1312,6 +1394,7 @@ fn store_metadata_backed_minute_coverage(
         .unwrap()
         .store_final_range(symbol, range.start_ns, range.end_ns, &snapshot, &[])
         .unwrap();
+    stored
 }
 
 fn temp_dir(name: &str) -> std::path::PathBuf {

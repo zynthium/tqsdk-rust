@@ -1538,7 +1538,7 @@ async fn resolve_backtest_minute_kline_inputs(
 
     for spec in specs {
         validate_backtest_symbol(&spec.symbol)?;
-        let metadata = load_backtest_history_metadata(cache_dir, &spec.symbol)?;
+        let metadata = resolve_backtest_minute_metadata(cache_dir, &spec.symbol, start_ns, end_ns)?;
         let metadata = if is_main_continuous_contract(&spec.symbol) {
             Some(metadata.ok_or_else(|| {
                 data_validation("KQ.m backtest history requires a persisted metadata sidecar")
@@ -1630,13 +1630,25 @@ fn backtest_metadata_cache_identity(
 fn minute_cache_snapshot_for_symbol(
     cache_dir: &Path,
     symbol: &str,
+    start_ns: i64,
+    end_ns: i64,
 ) -> Result<tqsdk_data::MinuteKlineCacheSnapshot> {
-    load_backtest_history_metadata(cache_dir, symbol)?
+    resolve_backtest_minute_metadata(cache_dir, symbol, start_ns, end_ns)?
         .as_ref()
         .map(backtest_metadata_cache_identity)
         .transpose()?
         .map(|(snapshot, _session)| snapshot)
         .map_or_else(|| Ok(tqsdk_data::MinuteKlineCacheSnapshot::cst_v1()), Ok)
+}
+
+fn resolve_backtest_minute_metadata(
+    cache_dir: &Path,
+    symbol: &str,
+    start_ns: i64,
+    end_ns: i64,
+) -> Result<Option<tqsdk_data::BacktestHistoryMetadataSnapshot>> {
+    tqsdk_data::resolve_minute_cache_metadata_snapshot(cache_dir, symbol, start_ns, end_ns)
+        .map_err(Error::from)
 }
 
 fn projected_tick_sources_from_metadata(
@@ -2155,8 +2167,13 @@ impl BacktestBuilder {
             .map(|spec| spec.symbol)
             .collect::<BTreeSet<_>>();
         let minute_cache = tqsdk_data::MinuteKlineCache::open_read_only(cache.cache_dir());
-        let snapshot = tqsdk_data::MinuteKlineCacheSnapshot::cst_v1();
         for symbol in minute_symbols {
+            let snapshot = minute_cache_snapshot_for_symbol(
+                cache.cache_dir(),
+                &symbol,
+                self.start_ns,
+                self.end_ns,
+            )?;
             statuses.push(BacktestHistoryCacheStatus::MinuteKline(
                 minute_cache.inspect(symbol, self.start_ns, self.end_ns, &snapshot)?,
             ));
@@ -2531,8 +2548,12 @@ impl BacktestBuilder {
                     .get(&symbol)
                     .copied()
                     .unwrap_or_default();
-                let after_snapshot =
-                    minute_cache_snapshot_for_symbol(cache_dir.as_path(), &symbol)?;
+                let after_snapshot = minute_cache_snapshot_for_symbol(
+                    cache_dir.as_path(),
+                    &symbol,
+                    self.start_ns,
+                    self.end_ns,
+                )?;
                 let after = minute_cache.inspect(
                     &symbol,
                     self.start_ns,

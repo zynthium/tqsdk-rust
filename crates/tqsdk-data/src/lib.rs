@@ -84,6 +84,8 @@ pub use aggregation::{
     MinuteKlineAggregationUpdate, MinuteKlineAggregator, TickKlineAggregationUpdate,
     TickKlineAggregator,
 };
+#[doc(hidden)]
+pub use backtest_history::resolve_minute_cache_metadata_snapshot;
 pub use backtest_history::{
     BACKTEST_HISTORY_METADATA_FORMAT_ID, BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
     BacktestHistoryAuthProvider, BacktestHistoryBatchReport, BacktestHistoryChunk,

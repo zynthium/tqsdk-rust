@@ -72,6 +72,11 @@ source-minute 空洞，不会关闭、重开或重置高周期 bucket，因此�
 mapping 是带 snapshot hash 的持久 sidecar；CacheOnly 需要本地 sidecar 覆盖窗口，绝不会查询线上 mapping。
 当前 durable fill 只支持 futures，股票使用 facade `.disabled_cache()` 官方回测路径。
 
+canonical-minute 月文件记录其写入时的 immutable metadata snapshot。active pointer 后续移动时，
+`BacktestHistoryClient` 只会在保留的历史 snapshot 覆盖整个请求窗口、schema/session identity 与 active
+snapshot 相同、且该 snapshot 精确验证现存月文件时读取历史分区；这不会触发认证或网络访问。缺失 sidecar、
+session 变化、损坏文件或不能由同一个 snapshot 解释的混合分区一律 fail closed，不会自动清理、重写或合并。
+
 storage orchestration 是 async，但 TQBN 解压/解码仍由有界 `spawn_blocking` worker 执行；不提供把
 `tokio::fs` 当作性能开关的第二条 production path。
 

@@ -221,6 +221,10 @@ tqsdk
 - durable source 固定为 Tick daily TQBN、`<60s` 从 Tick 按 session 临时聚合、canonical 60s monthly、
   `N × 60s` 从 canonical minutes 按固定 CST `18:00` trading-day grid 临时聚合。盘中 break 不重置
   高周期 bucket；Tick/60s 分区没有自动清理，派生 K 不落盘
+- canonical-minute 月分区绑定写入时的 immutable metadata snapshot。active metadata pointer 前移不单独
+  使旧分区失效；只有保留 snapshot 覆盖完整请求窗口、schema/session identity 与 active 相同并精确验证
+  月文件时才可读取它。缺失、session 变化、损坏或无法由同一 snapshot 解释的混合分区必须 fail closed，
+  不得自动删除、重写或拼接缓存
 
 设计原因：
 

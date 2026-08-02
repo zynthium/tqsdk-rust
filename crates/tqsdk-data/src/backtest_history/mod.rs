@@ -21,6 +21,8 @@ use tokio::task::JoinHandle;
 
 use crate::error::{DataError, Result};
 
+#[doc(hidden)]
+pub use metadata::resolve_minute_cache_metadata_snapshot;
 pub use metadata::{
     BACKTEST_HISTORY_METADATA_FORMAT_ID, BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
     BacktestHistoryMaintenanceClient, BacktestHistoryMaintenanceClientBuilder,

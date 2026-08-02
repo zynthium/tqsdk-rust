@@ -117,6 +117,11 @@ mapping 以 versioned snapshot sidecar 持久化，terminal report 携带 snapsh
 且覆盖请求窗口的 sidecar，不会向公开 metadata service 查询。当前 cache-backed fill 只支持 futures；
 股票回测必须使用 facade 的 `.disabled_cache()` 官方路径。
 
+每个 canonical-minute 月文件绑定写入时的 immutable metadata snapshot。active pointer 变更不单独使
+旧分区不可读：当且仅当保留 snapshot 覆盖整个请求窗口、schema/session identity 与 active snapshot
+一致，并能精确验证现存月文件时，planner 才选择它。缺少保留 snapshot、session 变化、损坏文件或不能由
+同一 snapshot 解释的混合分区保持 fail-closed；此路径不自动 purge、重写或合并数据。
+
 执行图是 async orchestration 加有界 `spawn_blocking` reader：文件读取、TQBN 解压和记录解码仍是
 CPU/blocking 工作，不能仅把 API 换成 `tokio::fs` 就宣称性能提升。
 

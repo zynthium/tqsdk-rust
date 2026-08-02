@@ -12,7 +12,12 @@ use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, Kline, ProtocolDomain, Quote,
     RuntimeHandle, RuntimeInput, Symbol, Tick,
 };
-use tqsdk_data::{MinuteKlineCache, MinuteKlineCacheSnapshot, TickDataSeriesRequest};
+use tqsdk_data::{
+    BACKTEST_HISTORY_METADATA_SCHEMA_VERSION, BacktestHistoryMarketKind,
+    BacktestHistoryMetadataCache, BacktestHistoryMetadataSnapshot, BacktestHistoryPhysicalSegment,
+    BacktestHistoryTradingDay, KlineSessionTemplate, MinuteKlineCache, MinuteKlineCacheSnapshot,
+    TickDataSeriesRequest,
+};
 use tqsdk_session::testing::ManualSession;
 use tqsdk_task::{MinuteKlineAggregator, MinuteKlineSessionTemplate};
 
@@ -96,6 +101,74 @@ async fn facade_backtest_cache_only_missing_canonical_minute_is_read_only() {
         !cache_dir.join("minute-kline-v3").exists(),
         "cache-only inspection must not create the minute-K namespace"
     );
+}
+
+#[tokio::test]
+async fn facade_cache_only_reuses_immutable_minute_metadata_after_active_pointer_moves() {
+    let symbol = "KQ.i@SHFE.au";
+    let cache_dir = temp_cache_dir();
+    let start_ns = 1_577_872_800_000_000_000_i64;
+    let end_ns = start_ns + 60_000_000_000;
+    let metadata_cache = BacktestHistoryMetadataCache::open(&cache_dir).unwrap();
+    let initial = metadata_cache
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+            market_kind: BacktestHistoryMarketKind::Futures,
+            logical_symbol: symbol.to_string(),
+            captured_at_ns: start_ns,
+            trading_days: vec![BacktestHistoryTradingDay {
+                date: "2020-01-02".to_string(),
+                is_trading_day: true,
+                start_ns,
+                end_ns,
+            }],
+            session: KlineSessionTemplate::cst_trading_day(),
+            physical_segments: vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: symbol.to_string(),
+                start_ns,
+                end_ns,
+            }],
+            snapshot_hash: String::new(),
+        })
+        .unwrap();
+    let initial_snapshot = MinuteKlineCacheSnapshot::new(
+        initial.schema_version,
+        initial.snapshot_hash.clone(),
+        initial.session.snapshot_hash(),
+    )
+    .unwrap();
+    MinuteKlineCache::open(&cache_dir)
+        .unwrap()
+        .store_final_range(
+            symbol,
+            start_ns,
+            end_ns,
+            &initial_snapshot,
+            &[minute_kline(1, start_ns, 100.0)],
+        )
+        .unwrap();
+    let advanced = metadata_cache
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            captured_at_ns: start_ns.saturating_add(1),
+            snapshot_hash: String::new(),
+            ..initial.clone()
+        })
+        .unwrap();
+    assert_ne!(initial.snapshot_hash, advanced.snapshot_hash);
+
+    let prepared = Tq::futures()
+        .backtest(start_ns, end_ns)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .cache_only()
+        .kline(symbol, std::time::Duration::from_secs(60), 1)
+        .unwrap()
+        .prepare()
+        .await;
+
+    if let Err(error) = prepared {
+        panic!("cache-backed prepare failed: {error}");
+    }
 }
 
 #[tokio::test]

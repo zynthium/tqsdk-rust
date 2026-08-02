@@ -191,6 +191,11 @@ tick 与 60s minute 分区均没有自动 retention、max-byte eviction 或后�
 minute 文件；主连支持 canonical 60s 和整数分钟本地聚合。`RemoteOnMiss` 只在 sidecar 缺失或覆盖不足时
 刷新它；`.cache_only()` 必须已有可覆盖窗口的 sidecar，且不会访问 metadata service。
 
+每个 `.tqmk` 月分区绑定写入时的 immutable metadata snapshot；active pointer 后续前移本身不会使
+旧分区失效。读取方只会在该历史 snapshot 覆盖整个请求窗口、schema 与 session identity 仍和 active
+snapshot 一致、且现存月文件可用该 snapshot 精确验证时回退使用它；缺少保留 snapshot、session 变化、
+损坏文件或无法由同一 snapshot 解释的混合分区仍 fail closed，不会自动删除、重写或拼接数据。
+
 cache-backed local backtest 当前只支持 futures；`Tq::stock().backtest(...)` 必须显式
 `.disabled_cache()` 并使用官方股票 server-backtest 行情。futures universe selector 不适用于股票，
 股票策略应显式声明 symbol。

@@ -114,6 +114,9 @@ V1 是：
     `RemoteOnMiss` 只在 sidecar 缺失或不覆盖窗口时刷新；CacheOnly 必须已有 sidecar 且完全离线。
     具体合约 cache hit 不需要 auth，cache fill 不使用专业历史下载接口；显式 `.disabled_cache()` 才使用官方
   server-side backtest market stream 且不落盘
+  - canonical-minute 月文件绑定写入时的 immutable metadata snapshot。active pointer 后续移动时，只有保留
+    snapshot 覆盖整个请求窗口、schema/session identity 不变且能精确验证现有月文件，才可回退读取该历史
+    分区；缺失历史 snapshot、session 变化、损坏或混合分区均 fail closed，且不会自动删除、重写或拼接数据
 - `PreparedBacktest::tick_sources()` 只读暴露上述 logical-to-physical 投影及各自有效区间，
   供调用方自有多资产回放器并行读取；跨品种 barrier、截面调度和策略状态不下沉到 facade
   - `.provisional_open_day_fill(day_start_ns, as_of_ns)?` 只为固定 as-of 的当前交易日 warmup

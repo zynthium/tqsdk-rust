@@ -27,6 +27,11 @@ minute 的 format id 为 `tqsdk.minute-kline.monthly.v4`，但 namespace 有意�
 `logical symbol × trading month`；旧 v3 文件不会自动迁移、覆盖或删除，deep doctor 会将其标记为
 `legacy_unsupported`。
 
+每个 v4 月文件绑定写入时的 immutable metadata snapshot。active metadata pointer 随后前移不会单独
+使已有分区失效：`inspect`、`fill --dry-run` 和 `verify` 只会在一个保留 snapshot 覆盖整个窗口、
+schema/session identity 与 active 相同并能精确验证现有月文件时使用它。不能满足这些条件的旧、损坏或
+混合分区仍 fail closed；CLI 不会为此自动删除、重写或重新下载数据。
+
 `--market futures|stock` 只影响 `--kind minute fill` 的 server-side backtest endpoint：
 futures 是默认值，允许 `--universe`；stock 必须提供一个或多个显式 `--symbol`，不支持 futures
 universe selector。tick fill 不支持 stock market；`--kind tick --market stock` 是 usage error。

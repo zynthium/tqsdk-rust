@@ -10,11 +10,15 @@ use tqsdk_core::{Kline, Tick};
 use crate::aggregation::{MinuteKlineAggregator, TickKlineAggregator};
 use crate::backtest_tick_cache::BacktestTickCache;
 use crate::minute_kline_cache::MinuteKlineCache;
-use crate::{BacktestHistoryMetadataCache, DataError, Result};
+use crate::{
+    BacktestHistoryMetadataCache, DataError, Result, resolve_minute_cache_metadata_snapshot,
+};
 
 use super::fill::{BacktestHistoryFillRequest, RemoteFillCoordinator};
 use super::metadata::{ensure_metadata_for_remote_miss, metadata_snapshot_covers_range};
-use super::planner::{PlannedBacktestHistoryRequest, PlannedBaseSource, bar_end_ns, plan_request};
+use super::planner::{
+    PlannedBacktestHistoryRequest, PlannedBaseSource, bar_end_ns, classify_request, plan_request,
+};
 use super::report::{
     BacktestHistoryBatchReport, BacktestHistoryChunk, BacktestHistoryEvent,
     BacktestHistoryFinality, BacktestHistoryRows, BacktestHistoryTelemetryEvent,
@@ -584,7 +588,20 @@ async fn plan_request_for_execution(
     let requested_range = (request.start_ns, request.end_ns);
     let active_metadata = BacktestHistoryMetadataCache::open_read_only(config.cache_dir.as_path())
         .load_active(request.symbol.as_str())?;
-    let metadata_needs_refresh = active_metadata
+    let selected_metadata = if matches!(
+        classify_request(&request)?,
+        PlannedBaseSource::CanonicalMinute
+    ) {
+        resolve_minute_cache_metadata_snapshot(
+            config.cache_dir.as_path(),
+            request.symbol.as_str(),
+            request.start_ns,
+            request.end_ns,
+        )?
+    } else {
+        active_metadata.clone()
+    };
+    let metadata_needs_refresh = selected_metadata
         .as_ref()
         .is_some_and(|snapshot| !metadata_snapshot_covers_range(snapshot, requested_range));
     let is_main_continuous = request.symbol.starts_with("KQ.m@");

@@ -6,7 +6,10 @@ use crate::backtest_tick_cache::{
     backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
 };
 use crate::minute_kline_cache::{MINUTE_KLINE_DURATION_NS, MinuteKlineCacheSnapshot};
-use crate::{BacktestHistoryMetadataCache, BacktestHistoryTradingDay, DataError, Result};
+use crate::{
+    BacktestHistoryMetadataCache, BacktestHistoryTradingDay, DataError, Result,
+    resolve_minute_cache_metadata_snapshot,
+};
 
 use super::report::{
     BacktestHistoryFinality, BacktestHistoryPhysicalSegment, BacktestHistoryRequestReport,
@@ -98,20 +101,27 @@ pub(crate) fn plan_request(
 ) -> Result<PlannedBacktestHistoryRequest> {
     validate_source_policy(&request)?;
     let base_source = classify_request(&request)?;
-    let metadata = BacktestHistoryMetadataCache::open_read_only(cache_dir)
-        .load_active(request.symbol.as_str())?;
-    if request.symbol.starts_with("KQ.m@") && metadata.is_none() {
-        return Err(DataError::InvalidState(
-            "KQ.m backtest history requires a persisted metadata sidecar",
-        ));
-    }
-
     let effective_end_ns = request
         .provisional_as_of_ns
         .map_or(request.end_ns, |as_of_ns| request.end_ns.min(as_of_ns));
     if effective_end_ns <= request.start_ns {
         return Err(DataError::Validation(
             "provisional_as_of_ns leaves no queryable backtest history range".to_string(),
+        ));
+    }
+    let metadata = match base_source {
+        PlannedBaseSource::CanonicalMinute => resolve_minute_cache_metadata_snapshot(
+            cache_dir,
+            request.symbol.as_str(),
+            request.start_ns,
+            effective_end_ns,
+        )?,
+        PlannedBaseSource::Tick => BacktestHistoryMetadataCache::open_read_only(cache_dir)
+            .load_active(request.symbol.as_str())?,
+    };
+    if request.symbol.starts_with("KQ.m@") && metadata.is_none() {
+        return Err(DataError::InvalidState(
+            "KQ.m backtest history requires a persisted metadata sidecar",
         ));
     }
 
@@ -265,7 +275,9 @@ pub(crate) fn classify_duration(duration_ns: i64) -> Result<PlannedBaseSource> {
     }
 }
 
-fn classify_request(request: &ValidatedBacktestHistoryRequest) -> Result<PlannedBaseSource> {
+pub(crate) fn classify_request(
+    request: &ValidatedBacktestHistoryRequest,
+) -> Result<PlannedBaseSource> {
     match request.duration_ns {
         None => Ok(PlannedBaseSource::Tick),
         Some(duration_ns) => classify_duration(duration_ns),

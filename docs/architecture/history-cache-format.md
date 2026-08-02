@@ -85,6 +85,12 @@ snapshot hash；不匹配、损坏或不完整覆盖一律 fail closed，不能�
 range（包括合法的零行 range）才可标记 final coverage；当前或未来交易日不得标记为 final。
 文件更新按单月原子重写，reader 以流式方式读取，不必把整月 materialize 到内存。
 
+月文件绑定的是写入时的 immutable metadata snapshot，而不是将来某次 refresh 写入的 active pointer。
+因此 active pointer 后续移动不会单独使已完成分区失效。读取方可以选择保留的历史 snapshot，但必须同时
+证明它覆盖完整请求窗口、schema version 与 session identity 仍和 active snapshot 一致，并用它精确验证
+现存月文件。缺失保留 snapshot、session 变化、损坏文件或不能由同一个 snapshot 解释的混合分区仍 fail
+closed；该回退绝不自动 purge、重写或拼接数据。
+
 目录名继续保留 `minute-kline-v3`，但它承载的是 v4 文件身份。这是刻意的诊断兼容策略：
 旧 v3 文件不会被静默忽略、迁移或覆盖；读取/coverage 会 fail closed，`diagnose()` 将其报告为
 `LegacyUnsupported`。如需移除旧文件，必须由操作者显式 purge。

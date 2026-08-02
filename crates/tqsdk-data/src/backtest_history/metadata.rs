@@ -14,7 +14,7 @@ use sha1::{Digest, Sha1};
 #[cfg(all(feature = "live", feature = "services"))]
 use tqsdk_core::TradingTime;
 
-use crate::{DataError, KlineSessionTemplate, Result};
+use crate::{DataError, KlineSessionTemplate, MinuteKlineCache, MinuteKlineCacheSnapshot, Result};
 #[cfg(all(feature = "live", feature = "services"))]
 use crate::{HistoricalContUnderlyingSegment, KlineSessionWindow, TradingCalendarRow};
 
@@ -58,6 +58,13 @@ pub struct BacktestHistoryMetadataSnapshot {
     pub session: KlineSessionTemplate,
     pub physical_segments: Vec<BacktestHistoryPhysicalSegment>,
     pub snapshot_hash: String,
+}
+
+impl BacktestHistoryMetadataSnapshot {
+    /// Returns whether this immutable physical mapping covers `range` in full.
+    fn covers_range(&self, range: (i64, i64)) -> bool {
+        physical_segments_cover_range(self.physical_segments.as_slice(), range)
+    }
 }
 
 /// Durable cache for immutable metadata snapshots and their active pointer.
@@ -124,24 +131,64 @@ impl BacktestHistoryMetadataCache {
             })?;
         pointer.validate(&active_path)?;
 
-        let snapshot_path = symbol_dir
-            .join(SNAPSHOTS_DIR_NAME)
-            .join(format!("{}.json", pointer.snapshot_hash));
-        let snapshot_bytes = fs::read(&snapshot_path).map_err(|error| {
-            metadata_response_error(format!(
-                "active snapshot {} cannot be read: {error}",
-                snapshot_path.display()
-            ))
-        })?;
-        let snapshot: BacktestHistoryMetadataSnapshot = serde_json::from_slice(&snapshot_bytes)
-            .map_err(|error| {
-                metadata_response_error(format!(
-                    "snapshot {} is invalid JSON: {error}",
-                    snapshot_path.display()
-                ))
-            })?;
-        validate_loaded_snapshot(&snapshot, logical_symbol, pointer.snapshot_hash.as_str())?;
-        Ok(Some(snapshot))
+        read_snapshot(&symbol_dir, logical_symbol, pointer.snapshot_hash.as_str()).map(Some)
+    }
+
+    /// Returns every validated immutable snapshot retained for one logical
+    /// symbol. The active pointer is intentionally not used as a filter: old
+    /// snapshots can still authenticate a durable canonical-minute partition
+    /// that was written before a later metadata refresh moved the pointer.
+    ///
+    /// Missing sidecars are an offline cache miss. Malformed snapshot files
+    /// fail closed rather than being ignored.
+    fn load_snapshots(&self, logical_symbol: &str) -> Result<Vec<BacktestHistoryMetadataSnapshot>> {
+        let symbol_dir = self.symbol_dir(logical_symbol)?;
+        match fs::metadata(&symbol_dir) {
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(metadata_response_error(format!(
+                    "symbol namespace {} is not a directory",
+                    symbol_dir.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        }
+
+        let _lock = MetadataLock::acquire_shared(&symbol_dir, &self.root_dir)?;
+        let snapshots_dir = symbol_dir.join(SNAPSHOTS_DIR_NAME);
+        let entries = match fs::read_dir(&snapshots_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut snapshot_hashes = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(snapshot_hash) = name.strip_suffix(".json") else {
+                return Err(metadata_response_error(format!(
+                    "snapshot directory {} contains an unexpected entry {name}",
+                    snapshots_dir.display()
+                )));
+            };
+            if !is_sha1_hex(snapshot_hash) {
+                return Err(metadata_response_error(format!(
+                    "snapshot directory {} contains an invalid snapshot hash {snapshot_hash}",
+                    snapshots_dir.display()
+                )));
+            }
+            snapshot_hashes.push(snapshot_hash.to_string());
+        }
+        snapshot_hashes.sort();
+        snapshot_hashes
+            .into_iter()
+            .map(|snapshot_hash| read_snapshot(&symbol_dir, logical_symbol, &snapshot_hash))
+            .collect()
     }
 
     /// Stores an immutable snapshot and atomically makes it active.
@@ -208,6 +255,106 @@ impl BacktestHistoryMetadataCache {
             .join(METADATA_NAMESPACE)
             .join(escape_symbol_path_component(logical_symbol)))
     }
+}
+
+fn read_snapshot(
+    symbol_dir: &Path,
+    logical_symbol: &str,
+    snapshot_hash: &str,
+) -> Result<BacktestHistoryMetadataSnapshot> {
+    let snapshot_path = symbol_dir
+        .join(SNAPSHOTS_DIR_NAME)
+        .join(format!("{snapshot_hash}.json"));
+    let snapshot_bytes = fs::read(&snapshot_path).map_err(|error| {
+        metadata_response_error(format!(
+            "snapshot {} cannot be read: {error}",
+            snapshot_path.display()
+        ))
+    })?;
+    let snapshot: BacktestHistoryMetadataSnapshot = serde_json::from_slice(&snapshot_bytes)
+        .map_err(|error| {
+            metadata_response_error(format!(
+                "snapshot {} is invalid JSON: {error}",
+                snapshot_path.display()
+            ))
+        })?;
+    validate_loaded_snapshot(&snapshot, logical_symbol, snapshot_hash)?;
+    Ok(snapshot)
+}
+
+/// Resolves the metadata snapshot that can safely read a canonical-minute
+/// cache range.
+///
+/// The active pointer remains authoritative for fresh data. If it has moved
+/// since a final monthly partition was written, this consults retained
+/// immutable snapshots only when the older snapshot covers the entire range,
+/// has the same schema and session identity, and exactly validates an existing
+/// local month. This keeps a range readable without accepting a session or
+/// mapping change as a best-effort cache hit.
+#[doc(hidden)]
+pub fn resolve_minute_cache_metadata_snapshot(
+    cache_dir: &Path,
+    logical_symbol: &str,
+    start_ns: i64,
+    end_ns: i64,
+) -> Result<Option<BacktestHistoryMetadataSnapshot>> {
+    validate_logical_symbol(logical_symbol)?;
+    if start_ns >= end_ns {
+        return Err(DataError::Validation(
+            "minute cache metadata resolution requires start_ns < end_ns".to_string(),
+        ));
+    }
+    let metadata_cache = BacktestHistoryMetadataCache::open_read_only(cache_dir);
+    let Some(active) = metadata_cache.load_active(logical_symbol)? else {
+        return Ok(None);
+    };
+    let minute_cache = MinuteKlineCache::open_read_only(cache_dir);
+    let active_snapshot = minute_cache_snapshot_from_metadata(&active)?;
+    let active_error =
+        match minute_cache.inspect(logical_symbol, start_ns, end_ns, &active_snapshot) {
+            Ok(_) => return Ok(Some(active)),
+            Err(error) if is_minute_snapshot_mismatch(&error) => error,
+            Err(error) => return Err(error),
+        };
+
+    for historical in metadata_cache.load_snapshots(logical_symbol)? {
+        if historical.snapshot_hash == active.snapshot_hash
+            || historical.schema_version != active.schema_version
+            || historical.session.snapshot_hash() != active.session.snapshot_hash()
+            || !historical.covers_range((start_ns, end_ns))
+        {
+            continue;
+        }
+        let snapshot = minute_cache_snapshot_from_metadata(&historical)?;
+        match minute_cache.inspect(logical_symbol, start_ns, end_ns, &snapshot) {
+            Ok(status) if status.months.iter().any(|month| month.present) => {
+                return Ok(Some(historical));
+            }
+            Ok(_) => {}
+            Err(error) if is_minute_snapshot_mismatch(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(active_error)
+}
+
+fn minute_cache_snapshot_from_metadata(
+    metadata: &BacktestHistoryMetadataSnapshot,
+) -> Result<MinuteKlineCacheSnapshot> {
+    MinuteKlineCacheSnapshot::new(
+        metadata.schema_version,
+        metadata.snapshot_hash.clone(),
+        metadata.session.snapshot_hash(),
+    )
+}
+
+fn is_minute_snapshot_mismatch(error: &DataError) -> bool {
+    matches!(
+        error,
+        DataError::InvalidResponse(message)
+            if message.contains("calendar/session snapshot mismatch")
+    )
 }
 
 /// Ensures that a logical symbol has a persisted metadata snapshot covering a
@@ -651,7 +798,7 @@ pub(crate) fn metadata_snapshot_covers_range(
     snapshot: &BacktestHistoryMetadataSnapshot,
     range: (i64, i64),
 ) -> bool {
-    physical_segments_cover_range(snapshot.physical_segments.as_slice(), range)
+    snapshot.covers_range(range)
 }
 
 fn physical_segments_cover_range(

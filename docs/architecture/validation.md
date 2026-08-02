@@ -231,6 +231,10 @@ final coverage；`facade_contract` 还覆盖
 partition、snapshot hash fail-closed、current-day final-coverage guard、streaming reader、Refresh 只移除
 相交月文件、缺失 root 的 read-only fast inventory，以及 readable v4 / legacy v3
 `LegacyUnsupported` diagnosis。旧 v3 不得被自动迁移、覆盖或当作 cache hit。
+`backtest_history_query`、`facade_contract` 与 `tqsdk-cache` CLI tests 还覆盖 active metadata pointer
+前移后，完整历史 minute 分区由覆盖整个窗口且 session/schema identity 相同的 immutable snapshot
+继续离线读取；`RemoteOnMiss` 完整命中不得读取 auth。`verify` 必须使用 metadata-backed snapshot，
+而不是固定 CST 默认值；缺失保留 snapshot、session 变化、损坏或混合分区仍必须 fail closed。
 `minute_kline_aggregate` 和 `history_backtest_replay` 覆盖 60s open/final、`N × 60s` 固定 CST `18:00`
 trading-day grid 聚合（盘中 break 不重置 bucket）、same-timestamp batch、以及主连 minute cache 保持 logical key 而 replay 保留 dated
 `underlying_symbol`。`tqsdk-cache` tests 还覆盖 minute/tick/all kind routing、minute logical-symbol

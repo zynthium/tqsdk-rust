@@ -54,6 +54,12 @@ minute 缓存当前的 format id 是 `tqsdk.minute-kline.monthly.v4`，schema/fi
 `logical symbol × trading month` 分区。目录名有意保持 `minute-kline-v3`：旧 v3 文件不自动迁移、
 覆盖、删除或当作命中；coverage/read fail closed，deep doctor 将其分类为 `legacy_unsupported`。
 
+每个 v4 月文件绑定写入时的 immutable metadata snapshot。active pointer 后续变化不会单独令历史
+月文件失效：minute `inspect`、`fill --dry-run`、`verify` 和 cache-backed reader 仅会在一个保留
+snapshot 覆盖完整窗口、schema/session identity 与 active 一致、并能精确验证现存月文件时选择它。
+缺少保留 snapshot、session 变化、损坏文件或不能由单一 snapshot 解释的混合分区仍 fail closed，且不会
+自动 purge、重写、下载或拼接数据。
+
 本地 replay 的周期合同不变：`<60s` 从 tick cache 按 session 合成，`60s` 从 canonical minute cache
 读取，`>60s` 只允许 `N × 60s` 并从 closed 60s K 按固定 CST `18:00` trading-day grid 本地聚合；
 盘中 break 不重置高周期 bucket，且 break 内不虚构 60s row。`61s`、`90s` 等拒绝。K-only `>=60s`

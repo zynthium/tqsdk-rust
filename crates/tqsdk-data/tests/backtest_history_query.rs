@@ -6,9 +6,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use chrono::{TimeZone, Utc};
 use tqsdk_core::{Kline, Tick};
 use tqsdk_data::{
-    BacktestHistoryAuthProvider, BacktestHistoryClient, BacktestHistoryCredentials,
-    BacktestHistoryMetadataCache, BacktestHistoryPolicy, BacktestHistoryRequest,
-    BacktestHistoryRows, BacktestTickCache, MinuteKlineCache, MinuteKlineCacheSnapshot,
+    BACKTEST_HISTORY_METADATA_SCHEMA_VERSION, BacktestHistoryAuthProvider, BacktestHistoryClient,
+    BacktestHistoryCredentials, BacktestHistoryMarketKind, BacktestHistoryMetadataCache,
+    BacktestHistoryMetadataSnapshot, BacktestHistoryPhysicalSegment, BacktestHistoryPolicy,
+    BacktestHistoryRequest, BacktestHistoryRows, BacktestHistoryTradingDay, BacktestTickCache,
+    KlineSessionTemplate, MinuteKlineCache, MinuteKlineCacheSnapshot,
     backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
 };
 
@@ -178,6 +180,172 @@ async fn cache_only_60s_passthrough_and_5m_aggregation_use_canonical_minutes() {
             .collect::<Vec<_>>(),
         vec![5, 5]
     );
+}
+
+#[tokio::test]
+async fn cache_only_minute_query_reuses_immutable_snapshot_after_active_metadata_moves() {
+    let root = temp_dir("minute-historical-metadata-snapshot");
+    let symbol = "KQ.i@SHFE.au";
+    let start_ns = utc_ns(2026, 1, 5, 1, 0, 0);
+    let end_ns = start_ns + MINUTE_NS;
+    let metadata_cache = BacktestHistoryMetadataCache::open(&root).unwrap();
+    let initial = metadata_cache
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+            market_kind: BacktestHistoryMarketKind::Futures,
+            logical_symbol: symbol.to_string(),
+            captured_at_ns: start_ns,
+            trading_days: vec![BacktestHistoryTradingDay {
+                date: "2026-01-05".to_string(),
+                is_trading_day: true,
+                start_ns,
+                end_ns,
+            }],
+            session: KlineSessionTemplate::cst_trading_day(),
+            physical_segments: vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: symbol.to_string(),
+                start_ns,
+                end_ns,
+            }],
+            snapshot_hash: String::new(),
+        })
+        .unwrap();
+    let initial_snapshot = MinuteKlineCacheSnapshot::new(
+        initial.schema_version,
+        initial.snapshot_hash.clone(),
+        initial.session.snapshot_hash(),
+    )
+    .unwrap();
+    MinuteKlineCache::open(&root)
+        .unwrap()
+        .store_final_range(
+            symbol,
+            start_ns,
+            end_ns,
+            &initial_snapshot,
+            &[kline(1, start_ns, 10.0)],
+        )
+        .unwrap();
+
+    let advanced = metadata_cache
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            captured_at_ns: start_ns.saturating_add(1),
+            snapshot_hash: String::new(),
+            ..initial.clone()
+        })
+        .unwrap();
+    assert_ne!(initial.snapshot_hash, advanced.snapshot_hash);
+
+    let collected = cache_only_client(&root)
+        .query(BacktestHistoryRequest::kline(
+            1,
+            symbol,
+            Duration::from_secs(60),
+            start_ns,
+            end_ns,
+        ))
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let BacktestHistoryRows::Klines { rows, .. } = collected.rows else {
+        panic!("60-second request must return Kline rows");
+    };
+    assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![1]);
+}
+
+#[tokio::test]
+async fn remote_on_miss_minute_query_uses_a_complete_historical_snapshot_without_auth() {
+    let root = temp_dir("minute-historical-metadata-without-auth");
+    let symbol = "KQ.i@SHFE.au";
+    let start_ns = utc_ns(2026, 1, 5, 1, 0, 0);
+    let end_ns = start_ns + MINUTE_NS;
+    let metadata_cache = BacktestHistoryMetadataCache::open(&root).unwrap();
+    let initial = metadata_cache
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+            market_kind: BacktestHistoryMarketKind::Futures,
+            logical_symbol: symbol.to_string(),
+            captured_at_ns: start_ns,
+            trading_days: vec![BacktestHistoryTradingDay {
+                date: "2026-01-05".to_string(),
+                is_trading_day: true,
+                start_ns,
+                end_ns,
+            }],
+            session: KlineSessionTemplate::cst_trading_day(),
+            physical_segments: vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: symbol.to_string(),
+                start_ns,
+                end_ns,
+            }],
+            snapshot_hash: String::new(),
+        })
+        .unwrap();
+    let initial_snapshot = MinuteKlineCacheSnapshot::new(
+        initial.schema_version,
+        initial.snapshot_hash.clone(),
+        initial.session.snapshot_hash(),
+    )
+    .unwrap();
+    MinuteKlineCache::open(&root)
+        .unwrap()
+        .store_final_range(
+            symbol,
+            start_ns,
+            end_ns,
+            &initial_snapshot,
+            &[kline(1, start_ns, 10.0)],
+        )
+        .unwrap();
+
+    let later_start_ns = end_ns + MINUTE_NS;
+    metadata_cache
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            captured_at_ns: later_start_ns,
+            trading_days: vec![BacktestHistoryTradingDay {
+                date: "2026-01-06".to_string(),
+                is_trading_day: true,
+                start_ns: later_start_ns,
+                end_ns: later_start_ns + MINUTE_NS,
+            }],
+            physical_segments: vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: symbol.to_string(),
+                start_ns: later_start_ns,
+                end_ns: later_start_ns + MINUTE_NS,
+            }],
+            snapshot_hash: String::new(),
+            ..initial.clone()
+        })
+        .unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let collected = BacktestHistoryClient::builder(root)
+        .policy(BacktestHistoryPolicy::RemoteOnMiss)
+        .auth_provider(CountingAuthProvider {
+            calls: Arc::clone(&calls),
+        })
+        .blocking_workers(1)
+        .build()
+        .unwrap()
+        .query(BacktestHistoryRequest::kline(
+            1,
+            symbol,
+            Duration::from_secs(60),
+            start_ns,
+            end_ns,
+        ))
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let BacktestHistoryRows::Klines { rows, .. } = collected.rows else {
+        panic!("60-second request must return Kline rows");
+    };
+    assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![1]);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
