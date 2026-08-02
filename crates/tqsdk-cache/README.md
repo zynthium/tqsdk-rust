@@ -126,16 +126,25 @@ cargo run -p tqsdk-cache -- query schema --series tick
 ```
 
 `--fields` 是严格 projection：只输出所选字段，长别名可输入、输出固定使用短别名与 schema 顺序。
-默认时间是完整 ISO 8601；`--timestamp offset` 改为相对于 block start 的整数纳秒，并在 metadata
-中保留 reference。默认数字是可读 decimal；`--number-format scaled-int` 必须显式传
+JSONL 的默认时间是完整 ISO 8601；`--timestamp offset` 改为相对于 block start 的整数纳秒。
+LLM CSV 使用 `--llm-time iso|offset|both`：默认 `iso` 按 block 实际精度无损裁剪（例如分钟 K
+线为 `2026-07-31T01:00Z`，不填充无意义纳秒）；`offset` 将已选择的 `t` 列改为相对于 `ref`
+的整数，并声明精确 `unit`（例如 `1m`）；`both` 仅在选择 `t` 时紧随它增加派生 `dt` 列，便于
+人工与模型逐行对照。未显式传 `--llm-time` 时，`--timestamp offset` 仍会选择 LLM 的 `offset`
+模式。所有 LLM 时间区间都显式标明 `end_exclusive=true`，Kline 还会标明其时间是 bar start。
+默认数字是可读 decimal；`--number-format scaled-int` 必须显式传
 `--price-tick`（或在 request file 的对应 block 提供），避免猜测合约精度；price tick 必须有限且为正，
 价格必须是 tick 的整数倍，CLI 不会静默四舍五入。缺失或非有限浮点以空 CSV cell / JSON `null` 表示，
-真实零值始终为 `0`。
+真实零值始终为 `0`。LLM CSV 在 scaled-int 模式会仅在相关 block 写出 `price_tick`，从不让模型猜测
+缩放比例。
 
 `--output-format jsonl` 的稳定协议为 `tqsdk-history-jsonl/1`。`--output-format llm-csv` 的稳定
-协议为 `tqllm-csv/1`：每个 symbol × series × period 是独立 block，带 finality、coverage source、
-physical segments、session snapshot、query/hash/drill-down id 与结构化 summary；它不调用模型、也不
-读取 OpenAI 凭证。两种 raw format 都会先通过 `collect_all()` 收齐 batch（默认
+协议为 `tqllm-csv/2`：每个 symbol × series × period 是独立 block，按 `block`、`time`、`columns`、
+`summary`、`data`、`block_end` 和 `document_end` 组织。`period` 使用 `1m` 这类人类单位，`columns`
+一次性定义短字段名与语义（包括 Kline `bar_volume` / Tick `cumulative_volume`）；source 只报告实际
+`cache`、`remote` 或 `cache+remote`。默认不输出 query ID/hash、token estimate、drill-down ID、coverage
+纳秒范围或 session JSON；active metadata snapshot 仍在输出前严格验证。需要完整审计 provenance 时使用
+JSONL。它不调用模型、也不读取 OpenAI 凭证。两种 raw format 都会先通过 `collect_all()` 收齐 batch（默认
 `--max-memory-bytes 128 MiB`）再生成完整 payload，因此 JSONL 是逐行格式而非在线 streaming export。
 LLM 输出会先收齐所有 terminal success、校验完整 coverage 和 active metadata snapshot，再一次性生成
 摘要、哈希与可能的 `lossy` 压缩；默认缺失即失败。`--allow-partial` 是唯一允许已完成 sibling block

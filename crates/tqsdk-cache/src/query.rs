@@ -19,7 +19,7 @@ use crate::{CacheKind, CliError, CommandOutcome, MarketKind, OutputFormat};
 
 const QUERY_SCHEMA_VERSION: u8 = 1;
 const JSONL_PROTOCOL: &str = "tqsdk-history-jsonl/1";
-const LLM_CSV_PROTOCOL: &str = "tqllm-csv/1";
+const LLM_CSV_PROTOCOL: &str = "tqllm-csv/2";
 const DEFAULT_MAX_MEMORY_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Debug, Clone, Args)]
@@ -72,6 +72,9 @@ struct QueryRequestArgs {
     /// Timestamp codec for row data.
     #[arg(long, value_enum, default_value_t = TimestampMode::Full)]
     timestamp: TimestampMode,
+    /// Time representation for LLM CSV. Defaults to compact ISO, or to offset when --timestamp offset is set.
+    #[arg(long, value_enum)]
+    llm_time: Option<LlmTimeMode>,
     /// Number codec for row data. scaled-int requires --price-tick.
     #[arg(long, value_enum, default_value_t = NumberFormat::Decimal)]
     number_format: NumberFormat,
@@ -154,6 +157,26 @@ impl TimestampMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum LlmTimeMode {
+    /// Human-readable UTC timestamps at the exact precision represented by the block.
+    Iso,
+    /// Integer offsets from the block reference, with the unit declared in block metadata.
+    Offset,
+    /// Both compact ISO timestamps and integer offsets for side-by-side comparison.
+    Both,
+}
+
+impl LlmTimeMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Iso => "iso",
+            Self::Offset => "offset",
+            Self::Both => "both",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum NumberFormat {
     Decimal,
     ScaledInt,
@@ -217,6 +240,7 @@ pub(crate) struct QueryRawOutput {
 struct QuerySettings {
     policy: QueryPolicy,
     timestamp: TimestampMode,
+    llm_time: Option<LlmTimeMode>,
     number_format: NumberFormat,
     max_memory_bytes: usize,
     allow_partial: bool,
@@ -224,6 +248,18 @@ struct QuerySettings {
     compression: CompressionMode,
     focus: FocusMode,
     output_path: Option<PathBuf>,
+}
+
+impl QuerySettings {
+    const fn llm_time_mode(&self) -> LlmTimeMode {
+        match self.llm_time {
+            Some(mode) => mode,
+            None => match self.timestamp {
+                TimestampMode::Full => LlmTimeMode::Iso,
+                TimestampMode::Offset => LlmTimeMode::Offset,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -489,6 +525,102 @@ enum CellValue {
     Float { value: f64, price: bool },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LlmTimestampPrecision {
+    Minute,
+    Second,
+    Millisecond,
+    Microsecond,
+    Nanosecond,
+}
+
+impl LlmTimestampPrecision {
+    fn from_timestamps(values: &[i64]) -> Self {
+        const MINUTE_NS: i64 = 60 * 1_000_000_000;
+        const SECOND_NS: i64 = 1_000_000_000;
+        const MILLISECOND_NS: i64 = 1_000_000;
+        const MICROSECOND_NS: i64 = 1_000;
+
+        if values.iter().all(|value| value.rem_euclid(MINUTE_NS) == 0) {
+            Self::Minute
+        } else if values.iter().all(|value| value.rem_euclid(SECOND_NS) == 0) {
+            Self::Second
+        } else if values
+            .iter()
+            .all(|value| value.rem_euclid(MILLISECOND_NS) == 0)
+        {
+            Self::Millisecond
+        } else if values
+            .iter()
+            .all(|value| value.rem_euclid(MICROSECOND_NS) == 0)
+        {
+            Self::Microsecond
+        } else {
+            Self::Nanosecond
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Minute => "m",
+            Self::Second => "s",
+            Self::Millisecond => "ms",
+            Self::Microsecond => "us",
+            Self::Nanosecond => "ns",
+        }
+    }
+
+    fn format(self, value: i64) -> Result<String, CliError> {
+        let seconds = value.div_euclid(1_000_000_000);
+        let nanos = u32::try_from(value.rem_euclid(1_000_000_000)).map_err(|_| {
+            CliError::Usage("timestamp nanosecond remainder is invalid".to_string())
+        })?;
+        let datetime = DateTime::<Utc>::from_timestamp(seconds, nanos).ok_or_else(|| {
+            CliError::Usage(format!("timestamp {value} is outside RFC 3339 range"))
+        })?;
+        Ok(match self {
+            Self::Minute => datetime.format("%Y-%m-%dT%H:%MZ").to_string(),
+            Self::Second => datetime.to_rfc3339_opts(SecondsFormat::Secs, true),
+            Self::Millisecond => datetime.to_rfc3339_opts(SecondsFormat::Millis, true),
+            Self::Microsecond => datetime.to_rfc3339_opts(SecondsFormat::Micros, true),
+            Self::Nanosecond => datetime.to_rfc3339_opts(SecondsFormat::Nanos, true),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LlmTimeCodec {
+    mode: LlmTimeMode,
+    precision: LlmTimestampPrecision,
+    reference_ns: i64,
+    offset_unit_ns: i64,
+}
+
+impl LlmTimeCodec {
+    fn for_block(block: &QueryBlock, settings: &QuerySettings) -> Self {
+        let timestamps = llm_timestamps(block);
+        Self {
+            mode: settings.llm_time_mode(),
+            precision: LlmTimestampPrecision::from_timestamps(timestamps.as_slice()),
+            reference_ns: block.spec.start_ns,
+            offset_unit_ns: llm_offset_unit_ns(block, timestamps.as_slice()),
+        }
+    }
+
+    fn format_timestamp(self, value: i64) -> Result<String, CliError> {
+        self.precision.format(value)
+    }
+
+    fn offset(self, value: i64) -> String {
+        let offset = i128::from(value) - i128::from(self.reference_ns);
+        (offset / i128::from(self.offset_unit_ns)).to_string()
+    }
+
+    fn offset_unit_label(self) -> String {
+        format_duration_label_from_ns(self.offset_unit_ns)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct LlmBlock {
     block_id: String,
@@ -497,32 +629,33 @@ struct LlmBlock {
     important_indices: Vec<usize>,
     prefix_lines: Vec<String>,
     header: String,
-    data_hash: String,
-    drill_down_id: String,
 }
 
 impl LlmBlock {
     fn render(&self, selected: &[usize], compression: &str) -> String {
         let mut lines = self.prefix_lines.clone();
-        lines.push(csv_line(vec![
+        let mut data_line = vec![
             "data".to_string(),
-            self.block_id.clone(),
             "compression".to_string(),
             compression.to_string(),
-            "rows_original".to_string(),
-            self.row_lines.len().to_string(),
-            "rows_emitted".to_string(),
-            selected.len().to_string(),
-        ]));
+        ];
+        if selected.len() == self.row_lines.len() {
+            data_line.extend(["rows".to_string(), selected.len().to_string()]);
+        } else {
+            data_line.extend([
+                "rows_original".to_string(),
+                self.row_lines.len().to_string(),
+                "rows_emitted".to_string(),
+                selected.len().to_string(),
+            ]);
+        }
+        lines.push(csv_line(data_line));
         lines.push(self.header.clone());
         lines.extend(selected.iter().map(|index| self.row_lines[*index].clone()));
         lines.push(csv_line(vec![
-            "end".to_string(),
-            self.block_id.clone(),
-            "data_hash".to_string(),
-            self.data_hash.clone(),
-            "drill_down_id".to_string(),
-            self.drill_down_id.clone(),
+            "block_end".to_string(),
+            "rows".to_string(),
+            selected.len().to_string(),
         ]));
         lines.join("\n")
     }
@@ -653,6 +786,7 @@ fn parse_request(args: QueryRequestArgs) -> Result<(QuerySettings, Vec<QuerySpec
     let settings = QuerySettings {
         policy: args.policy,
         timestamp: args.timestamp,
+        llm_time: args.llm_time,
         number_format: args.number_format,
         max_memory_bytes: args.max_memory_bytes,
         allow_partial: args.allow_partial,
@@ -811,6 +945,11 @@ fn validate_output_settings(
     if settings.data_token_budget.is_some() && !matches!(output_format, OutputFormat::LlmCsv) {
         return Err(CliError::Usage(
             "--data-token-budget requires --output-format llm-csv".to_string(),
+        ));
+    }
+    if settings.llm_time.is_some() && !matches!(output_format, OutputFormat::LlmCsv) {
+        return Err(CliError::Usage(
+            "--llm-time requires --output-format llm-csv".to_string(),
         ));
     }
     if matches!(settings.compression, CompressionMode::Off)
@@ -1261,194 +1400,378 @@ fn render_llm_document(
     selections: &[Vec<usize>],
     compression: &str,
 ) -> (String, usize) {
-    let mut estimated_tokens = 0;
-    let mut payload = String::new();
-    for _ in 0..3 {
-        let mut lines = vec![csv_line(vec![
-            "protocol".to_string(),
-            LLM_CSV_PROTOCOL.to_string(),
-        ])];
-        lines.push(csv_line(vec![
-            "manifest".to_string(),
-            "model".to_string(),
-            "gpt-5.6".to_string(),
-            "query_id".to_string(),
-            artifact.query_id.clone(),
-            "query_hash".to_string(),
-            artifact.query_hash.clone(),
-            "policy".to_string(),
-            artifact.settings.policy.as_str().to_string(),
-            "timestamp".to_string(),
-            artifact.settings.timestamp.as_str().to_string(),
-            "numbers".to_string(),
-            artifact.settings.number_format.as_str().to_string(),
-            "compression".to_string(),
-            compression.to_string(),
+    let mut lines = vec![csv_line(vec![
+        "protocol".to_string(),
+        LLM_CSV_PROTOCOL.to_string(),
+    ])];
+    let mut metadata = vec![
+        "meta".to_string(),
+        "model".to_string(),
+        "gpt-5.6".to_string(),
+        "numbers".to_string(),
+        artifact.settings.number_format.as_str().to_string(),
+        "compression".to_string(),
+        compression.to_string(),
+        "partial".to_string(),
+        (!artifact.failures.is_empty()).to_string(),
+    ];
+    if compression == "lossy" {
+        metadata.extend([
             "focus".to_string(),
             artifact.settings.focus.as_str().to_string(),
-            "token_budget".to_string(),
-            artifact
-                .settings
-                .data_token_budget
-                .map_or_else(String::new, |value| value.to_string()),
-            "estimated_tokens".to_string(),
-            estimated_tokens.to_string(),
-            "partial".to_string(),
-            (!artifact.failures.is_empty()).to_string(),
-        ]));
-        for (block, selected) in blocks.iter().zip(selections) {
-            lines.push(block.render(selected.as_slice(), compression));
-        }
-        for failure in &artifact.failures {
-            lines.push(csv_line(vec![
-                "gap".to_string(),
-                failure.request_id.to_string(),
-                failure.symbol.clone(),
-                failure.code.to_string(),
-                protocol_text(failure.message.as_str()),
-            ]));
-        }
-        lines.push(csv_line(vec![
-            "end".to_string(),
-            "status".to_string(),
-            if artifact.failures.is_empty() {
-                "success".to_string()
-            } else {
-                "partial".to_string()
-            },
-            "query_id".to_string(),
-            artifact.query_id.clone(),
-        ]));
-        payload = format!("{}\n", lines.join("\n"));
-        let next_estimate = estimate_tokens(payload.as_str());
-        if next_estimate == estimated_tokens {
-            return (payload, next_estimate);
-        }
-        estimated_tokens = next_estimate;
+        ]);
     }
-    let estimate = estimate_tokens(payload.as_str());
-    (payload, estimate)
+    lines.push(csv_line(metadata));
+    for (block, selected) in blocks.iter().zip(selections) {
+        lines.push(block.render(selected.as_slice(), compression));
+    }
+    for failure in &artifact.failures {
+        lines.push(csv_line(vec![
+            "gap".to_string(),
+            failure.request_id.to_string(),
+            failure.symbol.clone(),
+            failure.code.to_string(),
+            protocol_text(failure.message.as_str()),
+        ]));
+    }
+    lines.push(csv_line(vec![
+        "document_end".to_string(),
+        "status".to_string(),
+        if artifact.failures.is_empty() {
+            "success".to_string()
+        } else {
+            "partial".to_string()
+        },
+    ]));
+    let payload = format!("{}\n", lines.join("\n"));
+    let estimated_tokens = estimate_tokens(payload.as_str());
+    (payload, estimated_tokens)
 }
 
 impl LlmBlock {
     fn from_query_block(block: &QueryBlock, artifact: &QueryArtifact) -> Result<Self, CliError> {
-        let rows = rows_as_csv(block, &artifact.settings)?;
-        let metadata = match &block.metadata {
-            MetadataStatus::Verified(snapshot) => snapshot,
+        match &block.metadata {
+            MetadataStatus::Verified(_) => {}
             MetadataStatus::Missing { reason } => {
                 return Err(CliError::Data(DataError::InvalidResponse(format!(
                     "LLM block {} is missing metadata: {reason}",
                     block.block_id
                 ))));
             }
-        };
-        let fields = block
-            .spec
-            .fields
-            .iter()
-            .map(|field| field.code())
-            .collect::<Vec<_>>()
-            .join("|");
-        let block_line = csv_line(vec![
+        }
+        let time_codec = LlmTimeCodec::for_block(block, &artifact.settings);
+        let rows = rows_as_llm_csv(block, &artifact.settings, time_codec)?;
+        let mut block_cells = vec![
             "block".to_string(),
             block.block_id.clone(),
-            "request_id".to_string(),
-            block.spec.request_id.to_string(),
             "symbol".to_string(),
             block.spec.symbol.clone(),
             "series".to_string(),
             block.spec.series.as_str().to_string(),
-            "period_ns".to_string(),
-            block
-                .spec
-                .duration_ns
-                .map_or_else(String::new, |value| value.to_string()),
-            "fields".to_string(),
-            fields,
-            "weight".to_string(),
-            block.spec.weight.to_string(),
-        ]);
-        let reference_line = csv_line(vec![
-            "reference".to_string(),
-            block.block_id.clone(),
-            "start".to_string(),
-            format_timestamp(block.spec.start_ns)?,
-            "end".to_string(),
-            format_timestamp(block.spec.end_ns)?,
-            "time_ref".to_string(),
-            format_timestamp(block.spec.start_ns)?,
-            "time_mode".to_string(),
-            artifact.settings.timestamp.as_str().to_string(),
-            "number_mode".to_string(),
-            artifact.settings.number_format.as_str().to_string(),
-            "price_tick".to_string(),
-            block
-                .spec
-                .price_tick
-                .map_or_else(String::new, format_decimal),
-        ]);
-        let coverage_line = csv_line(vec![
-            "coverage".to_string(),
-            block.block_id.clone(),
-            "source".to_string(),
-            if block.request.remote_used {
-                "remote-on-miss".to_string()
-            } else {
-                "cache".to_string()
-            },
-            "finality".to_string(),
-            finality_name(block.request.coverage.finality).to_string(),
-            "cached".to_string(),
-            format_ranges(block.request.coverage.cached_ranges.as_slice()),
-            "remote".to_string(),
-            format_ranges(block.request.coverage.remote_filled_ranges.as_slice()),
-        ]);
-        let session = serde_json::to_string(&metadata.session)?;
-        let session_line = csv_line(vec![
-            "session".to_string(),
-            block.block_id.clone(),
-            "snapshot_hash".to_string(),
-            metadata.snapshot_hash.clone(),
-            "captured_at".to_string(),
-            format_timestamp(metadata.captured_at_ns)?,
-            "template".to_string(),
-            session,
-        ]);
-        let mut prefix_lines = vec![block_line, reference_line, coverage_line, session_line];
-        for (index, segment) in block.request.physical_segments.iter().enumerate() {
-            prefix_lines.push(csv_line(vec![
-                "segment".to_string(),
-                block.block_id.clone(),
-                index.to_string(),
-                segment.physical_symbol.clone(),
-                format_timestamp(segment.start_ns)?,
-                format_timestamp(segment.end_ns)?,
-            ]));
+        ];
+        if let Some(duration) = block.spec.duration {
+            block_cells.extend(["period".to_string(), format_duration_label(duration)]);
         }
-        prefix_lines.push(summary_line(block, &artifact.settings)?);
-        let header = block
-            .spec
-            .fields
-            .iter()
-            .map(|field| field.code().to_string())
-            .collect::<Vec<_>>()
-            .join(",");
+        block_cells.extend([
+            "rows".to_string(),
+            block.rows.len().to_string(),
+            "source".to_string(),
+            llm_source(&block.request).to_string(),
+            "final".to_string(),
+            "true".to_string(),
+        ]);
+        if matches!(artifact.settings.number_format, NumberFormat::ScaledInt) {
+            let price_tick = block.spec.price_tick.ok_or_else(|| {
+                CliError::Usage(format!(
+                    "--number-format scaled-int requires --price-tick for {}",
+                    block.spec.symbol
+                ))
+            })?;
+            block_cells.extend(["price_tick".to_string(), format_decimal(price_tick)]);
+        }
+        let underlying = llm_underlying_symbol(block);
+        if let Some(underlying) = underlying {
+            block_cells.extend(["underlying".to_string(), underlying.to_string()]);
+        }
+
+        let mut prefix_lines = vec![
+            csv_line(block_cells),
+            llm_time_line(block, time_codec)?,
+            llm_columns_line(block, time_codec),
+        ];
+        if underlying.is_none() {
+            for segment in &block.request.physical_segments {
+                prefix_lines.push(csv_line(vec![
+                    "segment".to_string(),
+                    "underlying".to_string(),
+                    segment.physical_symbol.clone(),
+                    "start".to_string(),
+                    time_codec.format_timestamp(segment.start_ns)?,
+                    "end".to_string(),
+                    time_codec.format_timestamp(segment.end_ns)?,
+                ]));
+            }
+        }
+        if let Some(summary) = summary_line(block, &artifact.settings)? {
+            prefix_lines.push(summary);
+        }
         Ok(Self {
             block_id: block.block_id.clone(),
             weight: block.spec.weight,
             important_indices: important_indices(block, artifact.settings.focus),
             row_lines: rows,
             prefix_lines,
-            header,
-            data_hash: block.data_hash.clone(),
-            drill_down_id: format!(
-                "{}:{}:{}",
-                artifact.query_id,
-                block.block_id,
-                &block.data_hash[..12]
-            ),
+            header: llm_header(block, time_codec),
         })
     }
+}
+
+fn llm_source(report: &BacktestHistoryRequestReport) -> &'static str {
+    if !report.remote_used {
+        "cache"
+    } else if report.coverage.cached_ranges.is_empty() {
+        "remote"
+    } else {
+        "cache+remote"
+    }
+}
+
+fn llm_underlying_symbol(block: &QueryBlock) -> Option<&str> {
+    let first = block.request.physical_segments.first()?;
+    if first.physical_symbol == block.spec.symbol
+        || !block
+            .request
+            .physical_segments
+            .iter()
+            .all(|segment| segment.physical_symbol == first.physical_symbol)
+    {
+        return None;
+    }
+    Some(first.physical_symbol.as_str())
+}
+
+fn llm_time_line(block: &QueryBlock, codec: LlmTimeCodec) -> Result<String, CliError> {
+    let mut cells = vec![
+        "time".to_string(),
+        "mode".to_string(),
+        codec.mode.as_str().to_string(),
+    ];
+    if matches!(codec.mode, LlmTimeMode::Iso | LlmTimeMode::Both) {
+        cells.extend(["precision".to_string(), codec.precision.label().to_string()]);
+    }
+    if matches!(codec.mode, LlmTimeMode::Offset | LlmTimeMode::Both) {
+        cells.extend(["unit".to_string(), codec.offset_unit_label()]);
+    }
+    cells.extend([
+        "ref".to_string(),
+        codec.format_timestamp(block.spec.start_ns)?,
+        "end".to_string(),
+    ]);
+    match codec.mode {
+        LlmTimeMode::Iso => cells.push(codec.format_timestamp(block.spec.end_ns)?),
+        LlmTimeMode::Offset | LlmTimeMode::Both => cells.push(codec.offset(block.spec.end_ns)),
+    }
+    cells.extend([
+        "end_exclusive".to_string(),
+        "true".to_string(),
+        match block.spec.series {
+            QuerySeries::Tick => "row_time".to_string(),
+            QuerySeries::Kline => "bar_time".to_string(),
+        },
+        match block.spec.series {
+            QuerySeries::Tick => "event".to_string(),
+            QuerySeries::Kline => "start".to_string(),
+        },
+    ]);
+    Ok(csv_line(cells))
+}
+
+fn llm_columns_line(block: &QueryBlock, codec: LlmTimeCodec) -> String {
+    let mut cells = vec!["columns".to_string()];
+    for field in &block.spec.fields {
+        cells.push(format!(
+            "{}={}",
+            field.code(),
+            llm_field_name(*field, block.spec.series)
+        ));
+        if matches!(field, Field::Time) && matches!(codec.mode, LlmTimeMode::Both) {
+            cells.push(format!("dt=offset_{}", codec.offset_unit_label()));
+        }
+    }
+    csv_line(cells)
+}
+
+fn llm_field_name(field: Field, series: QuerySeries) -> &'static str {
+    match field {
+        Field::Time => "time",
+        Field::Id => "id",
+        Field::Open => "open",
+        Field::High => "high",
+        Field::Low => "low",
+        Field::Close => "close",
+        Field::Volume => match series {
+            QuerySeries::Tick => "cumulative_volume",
+            QuerySeries::Kline => "bar_volume",
+        },
+        Field::OpenOi => "open_oi",
+        Field::CloseOi => "close_oi",
+        Field::LastPrice => "last_price",
+        Field::Average => "average",
+        Field::Highest => "highest",
+        Field::Lowest => "lowest",
+        Field::AskPrice1 => "ask_price1",
+        Field::AskVolume1 => "ask_volume1",
+        Field::BidPrice1 => "bid_price1",
+        Field::BidVolume1 => "bid_volume1",
+        Field::AskPrice2 => "ask_price2",
+        Field::AskVolume2 => "ask_volume2",
+        Field::BidPrice2 => "bid_price2",
+        Field::BidVolume2 => "bid_volume2",
+        Field::AskPrice3 => "ask_price3",
+        Field::AskVolume3 => "ask_volume3",
+        Field::BidPrice3 => "bid_price3",
+        Field::BidVolume3 => "bid_volume3",
+        Field::AskPrice4 => "ask_price4",
+        Field::AskVolume4 => "ask_volume4",
+        Field::BidPrice4 => "bid_price4",
+        Field::BidVolume4 => "bid_volume4",
+        Field::AskPrice5 => "ask_price5",
+        Field::AskVolume5 => "ask_volume5",
+        Field::BidPrice5 => "bid_price5",
+        Field::BidVolume5 => "bid_volume5",
+        Field::Amount => "amount",
+        Field::OpenInterest => "open_interest",
+    }
+}
+
+fn llm_header(block: &QueryBlock, codec: LlmTimeCodec) -> String {
+    let mut cells = Vec::with_capacity(block.spec.fields.len() + 1);
+    for field in &block.spec.fields {
+        cells.push(field.code().to_string());
+        if matches!(field, Field::Time) && matches!(codec.mode, LlmTimeMode::Both) {
+            cells.push("dt".to_string());
+        }
+    }
+    csv_line(cells)
+}
+
+fn rows_as_llm_csv(
+    block: &QueryBlock,
+    settings: &QuerySettings,
+    codec: LlmTimeCodec,
+) -> Result<Vec<String>, CliError> {
+    match &block.rows {
+        BacktestHistoryRows::Ticks(rows) => rows
+            .iter()
+            .map(|row| llm_csv_row(block, settings, codec, |field| tick_cell(row, field)))
+            .collect(),
+        BacktestHistoryRows::Klines { rows, .. } => rows
+            .iter()
+            .map(|row| llm_csv_row(block, settings, codec, |field| kline_cell(row, field)))
+            .collect(),
+    }
+}
+
+fn llm_csv_row(
+    block: &QueryBlock,
+    settings: &QuerySettings,
+    codec: LlmTimeCodec,
+    cell: impl Fn(Field) -> CellValue,
+) -> Result<String, CliError> {
+    let mut cells = Vec::with_capacity(block.spec.fields.len() + 1);
+    for field in &block.spec.fields {
+        match cell(*field) {
+            CellValue::Timestamp(value) => match codec.mode {
+                LlmTimeMode::Iso => cells.push(codec.format_timestamp(value)?),
+                LlmTimeMode::Offset => cells.push(codec.offset(value)),
+                LlmTimeMode::Both => {
+                    cells.push(codec.format_timestamp(value)?);
+                    cells.push(codec.offset(value));
+                }
+            },
+            value => cells.push(format_cell(value, &block.spec, settings)?),
+        }
+    }
+    Ok(csv_line(cells))
+}
+
+fn llm_timestamps(block: &QueryBlock) -> Vec<i64> {
+    let mut timestamps = vec![block.spec.start_ns, block.spec.end_ns];
+    timestamps.extend(
+        block
+            .request
+            .physical_segments
+            .iter()
+            .flat_map(|segment| [segment.start_ns, segment.end_ns]),
+    );
+    match &block.rows {
+        BacktestHistoryRows::Ticks(rows) => {
+            timestamps.extend(rows.iter().map(|row| row.datetime));
+        }
+        BacktestHistoryRows::Klines { rows, .. } => {
+            timestamps.extend(rows.iter().map(|row| row.datetime));
+        }
+    }
+    timestamps
+}
+
+fn llm_offset_unit_ns(block: &QueryBlock, timestamps: &[i64]) -> i64 {
+    if let Some(period_ns) = block
+        .spec
+        .duration_ns
+        .filter(|period_ns| timestamps_align_to_unit(block.spec.start_ns, timestamps, *period_ns))
+    {
+        return period_ns;
+    }
+    const CANDIDATES: [i64; 7] = [
+        24 * 60 * 60 * 1_000_000_000,
+        60 * 60 * 1_000_000_000,
+        60 * 1_000_000_000,
+        1_000_000_000,
+        1_000_000,
+        1_000,
+        1,
+    ];
+    CANDIDATES
+        .into_iter()
+        .find(|unit_ns| timestamps_align_to_unit(block.spec.start_ns, timestamps, *unit_ns))
+        .unwrap_or(1)
+}
+
+fn timestamps_align_to_unit(reference_ns: i64, timestamps: &[i64], unit_ns: i64) -> bool {
+    unit_ns > 0
+        && timestamps.iter().all(|timestamp| {
+            (i128::from(*timestamp) - i128::from(reference_ns)) % i128::from(unit_ns) == 0
+        })
+}
+
+fn format_duration_label(duration: Duration) -> String {
+    format_duration_label_nanos(duration.as_nanos())
+}
+
+fn format_duration_label_from_ns(value_ns: i64) -> String {
+    if value_ns <= 0 {
+        return format!("{value_ns}ns");
+    }
+    format_duration_label_nanos(value_ns as u128)
+}
+
+fn format_duration_label_nanos(value_ns: u128) -> String {
+    const UNITS: [(&str, u128); 7] = [
+        ("d", 24 * 60 * 60 * 1_000_000_000),
+        ("h", 60 * 60 * 1_000_000_000),
+        ("m", 60 * 1_000_000_000),
+        ("s", 1_000_000_000),
+        ("ms", 1_000_000),
+        ("us", 1_000),
+        ("ns", 1),
+    ];
+    for (suffix, unit_ns) in UNITS {
+        if value_ns % unit_ns == 0 {
+            return format!("{}{suffix}", value_ns / unit_ns);
+        }
+    }
+    format!("{value_ns}ns")
 }
 
 fn rows_as_csv(block: &QueryBlock, settings: &QuerySettings) -> Result<Vec<String>, CliError> {
@@ -1639,13 +1962,11 @@ fn scaled_price(value: f64, price_tick: Option<f64>, symbol: &str) -> Result<i64
     Ok(rounded as i64)
 }
 
-fn summary_line(block: &QueryBlock, settings: &QuerySettings) -> Result<String, CliError> {
-    let mut cells = vec![
-        "summary".to_string(),
-        block.block_id.clone(),
-        "rows".to_string(),
-        block.rows.len().to_string(),
-    ];
+fn summary_line(block: &QueryBlock, settings: &QuerySettings) -> Result<Option<String>, CliError> {
+    if block.rows.is_empty() {
+        return Ok(None);
+    }
+    let mut cells = vec!["summary".to_string()];
     match &block.rows {
         BacktestHistoryRows::Ticks(rows) => {
             append_tick_summary(&mut cells, rows.as_slice(), &block.spec, settings)?;
@@ -1654,7 +1975,7 @@ fn summary_line(block: &QueryBlock, settings: &QuerySettings) -> Result<String, 
             append_kline_summary(&mut cells, rows.as_slice(), &block.spec, settings)?;
         }
     }
-    Ok(csv_line(cells))
+    Ok(Some(csv_line(cells)))
 }
 
 fn append_tick_summary(
@@ -1667,8 +1988,6 @@ fn append_tick_summary(
         return Ok(());
     };
     let last = rows.last().expect("first row proves a last row");
-    push_summary(cells, "first", format_timestamp(first.datetime)?);
-    push_summary(cells, "last", format_timestamp(last.datetime)?);
     push_summary(
         cells,
         "first_lp",
@@ -1716,8 +2035,6 @@ fn append_kline_summary(
         return Ok(());
     };
     let last = rows.last().expect("first row proves a last row");
-    push_summary(cells, "first", format_timestamp(first.datetime)?);
-    push_summary(cells, "last", format_timestamp(last.datetime)?);
     push_summary(cells, "open", format_price(first.open, spec, settings)?);
     push_summary(cells, "close", format_price(last.close, spec, settings)?);
     push_summary(
@@ -1991,13 +2308,6 @@ fn finality_value(finality: BacktestHistoryFinality) -> Value {
     }
 }
 
-fn finality_name(finality: BacktestHistoryFinality) -> &'static str {
-    match finality {
-        BacktestHistoryFinality::Final => "final",
-        BacktestHistoryFinality::Provisional { .. } => "provisional",
-    }
-}
-
 fn parse_series_duration(
     series: QuerySeries,
     period: Option<&str>,
@@ -2188,14 +2498,6 @@ fn ranges_cover(requested: (i64, i64), ranges: &[(i64, i64)]) -> bool {
         }
     }
     false
-}
-
-fn format_ranges(ranges: &[(i64, i64)]) -> String {
-    ranges
-        .iter()
-        .map(|(start_ns, end_ns)| format!("{start_ns}:{end_ns}"))
-        .collect::<Vec<_>>()
-        .join(";")
 }
 
 fn timestamp_value(value: i64) -> Result<Value, CliError> {

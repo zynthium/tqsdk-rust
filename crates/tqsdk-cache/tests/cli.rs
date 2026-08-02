@@ -1482,11 +1482,124 @@ fn query_llm_csv_is_lossless_without_a_budget_and_writes_atomically() {
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("wrote"));
     let content = fs::read_to_string(&output_path).unwrap();
-    assert!(content.starts_with("protocol,tqllm-csv/1\n"));
-    assert!(content.contains("compression,lossless"));
-    assert!(content.contains("session,b1"));
+    assert!(content.starts_with("protocol,tqllm-csv/2\n"));
+    assert!(
+        content.contains("meta,model,gpt-5.6,numbers,decimal,compression,lossless,partial,false")
+    );
+    assert!(content.contains("block,b1,symbol,KQ.m@SHFE.au,series,tick,rows,8,source,cache,final,true,underlying,SHFE.au2002"));
+    assert!(content.contains("time,mode,iso,precision,s,ref,2020-01-01T11:00:00Z,end,2020-01-01T11:00:09Z,end_exclusive,true,row_time,event"));
+    assert!(content.contains("columns,t=time,lp=last_price,v=cumulative_volume,oi=open_interest"));
     assert!(content.contains("\nt,lp,v,oi\n"));
+    assert!(content.contains("\n2020-01-01T11:00:00Z,100,100,1000\n"));
+    assert!(content.contains("block_end,rows,8"));
+    assert!(content.contains("document_end,status,success"));
+    assert!(!content.contains(".000000000Z"));
+    assert!(!content.contains("period_ns"));
+    assert!(!content.contains("snapshot_hash"));
+    assert!(!content.contains("query_id"));
+    assert!(!content.contains("drill_down_id"));
     assert!(content.ends_with('\n'));
+
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn query_llm_csv_supports_compact_relative_time_offsets() {
+    let cache_dir = temp_dir("query-llm-time-modes");
+    let fixture = seed_query_fixture(&cache_dir, 8, true);
+    let arguments = [
+        "--cache-dir".to_string(),
+        cache_dir.display().to_string(),
+        "--output-format".to_string(),
+        "llm-csv".to_string(),
+        "query".to_string(),
+        "--symbol".to_string(),
+        fixture.logical_symbol.clone(),
+        "--series".to_string(),
+        "kline".to_string(),
+        "--period".to_string(),
+        "1m".to_string(),
+        "--start".to_string(),
+        rfc3339(fixture.start_ns),
+        "--end".to_string(),
+        rfc3339(fixture.kline_end_ns),
+        "--policy".to_string(),
+        "cache-only".to_string(),
+        "--fields".to_string(),
+        "time,open,high,low,close,volume,close_oi".to_string(),
+    ];
+
+    let offset = run_query_without_auth(
+        &arguments
+            .iter()
+            .cloned()
+            .chain(["--llm-time".to_string(), "offset".to_string()])
+            .collect::<Vec<_>>(),
+    );
+
+    assert!(offset.status.success());
+    let offset = String::from_utf8(offset.stdout).unwrap();
+    assert!(offset.contains("block,b1,symbol,KQ.m@SHFE.au,series,kline,period,1m,rows,3,source,cache,final,true,underlying,SHFE.au2002"));
+    assert!(offset.contains(
+        "time,mode,offset,unit,1m,ref,2020-01-01T11:00Z,end,3,end_exclusive,true,bar_time,start"
+    ));
+    assert!(
+        offset
+            .contains("\nt,o,h,l,c,v,oi\n0,100,101,99,100.5,10,101\n1,101,102,100,101.5,11,102\n")
+    );
+
+    let both = run_query_without_auth(
+        &arguments
+            .iter()
+            .cloned()
+            .chain(["--llm-time".to_string(), "both".to_string()])
+            .collect::<Vec<_>>(),
+    );
+
+    assert!(both.status.success());
+    let both = String::from_utf8(both.stdout).unwrap();
+    assert!(both.contains("time,mode,both,precision,m,unit,1m,ref,2020-01-01T11:00Z,end,3,end_exclusive,true,bar_time,start"));
+    assert!(both.contains("\nt,dt,o,h,l,c,v,oi\n2020-01-01T11:00Z,0,100,101,99,100.5,10,101\n"));
+
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn query_llm_csv_declares_price_tick_for_scaled_integers() {
+    let cache_dir = temp_dir("query-llm-scaled-price");
+    let fixture = seed_query_fixture(&cache_dir, 8, false);
+    let output = run_query_without_auth(&[
+        "--cache-dir".to_string(),
+        cache_dir.display().to_string(),
+        "--output-format".to_string(),
+        "llm-csv".to_string(),
+        "query".to_string(),
+        "--symbol".to_string(),
+        fixture.logical_symbol,
+        "--series".to_string(),
+        "tick".to_string(),
+        "--start".to_string(),
+        rfc3339(fixture.start_ns),
+        "--end".to_string(),
+        rfc3339(fixture.tick_end_ns),
+        "--policy".to_string(),
+        "cache-only".to_string(),
+        "--fields".to_string(),
+        "time,last_price".to_string(),
+        "--number-format".to_string(),
+        "scaled-int".to_string(),
+        "--price-tick".to_string(),
+        "0.1".to_string(),
+    ]);
+
+    assert!(output.status.success());
+    let content = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        content
+            .contains("meta,model,gpt-5.6,numbers,scaled-int,compression,lossless,partial,false")
+    );
+    assert!(content.contains("source,cache,final,true,price_tick,0.1,underlying,SHFE.au2002"));
+    assert!(content.contains("\n2020-01-01T11:00:00Z,1000\n"));
 
     let _ = fs::remove_dir_all(cache_dir);
 }
@@ -1644,9 +1757,9 @@ fn query_llm_csv_partial_metadata_failure_emits_a_gap() {
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stderr.is_empty());
     let content = String::from_utf8(output.stdout).unwrap();
-    assert!(content.starts_with("protocol,tqllm-csv/1\n"));
+    assert!(content.starts_with("protocol,tqllm-csv/2\n"));
     assert!(content.contains("gap,1,SHFE.au2002,metadata_unavailable,"));
-    assert!(content.contains("end,status,partial,"));
+    assert!(content.contains("document_end,status,partial"));
 
     let _ = fs::remove_dir_all(cache_dir);
 }

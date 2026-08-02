@@ -92,10 +92,11 @@ query 只在每个 request 取得 terminal report 后输出。每个 emitted blo
 以 `gap` 形式出现，不放宽上述 finality/coverage gate。
 
 主连及 session-sensitive Kline 的 metadata 沿用 immutable sidecar。JSONL 会如实标记缺失的 sidecar；
-`llm-csv` 还必须能由 active snapshot 验证 terminal report 的 snapshot hash，才会输出 session
-reference、physical segments 和可供模型解释的 block。这是 LLM export 特有的更严格 fail-closed 规则：
-底层 retained-snapshot reader 在 active pointer 前移后仍可读取符合其验证条件的历史分区，但该 export
-不会把它们当作带当前 session reference 的模型输入。缺失或不匹配时默认 fail closed；
+`llm-csv` 还必须能由 active snapshot 验证 terminal report 的 snapshot hash，才会输出可供模型解释的
+block（连续合约会保留必要的 underlying / segment mapping）。这是 LLM export 特有的更严格 fail-closed
+规则：V2 默认不把 session reference、snapshot hash 或 session JSON 放进模型上下文，但仍在输出前完成
+同样的验证。底层 retained-snapshot reader 在 active pointer 前移后仍可读取符合其验证条件的历史分区，但该 export
+不会把它们当作已通过 active-snapshot 验证的模型输入。缺失或不匹配时默认 fail closed；
 `--allow-partial` 可以省略该 block 并记录 gap，绝不伪造 session。
 
 ## 各命令的读写语义
@@ -146,14 +147,18 @@ minute fill 没有 provisional 语义：当前或未来 trading day 一律不能
 | format | stable protocol | 语义 |
 | --- | --- | --- |
 | `jsonl` | `tqsdk-history-jsonl/1` | lossless rows，附 `manifest`、每 block 的 `block` / 零或多个 `row` / `complete`、可选 `gap`、最终 `end` records；不压缩 |
-| `llm-csv` | `tqllm-csv/1` | GPT-5.6-oriented CSV-like blocks；行区无自由文本，metadata 提供 coverage、session、segments、summary、query/hash/drill-down IDs |
+| `llm-csv` | `tqllm-csv/2` | GPT-5.6-oriented CSV-like blocks；每 block 依次写 `block` / `time` / `columns` / 可选 `segment` / `summary` / `data` / `block_end`，最终以 `document_end` 收尾；默认省略内部 query/session/blob provenance |
 
 两者都遵守 strict `--fields` projection：输入可使用长 alias，输出固定为 canonical short alias 和
-schema order。默认 row timestamp 是完整 ISO 8601；`--timestamp offset` 改为相对 block start 的整数
-ns，reference 始终写在 block metadata。默认数字为 decimal；`--number-format scaled-int` 必须显式
-给出有效的 `price_tick`，非有限数为 missing 而不是零。
-`block.fields` 是唯一有序 projection；JSON `row.data` object 的成员顺序不是 contract，consumer 必须按
-字段名和 `fields` 解析。
+schema order。JSONL 默认 row timestamp 是完整 ISO 8601；`--timestamp offset` 改为相对 block start
+的整数 ns。LLM CSV 的 `--llm-time iso|offset|both` 默认 `iso`：它按该 block 的最小无损 UTC 精度写出
+时间（分钟 Kline 不填充秒/纳秒）；`offset` 用 `time.ref` 加声明的 `time.unit` 表示整数 `t`；`both` 在
+已选择 `t` 后额外写派生 `dt` 以供对照。未显式指定时 `--timestamp offset` 选择 LLM `offset` 模式。
+`time.end_exclusive=true` 固定表达半开区间，Kline 的 `time.bar_time=start` 明确其 bar timestamp 语义。
+默认数字为 decimal；`--number-format scaled-int` 必须显式给出有效的 `price_tick`，非有限数为 missing
+而不是零；LLM CSV 会把该缩放比例仅写在相关 block。LLM `columns` 是其唯一有序 projection（`both`
+的派生 `dt` 是显式 opt-in 例外）；JSONL 的有序 projection 仍是 `block.fields`，JSON `row.data` object
+的成员顺序不是 contract，consumer 必须按字段名和 `fields` 解析。
 
 `llm-csv` 是原子产物：terminal success、coverage、metadata、summary、data hash 和 token budget
 决策都完成后才写出。`--data-token-budget` 采用保守本地 GPT-5.6 estimate；不做模型/API 调用。若 full

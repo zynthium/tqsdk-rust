@@ -120,8 +120,9 @@ mapping 以 versioned snapshot sidecar 持久化，terminal report 携带 snapsh
 可选 `tqsdk-cache query` 只是这个 public query surface 的 CLI adapter：它使用
 `BacktestHistoryClient::query_batch(...).collect_all(...)` 和既有 `BacktestHistoryMetadataCache`，不新增
 data API、cache format、direct TQBN reader 或独立 session owner。它的 `cache-only` / `remote-on-miss`
-语义与 client 对齐；`jsonl` 适合作为 lossless row stream，`tqllm-csv/1` 则是 CLI-only 的 token-aware
-presentation contract，不会在 `tqsdk-data` 中引入模型依赖或 prompt API。
+语义与 client 对齐；`jsonl` 适合作为 lossless row stream，`tqllm-csv/2` 则是 CLI-only 的 token-aware
+presentation contract：以声明单位的紧凑 ISO / 相对整数时间和一次性 columns mapping 服务模型上下文，
+不会在 `tqsdk-data` 中引入模型依赖或 prompt API。
 CLI 只会把通过 `Final` 与完整 coverage 校验的 terminal report materialize 为 block；它不把
 `BacktestHistoryRun` 的 provisional `Chunk` 扩展成另一种 streaming query contract。
 
