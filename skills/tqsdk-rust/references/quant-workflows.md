@@ -22,7 +22,7 @@
 
 ## Historical Research
 
-history pages、time-range series、pull-based downloads、CSV export 和 option Greeks 使用 `tqsdk-data`。historical materialization 要和 live refs 分开。大规模重复读取时显式使用 history cache。`HistorySeriesCache` 是 offline `data_series` cache 和 cache-only reader，不是 live 最新行情 API；`BacktestTickCache` 是 tick-only 回测共享缓存，普通 live/backtest 组合入口在 `tqsdk::MarketCachePolicy`，纯 row writer 才下钻 `LiveTickCacheWriter`。
+用户明确要按区间获取历史 Tick/Kline，且优先走回测或回测缓存时，先用 `tqsdk::advanced::data::BacktestHistoryClient`。`RemoteOnMiss` 先读 shared backtest cache，缺口才通过官方 server-side backtest stream 获取并持久化；`CacheOnly` 用于后续离线 reader。它返回 owned chunk/rows，不是 live ref，也不替代策略 `.backtest(...)` 回放。只有需要 generic history page/series/download、CSV export、option Greeks，或回测缓存合同不覆盖的来源时，才用 `tqsdk-data::DataClient`。`HistorySeriesCache` 是 offline `data_series` cache 和 cache-only reader，不是 live 最新行情 API；`BacktestTickCache` 是 tick-only 回测共享缓存，普通 live/backtest 组合入口在 `tqsdk::MarketCachePolicy`，纯 row writer 才下钻 `LiveTickCacheWriter`。
 
 契约锚点：S17、S28-S30。Replay integration：S16；S18 JSONL local market cache 已移出当前核心 SDK public API。
 

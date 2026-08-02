@@ -25,6 +25,7 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 - 官方 Python TqSdk 行为是语义参考，但 Rust 要映射到 crate 归属，不要重建 Python 单体 `TqApi`。
 - 默认 facade 放在 `tqsdk`；one-shot query 放在 `tqsdk-session`，Python-style live ref 放在 `tqsdk-wait`，执行工具放在 `tqsdk-task`，离线/历史数据放在 `tqsdk-data`。多消费者 event/fan-out 是调用方基于 `tqsdk-session + RuntimeReader/UpdateCursor` 自建的集成层。
 - 默认 facade 回测入口统一为 `.backtest(start_ns, end_ns)`：默认使用共享持久 tick cache（`$HOME/.tqsdk/data_series_1`，可用 `TQSDK_HISTORY_CACHE_DIR` 覆盖）和 `RemoteOnMiss`。已知或静态解析 symbol 的 cache hit 不需要 auth；只有缺 tick range 时才需 auth，并通过官方 server-side backtest stream 补洞后在本地 `TqSim` 回放。`.cache_dir(...)`、`.cache_store(...)` 或 `.market_cache(...)` 覆盖默认 cache；只有 `.disabled_cache()` 才是纯官方服务端回测且不落盘。
+- 用户要按时间区间取得历史 Tick / Kline rows，且明确优先回测或回测缓存时，优先用 `tqsdk::advanced::data::BacktestHistoryClient` + `BacktestHistoryRequest`，不要先路由到 `DataClient`。`BacktestHistoryPolicy::RemoteOnMiss` 先读共享回测缓存，缺口才走官方 server-side backtest stream 并写回；完整缓存后改用 `BacktestHistoryPolicy::CacheOnly`。`Tq::backtest(...)` 留给策略回放，`DataClient` 留给显式 generic 历史下载、CSV/研究工作流，或回测缓存合同不覆盖的来源。
 - 不要再生成或推荐 `server_backtest(...)`。该 public 兼容 alias 已删除；旧代码统一迁移为 `.backtest(start_ns, end_ns)`，需要本地严格只读时加 `.cache_only()`，只有有意禁用缓存时才加 `.disabled_cache()`；自定义数据源使用 `.replay_backtest(...)`。
 - `DataClient` 的 history-series cache 默认 opt-in；这不改变 facade `.backtest(...)` 默认共享 tick cache 的语义。持久化 live tick 必须显式使用 `MarketCachePolicy` / `Tq::record_ticks(cache_dir, symbols)`；`HistorySeriesCache` 仍只服务 offline data-series。
 - `MarketCachePolicy` 是默认 facade 维护“live 增量记录 + 回测共享缓存”的首选入口：`MarketCachePolicy::new(cache_dir).record_ticks(symbols)` 或 `.record_universe(expression)?` + `TqBuilder::market_cache(policy)` 会在 live `connect()` 后启动 tick recording，也会给 `.backtest(...)` 提供默认 cache 目录和 symbol 集合。
@@ -43,6 +44,7 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 
 ## 历史 Tick 缓存补齐
 
+- 区间历史 rows 的回测优先路径：`BacktestHistoryClient::builder(cache_dir)` 配置 `RemoteOnMiss` 和 `.auth_env()`，再以 `BacktestHistoryRequest::tick(...)` / `.kline(...)` 调用 `query()`；调用方可消费 chunk/terminal event，或对单请求使用 `collect()`。它命中同一份回测缓存，只有缺口才使用官方回测流并持久化；预热或成功读取后，后续 reader 用 `CacheOnly`。这不是策略循环；策略回放继续用 `.backtest(...)`。
 - 按需补齐：单个策略可直接使用默认 `.backtest(...)`；完整缓存直接本地回放，缺口由默认 `RemoteOnMiss` 补齐。这个路径不使用 `tq_dl` / 专业历史下载权限，但实际远端补数需要 `.auth_env()?`。
 - 预热作业：对固定 cache root 和明确的 symbol/universe，使用 `.remote_on_miss().warmup().await?`。它只填每个 symbol 的 `missing_ranges`，连续 tick id 的成功 slice 才提交 coverage；失败或未确认尾部保留缺口，下一次 warmup 可继续补齐。
 - operator CLI：固定 root 的 inventory、closed-day fill、report-bound verify 或 TQBN doctor 使用可选

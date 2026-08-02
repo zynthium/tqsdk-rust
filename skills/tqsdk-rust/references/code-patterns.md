@@ -8,6 +8,7 @@
 - Session Metadata Query
 - 品种/合约查询
 - Caller-Owned Commit Consumer
+- Backtest Cache Historical Rows
 - Historical Data Client
 - Shared Live/Backtest Tick Cache
 - Embedded Monitoring Snapshot
@@ -171,9 +172,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Backtest Cache Historical Rows
+
+用户明确优先通过回测或回测缓存取得区间 Tick/Kline rows 时，先使用
+`BacktestHistoryClient`。`RemoteOnMiss` 先读共享 cache，缺口才使用官方
+server-side backtest stream，并将确认成功的数据写回 cache；后续 reader 用
+`CacheOnly` 完全离线读取。`Tq::backtest(...)` 则用于策略回放，不是 raw rows 的首选入口。
+
+```rust
+use std::time::Duration;
+
+use tqsdk::advanced::data::{
+    BacktestHistoryClient, BacktestHistoryPolicy, BacktestHistoryRequest, BacktestHistoryRows,
+};
+
+# async fn run(start_ns: i64, end_ns: i64) -> Result<(), Box<dyn std::error::Error>> {
+let client = BacktestHistoryClient::builder(".tqsdk/backtest_ticks")
+    .policy(BacktestHistoryPolicy::RemoteOnMiss)
+    .auth_env()
+    .build()?;
+
+let collected = client
+    .query(BacktestHistoryRequest::kline(
+        1,
+        "KQ.i@SHFE.au",
+        Duration::from_secs(5 * 60),
+        start_ns,
+        end_ns,
+    ))
+    .await?
+    .collect()
+    .await?;
+let BacktestHistoryRows::Klines { rows, .. } = collected.rows else {
+    unreachable!("requested Kline rows")
+};
+println!("rows={}", rows.len());
+# Ok(())
+# }
+```
+
+将 request 改为 `BacktestHistoryRequest::tick(...)` 可取得 Tick rows。批量请求使用
+`query_batch(...).await?` 并消费 chunk/terminal event，或显式提供总内存上限给
+`collect_all(max_total_bytes)`。已预热 cache 的只读 consumer 改用
+`BacktestHistoryPolicy::CacheOnly`，让 coverage 缺口立即失败。
+
 ## Historical Data Client
 
-owned historical materialization 和导出使用 `tqsdk-data`。CSV export 优先使用 async writer，并把 live session 和离线研究流程分开。
+需要 generic history page/series/download、CSV export、Greeks，或来源/周期不受回测缓存合同覆盖时，使用 `tqsdk-data`。CSV export 优先使用 async writer，并把 live session 和离线研究流程分开。
 
 ```rust
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
