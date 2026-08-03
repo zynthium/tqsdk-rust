@@ -197,26 +197,47 @@ fn write_fill(output: &mut impl Write, value: &Value) -> io::Result<()> {
         symbols.len()
     )?;
     for symbol in symbols {
-        let day_stats = symbol.get("day_stats");
-        let day_summary = day_stats.map_or_else(
-            || "day coverage unavailable".to_string(),
-            |stats| {
-                format!(
-                    "days {}/{} | received {} | missing {}",
-                    number(stats, "covered_days"),
-                    number(stats, "planned_days"),
-                    number(stats, "received_days"),
-                    number(stats, "missing_days"),
-                )
-            },
-        );
+        let action = string(symbol, "action").unwrap_or("-");
+        let (action, coverage, row_label) = if minute {
+            let coverage = if symbol
+                .get("after")
+                .is_some_and(|after| boolean(after, "complete"))
+            {
+                "final coverage complete".to_string()
+            } else {
+                "coverage incomplete".to_string()
+            };
+            let action = match action {
+                "skipped_complete" => "already cached",
+                "filled_remote" => "downloaded",
+                "refreshed_remote" => "refreshed",
+                "missing_cache_only" => "cache missing",
+                other => other,
+            };
+            (action, coverage, "rows downloaded")
+        } else {
+            let coverage = symbol.get("day_stats").map_or_else(
+                || "day coverage unavailable".to_string(),
+                |stats| {
+                    format!(
+                        "days {}/{} | received {} | missing {}",
+                        number(stats, "covered_days"),
+                        number(stats, "planned_days"),
+                        number(stats, "received_days"),
+                        number(stats, "missing_days"),
+                    )
+                },
+            );
+            (action, coverage, "rows")
+        };
         writeln!(
             output,
-            "  {}: {} | {} | {} rows",
+            "  {}: {} | {} | {} {}",
             string(symbol, "symbol").unwrap_or("-"),
-            string(symbol, "action").unwrap_or("-"),
-            day_summary,
+            action,
+            coverage,
             number(symbol, "rows_written"),
+            row_label,
         )?;
     }
     Ok(())
@@ -570,6 +591,37 @@ mod tests {
         assert!(output.contains("Files: 2 | Size: 1.50 KiB"));
         assert!(output.contains("2 months"));
         assert!(!output.contains("0 days"));
+    }
+
+    #[test]
+    fn minute_fill_summary_marks_reused_coverage_as_already_cached() {
+        let value = json!({
+            "command": "fill",
+            "cache_kind": "minute",
+            "cache_dir": "/tmp/cache",
+            "dry_run": false,
+            "report": {
+                "requested_days": { "start_day": "2026-07-20", "end_day": "2026-07-21" },
+                "complete": true,
+                "remote_used": false,
+                "rows_written": 0,
+                "symbols": [{
+                    "symbol": "KQ.i@CFFEX.IC",
+                    "action": "skipped_complete",
+                    "after": { "complete": true },
+                    "rows_written": 0,
+                }],
+            },
+        });
+        let mut output = Vec::new();
+
+        write_result(&mut output, &value, "success", 0, 12).unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains(
+            "KQ.i@CFFEX.IC: already cached | final coverage complete | 0 rows downloaded"
+        ));
+        assert!(!output.contains("day coverage unavailable"));
     }
 
     #[test]
