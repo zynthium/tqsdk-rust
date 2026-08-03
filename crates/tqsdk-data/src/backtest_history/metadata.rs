@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use chrono::NaiveDate;
 #[cfg(all(feature = "live", feature = "services"))]
-use chrono::{Days, FixedOffset, TimeZone, Utc};
+use chrono::{Datelike, Days, FixedOffset, TimeZone, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -16,7 +16,10 @@ use tqsdk_core::TradingTime;
 
 use crate::{DataError, KlineSessionTemplate, MinuteKlineCache, MinuteKlineCacheSnapshot, Result};
 #[cfg(all(feature = "live", feature = "services"))]
-use crate::{HistoricalContUnderlyingSegment, KlineSessionWindow, TradingCalendarRow};
+use crate::{
+    HistoricalContUnderlyingSegment, KlineSessionWindow, TradingCalendarRow,
+    trading_month_for_timestamp_ns,
+};
 
 use super::{
     BacktestHistoryAuthProvider, BacktestHistoryCredentials, BacktestHistoryPhysicalSegment,
@@ -128,22 +131,7 @@ impl BacktestHistoryMetadataCache {
         }
 
         let _lock = MetadataLock::acquire_shared(&symbol_dir, &self.root_dir)?;
-        let active_path = symbol_dir.join(ACTIVE_FILE_NAME);
-        let active_bytes = match fs::read(&active_path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        let pointer: ActiveSnapshotPointer =
-            serde_json::from_slice(&active_bytes).map_err(|error| {
-                metadata_response_error(format!(
-                    "active pointer {} is invalid JSON: {error}",
-                    active_path.display()
-                ))
-            })?;
-        pointer.validate(&active_path)?;
-
-        read_snapshot(&symbol_dir, logical_symbol, pointer.snapshot_hash.as_str()).map(Some)
+        read_active_snapshot(&symbol_dir, logical_symbol)
     }
 
     /// Returns every validated immutable snapshot retained for one logical
@@ -211,11 +199,37 @@ impl BacktestHistoryMetadataCache {
         &self,
         snapshot: BacktestHistoryMetadataSnapshot,
     ) -> Result<BacktestHistoryMetadataSnapshot> {
+        self.store_snapshot_with_active_policy(snapshot, false)
+    }
+
+    /// Stores a remote-miss snapshot without allowing a narrower mapping to
+    /// replace an already broader active pointer.
+    ///
+    /// The returned snapshot remains available to the request that fetched it,
+    /// while cache-backed historical requests retain a broadly useful active
+    /// mapping. Session or schema changes always advance the active pointer.
+    pub(crate) fn store_snapshot_for_remote_miss(
+        &self,
+        snapshot: BacktestHistoryMetadataSnapshot,
+    ) -> Result<BacktestHistoryMetadataSnapshot> {
+        self.store_snapshot_with_active_policy(snapshot, true)
+    }
+
+    fn store_snapshot_with_active_policy(
+        &self,
+        snapshot: BacktestHistoryMetadataSnapshot,
+        retain_broader_active: bool,
+    ) -> Result<BacktestHistoryMetadataSnapshot> {
         self.ensure_writable()?;
         let snapshot = normalize_snapshot_for_store(snapshot)?;
         let symbol_dir = self.symbol_dir(snapshot.logical_symbol.as_str())?;
         fs::create_dir_all(symbol_dir.join(SNAPSHOTS_DIR_NAME))?;
         let _lock = MetadataLock::acquire_exclusive(&symbol_dir, &self.root_dir)?;
+        let active_before = if retain_broader_active {
+            read_active_snapshot(&symbol_dir, snapshot.logical_symbol.as_str())?
+        } else {
+            None
+        };
 
         let snapshot_path = symbol_dir
             .join(SNAPSHOTS_DIR_NAME)
@@ -238,15 +252,12 @@ impl BacktestHistoryMetadataCache {
             Err(error) => return Err(error.into()),
         }
 
-        let active = ActiveSnapshotPointer {
-            format_id: BACKTEST_HISTORY_METADATA_FORMAT_ID.to_string(),
-            schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
-            snapshot_hash: snapshot.snapshot_hash.clone(),
-        };
-        let active_bytes = serde_json::to_vec(&active).map_err(|error| {
-            DataError::InvalidResponse(format!("cannot encode metadata active pointer: {error}"))
-        })?;
-        write_replace_atomically(&symbol_dir.join(ACTIVE_FILE_NAME), active_bytes.as_slice())?;
+        if active_before
+            .as_ref()
+            .is_none_or(|active| !should_keep_broader_active_snapshot(active, &snapshot))
+        {
+            write_active_snapshot(&symbol_dir, snapshot.snapshot_hash.as_str())?;
+        }
         Ok(snapshot)
     }
 
@@ -267,6 +278,74 @@ impl BacktestHistoryMetadataCache {
             .join(METADATA_NAMESPACE)
             .join(escape_symbol_path_component(logical_symbol)))
     }
+}
+
+fn read_active_snapshot(
+    symbol_dir: &Path,
+    logical_symbol: &str,
+) -> Result<Option<BacktestHistoryMetadataSnapshot>> {
+    let active_path = symbol_dir.join(ACTIVE_FILE_NAME);
+    let active_bytes = match fs::read(&active_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let pointer: ActiveSnapshotPointer =
+        serde_json::from_slice(&active_bytes).map_err(|error| {
+            metadata_response_error(format!(
+                "active pointer {} is invalid JSON: {error}",
+                active_path.display()
+            ))
+        })?;
+    pointer.validate(&active_path)?;
+    read_snapshot(symbol_dir, logical_symbol, pointer.snapshot_hash.as_str()).map(Some)
+}
+
+fn write_active_snapshot(symbol_dir: &Path, snapshot_hash: &str) -> Result<()> {
+    let active = ActiveSnapshotPointer {
+        format_id: BACKTEST_HISTORY_METADATA_FORMAT_ID.to_string(),
+        schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+        snapshot_hash: snapshot_hash.to_string(),
+    };
+    let active_bytes = serde_json::to_vec(&active).map_err(|error| {
+        DataError::InvalidResponse(format!("cannot encode metadata active pointer: {error}"))
+    })?;
+    write_replace_atomically(&symbol_dir.join(ACTIVE_FILE_NAME), active_bytes.as_slice())
+}
+
+fn should_keep_broader_active_snapshot(
+    active: &BacktestHistoryMetadataSnapshot,
+    candidate: &BacktestHistoryMetadataSnapshot,
+) -> bool {
+    if active.snapshot_hash == candidate.snapshot_hash {
+        return true;
+    }
+    if active.schema_version != candidate.schema_version
+        || active.market_kind != candidate.market_kind
+        || active.session.snapshot_hash() != candidate.session.snapshot_hash()
+    {
+        return false;
+    }
+    let Some(active_range) = metadata_physical_coverage_range(active) else {
+        return false;
+    };
+    let Some(candidate_range) = metadata_physical_coverage_range(candidate) else {
+        return false;
+    };
+    if candidate.covers_range(active_range) {
+        return false;
+    }
+    let active_span = active_range.1.saturating_sub(active_range.0);
+    let candidate_span = candidate_range.1.saturating_sub(candidate_range.0);
+    active_span >= candidate_span
+}
+
+fn metadata_physical_coverage_range(
+    snapshot: &BacktestHistoryMetadataSnapshot,
+) -> Option<(i64, i64)> {
+    let start_ns = snapshot.physical_segments.first()?.start_ns;
+    let end_ns = snapshot.physical_segments.last()?.end_ns;
+    (start_ns < end_ns).then_some((start_ns, end_ns))
 }
 
 fn read_snapshot(
@@ -412,9 +491,11 @@ fn is_minute_snapshot_mismatch(error: &DataError) -> bool {
 /// remote-query range. This is intentionally crate-private: callers reach it
 /// only after the query path has proved that a remote operation is needed.
 ///
-/// A present snapshot remains authoritative regardless of its age. We refresh
-/// only when it does not cover the requested range; `CacheOnly` callers never
-/// call this function and consequently remain fully offline.
+/// A present snapshot remains authoritative regardless of its age. Remote
+/// refreshes expand to whole canonical-minute trading months, so later misses
+/// can reuse one immutable snapshot rather than create incompatible partial
+/// month identities. `CacheOnly` callers never call this function and
+/// consequently remain fully offline.
 pub(crate) async fn ensure_metadata_for_remote_miss(
     cache_dir: &Path,
     auth_provider: Option<&Arc<dyn BacktestHistoryAuthProvider>>,
@@ -423,9 +504,12 @@ pub(crate) async fn ensure_metadata_for_remote_miss(
     end_ns: i64,
 ) -> Result<BacktestHistoryMetadataSnapshot> {
     validate_metadata_refresh_request(symbol, start_ns, end_ns)?;
+    #[cfg(all(feature = "live", feature = "services"))]
+    let metadata_range = canonical_minute_metadata_range(start_ns, end_ns)?;
+    #[cfg(not(all(feature = "live", feature = "services")))]
+    let metadata_range = (start_ns, end_ns);
     let read_only = BacktestHistoryMetadataCache::open_read_only(cache_dir);
-    if let Some(snapshot) = read_only.load_active(symbol)?
-        && metadata_snapshot_covers_range(&snapshot, (start_ns, end_ns))
+    if let Some(snapshot) = existing_snapshot_for_remote_range(&read_only, symbol, metadata_range)?
     {
         return Ok(snapshot);
     }
@@ -440,12 +524,18 @@ pub(crate) async fn ensure_metadata_for_remote_miss(
         })?;
         let credentials = provider.load().await?;
         let cache = BacktestHistoryMetadataCache::open(cache_dir)?;
-        if let Some(snapshot) = cache.load_active(symbol)?
-            && metadata_snapshot_covers_range(&snapshot, (start_ns, end_ns))
+        if let Some(snapshot) = existing_snapshot_for_remote_range(&cache, symbol, metadata_range)?
         {
             return Ok(snapshot);
         }
-        refresh_metadata_from_official(&cache, credentials, symbol, start_ns, end_ns).await
+        refresh_metadata_from_official(
+            &cache,
+            credentials,
+            symbol,
+            metadata_range.0,
+            metadata_range.1,
+        )
+        .await
     }
 
     #[cfg(not(all(feature = "live", feature = "services")))]
@@ -453,6 +543,89 @@ pub(crate) async fn ensure_metadata_for_remote_miss(
         let _ = auth_provider;
         Err(DataError::RemoteBacktestHistoryFillUnavailable)
     }
+}
+
+fn existing_snapshot_for_remote_range(
+    cache: &BacktestHistoryMetadataCache,
+    symbol: &str,
+    range: (i64, i64),
+) -> Result<Option<BacktestHistoryMetadataSnapshot>> {
+    let active = cache.load_active(symbol)?;
+    if active
+        .as_ref()
+        .is_some_and(|snapshot| metadata_snapshot_covers_range(snapshot, range))
+    {
+        return Ok(active);
+    }
+    for snapshot in cache.load_snapshots(symbol)? {
+        if !metadata_snapshot_covers_range(&snapshot, range) {
+            continue;
+        }
+        if active.as_ref().is_some_and(|current| {
+            snapshot.schema_version != current.schema_version
+                || snapshot.market_kind != current.market_kind
+                || snapshot.session.snapshot_hash() != current.session.snapshot_hash()
+        }) {
+            continue;
+        }
+        return Ok(Some(snapshot));
+    }
+    Ok(None)
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn canonical_minute_metadata_range(start_ns: i64, end_ns: i64) -> Result<(i64, i64)> {
+    let start_month = trading_month_for_timestamp_ns(start_ns)?;
+    let end_timestamp_ns = end_ns
+        .checked_sub(1)
+        .ok_or_else(|| DataError::Validation("metadata refresh range end underflow".to_string()))?;
+    let end_month = trading_month_for_timestamp_ns(end_timestamp_ns)?;
+    let start = trading_month_start_date(start_month.as_str())?;
+    let end = next_trading_month_start_date(end_month.as_str())?;
+    Ok((
+        cst_datetime_ns(start, 18, 0, 0)?,
+        cst_datetime_ns(end, 18, 0, 0)?,
+    ))
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn trading_month_start_date(month: &str) -> Result<NaiveDate> {
+    if month.len() != 6 || !month.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(DataError::Validation(format!(
+            "invalid canonical-minute trading month {month}"
+        )));
+    }
+    let year = month[..4].parse::<i32>().map_err(|error| {
+        DataError::Validation(format!(
+            "invalid canonical-minute trading month year: {error}"
+        ))
+    })?;
+    let month_number = month[4..].parse::<u32>().map_err(|error| {
+        DataError::Validation(format!(
+            "invalid canonical-minute trading month number: {error}"
+        ))
+    })?;
+    NaiveDate::from_ymd_opt(year, month_number, 1).ok_or_else(|| {
+        DataError::Validation(format!("invalid canonical-minute trading month {month}"))
+    })
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn next_trading_month_start_date(month: &str) -> Result<NaiveDate> {
+    let start = trading_month_start_date(month)?;
+    let (year, month_number) = if start.month() == 12 {
+        (
+            start.year().checked_add(1).ok_or_else(|| {
+                DataError::Validation("canonical-minute trading month year overflow".to_string())
+            })?,
+            1,
+        )
+    } else {
+        (start.year(), start.month() + 1)
+    };
+    NaiveDate::from_ymd_opt(year, month_number, 1).ok_or_else(|| {
+        DataError::Validation("canonical-minute trading month is out of range".to_string())
+    })
 }
 
 #[cfg(all(feature = "live", feature = "services"))]
@@ -507,7 +680,7 @@ async fn refresh_metadata_from_official(
         physical_segments,
         snapshot_hash: String::new(),
     };
-    cache.store_snapshot(snapshot)
+    cache.store_snapshot_for_remote_miss(snapshot)
 }
 
 /// Metadata direct-query helpers travel over the stock market websocket when
@@ -1412,6 +1585,115 @@ fn metadata_response_error(reason: impl AsRef<str>) -> DataError {
     DataError::InvalidResponse(format!("backtest history metadata: {}", reason.as_ref()))
 }
 
+#[cfg(test)]
+mod snapshot_store_tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn remote_miss_snapshot_does_not_narrow_a_broader_active_snapshot() {
+        let root = test_root("metadata-retain-broad-active");
+        let cache = BacktestHistoryMetadataCache::open(&root).unwrap();
+        let broad = cache.store_snapshot(snapshot(1_000, 10_000, 1)).unwrap();
+        let narrow = cache
+            .store_snapshot_for_remote_miss(snapshot(4_000, 5_000, 2))
+            .unwrap();
+
+        assert_ne!(broad.snapshot_hash, narrow.snapshot_hash);
+        assert_eq!(
+            cache
+                .load_active("KQ.m@SHFE.au")
+                .unwrap()
+                .unwrap()
+                .snapshot_hash,
+            broad.snapshot_hash
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remote_miss_snapshot_promotes_a_broader_snapshot_over_a_narrow_active_snapshot() {
+        let root = test_root("metadata-promote-broad-active");
+        let cache = BacktestHistoryMetadataCache::open(&root).unwrap();
+        let narrow = cache.store_snapshot(snapshot(4_000, 5_000, 1)).unwrap();
+        let broad = cache
+            .store_snapshot_for_remote_miss(snapshot(1_000, 10_000, 2))
+            .unwrap();
+
+        assert_ne!(narrow.snapshot_hash, broad.snapshot_hash);
+        assert_eq!(
+            cache
+                .load_active("KQ.m@SHFE.au")
+                .unwrap()
+                .unwrap()
+                .snapshot_hash,
+            broad.snapshot_hash
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remote_miss_reuses_a_retained_snapshot_when_the_active_snapshot_is_elsewhere() {
+        let root = test_root("metadata-reuse-retained-range");
+        let cache = BacktestHistoryMetadataCache::open(&root).unwrap();
+        let broad = cache.store_snapshot(snapshot(1_000, 10_000, 1)).unwrap();
+        let retained = cache
+            .store_snapshot_for_remote_miss(snapshot(20_000, 21_000, 2))
+            .unwrap();
+
+        assert_eq!(
+            cache
+                .load_active("KQ.m@SHFE.au")
+                .unwrap()
+                .unwrap()
+                .snapshot_hash,
+            broad.snapshot_hash
+        );
+        assert_eq!(
+            existing_snapshot_for_remote_range(&cache, "KQ.m@SHFE.au", (20_000, 21_000))
+                .unwrap()
+                .unwrap()
+                .snapshot_hash,
+            retained.snapshot_hash
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn test_root(label: &str) -> PathBuf {
+        let nonce = NEXT_TEST_ROOT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("tqsdk-data-{label}-{}-{nonce}", std::process::id()))
+    }
+
+    fn snapshot(
+        start_ns: i64,
+        end_ns: i64,
+        captured_at_ns: i64,
+    ) -> BacktestHistoryMetadataSnapshot {
+        BacktestHistoryMetadataSnapshot {
+            schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+            market_kind: BacktestHistoryMarketKind::Futures,
+            logical_symbol: "KQ.m@SHFE.au".to_string(),
+            captured_at_ns,
+            trading_days: vec![BacktestHistoryTradingDay {
+                date: "2026-01-05".to_string(),
+                is_trading_day: true,
+                start_ns,
+                end_ns,
+            }],
+            session: KlineSessionTemplate::cst_trading_day(),
+            physical_segments: vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: "SHFE.au2606".to_string(),
+                start_ns,
+                end_ns,
+            }],
+            snapshot_hash: String::new(),
+        }
+    }
+}
+
 #[cfg(all(test, feature = "live", feature = "services"))]
 mod tests {
     use super::*;
@@ -1640,6 +1922,20 @@ mod tests {
             DataError::InvalidResponse(message)
                 if message.contains("official continuous mapping does not cover")
         ));
+    }
+
+    #[test]
+    fn canonical_minute_metadata_range_expands_to_full_trading_months() {
+        let start_ns = cst_datetime_ns(date("2026-07-14"), 18, 0, 0).unwrap();
+        let end_ns = cst_datetime_ns(date("2026-07-27"), 18, 0, 0).unwrap();
+
+        assert_eq!(
+            canonical_minute_metadata_range(start_ns, end_ns).unwrap(),
+            (
+                cst_datetime_ns(date("2026-07-01"), 18, 0, 0).unwrap(),
+                cst_datetime_ns(date("2026-08-01"), 18, 0, 0).unwrap(),
+            )
+        );
     }
 
     fn calendar_row(date: &str, trading: bool) -> TradingCalendarRow {

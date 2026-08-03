@@ -227,6 +227,8 @@ tqsdk
   不得自动删除、重写或拼接缓存。唯一例外是 operator 显式传 `tqsdk-cache --kind minute fill
   --repair-stale`：active snapshot 覆盖窗口时，它仅删除与 active snapshot 冲突的整月分区，随后由同一次
   remote-on-miss fill 重建；这不是 reader 或普通 fill 的自动修复
+- remote-on-miss 的 canonical-minute metadata refresh 必须覆盖涉及的完整 CST trading month；更窄 snapshot
+  不得替换更宽 active pointer，兼容且覆盖请求的 retained snapshot 可供后续 miss 复用
 
 设计原因：
 

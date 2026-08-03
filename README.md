@@ -190,6 +190,8 @@ tick 与 60s minute 分区均没有自动 retention、max-byte eviction 或后�
 主连 symbol 并附带 `underlying_symbol`。minute cache 则以逻辑主连 symbol 为 key，不复制 physical
 minute 文件；主连支持 canonical 60s 和整数分钟本地聚合。`RemoteOnMiss` 只在 sidecar 缺失或覆盖不足时
 刷新它；`.cache_only()` 必须已有可覆盖窗口的 sidecar，且不会访问 metadata service。
+minute 的 remote metadata refresh 会扩展到涉及的完整 CST trading month；更窄的新 snapshot 不会取代
+更宽的 active pointer，覆盖请求范围的 retained snapshot 会被复用，以避免同月增量查询产生不兼容 cache identity。
 
 需要从命令行导出同一份回测缓存时，使用可选 `tqsdk-cache query`：它只是
 `BacktestHistoryClient` 的 CLI adapter，可输出 lossless JSONL，或为模型上下文压缩的

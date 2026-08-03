@@ -89,9 +89,11 @@ range（包括合法的零行 range）才可标记 final coverage；当前或未
 因此 active pointer 后续移动不会单独使已完成分区失效。读取方可以选择保留的历史 snapshot，但必须同时
 证明它覆盖完整请求窗口、schema version 与 session identity 仍和 active snapshot 一致，并用它精确验证
 现存月文件。缺失保留 snapshot、session 变化、损坏文件或不能由同一个 snapshot 解释的混合分区仍 fail
-closed；该回退绝不自动 purge、重写或拼接数据。仅 operator 显式使用
-`tqsdk-cache --kind minute fill --repair-stale` 时，才会选择覆盖窗口且匹配最多月文件的 retained
-snapshot，删除其冲突的整月分区并由该次 remote fill 补齐；这不改变普通 reader 的 fail-closed 合同。
+closed；该回退绝不自动 purge、重写或拼接数据。remote-on-miss 的 metadata refresh 会扩展到涉及的完整
+CST trading month，并保留更宽的 active pointer；若 retained snapshot 覆盖请求且 schema/session 与 active
+兼容，可直接复用它，避免短查询把同一月变成不兼容 identity。仅 operator 显式使用
+`tqsdk-cache --kind minute fill --repair-stale` 时，才会在 active snapshot 覆盖窗口时删除其冲突的整月分区，
+再由该次 remote fill 补齐；这不改变普通 reader 的 fail-closed 合同。
 
 目录名继续保留 `minute-kline-v3`，但它承载的是 v4 文件身份。这是刻意的诊断兼容策略：
 旧 v3 文件不会被静默忽略、迁移或覆盖；读取/coverage 会 fail closed，`diagnose()` 将其报告为

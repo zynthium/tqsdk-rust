@@ -238,6 +238,8 @@ partition、snapshot hash fail-closed、current-day final-coverage guard、strea
 而不是固定 CST 默认值；缺失保留 snapshot、session 变化、损坏或混合分区仍必须 fail closed。
 显式 `fill --repair-stale` 仅在 active snapshot 覆盖完整窗口时，才 purge 与它冲突的整月分区；tick 与
 `--dry-run` 必须拒绝该 destructive flag。
+metadata tests 还覆盖 remote-on-miss 的短 snapshot 不会降级更宽 active pointer、更宽 snapshot 会升级 active
+pointer、以及 partial range 的 metadata refresh 扩展到完整 CST trading month。
 `minute_kline_aggregate` 和 `history_backtest_replay` 覆盖 60s open/final、`N × 60s` 固定 CST `18:00`
 trading-day grid 聚合（盘中 break 不重置 bucket）、same-timestamp batch、以及主连 minute cache 保持 logical key 而 replay 保留 dated
 `underlying_symbol`。`tqsdk-cache` tests 还覆盖 minute/tick/all kind routing、minute logical-symbol
