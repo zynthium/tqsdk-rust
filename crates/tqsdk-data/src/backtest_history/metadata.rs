@@ -457,8 +457,11 @@ pub fn resolve_minute_cache_metadata_snapshot(
     Err(active_error)
 }
 
-/// Plans an explicit repair for monthly partitions that conflict with the
-/// active metadata snapshot a subsequent remote fill will write.
+/// Plans an explicit repair for stale monthly partitions before a subsequent
+/// remote fill. When a persisted snapshot covers the whole requested range,
+/// only partitions that conflict with that snapshot are selected. When none
+/// does, every present partition is selected because the remote metadata
+/// refresh will establish a new authoritative snapshot.
 ///
 /// This never writes or removes cache data. Callers must keep the ordinary
 /// fail-closed reader as the default and invoke a destructive purge only after
@@ -476,23 +479,26 @@ pub fn plan_minute_cache_stale_partition_repair(
             "minute cache stale repair requires start_ns < end_ns".to_string(),
         ));
     }
-    let metadata_cache = BacktestHistoryMetadataCache::open_read_only(cache_dir);
-    let Some(active) = metadata_cache.load_active(logical_symbol)? else {
+    let Some(active) =
+        resolve_backtest_metadata_snapshot(cache_dir, logical_symbol, start_ns, end_ns)?
+    else {
         return Ok(None);
     };
-    if !active.covers_range((start_ns, end_ns)) {
-        return Ok(None);
-    }
     let minute_cache = MinuteKlineCache::open_read_only(cache_dir);
     let snapshot = minute_cache_snapshot_from_metadata(&active)?;
     let compatibility =
         minute_cache.snapshot_compatibility(logical_symbol, start_ns, end_ns, &snapshot)?;
-    if compatibility.mismatched_ranges.is_empty() {
+    let stale_ranges = if active.covers_range((start_ns, end_ns)) {
+        compatibility.mismatched_ranges
+    } else {
+        compatibility.present_ranges
+    };
+    if stale_ranges.is_empty() {
         return Ok(None);
     }
     Ok(Some(MinuteCacheStalePartitionRepairPlan {
         snapshot_hash: active.snapshot_hash,
-        stale_ranges: compatibility.mismatched_ranges,
+        stale_ranges,
     }))
 }
 
@@ -1616,6 +1622,9 @@ fn metadata_response_error(reason: impl AsRef<str>) -> DataError {
 mod snapshot_store_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use chrono::{TimeZone, Utc};
+    use tqsdk_core::Kline;
+
     use super::*;
 
     static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(1);
@@ -1708,6 +1717,87 @@ mod snapshot_store_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn stale_repair_rebuilds_present_months_when_no_snapshot_covers_the_full_range() {
+        let root = test_root("metadata-minute-repair-refresh-range");
+        let cache = BacktestHistoryMetadataCache::open(&root).unwrap();
+        let january_start = utc_ns(2020, 1, 6, 1, 0);
+        let february_start = utc_ns(2020, 2, 3, 1, 0);
+        let minute_ns = 60 * 1_000_000_000;
+        let january_end = february_start;
+        let february_end = february_start + minute_ns;
+
+        let broad = cache
+            .store_snapshot(snapshot(january_start, january_end, 1))
+            .unwrap();
+        let narrow = cache
+            .store_snapshot_for_remote_miss(snapshot(february_start, february_end, 2))
+            .unwrap();
+        assert_eq!(
+            cache
+                .load_active("KQ.m@SHFE.au")
+                .unwrap()
+                .unwrap()
+                .snapshot_hash,
+            broad.snapshot_hash
+        );
+
+        let broad_snapshot = minute_cache_snapshot_from_metadata(&broad).unwrap();
+        let narrow_snapshot = minute_cache_snapshot_from_metadata(&narrow).unwrap();
+        let minute_cache = MinuteKlineCache::open(&root).unwrap();
+        minute_cache
+            .store_final_range(
+                "KQ.m@SHFE.au",
+                january_start,
+                january_start + minute_ns,
+                &broad_snapshot,
+                &[Kline {
+                    id: 1,
+                    datetime: january_start,
+                    ..Kline::default()
+                }],
+            )
+            .unwrap();
+        minute_cache
+            .store_final_range(
+                "KQ.m@SHFE.au",
+                february_start,
+                february_end,
+                &narrow_snapshot,
+                &[Kline {
+                    id: 2,
+                    datetime: february_start,
+                    ..Kline::default()
+                }],
+            )
+            .unwrap();
+
+        let repair = plan_minute_cache_stale_partition_repair(
+            &root,
+            "KQ.m@SHFE.au",
+            january_start,
+            february_end,
+        )
+        .unwrap()
+        .expect("an uncovered range must rebuild every present month");
+        assert_eq!(repair.snapshot_hash, broad.snapshot_hash);
+        assert_eq!(repair.stale_ranges.len(), 2);
+        assert!(
+            repair
+                .stale_ranges
+                .iter()
+                .any(|range| range.0 <= january_start && range.1 > january_start)
+        );
+        assert!(
+            repair
+                .stale_ranges
+                .iter()
+                .any(|range| range.0 <= february_start && range.1 > february_start)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn test_root(label: &str) -> PathBuf {
         let nonce = NEXT_TEST_ROOT.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("tqsdk-data-{label}-{}-{nonce}", std::process::id()))
@@ -1737,6 +1827,14 @@ mod snapshot_store_tests {
             }],
             snapshot_hash: String::new(),
         }
+    }
+
+    fn utc_ns(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
+        Utc.with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap()
     }
 }
 

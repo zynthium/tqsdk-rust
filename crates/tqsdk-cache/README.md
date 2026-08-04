@@ -32,8 +32,9 @@ minute 的 format id 为 `tqsdk.minute-kline.monthly.v4`，但 namespace 有意�
 使已有分区失效：`inspect`、`fill --dry-run` 和 `verify` 只会在一个保留 snapshot 覆盖整个窗口、
 schema/session identity 与 active 相同并能精确验证现有月文件时使用它。不能满足这些条件的旧、损坏或
 混合分区仍默认 fail closed；CLI 不会为此自动删除、重写或重新下载数据。只有操作者显式传
-`--kind minute fill --repair-stale` 时，CLI 才会在 active snapshot 覆盖窗口时，删除与它冲突的整月分区后
-再走普通 remote-on-miss 补齐；该 flag 不支持 tick 或 `--dry-run`。
+`--kind minute fill --repair-stale` 时，CLI 才会删除与覆盖窗口快照冲突的整月分区后再走普通
+remote-on-miss 补齐；若没有任何已持久化 snapshot 覆盖整个请求窗口，则该 flag 会删除窗口内所有已存在的
+minute 月分区，让官方 metadata refresh 建立唯一的目标 snapshot。该 flag 不支持 tick 或 `--dry-run`。
 remote-on-miss metadata 会覆盖涉及的完整 CST trading month；短查询生成的 snapshot 不会替换更宽的 active
 pointer，后续查询会优先复用覆盖其范围的 retained snapshot。
 

@@ -163,6 +163,14 @@ impl MinuteKlineCacheStatus {
 /// fail-closed read path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MinuteKlineCacheSnapshotCompatibility {
+    /// Every existing monthly partition intersecting the inspected range.
+    ///
+    /// Callers use this only for explicit operator repair when no currently
+    /// persisted metadata snapshot can cover the entire requested range. In
+    /// that state, a forthcoming remote metadata refresh determines the
+    /// authoritative snapshot, so even a partition matching the old active
+    /// snapshot cannot safely be retained.
+    pub(crate) present_ranges: Vec<(i64, i64)>,
     pub(crate) mismatched_ranges: Vec<(i64, i64)>,
 }
 
@@ -480,6 +488,7 @@ impl MinuteKlineCache {
         validate_range(symbol, range_start_ns, range_end_ns)?;
         snapshot.validate()?;
 
+        let mut present_ranges = Vec::new();
         let mut mismatched_ranges = Vec::new();
         for slice in split_trading_month_range(range_start_ns, range_end_ns)? {
             let path = self.month_file_path_unchecked(symbol, slice.trading_month.as_str());
@@ -489,14 +498,21 @@ impl MinuteKlineCache {
                 slice.trading_month.as_str(),
                 snapshot,
             ) {
-                Ok(Some(_)) | Ok(None) => {}
+                Ok(Some(_)) => {
+                    present_ranges.push((slice.start_ns, slice.end_ns));
+                }
+                Ok(None) => {}
                 Err(error) if is_snapshot_mismatch(&error) => {
+                    present_ranges.push((slice.start_ns, slice.end_ns));
                     mismatched_ranges.push((slice.start_ns, slice.end_ns));
                 }
                 Err(error) => return Err(error),
             }
         }
-        Ok(MinuteKlineCacheSnapshotCompatibility { mismatched_ranges })
+        Ok(MinuteKlineCacheSnapshotCompatibility {
+            present_ranges,
+            mismatched_ranges,
+        })
     }
 
     /// Store a server-confirmed final 60-second range.
