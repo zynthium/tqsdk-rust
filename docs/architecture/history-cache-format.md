@@ -55,6 +55,28 @@ symbol 的全部 tick 日分区 append-log；默认远端回测补缓存成功�
 后续如果 TQBN 的内部 record layout 需要演进，应先保持这些 public facade 不变；只有当
 用户可见语义改变时，才同步调整 public API 文档和 contract examples。
 
+## CLI 原始节假日日历 sidecar
+
+`tqsdk-cache fill` 的 closed-day 选择和进度可使用一个独立的、非行情数据 sidecar。它不改变
+TQBN / `.tqmk` 的 coverage、session 或 finality 合同，且 coverage 仍是数据完整性的唯一权威。
+sidecar 复用 `tqsdk-data::DataClient::query_trading_calendar_holidays()` 的 credential-free Shinny
+holiday source，按 cache root 持久化为：
+
+```text
+meta/trading-calendar-holidays-v1/
+  active.json
+  snapshots/<content-hash>.json
+```
+
+snapshot 包含 schema version、source URL、`fetched_at`、排序去重后的 raw holiday dates、content hash
+和支持年份；文件按 content hash 创建后不再覆盖。`active.json` 是原子更新的 pointer，允许相同内容的
+forced refresh 只推进 pointer，而不重写历史 snapshot。reader 必须验证 pointer、snapshot hash 和
+排序/年份一致性，任一缺失或损坏都不能作为 `--last-trading-days` 的 weekday fallback。
+
+早期 `meta/trading-calendar-v1.json` 的 daily expansion 是 legacy sidecar：它不会自动删除、迁移或
+覆盖，但新的 closed-day resolver 不读取它。report 只输出新 snapshot 的 source URL、fetch 时间、hash、
+支持年份和 holiday count，不输出完整 raw list。
+
 ## Backtest Canonical-minute v4
 
 本地 facade 回测不再把任意周期的 K 线写入 TQBN history-series cache。它使用独立的

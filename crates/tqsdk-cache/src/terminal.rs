@@ -153,11 +153,49 @@ fn write_fill(output: &mut impl Write, value: &Value) -> io::Result<()> {
         number(report, "rows_written"),
     )?;
     if let Some(calendar) = report.get("calendar") {
+        let source = string(calendar, "source").unwrap_or("-");
+        let source = match source {
+            "local" => "local holidays",
+            "remote" => "remote holidays",
+            other => other,
+        };
+        let persistence = if calendar
+            .get("persisted")
+            .and_then(Value::as_bool)
+            .is_some_and(|persisted| !persisted)
+        {
+            ", not persisted"
+        } else {
+            ""
+        };
+        let years = calendar
+            .get("snapshot")
+            .and_then(|snapshot| {
+                Some((
+                    snapshot.get("supported_year_start")?.as_i64()?,
+                    snapshot.get("supported_year_end")?.as_i64()?,
+                ))
+            })
+            .map(|(start, end)| format!(", years {start}\u{2013}{end}"))
+            .unwrap_or_default();
+        let candidate_hash = if persistence.is_empty() {
+            String::new()
+        } else {
+            calendar
+                .get("snapshot")
+                .and_then(|snapshot| snapshot.get("content_hash"))
+                .and_then(Value::as_str)
+                .map(|hash| format!(", candidate {hash}"))
+                .unwrap_or_default()
+        };
         writeln!(
             output,
-            "Calendar: {} ({})",
+            "Calendar: {} ({}{}{}{})",
             string(calendar, "mode").unwrap_or("-"),
-            string(calendar, "source").unwrap_or("-"),
+            source,
+            persistence,
+            years,
+            candidate_hash,
         )?;
     }
     if let Some(path) = string(value, "report_path") {
@@ -622,6 +660,40 @@ mod tests {
             "KQ.i@CFFEX.IC: already cached | final coverage complete | 0 rows downloaded"
         ));
         assert!(!output.contains("day coverage unavailable"));
+    }
+
+    #[test]
+    fn fill_summary_describes_local_holiday_calendar_and_dry_run_candidate() {
+        let value = json!({
+            "command": "fill",
+            "cache_dir": "/tmp/cache",
+            "dry_run": true,
+            "report": {
+                "requested_days": { "start_day": "2026-07-20", "end_day": "2026-07-21" },
+                "complete": true,
+                "remote_used": false,
+                "rows_written": 0,
+                "calendar": {
+                    "mode": "auto",
+                    "source": "remote",
+                    "persisted": false,
+                    "snapshot": {
+                        "supported_year_start": 2003,
+                        "supported_year_end": 2026,
+                        "content_hash": "0123456789012345678901234567890123456789"
+                    }
+                },
+                "physical_symbols": [],
+            },
+        });
+        let mut output = Vec::new();
+
+        write_result(&mut output, &value, "success", 0, 12).unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains(
+            "Calendar: auto (remote holidays, not persisted, years 2003–2026, candidate 0123456789012345678901234567890123456789)"
+        ));
     }
 
     #[test]

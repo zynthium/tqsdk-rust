@@ -4,12 +4,12 @@ use std::process::Command;
 use chrono::{NaiveDate, TimeZone, Utc};
 use serde_json::Value;
 use tqsdk::advanced::core::{Kline, Tick};
-use tqsdk_cache::{TradingCalendarSnapshot, write_trading_calendar_snapshot};
+use tqsdk_cache::{TradingCalendarHolidaysSnapshot, write_trading_calendar_holidays_snapshot};
 use tqsdk_data::{
     BACKTEST_HISTORY_METADATA_SCHEMA_VERSION, BacktestHistoryMarketKind,
     BacktestHistoryMetadataCache, BacktestHistoryMetadataSnapshot, BacktestHistoryPhysicalSegment,
     BacktestHistoryTradingDay, BacktestTickCache, KlineSessionTemplate, MinuteKlineCache,
-    MinuteKlineCacheSnapshot, TradingCalendarRow, backtest_tick_trading_day_for_timestamp_ns,
+    MinuteKlineCacheSnapshot, TradingCalendarHolidays, backtest_tick_trading_day_for_timestamp_ns,
     backtest_tick_trading_day_range,
 };
 
@@ -743,26 +743,12 @@ fn minute_fill_progress_uses_the_resolved_trading_calendar() {
             &[],
         )
         .unwrap();
-    let calendar = TradingCalendarSnapshot::from_rows(vec![
-        TradingCalendarRow {
-            date: "2026-07-17".to_string(),
-            trading: true,
-        },
-        TradingCalendarRow {
-            date: "2026-07-18".to_string(),
-            trading: false,
-        },
-        TradingCalendarRow {
-            date: "2026-07-19".to_string(),
-            trading: false,
-        },
-        TradingCalendarRow {
-            date: "2026-07-20".to_string(),
-            trading: true,
-        },
-    ])
+    let calendar = TradingCalendarHolidaysSnapshot::from_holidays(
+        TradingCalendarHolidays::new("https://example.invalid/holidays.json", [day(2026, 1, 1)])
+            .unwrap(),
+    )
     .unwrap();
-    write_trading_calendar_snapshot(&cache_dir, &calendar).unwrap();
+    write_trading_calendar_holidays_snapshot(&cache_dir, &calendar).unwrap();
 
     let output = run_without_auth_json([
         "--cache-dir",

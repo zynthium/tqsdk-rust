@@ -2,26 +2,28 @@
 //!
 //! The crate intentionally manages only the canonical daily TQBN tick cache.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
+use sha1::{Digest, Sha1};
 use tqsdk::{
     BacktestCacheWarmupAction, BacktestCacheWarmupReport,
     BacktestMinuteKlineCacheWarmupSymbolReport, BacktestRemoteFillConfig, BacktestTickCacheStatus,
 };
 use tqsdk_data::{
-    BacktestTickCache, DataError, MinuteKlineCacheStatus, TradingCalendarRow,
-    backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
-    default_history_cache_dir,
+    BacktestTickCache, DataError, MinuteKlineCacheStatus, TradingCalendarHolidays,
+    TradingCalendarRow, backtest_tick_trading_day_for_timestamp_ns,
+    backtest_tick_trading_day_range, default_history_cache_dir,
 };
 
 pub const REPORT_SCHEMA_VERSION: u32 = 2;
 pub const MINUTE_FILL_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const TRADING_CALENDAR_SCHEMA_VERSION: u32 = 1;
+pub const TRADING_CALENDAR_HOLIDAYS_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TradingDayWindow {
@@ -281,6 +283,314 @@ pub fn write_trading_calendar_snapshot(
     Ok(path)
 }
 
+/// Immutable compact snapshot of the raw holiday data used for calendar
+/// planning.  It deliberately stores holidays instead of a finite daily
+/// expansion, so any range inside its supported years can be derived locally.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradingCalendarHolidaysSnapshot {
+    pub schema_version: u32,
+    pub source_url: String,
+    pub fetched_at: String,
+    pub content_hash: String,
+    pub supported_year_start: i32,
+    pub supported_year_end: i32,
+    pub holidays: Vec<String>,
+}
+
+impl TradingCalendarHolidaysSnapshot {
+    /// Create an immutable snapshot from a normalized raw `tqsdk-data` value.
+    pub fn from_holidays(holidays: TradingCalendarHolidays) -> Result<Self, DataError> {
+        holidays.validate()?;
+        let source_url = holidays.source_url;
+        let holiday_dates = holidays.holidays;
+        let supported_year_start = holiday_dates
+            .first()
+            .expect("validated holiday set must not be empty")
+            .year();
+        let supported_year_end = holiday_dates
+            .last()
+            .expect("validated holiday set must not be empty")
+            .year();
+        let holidays = holiday_dates
+            .into_iter()
+            .map(|date| date.format("%Y-%m-%d").to_string())
+            .collect::<Vec<_>>();
+        let snapshot = Self {
+            schema_version: TRADING_CALENDAR_HOLIDAYS_SCHEMA_VERSION,
+            source_url,
+            fetched_at: Utc::now().to_rfc3339(),
+            content_hash: calendar_holidays_content_hash(&holidays),
+            supported_year_start,
+            supported_year_end,
+            holidays,
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
+    /// Return whether this raw snapshot supports deriving the full date range.
+    pub fn covers(&self, start_day: NaiveDate, end_day: NaiveDate) -> Result<bool, DataError> {
+        self.validate()?;
+        Ok(start_day <= end_day
+            && self.supported_year_start <= start_day.year()
+            && end_day.year() <= self.supported_year_end)
+    }
+
+    /// Derive all weekday, non-holiday trading days in an inclusive range.
+    pub fn trading_days_between(
+        &self,
+        start_day: NaiveDate,
+        end_day: NaiveDate,
+    ) -> Result<Vec<NaiveDate>, DataError> {
+        if !self.covers(start_day, end_day)? {
+            return Err(DataError::Validation(format!(
+                "trading calendar holidays support years {} to {}, not {} to {}",
+                self.supported_year_start,
+                self.supported_year_end,
+                start_day.format("%Y-%m-%d"),
+                end_day.format("%Y-%m-%d")
+            )));
+        }
+        let holidays = self
+            .holidays
+            .iter()
+            .map(|date| parse_calendar_date(date))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut days = Vec::new();
+        let mut day = start_day;
+        while day <= end_day {
+            if day.weekday().number_from_monday() <= 5 && holidays.binary_search(&day).is_err() {
+                days.push(day);
+            }
+            day = day.succ_opt().ok_or_else(|| {
+                DataError::Validation("trading calendar date overflow".to_string())
+            })?;
+        }
+        Ok(days)
+    }
+
+    pub fn validate(&self) -> Result<(), DataError> {
+        if self.schema_version != TRADING_CALENDAR_HOLIDAYS_SCHEMA_VERSION {
+            return Err(DataError::Validation(format!(
+                "unsupported trading calendar holidays schema {}; expected {TRADING_CALENDAR_HOLIDAYS_SCHEMA_VERSION}",
+                self.schema_version
+            )));
+        }
+        if self.source_url.trim().is_empty() {
+            return Err(DataError::Validation(
+                "trading calendar holiday snapshot source URL must not be empty".to_string(),
+            ));
+        }
+        if self.fetched_at.trim().is_empty() {
+            return Err(DataError::Validation(
+                "trading calendar holiday snapshot fetched_at must not be empty".to_string(),
+            ));
+        }
+        if DateTime::parse_from_rfc3339(&self.fetched_at).is_err() {
+            return Err(DataError::Validation(
+                "trading calendar holiday snapshot fetched_at must be RFC 3339".to_string(),
+            ));
+        }
+        if self.holidays.is_empty() {
+            return Err(DataError::Validation(
+                "trading calendar holiday snapshot contains no holidays".to_string(),
+            ));
+        }
+        let dates = self
+            .holidays
+            .iter()
+            .map(|date| parse_calendar_date(date))
+            .collect::<Result<Vec<_>, _>>()?;
+        if dates.windows(2).any(|dates| dates[0] >= dates[1]) {
+            return Err(DataError::Validation(
+                "trading calendar holiday snapshot dates must be strictly ordered".to_string(),
+            ));
+        }
+        let first_year = dates
+            .first()
+            .expect("non-empty validated holiday snapshot")
+            .year();
+        let last_year = dates
+            .last()
+            .expect("non-empty validated holiday snapshot")
+            .year();
+        if (self.supported_year_start, self.supported_year_end) != (first_year, last_year) {
+            return Err(DataError::Validation(
+                "trading calendar holiday snapshot supported years do not match its dates"
+                    .to_string(),
+            ));
+        }
+        if self.content_hash != calendar_holidays_content_hash(&self.holidays) {
+            return Err(DataError::Validation(
+                "trading calendar holiday snapshot content hash does not match its dates"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn metadata(&self) -> TradingCalendarHolidaysSnapshotMetadata {
+        TradingCalendarHolidaysSnapshotMetadata {
+            schema_version: self.schema_version,
+            source_url: self.source_url.clone(),
+            fetched_at: self.fetched_at.clone(),
+            content_hash: self.content_hash.clone(),
+            supported_year_start: self.supported_year_start,
+            supported_year_end: self.supported_year_end,
+            holidays: self.holidays.len(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradingCalendarHolidaysSnapshotMetadata {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub source_url: String,
+    #[serde(default)]
+    pub fetched_at: String,
+    #[serde(default)]
+    pub content_hash: String,
+    #[serde(default)]
+    pub supported_year_start: i32,
+    #[serde(default)]
+    pub supported_year_end: i32,
+    #[serde(default)]
+    pub holidays: usize,
+}
+
+/// Active pointer for the immutable raw-holiday snapshot set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradingCalendarHolidaysActivePointer {
+    pub schema_version: u32,
+    pub content_hash: String,
+    pub activated_at: String,
+}
+
+impl TradingCalendarHolidaysActivePointer {
+    fn validate(&self) -> Result<(), DataError> {
+        if self.schema_version != TRADING_CALENDAR_HOLIDAYS_SCHEMA_VERSION {
+            return Err(DataError::Validation(format!(
+                "unsupported trading calendar holiday pointer schema {}; expected {TRADING_CALENDAR_HOLIDAYS_SCHEMA_VERSION}",
+                self.schema_version
+            )));
+        }
+        if !is_sha1_hex(&self.content_hash) {
+            return Err(DataError::Validation(
+                "trading calendar holiday pointer has an invalid content hash".to_string(),
+            ));
+        }
+        if self.activated_at.trim().is_empty() {
+            return Err(DataError::Validation(
+                "trading calendar holiday pointer activated_at must not be empty".to_string(),
+            ));
+        }
+        if DateTime::parse_from_rfc3339(&self.activated_at).is_err() {
+            return Err(DataError::Validation(
+                "trading calendar holiday pointer activated_at must be RFC 3339".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Directory containing the active pointer and immutable raw-holiday snapshots.
+pub fn trading_calendar_holidays_dir(cache_dir: &Path) -> PathBuf {
+    cache_dir.join("meta").join("trading-calendar-holidays-v1")
+}
+
+pub fn trading_calendar_holidays_active_path(cache_dir: &Path) -> PathBuf {
+    trading_calendar_holidays_dir(cache_dir).join("active.json")
+}
+
+pub fn trading_calendar_holidays_snapshot_path(cache_dir: &Path, content_hash: &str) -> PathBuf {
+    trading_calendar_holidays_dir(cache_dir)
+        .join("snapshots")
+        .join(format!("{content_hash}.json"))
+}
+
+/// Read the active immutable raw-holiday snapshot, if one has been activated.
+pub fn read_trading_calendar_holidays_snapshot(
+    cache_dir: &Path,
+) -> Result<Option<TradingCalendarHolidaysSnapshot>, DataError> {
+    let active_path = trading_calendar_holidays_active_path(cache_dir);
+    let file = match File::open(active_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let pointer: TradingCalendarHolidaysActivePointer =
+        serde_json::from_reader(BufReader::new(file))
+            .map_err(|error| DataError::InvalidResponse(error.to_string()))?;
+    pointer.validate()?;
+    let snapshot_path = trading_calendar_holidays_snapshot_path(cache_dir, &pointer.content_hash);
+    let file = File::open(&snapshot_path).map_err(|error| {
+        DataError::InvalidResponse(format!(
+            "trading calendar holiday pointer references unavailable snapshot {}: {error}",
+            snapshot_path.display()
+        ))
+    })?;
+    let snapshot: TradingCalendarHolidaysSnapshot =
+        serde_json::from_reader(BufReader::new(file))
+            .map_err(|error| DataError::InvalidResponse(error.to_string()))?;
+    snapshot.validate()?;
+    if snapshot.content_hash != pointer.content_hash {
+        return Err(DataError::Validation(
+            "trading calendar holiday pointer does not match its snapshot".to_string(),
+        ));
+    }
+    Ok(Some(snapshot))
+}
+
+/// Persist an immutable raw-holiday snapshot and atomically move the active pointer.
+///
+/// Existing content-addressed snapshots are never replaced.  Re-activating an
+/// unchanged payload only updates `active.json`.
+pub fn write_trading_calendar_holidays_snapshot(
+    cache_dir: &Path,
+    snapshot: &TradingCalendarHolidaysSnapshot,
+) -> Result<PathBuf, DataError> {
+    snapshot.validate()?;
+    let snapshot_path = trading_calendar_holidays_snapshot_path(cache_dir, &snapshot.content_hash);
+    write_json_immutably(&snapshot_path, snapshot)?;
+    let existing_file = File::open(&snapshot_path)?;
+    let existing: TradingCalendarHolidaysSnapshot =
+        serde_json::from_reader(BufReader::new(existing_file))
+            .map_err(|error| DataError::InvalidResponse(error.to_string()))?;
+    existing.validate()?;
+    if existing.content_hash != snapshot.content_hash
+        || existing.source_url != snapshot.source_url
+        || existing.holidays != snapshot.holidays
+    {
+        return Err(DataError::Validation(
+            "existing trading calendar holiday snapshot conflicts with its content hash"
+                .to_string(),
+        ));
+    }
+    let pointer = TradingCalendarHolidaysActivePointer {
+        schema_version: TRADING_CALENDAR_HOLIDAYS_SCHEMA_VERSION,
+        content_hash: snapshot.content_hash.clone(),
+        activated_at: Utc::now().to_rfc3339(),
+    };
+    pointer.validate()?;
+    write_json_atomically(&trading_calendar_holidays_active_path(cache_dir), &pointer)?;
+    Ok(snapshot_path)
+}
+
+fn calendar_holidays_content_hash(holidays: &[String]) -> String {
+    let mut hasher = Sha1::new();
+    for holiday in holidays {
+        hasher.update(holiday.as_bytes());
+        hasher.update(b"\n");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn is_sha1_hex(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheCoverageSnapshot {
     pub series_path: String,
@@ -335,7 +645,10 @@ pub struct FillSelectorReport {
 pub struct FillReportCalendar {
     pub mode: String,
     pub source: String,
-    pub snapshot: Option<TradingCalendarSnapshotMetadata>,
+    /// Whether the selected raw calendar snapshot is durable in this cache root.
+    #[serde(default)]
+    pub persisted: bool,
+    pub snapshot: Option<TradingCalendarHolidaysSnapshotMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -589,6 +902,8 @@ pub struct MinuteFillReport {
     pub requested_range: (i64, i64),
     #[serde(default)]
     pub selector: FillSelectorReport,
+    #[serde(default)]
+    pub calendar: Option<FillReportCalendar>,
     pub market: String,
     pub logical_symbols: Vec<String>,
     pub symbols: Vec<MinuteFillReportSymbol>,
@@ -620,6 +935,7 @@ impl MinuteFillReport {
             requested_range: warmup.requested_range,
             requested_days,
             selector: FillSelectorReport::default(),
+            calendar: None,
             market: market.into(),
             logical_symbols: warmup.logical_symbols.clone(),
             symbols,
@@ -633,6 +949,12 @@ impl MinuteFillReport {
     #[must_use]
     pub fn with_selector(mut self, selector: FillSelectorReport) -> Self {
         self.selector = selector;
+        self
+    }
+
+    #[must_use]
+    pub fn with_calendar(mut self, calendar: FillReportCalendar) -> Self {
+        self.calendar = Some(calendar);
         self
     }
 
@@ -795,6 +1117,31 @@ fn parse_calendar_date(value: &str) -> Result<NaiveDate, DataError> {
     })
 }
 
+fn write_json_immutably<T: Serialize>(path: &Path, value: &T) -> Result<(), DataError> {
+    let parent = path.parent().ok_or_else(|| {
+        DataError::Validation("JSON output path must have a parent directory".to_string())
+    })?;
+    fs::create_dir_all(parent)?;
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|error| DataError::InvalidResponse(error.to_string()))?;
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let write_result = (|| -> Result<(), DataError> {
+        file.write_all(&bytes)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        drop(file);
+        let _ = fs::remove_file(path);
+    }
+    write_result
+}
+
 fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> Result<(), DataError> {
     let parent = path.parent().ok_or_else(|| {
         DataError::Validation("JSON output path must have a parent directory".to_string())
@@ -847,10 +1194,11 @@ mod tests {
     use super::{
         CacheCoverageSnapshot, FillConfigReport, FillReport, FillReportSymbol,
         FillReportSymbolDayStats, FillSelectorReport, REPORT_SCHEMA_VERSION,
-        TradingCalendarSnapshot, TradingDayWindow, read_fill_report,
-        read_trading_calendar_snapshot, write_trading_calendar_snapshot,
+        TradingCalendarHolidaysSnapshot, TradingCalendarSnapshot, TradingDayWindow,
+        read_fill_report, read_trading_calendar_holidays_snapshot, read_trading_calendar_snapshot,
+        write_trading_calendar_holidays_snapshot, write_trading_calendar_snapshot,
     };
-    use tqsdk_data::TradingCalendarRow;
+    use tqsdk_data::{TradingCalendarHolidays, TradingCalendarRow};
 
     #[test]
     fn trading_day_window_normalizes_weekend_and_keeps_evening_boundary() {
@@ -932,6 +1280,64 @@ mod tests {
                 .to_string_lossy()
                 .ends_with(".tmp")
         }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn raw_holiday_snapshot_is_immutable_and_content_addressed() {
+        let root = std::env::temp_dir().join(format!(
+            "tqsdk-cache-calendar-holidays-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = "https://example.invalid/holidays.json";
+        let first = TradingCalendarHolidaysSnapshot::from_holidays(
+            TradingCalendarHolidays::new(
+                source,
+                [
+                    chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+                    chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+                    chrono::NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let path = write_trading_calendar_holidays_snapshot(&root, &first).unwrap();
+        let first_bytes = fs::read(&path).unwrap();
+        assert_eq!(path.parent().unwrap().file_name().unwrap(), "snapshots");
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            format!("{}.json", first.content_hash)
+        );
+
+        let mut refetched = first.clone();
+        refetched.fetched_at = "2026-08-04T00:00:00Z".to_string();
+        write_trading_calendar_holidays_snapshot(&root, &refetched).unwrap();
+        let restored = read_trading_calendar_holidays_snapshot(&root)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(restored, first);
+        assert_eq!(fs::read(path).unwrap(), first_bytes);
+        assert_eq!(restored.supported_year_start, 2025);
+        assert_eq!(restored.supported_year_end, 2026);
+        assert_eq!(
+            restored
+                .trading_days_between(
+                    chrono::NaiveDate::from_ymd_opt(2026, 4, 30).unwrap(),
+                    chrono::NaiveDate::from_ymd_opt(2026, 5, 4).unwrap(),
+                )
+                .unwrap(),
+            vec![
+                chrono::NaiveDate::from_ymd_opt(2026, 4, 30).unwrap(),
+                chrono::NaiveDate::from_ymd_opt(2026, 5, 4).unwrap(),
+            ]
+        );
 
         let _ = fs::remove_dir_all(root);
     }

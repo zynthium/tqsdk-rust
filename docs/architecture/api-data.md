@@ -149,6 +149,7 @@ CPU/blocking 工作，不能仅把 API 换成 `tokio::fs` 就宣称性能提升�
 - `query_his_cont_quotes(symbols, days, end_date)`
 - `query_his_cont_underlyings(symbol, days, end_date)`
 - `query_his_cont_underlying_segments(symbol, days, end_date)`
+- `query_trading_calendar_holidays()`
 - `query_trading_calendar(start_date, end_date)`
 - `query_trading_days(start_date, end_date)`
 - `historical_cont_underlying_segments(rows)`
@@ -250,7 +251,7 @@ CPU/blocking 工作，不能仅把 API 换成 `tokio::fs` 就宣称性能提升�
    - 扩展 `query_his_cont_quotes`
    - `query_his_cont_underlyings` 提供单主连 date -> underlying 映射薄 helper
    - `query_his_cont_underlying_segments` / `historical_cont_underlying_segments` 提供相邻交易日同一 underlying 的 segment 压缩基础能力
-- `query_trading_calendar` / `query_trading_days` 提供交易日历基础能力，供主连分段和回测日期语义复用；
+- `query_trading_calendar_holidays` 提供 credential-free、带 source URL 的排序去重原始节假日集合与支持年份；`query_trading_calendar` / `query_trading_days` 保持原有按日/交易日接口，均从该集合派生，供主连分段和回测日期语义复用；
   cache-backed facade 的 `KQ.m@...` 回测据此把逻辑主连分段投影到具体合约 tick cache，
   data 层只提供 mapping/rows，不拥有 replay
 - `PreparedBacktest::tick_sources()` 向调用方自有回放器暴露 facade 已验证的投影计划：

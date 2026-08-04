@@ -306,7 +306,8 @@ TQBN 18:00 分区结束后必须再次运行普通 warmup，完成全日 final �
 `summary()` / `performance_metrics()` / `performance_report(window)` / trade log /
 cash + mark-to-market equity 曲线 / 平仓盈亏观测 / 胜率 / 盈亏额比例。交易日历、单主连
 date -> underlying 映射和 contiguous segment 压缩可用
-`tqsdk-data::DataClient::query_trading_calendar(...)` / `query_trading_days(...)` /
+`tqsdk-data::DataClient::query_trading_calendar_holidays(...)` /
+`query_trading_calendar(...)` / `query_trading_days(...)` /
 `tqsdk-data::DataClient::query_his_cont_underlyings(...)` /
 `query_his_cont_underlying_segments(...)`。
 历史序列和回测 tick cache 默认写按交易日分区的 TQBN daily v2 (`.tqbn`)；

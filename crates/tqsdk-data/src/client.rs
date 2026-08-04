@@ -28,7 +28,7 @@ mod permissions;
 
 pub use cont_quotes::{
     HistoricalContQuotesRow, HistoricalContUnderlyingRow, HistoricalContUnderlyingSegment,
-    TradingCalendarRow, historical_cont_underlying_segments,
+    TradingCalendarHolidays, TradingCalendarRow, historical_cont_underlying_segments,
 };
 pub use page::{
     KlineDataPage, KlineDataPageRequest, KlineDataSeries, KlineDataSeriesRequest, TickDataPage,
@@ -803,6 +803,60 @@ mod tests {
                 ]
             );
 
+            server.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn trading_calendar_holidays_normalize_and_report_supported_years() {
+        let holidays = TradingCalendarHolidays::new(
+            "https://example.invalid/calendar.json",
+            [
+                NaiveDate::from_ymd_opt(2026, 5, 3).unwrap(),
+                NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 5, 3).unwrap(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            holidays.holidays,
+            vec![
+                NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 5, 3).unwrap(),
+            ]
+        );
+        assert_eq!(holidays.supported_years().unwrap(), (2025, 2026));
+        assert!(holidays.supports_year(2026).unwrap());
+        assert!(!holidays.supports_year(2027).unwrap());
+    }
+
+    #[cfg(feature = "services")]
+    #[test]
+    fn query_trading_calendar_holidays_returns_normalized_raw_source() {
+        run_on_tokio(async {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_http_request(&mut stream);
+                assert!(
+                    request.starts_with("GET /holiday.json HTTP/1.1"),
+                    "{request}"
+                );
+                write_http_ok(&mut stream, r#"["2026-05-03","2025-01-01","2026-05-03"]"#);
+            });
+            let source_url = format!("http://{addr}/holiday.json");
+            let client = DataClient::new_for_test_with_urls(
+                source_url.clone(),
+                format!("http://{addr}/continuous_table.json"),
+            );
+
+            let holidays = client.query_trading_calendar_holidays().await.unwrap();
+
+            assert_eq!(holidays.source_url, source_url);
+            assert_eq!(holidays.supported_years().unwrap(), (2025, 2026));
+            assert_eq!(holidays.holidays.len(), 2);
             server.join().unwrap();
         });
     }

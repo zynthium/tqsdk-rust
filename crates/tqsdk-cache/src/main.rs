@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use chrono::{Days, NaiveDate, SecondsFormat, Utc};
+use chrono::{NaiveDate, SecondsFormat, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -12,15 +12,15 @@ use tqsdk::{BacktestRemoteFillCancellation, BacktestRemoteFillConfig, RemoteFill
 use tqsdk_cache::{
     FillReport, FillReportCalendar, FillReportSymbolDayStats, FillSelectorReport,
     MINUTE_FILL_REPORT_SCHEMA_VERSION, MinuteCacheCoverageSnapshot, MinuteFillReport,
-    MinuteFillReportSymbol, PersistedFillReport, REPORT_SCHEMA_VERSION, TradingCalendarSnapshot,
-    TradingDayWindow, default_fill_report_path, default_minute_fill_report_path, open_cache,
-    open_read_only_cache, read_fill_report, read_persisted_fill_report,
-    read_trading_calendar_snapshot, write_fill_report, write_minute_fill_report,
-    write_trading_calendar_snapshot,
+    MinuteFillReportSymbol, PersistedFillReport, REPORT_SCHEMA_VERSION,
+    TradingCalendarHolidaysSnapshot, TradingDayWindow, default_fill_report_path,
+    default_minute_fill_report_path, open_cache, open_read_only_cache, read_fill_report,
+    read_persisted_fill_report, read_trading_calendar_holidays_snapshot, write_fill_report,
+    write_minute_fill_report, write_trading_calendar_holidays_snapshot,
 };
 use tqsdk_data::{
     BacktestTickCache, DataClient, DataError, HistorySeriesCacheFileStatus, MinuteKlineCache,
-    MinuteKlineCacheSnapshot, TradingCalendarRow, backtest_tick_trading_day_for_timestamp_ns,
+    MinuteKlineCacheSnapshot, backtest_tick_trading_day_for_timestamp_ns,
     plan_minute_cache_stale_partition_repair,
 };
 
@@ -193,6 +193,11 @@ struct FillDaysArgs {
     /// Calendar planning policy. Cache coverage remains the completeness authority.
     #[arg(long, value_enum, default_value_t = CalendarMode::Auto)]
     calendar: CalendarMode,
+    /// Refetch the raw holiday set and advance its active local snapshot.
+    ///
+    /// With --dry-run the fetched candidate is reported but never persisted.
+    #[arg(long)]
+    refresh_calendar: bool,
 }
 
 #[derive(Debug, Args)]
@@ -417,9 +422,10 @@ impl CommandOutcome {
 #[derive(Clone)]
 struct CalendarResolution {
     mode: CalendarMode,
-    snapshot: Option<TradingCalendarSnapshot>,
+    snapshot: Option<TradingCalendarHolidaysSnapshot>,
     source: String,
     persist_after_plan: bool,
+    persisted: bool,
 }
 
 struct ResolvedFillWindow {
@@ -450,10 +456,11 @@ impl CalendarResolution {
         FillReportCalendar {
             mode: self.mode.as_str().to_string(),
             source: self.source.clone(),
+            persisted: self.persisted,
             snapshot: self
                 .snapshot
                 .as_ref()
-                .map(TradingCalendarSnapshot::metadata),
+                .map(TradingCalendarHolidaysSnapshot::metadata),
         }
     }
 
@@ -477,6 +484,11 @@ async fn resolve_fill_window(
     dry_run: bool,
     allow_open_day: bool,
 ) -> Result<ResolvedFillWindow, CliError> {
+    if args.refresh_calendar && matches!(args.calendar, CalendarMode::Off) {
+        return Err(CliError::Usage(
+            "--refresh-calendar requires --calendar auto or required".to_string(),
+        ));
+    }
     if args.last_trading_days.is_some() && matches!(args.calendar, CalendarMode::Off) {
         return Err(CliError::Usage(
             "--last-trading-days requires --calendar auto or required".to_string(),
@@ -491,7 +503,7 @@ async fn resolve_fill_window(
     let local_snapshot = if matches!(args.calendar, CalendarMode::Off) {
         None
     } else {
-        match read_trading_calendar_snapshot(cache_dir) {
+        match read_trading_calendar_holidays_snapshot(cache_dir) {
             Ok(snapshot) => snapshot,
             Err(_) if matches!(args.calendar, CalendarMode::Auto) => None,
             Err(error) => return Err(error.into()),
@@ -504,39 +516,70 @@ async fn resolve_fill_window(
             ));
         }
         let open_day = current_open_trading_day()?;
-        let anchor = args.end_day.unwrap_or(open_day);
+        if let Some(anchor) = args.end_day {
+            if anchor >= open_day {
+                return Err(CliError::Usage(format!(
+                    "--end-day with --last-trading-days must be before the current open TQBN trading day {}",
+                    open_day.format("%Y-%m-%d")
+                )));
+            }
+        }
+        let anchor = args.end_day.unwrap_or_else(|| {
+            open_day
+                .pred_opt()
+                .expect("current TQBN trading day must have a previous date")
+        });
         let mut snapshot = local_snapshot;
-        let mut source = "local".to_string();
+        let mut source = if snapshot.is_some() {
+            "local".to_string()
+        } else {
+            "remote".to_string()
+        };
         let mut persist_after_plan = false;
-        if snapshot.as_ref().is_none_or(|snapshot| {
-            eligible_calendar_days(snapshot, anchor, open_day)
-                .map(|days| days.len() < last_trading_days)
-                .unwrap_or(true)
-        }) {
-            let lookback_days = last_trading_days
-                .checked_mul(4)
-                .and_then(|days| days.checked_add(31))
-                .ok_or_else(|| CliError::Usage("--last-trading-days is too large".to_string()))?;
-            let start = anchor
-                .checked_sub_days(Days::new(lookback_days as u64))
-                .ok_or_else(|| {
-                    CliError::Usage("failed to compute calendar lookback".to_string())
-                })?;
-            snapshot = Some(fetch_calendar_snapshot(start, anchor).await?);
+        let mut persisted = snapshot.is_some();
+        let mut fetched_remote = false;
+        if args.refresh_calendar || snapshot.is_none() {
+            snapshot = Some(fetch_calendar_snapshot().await?);
             source = "remote".to_string();
             persist_after_plan = !dry_run;
+            persisted = false;
+            fetched_remote = true;
         }
-        let snapshot = snapshot.ok_or_else(|| {
-            CliError::Usage("--last-trading-days requires a trading calendar".to_string())
-        })?;
-        let eligible = eligible_calendar_days(&snapshot, anchor, open_day)?;
-        if eligible.len() < last_trading_days {
-            return Err(CliError::Usage(format!(
-                "trading calendar contains only {} closed trading days before {}",
-                eligible.len(),
-                anchor.format("%Y-%m-%d")
-            )));
-        }
+        let (snapshot, eligible) = loop {
+            let active_snapshot = snapshot.as_ref().ok_or_else(|| {
+                CliError::Usage("--last-trading-days requires a trading calendar".to_string())
+            })?;
+            match eligible_calendar_days(active_snapshot, anchor) {
+                Ok(eligible) if eligible.len() >= last_trading_days => {
+                    break (active_snapshot.clone(), eligible);
+                }
+                Ok(eligible) if !fetched_remote => {
+                    snapshot = Some(fetch_calendar_snapshot().await?);
+                    source = "remote".to_string();
+                    persist_after_plan = !dry_run;
+                    persisted = false;
+                    fetched_remote = true;
+                    continue;
+                }
+                Ok(eligible) => {
+                    return Err(CliError::Usage(format!(
+                        "trading calendar contains only {} closed trading days through {} (supported years {} to {})",
+                        eligible.len(),
+                        anchor.format("%Y-%m-%d"),
+                        active_snapshot.supported_year_start,
+                        active_snapshot.supported_year_end,
+                    )));
+                }
+                Err(_) if !fetched_remote => {
+                    snapshot = Some(fetch_calendar_snapshot().await?);
+                    source = "remote".to_string();
+                    persist_after_plan = !dry_run;
+                    persisted = false;
+                    fetched_remote = true;
+                }
+                Err(error) => return Err(error),
+            }
+        };
         let selected = &eligible[eligible.len() - last_trading_days..];
         let window = TradingDayWindow::closed_from_days(selected[0], *selected.last().unwrap())?;
         return resolved_fill_window(
@@ -546,6 +589,7 @@ async fn resolve_fill_window(
                 snapshot: Some(snapshot),
                 source,
                 persist_after_plan,
+                persisted,
             },
             allow_open_day,
         );
@@ -569,18 +613,25 @@ async fn resolve_fill_window(
         "partition_fallback".to_string()
     };
     let mut persist_after_plan = false;
-    let needs_calendar = snapshot.as_ref().is_some_and(|snapshot| {
-        !snapshot
-            .covers(normalized_start, normalized_end)
-            .unwrap_or(false)
-    });
-    if matches!(args.calendar, CalendarMode::Required) && (snapshot.is_none() || needs_calendar) {
-        snapshot = Some(fetch_calendar_snapshot(normalized_start, normalized_end).await?);
-        source = "remote".to_string();
-        persist_after_plan = !dry_run;
-    } else if needs_calendar {
-        snapshot = None;
-        source = "partition_fallback".to_string();
+    let mut persisted = snapshot.is_some();
+    if !matches!(args.calendar, CalendarMode::Off) {
+        let needs_calendar = snapshot.as_ref().is_none_or(|snapshot| {
+            !snapshot
+                .covers(normalized_start, normalized_end)
+                .unwrap_or(false)
+        });
+        if args.refresh_calendar
+            || (matches!(args.calendar, CalendarMode::Required) && needs_calendar)
+        {
+            snapshot = Some(fetch_calendar_snapshot().await?);
+            source = "remote".to_string();
+            persist_after_plan = !dry_run;
+            persisted = false;
+        } else if needs_calendar {
+            snapshot = None;
+            source = "partition_fallback".to_string();
+            persisted = false;
+        }
     }
     resolved_fill_window(
         window,
@@ -589,6 +640,7 @@ async fn resolve_fill_window(
             snapshot,
             source,
             persist_after_plan,
+            persisted,
         },
         allow_open_day,
     )
@@ -644,17 +696,16 @@ async fn finish_calendar_after_plan(
     let Some(plan) = plan_rx.recv().await else {
         return Ok(calendar);
     };
-    let start_day = parse_window_day(&window.start_day)?;
-    let end_day = parse_window_day(&window.end_day)?;
     if calendar.snapshot.is_none()
         && matches!(calendar.mode, CalendarMode::Auto | CalendarMode::Required)
         && plan.requires_remote_fill()
     {
-        match fetch_calendar_snapshot(start_day, end_day).await {
+        match fetch_calendar_snapshot().await {
             Ok(snapshot) => {
                 calendar.snapshot = Some(snapshot);
                 calendar.source = "remote".to_string();
                 calendar.persist_after_plan = !dry_run;
+                calendar.persisted = false;
             }
             Err(error) if matches!(calendar.mode, CalendarMode::Auto) => {
                 calendar.source = "partition_fallback".to_string();
@@ -663,39 +714,40 @@ async fn finish_calendar_after_plan(
             Err(error) => return Err(error),
         }
     }
-    if calendar.persist_after_plan && !dry_run {
-        if let Some(snapshot) = &calendar.snapshot {
-            write_trading_calendar_snapshot(&cache_dir, snapshot)?;
-            calendar.persist_after_plan = false;
-        }
-    }
+    persist_calendar_if_needed(&cache_dir, &mut calendar, dry_run)?;
     reporter.calendar_ready(calendar.progress_calendar(&window)?);
     Ok(calendar)
 }
 
-async fn fetch_calendar_snapshot(
-    start_day: NaiveDate,
-    end_day: NaiveDate,
-) -> Result<TradingCalendarSnapshot, CliError> {
-    let rows: Vec<TradingCalendarRow> = DataClient::new()
-        .query_trading_calendar(start_day, end_day)
-        .await?;
-    Ok(TradingCalendarSnapshot::from_rows(rows)?)
+fn persist_calendar_if_needed(
+    cache_dir: &Path,
+    calendar: &mut CalendarResolution,
+    dry_run: bool,
+) -> Result<(), CliError> {
+    if calendar.persist_after_plan && !dry_run {
+        let snapshot = calendar.snapshot.as_ref().ok_or_else(|| {
+            CliError::Usage("calendar persistence was requested without a snapshot".to_string())
+        })?;
+        write_trading_calendar_holidays_snapshot(cache_dir, snapshot)?;
+        calendar.persist_after_plan = false;
+        calendar.persisted = true;
+    }
+    Ok(())
+}
+
+async fn fetch_calendar_snapshot() -> Result<TradingCalendarHolidaysSnapshot, CliError> {
+    let holidays = DataClient::new().query_trading_calendar_holidays().await?;
+    Ok(TradingCalendarHolidaysSnapshot::from_holidays(holidays)?)
 }
 
 fn eligible_calendar_days(
-    snapshot: &TradingCalendarSnapshot,
+    snapshot: &TradingCalendarHolidaysSnapshot,
     anchor: NaiveDate,
-    open_day: NaiveDate,
 ) -> Result<Vec<NaiveDate>, CliError> {
-    let mut days = Vec::new();
-    for day in &snapshot.days {
-        let date = parse_window_day(&day.date)?;
-        if day.trading && date <= anchor && date < open_day {
-            days.push(date);
-        }
-    }
-    Ok(days)
+    let start = NaiveDate::from_ymd_opt(snapshot.supported_year_start, 1, 1).ok_or_else(|| {
+        CliError::Usage("failed to build trading calendar lower bound".to_string())
+    })?;
+    Ok(snapshot.trading_days_between(start, anchor)?)
 }
 
 fn parse_window_day(value: &str) -> Result<NaiveDate, CliError> {
@@ -1292,9 +1344,15 @@ async fn fill_minute(
         ));
     }
     let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
-    let resolved =
+    let mut resolved =
         resolve_fill_window(&canonical_cache_dir, &args.days, args.dry_run, false).await?;
+    persist_calendar_if_needed(
+        canonical_cache_dir.as_path(),
+        &mut resolved.calendar,
+        args.dry_run,
+    )?;
     debug_assert!(resolved.provisional.is_none());
+    let calendar_report = resolved.calendar.report_calendar();
     let window = resolved.window;
     let selector_symbols = explicit_symbols.clone();
     let symbols = resolve_minute_fill_symbols(
@@ -1334,6 +1392,7 @@ async fn fill_minute(
             window.clone(),
             market,
             selector,
+            calendar_report,
             statuses,
         );
         return Ok(CommandOutcome {
@@ -1443,7 +1502,8 @@ async fn fill_minute(
         market.as_str(),
         false,
     )
-    .with_selector(selector);
+    .with_selector(selector)
+    .with_calendar(calendar_report);
     let completion_summary = if report.complete {
         "minute fill complete; final canonical-minute coverage verified"
     } else {
@@ -1550,6 +1610,7 @@ fn minute_cache_only_report(
     requested_days: TradingDayWindow,
     market: MarketKind,
     selector: FillSelectorReport,
+    calendar: FillReportCalendar,
     statuses: Vec<tqsdk_data::MinuteKlineCacheStatus>,
 ) -> MinuteFillReport {
     let symbols = statuses
@@ -1578,6 +1639,7 @@ fn minute_cache_only_report(
         requested_range: (requested_days.start_ns, requested_days.end_ns),
         requested_days,
         selector,
+        calendar: Some(calendar),
         market: market.as_str().to_string(),
         logical_symbols: symbols.iter().map(|symbol| symbol.symbol.clone()).collect(),
         symbols,
@@ -1603,13 +1665,18 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
     } else {
         open_cache(cache_dir)?
     };
-    let resolved = resolve_fill_window(
+    let mut resolved = resolve_fill_window(
         &canonical_cache_dir,
         &args.days,
         args.dry_run,
         allow_open_day,
     )
     .await?;
+    persist_calendar_if_needed(
+        canonical_cache_dir.as_path(),
+        &mut resolved.calendar,
+        args.dry_run,
+    )?;
     let window = resolved.window.clone();
     let operation_end_ns = resolved
         .provisional
@@ -2537,11 +2604,18 @@ fn write_output(value: &Value, pretty: bool) -> Result<(), CliError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CalendarMode, Cli, Command, FillDaysArgs, ProgressMode, resolve_fill_window};
+    use super::{
+        CalendarMode, Cli, Command, FillDaysArgs, ProgressMode, current_open_trading_day,
+        persist_calendar_if_needed, resolve_fill_window,
+    };
     use chrono::NaiveDate;
     use clap::Parser;
-    use tqsdk_cache::{TradingCalendarSnapshot, write_trading_calendar_snapshot};
-    use tqsdk_data::TradingCalendarRow;
+    use tqsdk_cache::{
+        TradingCalendarHolidaysSnapshot, TradingCalendarSnapshot,
+        read_trading_calendar_holidays_snapshot, write_trading_calendar_holidays_snapshot,
+        write_trading_calendar_snapshot,
+    };
+    use tqsdk_data::{TradingCalendarHolidays, TradingCalendarRow};
 
     #[tokio::test(flavor = "current_thread")]
     async fn explicit_auto_range_uses_partition_fallback_without_a_snapshot() {
@@ -2558,6 +2632,7 @@ mod tests {
             end_day: Some(NaiveDate::from_ymd_opt(2020, 1, 3).unwrap()),
             last_trading_days: None,
             calendar: CalendarMode::Auto,
+            refresh_calendar: false,
         };
 
         let resolved = resolve_fill_window(&root, &args, true, false)
@@ -2587,6 +2662,7 @@ mod tests {
             end_day: Some(NaiveDate::from_ymd_opt(2020, 1, 3).unwrap()),
             last_trading_days: None,
             calendar: CalendarMode::Auto,
+            refresh_calendar: false,
         };
 
         let resolved = resolve_fill_window(&root, &args, true, false)
@@ -2606,6 +2682,7 @@ mod tests {
             end_day: None,
             last_trading_days: Some(5),
             calendar: CalendarMode::Off,
+            refresh_calendar: false,
         };
         let error = match resolve_fill_window(
             std::path::Path::new("/tmp/unused"),
@@ -2632,7 +2709,9 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let snapshot = TradingCalendarSnapshot::from_rows(vec![
+        let snapshot = raw_snapshot(2020, 2020);
+        write_trading_calendar_holidays_snapshot(&root, &snapshot).unwrap();
+        let legacy = TradingCalendarSnapshot::from_rows(vec![
             TradingCalendarRow {
                 date: "2020-01-06".to_string(),
                 trading: true,
@@ -2641,26 +2720,16 @@ mod tests {
                 date: "2020-01-07".to_string(),
                 trading: true,
             },
-            TradingCalendarRow {
-                date: "2020-01-08".to_string(),
-                trading: true,
-            },
-            TradingCalendarRow {
-                date: "2020-01-09".to_string(),
-                trading: true,
-            },
-            TradingCalendarRow {
-                date: "2020-01-10".to_string(),
-                trading: true,
-            },
         ])
         .unwrap();
-        write_trading_calendar_snapshot(&root, &snapshot).unwrap();
+        let legacy_path = write_trading_calendar_snapshot(&root, &legacy).unwrap();
+        let legacy_before = std::fs::read(&legacy_path).unwrap();
         let args = FillDaysArgs {
             start_day: None,
             end_day: Some(NaiveDate::from_ymd_opt(2020, 1, 10).unwrap()),
             last_trading_days: Some(2),
             calendar: CalendarMode::Auto,
+            refresh_calendar: false,
         };
 
         let resolved = resolve_fill_window(&root, &args, false, true)
@@ -2672,8 +2741,114 @@ mod tests {
         assert!(resolved.provisional.is_none());
         assert_eq!(resolved.calendar.source, "local");
         assert!(!resolved.calendar.persist_after_plan);
+        assert!(resolved.calendar.persisted);
+        assert_eq!(std::fs::read(legacy_path).unwrap(), legacy_before);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn last_trading_days_resolves_weekend_anchors_backward() {
+        let root = std::env::temp_dir().join(format!(
+            "tqsdk-cache-calendar-weekend-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_trading_calendar_holidays_snapshot(&root, &raw_snapshot(2020, 2020)).unwrap();
+        let args = FillDaysArgs {
+            start_day: None,
+            end_day: Some(NaiveDate::from_ymd_opt(2020, 1, 11).unwrap()),
+            last_trading_days: Some(2),
+            calendar: CalendarMode::Auto,
+            refresh_calendar: false,
+        };
+
+        let resolved = resolve_fill_window(&root, &args, false, false)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.window.start_day, "2020-01-09");
+        assert_eq!(resolved.window.end_day, "2020-01-10");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn last_trading_days_rejects_current_open_day_anchor_before_fetching() {
+        let open_day = current_open_trading_day().unwrap();
+        let args = FillDaysArgs {
+            start_day: None,
+            end_day: Some(open_day),
+            last_trading_days: Some(1),
+            calendar: CalendarMode::Auto,
+            refresh_calendar: false,
+        };
+
+        let error = match resolve_fill_window(
+            std::path::Path::new("/tmp/unused"),
+            &args,
+            true,
+            false,
+        )
+        .await
+        {
+            Ok(_) => panic!("current open-day anchor should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("current open TQBN trading day"));
+    }
+
+    #[test]
+    fn raw_calendar_fails_closed_outside_its_supported_years() {
+        let snapshot = raw_snapshot(2020, 2020);
+        let error =
+            super::eligible_calendar_days(&snapshot, NaiveDate::from_ymd_opt(2021, 1, 4).unwrap())
+                .unwrap_err();
+
+        assert!(error.to_string().contains("support years 2020 to 2020"));
+    }
+
+    #[test]
+    fn dry_run_calendar_persistence_does_not_create_an_active_pointer() {
+        let root = std::env::temp_dir().join(format!(
+            "tqsdk-cache-calendar-dry-run-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut calendar = super::CalendarResolution {
+            mode: CalendarMode::Auto,
+            snapshot: Some(raw_snapshot(2020, 2020)),
+            source: "remote".to_string(),
+            persist_after_plan: true,
+            persisted: false,
+        };
+
+        persist_calendar_if_needed(&root, &mut calendar, true).unwrap();
+
+        assert!(
+            read_trading_calendar_holidays_snapshot(&root)
+                .unwrap()
+                .is_none()
+        );
+        assert!(calendar.persist_after_plan);
+        assert!(!calendar.persisted);
+    }
+
+    fn raw_snapshot(start_year: i32, end_year: i32) -> TradingCalendarHolidaysSnapshot {
+        let holidays = (start_year..=end_year)
+            .map(|year| NaiveDate::from_ymd_opt(year, 1, 1).unwrap())
+            .collect::<Vec<_>>();
+        TradingCalendarHolidaysSnapshot::from_holidays(
+            TradingCalendarHolidays::new("https://example.invalid/holidays.json", holidays)
+                .unwrap(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2694,6 +2869,27 @@ mod tests {
             panic!("expected fill command");
         };
         assert_eq!(args.progress, ProgressMode::Tty);
+    }
+
+    #[test]
+    fn fill_accepts_refresh_calendar() {
+        let cli = Cli::try_parse_from([
+            "tqsdk-cache",
+            "fill",
+            "--symbol",
+            "SHFE.au2608",
+            "--start-day",
+            "2026-07-20",
+            "--end-day",
+            "2026-07-21",
+            "--refresh-calendar",
+        ])
+        .unwrap();
+
+        let Command::Fill(args) = cli.command else {
+            panic!("expected fill command");
+        };
+        assert!(args.days.refresh_calendar);
     }
 
     #[test]

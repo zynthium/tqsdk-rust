@@ -220,7 +220,9 @@ round-trip、compaction 保留，以及 final coverage 覆盖后立即隐藏并�
 inspection、fast inventory、deep diagnostic、root lock、closed-day dry-run、完整 cache 无 auth fill、
 当前日显式 opt-in、已有 checkpoint 无 auth 复用、partial shared high-water、closed-day final
 reconciliation、旧 report 的 `day_complete=complete` 兼容、日历快照 round-trip、
-`--last-trading-days` 的本地快照选择、progress reducer 的完整分区计数、默认 text /
+raw holiday snapshot 的 content-addressed pointer / immutable round-trip、legacy daily snapshot 非破坏性
+忽略、`--last-trading-days` 的本地选择、周末 anchor、current open-day rejection、支持年份 fail-closed 与
+dry-run no-write，以及 progress reducer 的完整分区计数、默认 text /
 explicit V3 stdout、legacy V2 output、JSONL stderr progress，以及 fill report v1/v2 对 canonical root
 的 verify binding。`tqsdk` 单元测试还覆盖 provisional planner 的 5 分钟 overlap 和远端提交不污染
 final coverage；`facade_contract` 还覆盖

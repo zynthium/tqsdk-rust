@@ -128,6 +128,26 @@ minute fill 没有 provisional 语义：当前或未来 trading day 一律不能
 `--include-open-day` 也不适用于 minute。`--calendar auto|required|off` 与
 `--last-trading-days` 只用于选择 closed-day window 和进度分母，不能推断任一 cache 的 coverage。
 
+calendar 的 durable sidecar 是 raw holiday set，不是一个有限的每日展开：
+
+```text
+meta/trading-calendar-holidays-v1/
+  active.json
+  snapshots/<content-hash>.json
+```
+
+snapshot 是 immutable，包含 Shinny holiday source URL、`fetched_at`、排序去重的 raw holiday dates、
+content hash 和支持年份；`active.json` 原子地选择当前 snapshot。旧
+`meta/trading-calendar-v1.json` 保留以保证非破坏性迁移，但不参与新的 `--last-trading-days` 解析。
+`--calendar auto` 只在本地 raw snapshot 不能覆盖所需 anchor year(s) 时请求远端；`required` 在同一
+情形强制成功，`off` 拒绝 `--last-trading-days`。任何无法获得所需年份或不足以选择 N 个 closed days
+的情况都 fail closed，绝不退回 weekday-only 推断。`--refresh-calendar` 强制 remote refetch 并更新
+active pointer；`--refresh-calendar --dry-run` 可读取远端 candidate，但绝不写 snapshot 或 pointer。
+
+没有显式 anchor 时，`--last-trading-days` 从当前 open TQBN trading day 之前严格选择；显式
+`--end-day` 必须小于当前 open TQBN trading day。周末或 holiday anchor 按 raw set 向前选择最近的
+closed trading day。显式 `--start-day/--end-day` 仍表达调用者的数据窗口，日历不会改写它们。
+
 完整 cache 命中时两类 fill 都不需要认证或远端 session。需要补洞时才要求 `TQ_AUTH_USER` /
 `TQ_AUTH_PASS`，且不使用 `tq_dl` / 专业历史下载权限。
 
@@ -141,6 +161,10 @@ minute fill 没有 provisional 语义：当前或未来 trading day 一律不能
   `<cache-root>/reports/tqsdk-cache-fill-<utc>-<pid>.json`，兼容读取 schema v1。
 - minute normal fill report 为独立 schema v1，带 `cache_kind=minute` 与 logical symbols，默认路径
   `<cache-root>/reports/minute/tqsdk-cache-minute-fill-<utc>-<pid>.json`。
+- tick 与 minute fill report 的 `calendar`（存在时）只记录 mode、source、是否已持久化以及 raw
+  snapshot 的 source URL、fetch 时间、hash、支持年份和 holiday count；不会嵌入完整 holiday list。
+  text output 会显示 `local holidays, years YYYY–YYYY`；dry-run remote candidate 还会显示
+  `not persisted` 与 candidate hash。
 - `--progress jsonl` 始终写 stderr，schema 为 v2、kind 为 `tqsdk-cache.progress`，并含
   `cache_kind: "tick" | "minute"`。脚本不得继续按 schema v1 解析。
 

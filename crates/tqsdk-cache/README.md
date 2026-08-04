@@ -234,6 +234,29 @@ tick `fill` 保留 CST `18:00` TQBN partition、当前交易日 provisional chec
 `--include-open-day` 也不适用于 minute。`--last-trading-days` 与 `--calendar auto|required|off`
 仍可用于选择 closed-day 窗口；日历只做选择和进度，不替代 cache coverage。
 
+### 原始节假日日历
+
+`fill` 通过 `DataClient::query_trading_calendar_holidays()` 复用 Shinny 的公开节假日源，不需要
+账号。它不再把有限日期范围写成日历快照，而是在 cache root 下保存不可变、内容寻址的原始集合：
+
+```text
+meta/trading-calendar-holidays-v1/
+  active.json
+  snapshots/<content-hash>.json
+```
+
+每个 snapshot 记录 source URL、fetch 时间、排序去重后的 holiday dates、content hash 与支持年份。
+旧 `meta/trading-calendar-v1.json` 不会被删除或改写，但 `--last-trading-days` 不再读取它。
+`--calendar auto` 在本地 raw snapshot 不能覆盖所需年份时才拉取；`--last-trading-days` 因此不会在
+日历不足时退化为 weekday 猜测。`--calendar required` 同样 fail closed，`--calendar off` 不允许
+`--last-trading-days`。`--refresh-calendar` 强制重新拉取并推进 active pointer；配合 `--dry-run`
+只报告 remote candidate hash，不写任何文件。
+
+默认 `--last-trading-days N` 只选当前 open TQBN trading day 之前的 N 个交易日。显式
+`--end-day` 必须早于当前 open TQBN trading day；落在周末或 holiday 的 anchor 会向后解析到最近的
+closed trading day。显式 `--start-day/--end-day` 的数据窗口仍由 TQBN 规则确定，日历不会把它们改写为
+另一段数据范围。
+
 ## 报告与进度
 
 普通 tick fill 默认把 schema-v2 report 写入 `<cache-root>/reports/`，兼容读取旧 schema-v1 report。

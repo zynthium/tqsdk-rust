@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use chrono::{Datelike, Days, FixedOffset, NaiveDate, Utc};
 use serde_json::Value;
@@ -44,6 +44,86 @@ pub struct HistoricalContUnderlyingSegment {
 pub struct TradingCalendarRow {
     pub date: String,
     pub trading: bool,
+}
+
+/// The normalized raw holiday set behind the generic Chinese trading calendar.
+///
+/// The source identifies non-trading holiday dates.  Weekends remain derived
+/// from the Gregorian calendar, so consumers can persist this compact raw set
+/// and derive arbitrary date ranges without depending on a bounded daily
+/// expansion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TradingCalendarHolidays {
+    pub source_url: String,
+    pub holidays: Vec<NaiveDate>,
+}
+
+impl TradingCalendarHolidays {
+    /// Build a normalized, sorted, de-duplicated holiday set.
+    pub fn new(
+        source_url: impl Into<String>,
+        holidays: impl IntoIterator<Item = NaiveDate>,
+    ) -> Result<Self> {
+        let source_url = source_url.into();
+        if source_url.trim().is_empty() {
+            return Err(DataError::Validation(
+                "trading calendar holiday source URL must not be empty".to_string(),
+            ));
+        }
+        let holidays = holidays
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let value = Self {
+            source_url,
+            holidays,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Validate the normalized raw set and return its inclusive supported years.
+    pub fn supported_years(&self) -> Result<(i32, i32)> {
+        self.validate()?;
+        let first = self
+            .holidays
+            .first()
+            .expect("validated holiday set must not be empty")
+            .year();
+        let last = self
+            .holidays
+            .last()
+            .expect("validated holiday set must not be empty")
+            .year();
+        Ok((first, last))
+    }
+
+    /// Return whether this source supports deriving the supplied calendar year.
+    pub fn supports_year(&self, year: i32) -> Result<bool> {
+        let (first, last) = self.supported_years()?;
+        Ok((first..=last).contains(&year))
+    }
+
+    /// Validate that the source and raw dates are non-empty and normalized.
+    pub fn validate(&self) -> Result<()> {
+        if self.source_url.trim().is_empty() {
+            return Err(DataError::Validation(
+                "trading calendar holiday source URL must not be empty".to_string(),
+            ));
+        }
+        if self.holidays.is_empty() {
+            return Err(DataError::InvalidResponse(
+                "holiday payload must not be empty".to_string(),
+            ));
+        }
+        if self.holidays.windows(2).any(|dates| dates[0] >= dates[1]) {
+            return Err(DataError::Validation(
+                "trading calendar holidays must be strictly ordered".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl DataClient {
@@ -168,6 +248,29 @@ impl DataClient {
             .collect())
     }
 
+    /// Fetch the compact raw holiday set used by the generic trading calendar.
+    ///
+    /// This request is credential-free.  The returned dates are normalized,
+    /// sorted and de-duplicated; a consumer can derive any supported daily
+    /// range from the set without persisting a finite expansion.
+    pub async fn query_trading_calendar_holidays(&self) -> Result<TradingCalendarHolidays> {
+        let payload = self.fetch_json(&self.endpoints.holiday_url).await?;
+        let holidays = payload.as_array().ok_or_else(|| {
+            DataError::InvalidResponse("holiday payload must be an array".to_string())
+        })?;
+
+        let mut parsed = Vec::with_capacity(holidays.len());
+        for holiday in holidays {
+            let Some(value) = holiday.as_str() else {
+                return Err(DataError::InvalidResponse(
+                    "holiday entry must be a string".to_string(),
+                ));
+            };
+            parsed.push(parse_iso_date(value)?);
+        }
+        TradingCalendarHolidays::new(self.endpoints.holiday_url.clone(), parsed)
+    }
+
     pub async fn query_trading_days(
         &self,
         start_date: NaiveDate,
@@ -200,33 +303,12 @@ impl DataClient {
             ));
         }
 
-        let payload = self.fetch_json(&self.endpoints.holiday_url).await?;
-        let holidays = payload.as_array().ok_or_else(|| {
-            DataError::InvalidResponse("holiday payload must be an array".to_string())
-        })?;
-
-        let mut holiday_set = HashSet::new();
-        let mut years = Vec::with_capacity(holidays.len());
-        for holiday in holidays {
-            let Some(value) = holiday.as_str() else {
-                return Err(DataError::InvalidResponse(
-                    "holiday entry must be a string".to_string(),
-                ));
-            };
-            let date = parse_iso_date(value)?;
-            holiday_set.insert(date);
-            years.push(date.year());
-        }
-
-        let (Some(first_year), Some(last_year)) = (years.iter().min(), years.iter().max()) else {
-            return Err(DataError::InvalidResponse(
-                "holiday payload must not be empty".to_string(),
-            ));
-        };
-        let first_day = NaiveDate::from_ymd_opt(*first_year, 1, 1).ok_or_else(|| {
+        let holidays = self.query_trading_calendar_holidays().await?;
+        let (first_year, last_year) = holidays.supported_years()?;
+        let first_day = NaiveDate::from_ymd_opt(first_year, 1, 1).ok_or_else(|| {
             DataError::InvalidResponse("failed to build holiday lower bound".to_string())
         })?;
-        let last_day = NaiveDate::from_ymd_opt(*last_year, 12, 31).ok_or_else(|| {
+        let last_day = NaiveDate::from_ymd_opt(last_year, 12, 31).ok_or_else(|| {
             DataError::InvalidResponse("failed to build holiday upper bound".to_string())
         })?;
         if start_date < first_day || end_date > last_day {
@@ -237,6 +319,7 @@ impl DataClient {
             )));
         }
 
+        let holiday_set = holidays.holidays.into_iter().collect::<BTreeSet<_>>();
         let mut days = Vec::new();
         let mut current = start_date;
         while current <= end_date {
