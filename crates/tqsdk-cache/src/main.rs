@@ -553,7 +553,7 @@ async fn resolve_fill_window(
                 Ok(eligible) if eligible.len() >= last_trading_days => {
                     break (active_snapshot.clone(), eligible);
                 }
-                Ok(eligible) if !fetched_remote => {
+                Ok(_) if !fetched_remote => {
                     snapshot = Some(fetch_calendar_snapshot().await?);
                     source = "remote".to_string();
                     persist_after_plan = !dry_run;
