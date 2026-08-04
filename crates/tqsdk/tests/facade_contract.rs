@@ -248,6 +248,78 @@ async fn facade_backtest_cache_mode_replays_cached_ticks() {
     assert!(!tq.next().await.unwrap());
 }
 
+#[tokio::test]
+async fn facade_cache_only_tick_uses_retained_metadata_when_active_range_is_disjoint() {
+    let logical_symbol = "KQ.m@SHFE.au";
+    let physical_symbol = "SHFE.au2610";
+    let cache_dir = temp_cache_dir();
+    let start_ns = 20_000;
+    let end_ns = 21_000;
+    let metadata_cache = BacktestHistoryMetadataCache::open(&cache_dir).unwrap();
+    let retained = metadata_cache
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+            market_kind: BacktestHistoryMarketKind::Futures,
+            logical_symbol: logical_symbol.to_string(),
+            captured_at_ns: 1,
+            trading_days: vec![BacktestHistoryTradingDay {
+                date: "2026-08-04".to_string(),
+                is_trading_day: true,
+                start_ns,
+                end_ns,
+            }],
+            session: KlineSessionTemplate::cst_trading_day(),
+            physical_segments: vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: physical_symbol.to_string(),
+                start_ns,
+                end_ns,
+            }],
+            snapshot_hash: String::new(),
+        })
+        .unwrap();
+    let active = metadata_cache
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            captured_at_ns: 2,
+            trading_days: vec![BacktestHistoryTradingDay {
+                date: "2026-07-31".to_string(),
+                is_trading_day: true,
+                start_ns: 1_000,
+                end_ns: 10_000,
+            }],
+            physical_segments: vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: "SHFE.au2608".to_string(),
+                start_ns: 1_000,
+                end_ns: 10_000,
+            }],
+            snapshot_hash: String::new(),
+            ..retained.clone()
+        })
+        .unwrap();
+    assert_ne!(retained.snapshot_hash, active.snapshot_hash);
+    BacktestTickCache::open(&cache_dir)
+        .unwrap()
+        .store_ticks(
+            physical_symbol,
+            start_ns,
+            end_ns,
+            [tick(1, start_ns, 100.0)],
+        )
+        .unwrap();
+
+    let prepared = Tq::futures()
+        .backtest(start_ns, end_ns)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .cache_only()
+        .symbol(logical_symbol)
+        .prepare()
+        .await;
+
+    if let Err(error) = prepared {
+        panic!("cache-backed prepare should use the retained snapshot: {error}");
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn facade_backtest_uses_default_history_cache_when_cache_dir_is_omitted() {
     static HISTORY_CACHE_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

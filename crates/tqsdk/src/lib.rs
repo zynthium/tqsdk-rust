@@ -1483,7 +1483,9 @@ async fn resolve_backtest_tick_sources(
 
     for symbol in symbols {
         validate_backtest_symbol(symbol)?;
-        let metadata = load_backtest_history_metadata(cache_dir, symbol)?;
+        let metadata =
+            tqsdk_data::resolve_backtest_metadata_snapshot(cache_dir, symbol, start_ns, end_ns)
+                .map_err(Error::from)?;
         if is_main_continuous_contract(symbol) {
             let metadata = metadata.ok_or_else(|| {
                 data_validation("KQ.m backtest history requires a persisted metadata sidecar")

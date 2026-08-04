@@ -373,17 +373,14 @@ fn read_snapshot(
     Ok(snapshot)
 }
 
-/// Resolves the metadata snapshot that can safely read a canonical-minute
-/// cache range.
+/// Resolves the metadata snapshot that covers one backtest range.
 ///
-/// The active pointer remains authoritative for fresh data. If it has moved
-/// since a final monthly partition was written, this consults retained
-/// immutable snapshots only when the older snapshot covers the entire range,
-/// has the same schema and session identity, and exactly validates an existing
-/// local month. This keeps a range readable without accepting a session or
-/// mapping change as a best-effort cache hit.
+/// The active snapshot remains preferred whenever it covers the full range.
+/// A remote fill may retain a narrower, disjoint snapshot without replacing a
+/// broader active pointer; in that case the compatible retained snapshot is
+/// the authoritative mapping for the requested range.
 #[doc(hidden)]
-pub fn resolve_minute_cache_metadata_snapshot(
+pub fn resolve_backtest_metadata_snapshot(
     cache_dir: &Path,
     logical_symbol: &str,
     start_ns: i64,
@@ -392,11 +389,41 @@ pub fn resolve_minute_cache_metadata_snapshot(
     validate_logical_symbol(logical_symbol)?;
     if start_ns >= end_ns {
         return Err(DataError::Validation(
-            "minute cache metadata resolution requires start_ns < end_ns".to_string(),
+            "backtest metadata resolution requires start_ns < end_ns".to_string(),
         ));
     }
     let metadata_cache = BacktestHistoryMetadataCache::open_read_only(cache_dir);
     let Some(active) = metadata_cache.load_active(logical_symbol)? else {
+        return Ok(None);
+    };
+    if active.covers_range((start_ns, end_ns)) {
+        return Ok(Some(active));
+    }
+    Ok(
+        existing_snapshot_for_remote_range(&metadata_cache, logical_symbol, (start_ns, end_ns))?
+            .or(Some(active)),
+    )
+}
+
+/// Resolves the metadata snapshot that can safely read a canonical-minute
+/// cache range.
+///
+/// The active pointer is preferred whenever it covers the range. When it does
+/// not, a compatible retained snapshot can provide the mapping for a remote
+/// miss. For an existing monthly partition, the retained snapshot must still
+/// exactly validate that local month; session or mapping changes never become
+/// best-effort cache hits.
+#[doc(hidden)]
+pub fn resolve_minute_cache_metadata_snapshot(
+    cache_dir: &Path,
+    logical_symbol: &str,
+    start_ns: i64,
+    end_ns: i64,
+) -> Result<Option<BacktestHistoryMetadataSnapshot>> {
+    let metadata_cache = BacktestHistoryMetadataCache::open_read_only(cache_dir);
+    let Some(active) =
+        resolve_backtest_metadata_snapshot(cache_dir, logical_symbol, start_ns, end_ns)?
+    else {
         return Ok(None);
     };
     let minute_cache = MinuteKlineCache::open_read_only(cache_dir);
@@ -1659,6 +1686,25 @@ mod snapshot_store_tests {
                 .snapshot_hash,
             retained.snapshot_hash
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn minute_metadata_resolver_uses_retained_snapshot_when_active_misses_range() {
+        let root = test_root("metadata-minute-retained-range");
+        let cache = BacktestHistoryMetadataCache::open(&root).unwrap();
+        let active = cache.store_snapshot(snapshot(1_000, 10_000, 1)).unwrap();
+        let retained = cache
+            .store_snapshot_for_remote_miss(snapshot(20_000, 21_000, 2))
+            .unwrap();
+
+        let resolved =
+            resolve_minute_cache_metadata_snapshot(&root, "KQ.m@SHFE.au", 20_000, 21_000)
+                .unwrap()
+                .unwrap();
+
+        assert_ne!(resolved.snapshot_hash, active.snapshot_hash);
+        assert_eq!(resolved.snapshot_hash, retained.snapshot_hash);
         std::fs::remove_dir_all(root).unwrap();
     }
 

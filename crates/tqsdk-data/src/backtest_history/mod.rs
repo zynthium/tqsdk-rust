@@ -29,7 +29,8 @@ pub use metadata::{
 };
 #[doc(hidden)]
 pub use metadata::{
-    plan_minute_cache_stale_partition_repair, resolve_minute_cache_metadata_snapshot,
+    plan_minute_cache_stale_partition_repair, resolve_backtest_metadata_snapshot,
+    resolve_minute_cache_metadata_snapshot,
 };
 pub use report::{
     BacktestHistoryBatchReport, BacktestHistoryChunk, BacktestHistoryCollected,

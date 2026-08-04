@@ -100,7 +100,8 @@ pub use backtest_history::{
 };
 #[doc(hidden)]
 pub use backtest_history::{
-    plan_minute_cache_stale_partition_repair, resolve_minute_cache_metadata_snapshot,
+    plan_minute_cache_stale_partition_repair, resolve_backtest_metadata_snapshot,
+    resolve_minute_cache_metadata_snapshot,
 };
 pub use backtest_tick_cache::{
     BacktestCachePolicy, BacktestTickCache, BacktestTickCacheDiagnostic,
