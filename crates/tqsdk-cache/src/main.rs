@@ -23,6 +23,7 @@ use tqsdk_data::{
     MinuteKlineCacheSnapshot, backtest_tick_trading_day_for_timestamp_ns,
     plan_minute_cache_stale_partition_repair,
 };
+use tqsdk_session::SessionClientBuilder;
 
 mod progress;
 mod query;
@@ -1355,14 +1356,7 @@ async fn fill_minute(
     let calendar_report = resolved.calendar.report_calendar();
     let window = resolved.window;
     let selector_symbols = explicit_symbols.clone();
-    let symbols = resolve_minute_fill_symbols(
-        canonical_cache_dir.as_path(),
-        &window,
-        market,
-        explicit_symbols,
-        universe.as_deref(),
-    )
-    .await?;
+    let symbols = resolve_minute_fill_symbols(explicit_symbols, universe.as_deref()).await?;
     let selector = FillSelectorReport {
         symbols: selector_symbols,
         universe,
@@ -1579,9 +1573,6 @@ fn minute_cache_snapshot_for_symbol(
 }
 
 async fn resolve_minute_fill_symbols(
-    cache_dir: &Path,
-    window: &TradingDayWindow,
-    market: MarketKind,
     explicit_symbols: Vec<String>,
     universe: Option<&str>,
 ) -> Result<Vec<String>, CliError> {
@@ -1589,14 +1580,37 @@ async fn resolve_minute_fill_symbols(
     let Some(universe) = universe else {
         return Ok(symbols.into_iter().collect());
     };
-    debug_assert!(matches!(market, MarketKind::Futures));
-    let builder = builder_with_market_environment_auth(MarketKind::Futures, false)?
-        .backtest(window.start_ns, window.end_ns)
-        .cache_store(BacktestTickCache::open_read_only(cache_dir))
-        .cache_only()
-        .universe(universe)?;
-    let resolved = builder.warmup().await?;
-    symbols.extend(resolved.logical_symbols);
+    let expression = tqsdk_data::UniverseExpression::parse(universe)?;
+    if expression.is_static_symbol_only() {
+        symbols.extend(tqsdk_data::resolve_static_symbols_with_expression(
+            &expression,
+        )?);
+    } else {
+        let user = std::env::var("TQ_AUTH_USER").map_err(|_| {
+            CliError::Usage(
+                "dynamic futures universe requires TQ_AUTH_USER and TQ_AUTH_PASS".to_string(),
+            )
+        })?;
+        let pass = std::env::var("TQ_AUTH_PASS").map_err(|_| {
+            CliError::Usage(
+                "dynamic futures universe requires TQ_AUTH_USER and TQ_AUTH_PASS".to_string(),
+            )
+        })?;
+        let discovery = tqsdk_data::session_client_builder_for_futures_discovery(&user, &pass)
+            .build()
+            .map_err(tqsdk::Error::from)?;
+        let mut resolver = tqsdk_data::SessionFuturesUniverseResolver::new(discovery);
+        if tqsdk_data::expression_requires_activity_quotes(&expression) {
+            let activity = SessionClientBuilder::new(user, pass)
+                .futures_market()
+                .build()
+                .map_err(tqsdk::Error::from)?;
+            resolver = resolver.with_activity_client(activity);
+        }
+        symbols.extend(
+            tqsdk_data::resolve_futures_universe_symbols(&expression, &mut resolver).await?,
+        );
+    }
     if symbols.is_empty() {
         return Err(CliError::Usage(
             "--universe resolved no canonical-minute symbols".to_string(),

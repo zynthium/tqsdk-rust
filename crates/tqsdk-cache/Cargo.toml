@@ -19,6 +19,7 @@ tokio.workspace = true
 toml = "0.8"
 tqsdk = { path = "../tqsdk", version = "0.1.0" }
 tqsdk-data = { path = "../tqsdk-data", version = "0.1.0" }
+tqsdk-session = { path = "../tqsdk-session", version = "0.1.0" }
 
 [lints]
 workspace = true

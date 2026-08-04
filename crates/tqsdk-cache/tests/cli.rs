@@ -273,6 +273,33 @@ fn minute_fill_dry_run_is_cache_only_and_does_not_create_the_root() {
 }
 
 #[test]
+fn minute_fill_static_universe_dry_run_does_not_warm_the_cache() {
+    let cache_dir = temp_dir("minute-fill-static-universe-dry-run");
+    let output = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "fill",
+        "--universe",
+        "symbol:KQ.m@SHFE.au",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-03",
+        "--dry-run",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "fill", "incomplete", 1);
+    assert_eq!(result["report"]["cache_kind"], "minute");
+    assert_eq!(result["report"]["remote_used"], false);
+    assert_eq!(result["report"]["complete"], false);
+    assert!(!cache_dir.exists());
+}
+
+#[test]
 fn minute_fill_dry_run_uses_the_persisted_metadata_snapshot() {
     let cache_dir = temp_dir("minute-fill-dry-run-metadata-snapshot");
     let symbol = "KQ.i@SHFE.au";
