@@ -21,7 +21,7 @@ const DEFAULT_AUTH_URL: &str = "https://auth.shinnytech.com";
 const DEFAULT_NAME_SERVICE_URL: &str = "https://api.shinnytech.com/ns";
 const DEFAULT_BROKER_BASE_URL: &str = "https://files.shinnytech.com";
 const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.8.1";
-const HTTP_SEND_ATTEMPTS: usize = 3;
+const HTTP_SEND_ATTEMPTS: usize = 6;
 const HTTP_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 // These are ShinnyTech's public OAuth2 client identifiers, not user
 // credentials. User passwords and access tokens still come from the runtime
@@ -606,40 +606,59 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn access_token_request_retries_a_transient_send_failure() {
+    async fn access_token_request_retries_several_transient_send_failures() {
         let listener =
             std::net::TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
         let addr = listener
             .local_addr()
             .expect("test listener should have an address");
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_done = std::sync::Arc::clone(&done);
         let server = std::thread::spawn(move || {
-            for attempt in 0..2 {
-                let (mut stream, _) = listener.accept().expect("test connection should arrive");
-                let mut request = [0_u8; 2048];
-                let _ = stream.read(&mut request);
-                if attempt == 0 {
-                    continue;
+            listener
+                .set_nonblocking(true)
+                .expect("test listener should become nonblocking");
+            let mut attempt = 0;
+            loop {
+                if server_done.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
                 }
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0_u8; 2048];
+                        let _ = stream.read(&mut request);
+                        if attempt < 3 {
+                            attempt += 1;
+                            continue;
+                        }
 
-                let body = br#"{"access_token":"test-access-token"}"#;
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                )
-                .expect("headers should write");
-                stream.write_all(body).expect("body should write");
+                        let body = br#"{"access_token":"test-access-token"}"#;
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .expect("headers should write");
+                        stream.write_all(body).expect("body should write");
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("test connection should arrive: {error}"),
+                }
             }
         });
         let provider = test_provider().with_auth_url(format!("http://{addr}"));
 
-        let access_token = provider
-            .request_access_token()
-            .await
-            .expect("transient send failure should be retried");
-
-        assert_eq!(access_token, "test-access-token");
+        let access_token = provider.request_access_token().await;
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
         server.join().expect("test server should finish");
+
+        assert_eq!(
+            access_token.expect("several transient send failures should be retried"),
+            "test-access-token"
+        );
     }
 
     fn test_provider() -> TqAuthProvider {
