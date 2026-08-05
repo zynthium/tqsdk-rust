@@ -63,8 +63,9 @@ minute 缓存当前的 format id 是 `tqsdk.minute-kline.monthly.v4`，schema/fi
 snapshot 覆盖完整窗口、schema/session identity 与 active 一致、并能精确验证现存月文件时选择它。
 缺少保留 snapshot、session 变化、损坏文件或不能由单一 snapshot 解释的混合分区仍 fail closed，且不会
 自动 purge、重写、下载或拼接数据。唯一例外是显式的 `--kind minute fill --repair-stale`：active snapshot
-覆盖窗口时，它删除该窗口内与 active snapshot 冲突的整月文件后，才由同一次
-remote-on-miss fill 重建缺口；普通 `fill`、`inspect`、`verify` 和 cache-backed reader 仍 fail closed。
+覆盖窗口时，它仅在同一 root remote-fill lock 已取得且 repair 所需认证预检成功后删除与 active snapshot
+冲突的整月分区，随后由同一次 remote-on-miss fill 重建；锁忙或认证缺失时不删除分区。普通 `fill`、
+`inspect`、`verify` 和 cache-backed reader 仍 fail closed。
 
 本地 replay 的周期合同不变：`<60s` 从 tick cache 按 session 合成，`60s` 从 canonical minute cache
 读取，`>60s` 只允许 `N × 60s` 并从 closed 60s K 按固定 CST `18:00` trading-day grid 本地聚合；
@@ -108,7 +109,7 @@ block（连续合约会保留必要的 underlying / segment mapping）。这是 
 | `inventory` | 快速枚举日分区、文件/字节/已知问题；不解码、不建 root | 快速枚举月文件、文件/字节；不解码、不建 root |
 | `inspect` | read-only coverage/missing ranges，要求 explicit physical symbols | read-only final-60s coverage/missing ranges，要求 explicit logical symbols |
 | `fill --dry-run` | CacheOnly 预检，不取 fill lock、不写 report/rows | 同样只做 final coverage 预检 |
-| `fill` | missing tick ranges 远端补齐；当前日可走 explicit provisional 规则 | 仅 closed-day final ranges，按 60s Kline stream 补齐；显式 `--repair-stale` 才会先删除已定位的 mixed-snapshot 月分区 |
+| `fill` | missing tick ranges 远端补齐；当前日可走 explicit provisional 规则 | 仅 closed-day final ranges，按 60s Kline stream 补齐；显式 `--repair-stale` 才会在 root fill lock 和 auth preflight 后删除已定位的 mixed-snapshot 月分区 |
 | `verify` | CacheOnly coverage，选配 local tick replay | CacheOnly final coverage，选配流式读取 local minute rows |
 | `doctor` | 深度解码 TQBN；tick stable-view lock 协调检查 | 深度解码 `.tqmk`，状态为 `readable` / `legacy_unsupported` / `unsupported_version` / `corrupt` |
 | `purge` | 不提供 CLI purge | 受控的整月分区删除 |
@@ -213,8 +214,9 @@ tick 和 minute 都没有自动 retention、max-byte eviction 或后台 cleanup�
 
 `--dry-run` 只列出会移除的月文件、路径与大小，不写任何内容。真实 purge 删除所有与请求 window
 相交的整月分区，并以每月文件锁执行；它不是跨 cache family 的 root-wide transaction。
-`fill --repair-stale` 是另一条显式 minute maintenance path，不能和 `--dry-run` 或 tick 使用；它只删除
-已由 active snapshot 比较定位的冲突整月分区，并立刻由同一 remote fill 请求补齐。
+`fill --repair-stale` 是另一条显式 minute maintenance path，不能和 `--dry-run` 或 tick 使用；它只在
+同一 root remote-fill lock 和 repair 所需 auth preflight 成功后删除已由 active snapshot 比较定位的冲突整月
+分区，并立刻由同一 remote fill 请求补齐。lock busy 或 auth 缺失时不删除任何分区。
 
 ## 验收
 

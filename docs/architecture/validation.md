@@ -238,8 +238,9 @@ partition、snapshot hash fail-closed、current-day final-coverage guard、strea
 前移后，完整历史 minute 分区由覆盖整个窗口且 session/schema identity 相同的 immutable snapshot
 继续离线读取；`RemoteOnMiss` 完整命中不得读取 auth。`verify` 必须使用 metadata-backed snapshot，
 而不是固定 CST 默认值；缺失保留 snapshot、session 变化、损坏或混合分区仍必须 fail closed。
-显式 `fill --repair-stale` 仅在 active snapshot 覆盖完整窗口时，才 purge 与它冲突的整月分区；tick 与
-`--dry-run` 必须拒绝该 destructive flag。
+显式 `fill --repair-stale` 仅在 active snapshot 覆盖完整窗口时，才 purge 与它冲突的整月分区；该 purge
+必须在同一 root remote-fill lock 和 repair 所需 auth preflight 成功后发生。lock busy 或认证缺失必须保留
+所有分区；tick 与 `--dry-run` 必须拒绝该 destructive flag。
 metadata tests 还覆盖 remote-on-miss 的短 snapshot 不会降级更宽 active pointer、更宽 snapshot 会升级 active
 pointer、以及 partial range 的 metadata refresh 扩展到完整 CST trading month。
 `minute_kline_aggregate` 和 `history_backtest_replay` 覆盖 60s open/final、`N × 60s` 固定 CST `18:00`

@@ -32,9 +32,11 @@ minute 的 format id 为 `tqsdk.minute-kline.monthly.v4`，但 namespace 有意�
 使已有分区失效：`inspect`、`fill --dry-run` 和 `verify` 只会在一个保留 snapshot 覆盖整个窗口、
 schema/session identity 与 active 相同并能精确验证现有月文件时使用它。不能满足这些条件的旧、损坏或
 混合分区仍默认 fail closed；CLI 不会为此自动删除、重写或重新下载数据。只有操作者显式传
-`--kind minute fill --repair-stale` 时，CLI 才会删除与覆盖窗口快照冲突的整月分区后再走普通
-remote-on-miss 补齐；若没有任何已持久化 snapshot 覆盖整个请求窗口，则该 flag 会删除窗口内所有已存在的
-minute 月分区，让官方 metadata refresh 建立唯一的目标 snapshot。该 flag 不支持 tick 或 `--dry-run`。
+`--kind minute fill --repair-stale` 时，CLI 才会在同一次 facade remote-on-miss warmup 中，取得
+root remote-fill lock 并完成认证预检后，删除与覆盖窗口快照冲突的整月分区，再补齐缺口；若没有任何已持久化
+snapshot 覆盖整个请求窗口，则该 flag 会删除窗口内所有已存在的 minute 月分区，让官方 metadata refresh
+建立唯一的目标 snapshot。锁忙或 repair 所需认证缺失时，命令失败且不删除任何分区。该 flag 不支持 tick
+或 `--dry-run`。
 remote-on-miss metadata 会覆盖涉及的完整 CST trading month；短查询生成的 snapshot 不会替换更宽的 active
 pointer，后续查询会优先复用覆盖其范围的 retained snapshot。
 
@@ -275,7 +277,8 @@ canonical root、range 和 symbols 为准。
 CLI 的常规显式维护是 minute purge：必须恰好一个 `--symbol`、完整的 `--start-day` / `--end-day`
 window 以及 `--yes`。`--dry-run` 不写入，只列出将删除的月文件、路径和大小；真实 purge 会删除与请求
 窗口相交的整个 monthly partition，而不是单条 K 线。`fill --repair-stale` 是另一条更窄的显式维护路径：
-它只针对已判定为 mixed snapshot 的月文件，并立刻用同一次 remote fill 补齐；不能和 `--dry-run` 使用。
+它只针对已判定为 mixed snapshot 的月文件，并在同一 root fill lock 与 auth preflight 成功后用同一次
+remote fill 补齐；锁忙或认证缺失时不删除分区，且不能和 `--dry-run` 使用。
 
 ```bash
 # 先看会删除哪些整月分区。

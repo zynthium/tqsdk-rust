@@ -403,6 +403,76 @@ fn repair_stale_is_explicitly_limited_to_mutating_minute_fills() {
 }
 
 #[test]
+fn minute_repair_stale_keeps_partitions_when_remote_fill_lock_is_busy() {
+    let cache_dir = temp_dir("minute-repair-stale-lock-busy");
+    let symbol = "KQ.i@SHFE.au";
+    let month_path = stale_minute_partition(&cache_dir, symbol);
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    let lock = cache.try_acquire_remote_fill_lock().unwrap();
+
+    let output = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "fill",
+        "--symbol",
+        symbol,
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--repair-stale",
+    ]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(75),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(month_path.exists());
+
+    drop(lock);
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn minute_repair_stale_requires_auth_before_removing_partitions() {
+    let cache_dir = temp_dir("minute-repair-stale-auth");
+    let symbol = "KQ.i@SHFE.au";
+    let month_path = stale_minute_partition(&cache_dir, symbol);
+
+    let output = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "fill",
+        "--symbol",
+        symbol,
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--repair-stale",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(month_path.exists());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("remote backtest cache fill requires auth")
+    );
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
 fn tick_fill_rejects_stock_market_instead_of_silently_using_futures() {
     let output = run_json([
         "--kind",
@@ -2104,6 +2174,41 @@ fn store_metadata_backed_minute_coverage(
         .store_final_range(symbol, range.start_ns, range.end_ns, &snapshot, &[])
         .unwrap();
     stored
+}
+
+fn stale_minute_partition(cache_dir: &std::path::Path, symbol: &str) -> std::path::PathBuf {
+    let trading_day = day(2020, 1, 2);
+    let range = backtest_tick_trading_day_range(trading_day).unwrap();
+    store_metadata_backed_minute_coverage(cache_dir, symbol, trading_day);
+    let month_path = MinuteKlineCache::open(cache_dir)
+        .unwrap()
+        .month_file_path(symbol, "202001");
+
+    BacktestHistoryMetadataCache::open(cache_dir)
+        .unwrap()
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+            market_kind: BacktestHistoryMarketKind::Futures,
+            logical_symbol: symbol.to_string(),
+            captured_at_ns: range.end_ns.saturating_add(1),
+            trading_days: vec![BacktestHistoryTradingDay {
+                date: trading_day.to_string(),
+                is_trading_day: true,
+                start_ns: range.start_ns,
+                end_ns: range.end_ns,
+            }],
+            session: KlineSessionTemplate::new("changed-session", Vec::new()).unwrap(),
+            physical_segments: vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: symbol.to_string(),
+                start_ns: range.start_ns,
+                end_ns: range.end_ns,
+            }],
+            snapshot_hash: String::new(),
+        })
+        .unwrap();
+
+    assert!(month_path.exists());
+    month_path
 }
 
 fn temp_dir(name: &str) -> std::path::PathBuf {

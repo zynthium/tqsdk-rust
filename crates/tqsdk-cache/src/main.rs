@@ -21,7 +21,6 @@ use tqsdk_cache::{
 use tqsdk_data::{
     BacktestTickCache, DataClient, DataError, HistorySeriesCacheFileStatus, MinuteKlineCache,
     MinuteKlineCacheSnapshot, backtest_tick_trading_day_for_timestamp_ns,
-    plan_minute_cache_stale_partition_repair,
 };
 use tqsdk_session::SessionClientBuilder;
 
@@ -1411,31 +1410,11 @@ async fn fill_minute(
     if resolved.calendar.snapshot.is_some() {
         reporter.calendar_ready(resolved.calendar.progress_calendar(&window)?);
     }
-    let repaired_stale_partitions = if args.repair_stale {
-        reporter.planning("removing explicitly requested stale canonical-minute partitions");
-        match repair_stale_minute_partitions(
-            canonical_cache_dir.as_path(),
-            symbols.as_slice(),
-            window.start_ns,
-            window.end_ns,
-        ) {
-            Ok(removed) => {
-                reporter.planning(format!(
-                    "removed {removed} stale canonical-minute partitions; checking final coverage"
-                ));
-                removed
-            }
-            Err(error) => {
-                progress_session.finish(
-                    ProgressTerminalStatus::Failed,
-                    "minute stale-partition repair failed; no remote fill was started",
-                );
-                return Err(error);
-            }
-        }
-    } else {
-        0
-    };
+    if args.repair_stale {
+        reporter.planning(
+            "checking explicitly requested stale canonical-minute partitions under remote-fill lock",
+        );
+    }
     let cancellation = BacktestRemoteFillCancellation::new();
     let signal_cancellation = cancellation.clone();
     let signal_task = tokio::spawn(async move {
@@ -1451,6 +1430,9 @@ async fn fill_minute(
         .remote_fill_cancellation(cancellation.clone())
         .on_remote_fill_progress(move |event| progress_callback.observe_progress(event))
         .on_remote_fill_telemetry(move |event| telemetry_callback.observe_telemetry(event));
+    if args.repair_stale {
+        builder = builder.repair_stale_minute_partitions();
+    }
     if let Some(wait_secs) = args.lock_wait_secs {
         builder = builder.remote_fill_lock_wait(Duration::from_secs(wait_secs));
     }
@@ -1489,6 +1471,7 @@ async fn fill_minute(
             return Err(error.into());
         }
     };
+    let repaired_stale_partitions = warmup.stale_minute_partitions_repaired;
     let report = MinuteFillReport::from_warmup(
         &warmup,
         canonical_cache_dir.as_path(),
@@ -1529,28 +1512,6 @@ async fn fill_minute(
         }),
         exit_code: if report.complete { 0 } else { 1 },
     })
-}
-
-fn repair_stale_minute_partitions(
-    cache_dir: &Path,
-    symbols: &[String],
-    start_ns: i64,
-    end_ns: i64,
-) -> Result<usize, CliError> {
-    let cache = MinuteKlineCache::open(cache_dir)?;
-    let mut removed = 0_usize;
-    for symbol in symbols {
-        let Some(plan) =
-            plan_minute_cache_stale_partition_repair(cache_dir, symbol.as_str(), start_ns, end_ns)?
-        else {
-            continue;
-        };
-        for (range_start_ns, range_end_ns) in plan.stale_ranges {
-            let report = cache.purge_range(symbol.as_str(), range_start_ns, range_end_ns)?;
-            removed = removed.saturating_add(report.removed_files);
-        }
-    }
-    Ok(removed)
 }
 
 fn minute_cache_snapshot_for_symbol(

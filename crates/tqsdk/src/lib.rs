@@ -1011,6 +1011,7 @@ pub struct BacktestBuilder {
     remote_fill_cancellation: Option<BacktestRemoteFillCancellation>,
     remote_fill_lock_wait: Option<Duration>,
     provisional_open_day_fill: Option<ProvisionalOpenDayFill>,
+    repair_stale_minute_partitions: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1182,6 +1183,9 @@ pub struct BacktestCacheWarmupReport {
     pub minute_kline_symbols: Vec<BacktestMinuteKlineCacheWarmupSymbolReport>,
     pub minute_kline_rows_written: usize,
     pub remote_minute_kline_used: bool,
+    /// Number of stale canonical-minute monthly partitions explicitly removed
+    /// before remote filling.
+    pub stale_minute_partitions_repaired: usize,
 }
 
 fn backtest_kline_source(duration_ns: i64) -> Result<BacktestKlineSource> {
@@ -2268,6 +2272,63 @@ impl BacktestBuilder {
         let mut minute_klines = planned.canonical_minutes.clone();
         minute_klines.extend(planned.aggregated_minutes.clone());
         minute_klines.extend(planned.auto_quote_minutes.clone());
+        let repair_minute_symbols = minute_klines
+            .iter()
+            .map(|spec| spec.symbol.clone())
+            .collect::<BTreeSet<_>>();
+        if self.repair_stale_minute_partitions
+            && !matches!(self.cache_policy, BacktestCachePolicy::RemoteOnMiss)
+        {
+            return Err(data_validation(
+                "stale canonical-minute partition repair requires remote-on-miss cache policy",
+            ));
+        }
+        if self.repair_stale_minute_partitions
+            && !repair_minute_symbols.is_empty()
+            && !minute_range_can_claim_final_coverage(self.end_ns)?
+        {
+            return Err(data_validation(
+                "canonical 60-second Kline cache cannot fill a current or future trading day; retry after that trading day closes",
+            ));
+        }
+        let (remote_fill_lock, stale_minute_partitions_repaired) =
+            if self.repair_stale_minute_partitions {
+                let remote_fill_lock = Some(self.acquire_remote_fill_lock(&cache).await?);
+                let minute_cache = tqsdk_data::MinuteKlineCache::open(cache.cache_dir())?;
+                let mut stale_plans = Vec::new();
+                for symbol in &repair_minute_symbols {
+                    if let Some(plan) = tqsdk_data::plan_minute_cache_stale_partition_repair(
+                        cache_dir.as_path(),
+                        symbol,
+                        self.start_ns,
+                        self.end_ns,
+                    )? {
+                        stale_plans.push((symbol.clone(), plan));
+                    }
+                }
+                let stale_minute_partitions_repaired = if stale_plans.is_empty() {
+                    0
+                } else {
+                    if self.base.auth.is_none() {
+                        return Err(data_validation("remote backtest cache fill requires auth"));
+                    }
+                    let mut removed_files = 0_usize;
+                    for (symbol, plan) in stale_plans {
+                        for (range_start_ns, range_end_ns) in plan.stale_ranges {
+                            let report = minute_cache.purge_range(
+                                symbol.as_str(),
+                                range_start_ns,
+                                range_end_ns,
+                            )?;
+                            removed_files = removed_files.saturating_add(report.removed_files);
+                        }
+                    }
+                    removed_files
+                };
+                (remote_fill_lock, stale_minute_partitions_repaired)
+            } else {
+                (None, 0)
+            };
         let minute_inputs = resolve_backtest_minute_kline_inputs(
             cache_dir.as_path(),
             &minute_klines,
@@ -2314,7 +2375,6 @@ impl BacktestBuilder {
                 self.cache_policy
             )));
         }
-
         let minute_cache = if matches!(self.cache_policy, BacktestCachePolicy::CacheOnly) {
             tqsdk_data::MinuteKlineCache::open_read_only(cache.cache_dir())
         } else {
@@ -2335,13 +2395,16 @@ impl BacktestBuilder {
                 "canonical 60-second Kline cache cannot fill a current or future trading day; retry after that trading day closes",
             ));
         }
-        let _remote_fill_lock = if matches!(
-            self.cache_policy,
-            BacktestCachePolicy::RemoteOnMiss | BacktestCachePolicy::Refresh
-        ) {
-            Some(self.acquire_remote_fill_lock(&cache).await?)
-        } else {
-            None
+        let _remote_fill_lock = match remote_fill_lock {
+            Some(lock) => Some(lock),
+            None if matches!(
+                self.cache_policy,
+                BacktestCachePolicy::RemoteOnMiss | BacktestCachePolicy::Refresh
+            ) =>
+            {
+                Some(self.acquire_remote_fill_lock(&cache).await?)
+            }
+            None => None,
         };
         if refresh {
             for (symbol, _, _) in &physical_ranges {
@@ -2473,6 +2536,7 @@ impl BacktestBuilder {
                     batch_size: self.warmup_batch_size,
                     remote_used: false,
                     remote_minute_kline_used: false,
+                    stale_minute_partitions_repaired: 0,
                 },
                 symbols,
                 minute_kline_symbols,
@@ -2592,6 +2656,7 @@ impl BacktestBuilder {
                 batch_size: self.warmup_batch_size,
                 remote_used,
                 remote_minute_kline_used,
+                stale_minute_partitions_repaired,
             },
             symbols,
             minute_kline_symbols,
@@ -2609,6 +2674,17 @@ impl BacktestBuilder {
     #[must_use]
     pub fn remote_on_miss(self) -> Self {
         self.cache(BacktestCachePolicy::RemoteOnMiss)
+    }
+
+    /// Enable operator-requested repair of stale canonical-minute partitions.
+    ///
+    /// This is honored only by [`Self::remote_on_miss`] [`Self::warmup`]. The
+    /// remote-fill root lock and auth preflight cover both removal and refill.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn repair_stale_minute_partitions(mut self) -> Self {
+        self.repair_stale_minute_partitions = true;
+        self
     }
 
     /// Disable the persistent cache path.
@@ -3086,6 +3162,7 @@ struct WarmupReportContext {
     batch_size: usize,
     remote_used: bool,
     remote_minute_kline_used: bool,
+    stale_minute_partitions_repaired: usize,
 }
 
 fn build_warmup_report(
@@ -3132,6 +3209,7 @@ fn build_warmup_report(
         minute_kline_symbols,
         minute_kline_rows_written,
         remote_minute_kline_used: context.remote_minute_kline_used,
+        stale_minute_partitions_repaired: context.stale_minute_partitions_repaired,
     }
 }
 
@@ -3222,6 +3300,7 @@ impl PreparedBacktest {
             remote_fill_cancellation: _,
             remote_fill_lock_wait: _,
             provisional_open_day_fill: _,
+            repair_stale_minute_partitions: _,
         } = builder;
         let mut base = base;
         for spec in &kline_specs {
@@ -3425,6 +3504,7 @@ impl TqBuilder {
             remote_fill_cancellation: None,
             remote_fill_lock_wait: None,
             provisional_open_day_fill: None,
+            repair_stale_minute_partitions: false,
         }
     }
 
