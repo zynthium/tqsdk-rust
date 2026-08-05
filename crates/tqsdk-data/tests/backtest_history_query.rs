@@ -22,6 +22,39 @@ const SECOND_NS: i64 = 1_000_000_000;
 const MINUTE_NS: i64 = 60 * SECOND_NS;
 
 #[tokio::test]
+async fn cache_materialization_skips_readback_and_reports_only_new_writes() {
+    let root = temp_dir("materialize-cache-hit");
+    let symbol = "SHFE.au2608";
+    let timestamp = utc_ns(2026, 1, 5, 1, 0, 0);
+    let day = backtest_tick_trading_day_for_timestamp_ns(timestamp).unwrap();
+    let range = backtest_tick_trading_day_range(day).unwrap();
+    BacktestTickCache::open(&root)
+        .unwrap()
+        .store_ticks(
+            symbol,
+            range.start_ns,
+            range.end_ns,
+            [tick(1, timestamp, 100.0, 100, 10)],
+        )
+        .unwrap();
+
+    let report = cache_only_client(&root)
+        .materialize_cache([BacktestHistoryRequest::tick(
+            1,
+            symbol,
+            range.start_ns,
+            range.end_ns,
+        )])
+        .await
+        .unwrap();
+
+    assert!(report.failed.is_empty());
+    assert_eq!(report.completed.len(), 1);
+    assert_eq!(report.completed[0].rows, 0);
+    assert!(!report.completed[0].remote_used);
+}
+
+#[tokio::test]
 async fn cache_only_tick_and_15s_requests_read_the_same_durable_tick_source() {
     let root = temp_dir("tick-and-15s");
     let symbol = "SHFE.au2608";

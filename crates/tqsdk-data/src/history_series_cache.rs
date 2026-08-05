@@ -417,6 +417,17 @@ impl HistorySeriesCache {
         self.store.compact_series(symbol, kind)
     }
 
+    pub(crate) fn compact_series_range(
+        &self,
+        symbol: &str,
+        kind: HistorySeriesKind,
+        range_start_ns: i64,
+        range_end_ns: i64,
+    ) -> Result<()> {
+        self.store
+            .compact_series_range(symbol, kind, range_start_ns, range_end_ns)
+    }
+
     pub(crate) fn open_reader(
         &self,
         request: HistorySeriesReadRequest,

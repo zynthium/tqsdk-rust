@@ -209,6 +209,8 @@ tqsdk
 - TQBN market-data block 的 crate-internal 时间索引与范围读取；旧/不匹配索引必须逐 block 回退
 - TQBN final coverage 与 open-day provisional checkpoint；后者只用于增量恢复，不得进入普通
   coverage/cache-hit，物理淘汰仅由显式 maintenance/compaction 触发
+- TQBN 每分区 advisory lock、原子首次发布、opened-file snapshot 与 tail checkpoint；新格式 reader
+  只读取 checkpoint 确认的长度，解压/流式消费在短锁外完成，未确认坏后缀由下一 writer 截断恢复
 - 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store
 - `LiveTickCacheWriter` 只作为纯数据层 writer，接收已解码 tick rows 并写入共享回测缓存；
   它可以做有界行缓冲和显式 `flush()`，但 live 订阅、`wait_update()` 驱动、timer task 和后台进程
@@ -218,6 +220,9 @@ tqsdk
 - `BacktestHistoryClient`：持久 metadata sidecar、请求 planner、official server-backtest
   fill/single-flight、bounded async cache scan 与 Tick/60s 派生 K 线查询。它是回测数据路径的
   唯一 cache/fill owner；`tqsdk-wait` 不参与 data fill，`tqsdk-task` 不拥有 durable partition
+- `RemoteOnMiss` client/facade/CLI 必须进入 shared cache-root gate，并由 `family × symbol` lease 去重
+  重叠 fill；refresh、stale repair、verify、doctor 和真实 purge 使用 exclusive gate。不要绕过该门禁
+  增加另一条远端 fill 路径，也不要承诺不理解该协议的旧进程可与新进程长期混跑
 - durable source 固定为 Tick daily TQBN、`<60s` 从 Tick 按 session 临时聚合、canonical 60s monthly、
   `N × 60s` 从 canonical minutes 按固定 CST `18:00` trading-day grid 临时聚合。盘中 break 不重置
   高周期 bucket；Tick/60s 分区没有自动清理，派生 K 不落盘
@@ -246,8 +251,9 @@ tqsdk
 - 默认 human summary / opt-in JSON stdout contract，stderr progress，closed-day fill、显式日期
   current-day 自动 provisional fill、`--require-final` 严格保护、report-bound CacheOnly verify、
   fast inventory 与 deep doctor
-- 使用 `BacktestTickCache` root advisory lock 协调远端 fill owner；取消时 flush partial rows，
-  但不提交 final coverage 或推进 provisional checkpoint
+- 使用 `BacktestTickCache` shared/exclusive root advisory gate 与 data-owned per-series lease 协调并发；
+  首次关闭信号请求协作式取消并等待 tick 短尾 flush，但不提交未确认 final coverage 或推进 provisional
+  checkpoint；第二次关闭信号立即以 130 退出
 
 非职责：
 

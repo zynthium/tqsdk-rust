@@ -182,6 +182,10 @@ tick 与 60s minute 分区均没有自动 retention、max-byte eviction 或后�
 才会删除。`tqsdk::advanced::data::BacktestHistoryClient` 是面向区间查询的异步入口：它按 request id
 流式交付 chunk，只有收到 `RequestCompleted` 后 chunk 才成为成功结果；需要一次性收集时，单请求
 `collect()` 使用配置的内存上限，批量 `collect_all(max_total_bytes)` 必须由调用方显式给出总内存预算。
+`RemoteOnMiss` run 与普通 facade/CLI fill 共用 cache-root shared gate；不同 symbol 可并行，重叠的
+`family × physical symbol` fill 再由跨进程 lease 串行。refresh、stale repair、verify、doctor 和真实 purge
+使用 exclusive gate，锁冲突返回可重试的 `cache_busy`。该协议是 advisory coordination，部署时不要让
+不理解 shared/exclusive gate 的旧版本进程与新版本长期混跑。
 
 回测声明 `KQ.m@EX.product` 主连时，facade 会通过
 `tqsdk-data` 持久化的 metadata sidecar 取得 calendar、session 与历史 date → concrete-contract
@@ -282,7 +286,9 @@ serial；写入端只在 tick id 连续时推进 coverage，断线、跳号或�
 `.batch_size(n)` 记录兼容 batch hint、解析 universe、跳过完整缓存、用官方 server-side
 backtest 流按每个物理 cache symbol 的 `missing_ranges` 只补缺口，并返回每个 symbol 的 skipped /
 missing / filled 报告。普通 final 补齐成功后只
-compact 本次 symbol 的 tick 文件，用于合并回填时产生的碎片 blocks。
+compact 本次实际 fill 涉及的 tick 交易日分区（同日去重），用于合并回填时产生的碎片 blocks；
+provisional fill 不 compact。Tick 远端行按交易日顺序消费并以 8192 行短批追加，fill-only 路径不再为
+统计行数回读 cache；完整 cache hit 的 `rows_written` 为 0，同一 shared fill 的物理写入只计入一个报告。
 当前交易日若要盘中增量快照，可固定
 `.backtest(day_start_ns, as_of_ns)` 后调用
 `.provisional_open_day_fill(day_start_ns, as_of_ns)?`；它只写 non-final checkpoint，

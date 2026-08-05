@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 
+use chrono::NaiveDate;
 use tqsdk_core::Tick;
 use tqsdk_data::{
     BacktestTickCache, HistorySeriesCache, HistorySeriesCacheFileStatus, TickDataSeriesRequest,
+    backtest_tick_trading_day_range,
 };
 
 #[test]
@@ -30,7 +32,7 @@ fn tqbn_scan_ignores_sidecar_lock_files() {
         .join("series")
         .join("19700101")
         .join("tick")
-        .join(".tqbn.lock");
+        .join("DCE.i2601.tqbn.lock");
     assert!(lock_path.is_file(), "missing {}", lock_path.display());
 
     let scan = cache.scan().unwrap();
@@ -141,6 +143,43 @@ fn backtest_tick_cache_compacts_only_requested_symbol_ticks() {
         .unwrap();
     assert_eq!(rows.rows().len(), 1);
     assert_eq!(rows.rows()[0].last_price, 110.0);
+}
+
+#[test]
+fn backtest_tick_cache_range_compaction_touches_only_intersecting_days() {
+    let dir = temp_dir("backtest-range-compaction");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let first =
+        backtest_tick_trading_day_range(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap()).unwrap();
+    let second =
+        backtest_tick_trading_day_range(NaiveDate::from_ymd_opt(2026, 1, 6).unwrap()).unwrap();
+    for (range, id) in [(first, 7), (second, 8)] {
+        let datetime = range.start_ns.saturating_add(1);
+        cache
+            .append_partial_ticks("DCE.i2601", [tick(id, datetime, 100.0)])
+            .unwrap();
+        cache
+            .append_partial_ticks("DCE.i2601", [tick(id, datetime, 110.0)])
+            .unwrap();
+        cache
+            .mark_complete("DCE.i2601", range.start_ns, range.end_ns, 1, Some((id, id)))
+            .unwrap();
+    }
+
+    let first_path = daily_tick_file(&dir, "20260105", "DCE.i2601");
+    let second_path = daily_tick_file(&dir, "20260106", "DCE.i2601");
+    let first_size_before = std::fs::metadata(&first_path).unwrap().len();
+    let second_size_before = std::fs::metadata(&second_path).unwrap().len();
+
+    cache
+        .compact_symbol_ticks_in_range("DCE.i2601", first.start_ns, first.end_ns)
+        .unwrap();
+
+    assert!(std::fs::metadata(first_path).unwrap().len() < first_size_before);
+    assert_eq!(
+        std::fs::metadata(second_path).unwrap().len(),
+        second_size_before
+    );
 }
 
 fn tick(id: i64, datetime: i64, last_price: f64) -> Tick {

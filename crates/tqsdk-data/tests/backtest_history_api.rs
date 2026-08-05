@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use tqsdk_data::{
     BacktestHistoryAuthProvider, BacktestHistoryClient, BacktestHistoryCredentials,
-    BacktestHistoryEvent, BacktestHistoryPolicy, BacktestHistoryRequest, DataError,
+    BacktestHistoryEvent, BacktestHistoryPolicy, BacktestHistoryRequest, BacktestTickCache,
+    DataError,
 };
 
 #[tokio::test]
@@ -88,6 +89,31 @@ async fn request_and_builder_validation_happen_before_a_run_starts() {
             )
             .await,
     );
+}
+
+#[tokio::test]
+async fn remote_on_miss_run_joins_the_shared_cache_root_gate() {
+    let root = std::env::temp_dir().join(format!(
+        "tqsdk-backtest-history-api-root-gate-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    let cache = BacktestTickCache::open(&root).unwrap();
+    let exclusive = cache.try_acquire_consistency_read_lock().unwrap();
+    let client = BacktestHistoryClient::builder(root.clone())
+        .build()
+        .unwrap();
+
+    let result = client
+        .query(BacktestHistoryRequest::tick(8, "SHFE.au2602", 1, 2))
+        .await;
+
+    assert!(matches!(result, Err(DataError::CacheBusy { .. })));
+    drop(exclusive);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]

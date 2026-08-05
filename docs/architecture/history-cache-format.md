@@ -50,7 +50,8 @@ row writer 语义。
 `LiveTickCacheWriter::push_ticks(...)` 会合并连续单 tick 调用，`flush()` 显式提交不足一批的尾部；
 这只改变纯 writer 的批写时机，不把 session、timer task 或后台线程下沉到 data crate。
 `BacktestTickCache::compact_symbol_ticks(...)` 是 tick-only 运维入口，用于只重写指定
-symbol 的全部 tick 日分区 append-log；默认远端回测补缓存成功后会走该路径合并本次写入产生的碎块。
+symbol 的全部 tick 日分区 append-log；范围版本只重写相交日分区。默认远端 final 回测补缓存会按
+`symbol × trading day` 对本轮实际远端回填范围去重后 compact 相交日分区，provisional fill 不 compact。
 
 后续如果 TQBN 的内部 record layout 需要演进，应先保持这些 public facade 不变；只有当
 用户可见语义改变时，才同步调整 public API 文档和 contract examples。
@@ -155,6 +156,34 @@ minute cache 没有 retention、max-byte eviction 或后台清理。`Refresh` �
 - `HistorySeriesCache::tick_series_path(...)` / `kline_series_path(...)` 返回逻辑 series
   路径，不代表单个物理文件；`scan()`、coverage、purge 和 compact 会遍历匹配的全部日分区文件。
 
+## 文件锁、opened-file snapshot 与尾部恢复
+
+每个 `.tqbn` 日分区使用同路径的 `.tqbn.lock` sidecar 做 advisory file lock；该 sidecar 同时保存
+最近一次确认提交的 tail checkpoint。writer 持 exclusive lock，reader 持 shared lock。首次建文件在
+exclusive lock 内写临时文件、flush/sync 后原子 rename，并同步父目录；reader 不会观察半初始化 prefix。
+
+reader 的打开协议消除“先看文件不存在、writer 随后建锁和文件”的 TOCTOU：
+
+- 已有 sidecar 时，reader 先取得 shared lock，再打开 data file；锁内仍不存在才是明确的 missing snapshot。
+- sidecar 与 legacy lock 都不存在时，reader 打开 data file 并暂时锁住该已打开文件，然后再次检查
+  sidecar；若 writer 已创建 sidecar，reader 切换到它并等待 writer，不能把正在初始化的文件误判为损坏。
+- checkpoint 校验成功后，reader 记录已打开 file handle 和 confirmed prefix length，即可释放 shared
+  lock，再从该 handle 读取 snapshot。后续 append 不超过 confirmed prefix；并发 compaction 的 rename
+  也不会改变 reader 已打开的 inode snapshot。
+- 没有有效 checkpoint 的旧文件在 shared lock 内记录已打开 file handle 和当时的完整物理长度，之后可释放
+  lock；解码必须严格校验该捕获长度内的全部内容，不能忽略或截断其中的损坏 suffix。
+
+每次成功 append/coverage/provisional commit 在 data file `flush()` / `sync_data()` 后更新 tail
+checkpoint。checkpoint 包含 confirmed file length、该边界前的 bounded tail checksum，以及最新
+coverage-index head offset。coverage 与 range reader 只读取这个 confirmed prefix；checkpoint 之后的
+短写、截断 block 或 checksum 损坏 suffix 不参与当前读取，下一 writer 在 exclusive lock 内从 confirmed
+边界继续验证并截断坏 suffix 后恢复。checkpoint 缺失、版本未知、长度越界或 checksum 不匹配时，不得
+把任意 prefix 猜成安全快照，仍按旧文件严格全量校验。
+
+该协议保证当前实现之间的进程内/跨进程并发读写与异常恢复，不承诺新旧 binary 版本长期混跑。
+升级 cache writer 时应同步升级所有持续访问同一 root 的进程；per-file lock 不能让不了解 tail
+checkpoint 的旧 reader 获得新 reader 的 confirmed-prefix 语义。
+
 ## Binary Contract
 
 TQBN 文件是按记录顺序解码的二进制 record stream。
@@ -194,13 +223,22 @@ compaction 等完整性路径继续解码整个文件，因此范围读取跳过
 schema version，普通 record reader 可以忽略 `Index` block。coverage chain 与 `TQRI` records index
 可以交错存在；coverage tail 查找会忽略合法 `TQRI` entry。
 
-coverage inspection 只有在文件尾是完整 `TQCI` 链、链最终回到首 block root，且每个引用 block 的
-type、offset、checksum、coverage record 和 range 都匹配时才走小型索引读取。旧日文件、覆盖写入中断、尾部
-后来追加 rows，或任一 index/coverage 校验失败时必须回退到完整 block stream 校验，绝不能把该分区判断为
-complete。coverage 永远在 rows 已 `sync_data()` 后写入；异常崩溃可以留下 coverage gap，但不能让 coverage
-比其 rows 更早持久化。
+新文件的 tail checkpoint 保存 confirmed prefix 内最新 `TQCI` head，因此 coverage inspection 不要求
+物理文件最后一个 block 恰好是 `TQCI`。只要 checkpoint 的 confirmed length/tail checksum、head offset、
+整条链到首 block root，以及每个引用 block 的 type、offset、checksum、coverage record 和 range 都匹配，
+即可只读小型索引。索引链不完整或任一校验失败时，reader 回退扫描 confirmed prefix；没有有效 checkpoint
+的旧文件才回退严格扫描整个物理文件。任何路径都不能读取未确认 suffix 或把损坏分区判断为 complete。
+coverage 永远在 rows 已 `sync_data()` 后写入；异常崩溃可以留下 coverage gap，但不能让 coverage 比其 rows
+更早持久化。
+
+每个 `Coverage` / `ProvisionalCoverage` record 与紧邻、引用它的 `TQCI` block 构成恢复原子对。writer
+恢复时若发现 record 后没有合法相邻 `TQCI`，必须从该 record 起点截断；它属于未确认 tail，fallback/full
+scan 也不得把它重新解释为已提交 coverage。
 
 ### Provisional Coverage Checkpoints
+
+这里的 `ProvisionalCoverage` 是行情语义上的盘中高水位 record，不是上一节 `.tqbn.lock` 中用于确认
+物理文件 prefix 的 tail checkpoint；两者必须分别验证。
 
 当前交易日盘中回填使用独立的 `ProvisionalCoverage` record（rtype `19`），记录
 `range_start_ns`、`complete_through_ns`、`as_of_ns`、row 数和可选 tick id 范围。
@@ -251,6 +289,7 @@ TQBN reader 的兼容规则是：
 
 5. 已知 block flags 按 feature-gated path 处理；未知 block flags 必须拒绝。
 6. `TQRI` 是可选加速结构；缺失或无效时必须回退解码对应 records block，不能静默漏行。
+7. tail checkpoint 是 sidecar 加速与恢复合同；无效时严格读取旧文件，不得把坏 suffix 静默裁成命中。
 
 这些规则允许后续 record 尾部追加字段，但不允许 silent truncation。任何需要读取旧 layout 的逻辑都应
 集中在 compat module 中，不能散落在 normal decode path。

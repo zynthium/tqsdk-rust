@@ -145,6 +145,15 @@ pub(crate) trait HistorySeriesStore: Send + Sync {
         retention_days: Option<u64>,
     ) -> Result<HistorySeriesCacheMaintenanceReport>;
     fn compact_series(&self, symbol: &str, kind: HistorySeriesKind) -> Result<()>;
+    fn compact_series_range(
+        &self,
+        symbol: &str,
+        kind: HistorySeriesKind,
+        _range_start_ns: i64,
+        _range_end_ns: i64,
+    ) -> Result<()> {
+        self.compact_series(symbol, kind)
+    }
     fn coverage(
         &self,
         request: HistorySeriesCoverageRequest,

@@ -899,7 +899,7 @@ pub struct MinuteKlineReader {
     snapshot: MinuteKlineCacheSnapshot,
     paths: Vec<(String, PathBuf)>,
     next_path: usize,
-    current: Option<LockedMonthRowReader>,
+    current: Option<MonthRowReader>,
 }
 
 impl MinuteKlineReader {
@@ -921,7 +921,7 @@ impl MinuteKlineReader {
     pub fn next_kline(&mut self) -> Result<Option<Kline>> {
         loop {
             if let Some(current) = self.current.as_mut() {
-                match current.reader.next_row()? {
+                match current.next_row()? {
                     Some(row)
                         if row.datetime >= self.range_start_ns
                             && row.datetime < self.range_end_ns =>
@@ -946,16 +946,15 @@ impl MinuteKlineReader {
                 self.read_only,
             )?;
             let data_file = File::open(path.as_path())?;
-            self.current = Some(LockedMonthRowReader {
-                lock_file,
-                reader: MonthRowReader::open(
-                    data_file,
-                    path.as_path(),
-                    self.symbol.as_str(),
-                    trading_month.as_str(),
-                    &self.snapshot,
-                )?,
-            });
+            let reader = MonthRowReader::open(
+                data_file,
+                path.as_path(),
+                self.symbol.as_str(),
+                trading_month.as_str(),
+                &self.snapshot,
+            )?;
+            FileExt::unlock(&lock_file)?;
+            self.current = Some(reader);
         }
     }
 
@@ -975,17 +974,6 @@ impl MinuteKlineReader {
             rows.push(row);
         }
         Ok(rows)
-    }
-}
-
-struct LockedMonthRowReader {
-    lock_file: File,
-    reader: MonthRowReader,
-}
-
-impl Drop for LockedMonthRowReader {
-    fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.lock_file);
     }
 }
 
@@ -1099,7 +1087,7 @@ struct MonthFileLock {
 }
 
 impl MonthFileLock {
-    fn acquire(path: &Path, root_dir: &Path) -> Result<Self> {
+    fn acquire(path: &Path, _root_dir: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -1110,19 +1098,11 @@ impl MonthFileLock {
             .write(true)
             .truncate(false)
             .open(lock_path)?;
-        match FileExt::try_lock_exclusive(&file) {
-            Ok(()) => Ok(Self { file }),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                Err(DataError::CacheBusy {
-                    cache_dir: root_dir.to_path_buf(),
-                    operation: "minute kline cache monthly write",
-                })
-            }
-            Err(error) => Err(error.into()),
-        }
+        FileExt::lock_exclusive(&file)?;
+        Ok(Self { file })
     }
 
-    fn acquire_shared(path: &Path, root_dir: &Path, read_only: bool) -> Result<File> {
+    fn acquire_shared(path: &Path, _root_dir: &Path, read_only: bool) -> Result<File> {
         let lock_path = path.with_extension(format!("{FILE_EXTENSION}.lock"));
         let file = if read_only {
             OpenOptions::new()
@@ -1146,16 +1126,8 @@ impl MonthFileLock {
                 .truncate(false)
                 .open(lock_path)?
         };
-        match FileExt::try_lock_shared(&file) {
-            Ok(()) => Ok(file),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                Err(DataError::CacheBusy {
-                    cache_dir: root_dir.to_path_buf(),
-                    operation: "minute kline cache monthly read",
-                })
-            }
-            Err(error) => Err(error.into()),
-        }
+        FileExt::lock_shared(&file)?;
+        Ok(file)
     }
 }
 

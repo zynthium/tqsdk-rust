@@ -75,26 +75,26 @@ fn fast_inventory_and_diagnostics_report_bad_tqbn_magic() {
 }
 
 #[test]
-fn operation_lock_allows_shared_readers_and_rejects_remote_fill() {
+fn operation_lock_allows_parallel_fills_and_excludes_maintenance() {
     let dir = temp_dir("operation-lock");
     let cache = BacktestTickCache::open(&dir).unwrap();
-    let first_reader = cache.try_acquire_consistency_read_lock().unwrap();
-    let second_reader = cache.try_acquire_consistency_read_lock().unwrap();
+    let first_fill = cache.try_acquire_remote_fill_shared_lock().unwrap();
+    let second_fill = cache.try_acquire_remote_fill_shared_lock().unwrap();
 
-    let error = cache.try_acquire_remote_fill_lock().unwrap_err();
+    let error = cache.try_acquire_consistency_read_lock().unwrap_err();
     assert!(matches!(
         error,
         DataError::CacheBusy {
-            operation: "remote fill",
+            operation: "consistency read",
             ..
         }
     ));
 
-    drop(first_reader);
-    drop(second_reader);
-    let writer = cache.try_acquire_remote_fill_lock().unwrap();
-    assert_eq!(writer.cache_dir(), dir.as_path());
-    assert!(writer.path().ends_with(".tqsdk-cache-operation.lock"));
+    drop(first_fill);
+    drop(second_fill);
+    let maintenance = cache.try_acquire_consistency_read_lock().unwrap();
+    assert_eq!(maintenance.cache_dir(), dir.as_path());
+    assert!(maintenance.path().ends_with(".tqsdk-cache-operation.lock"));
 }
 
 #[test]

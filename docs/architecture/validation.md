@@ -209,15 +209,20 @@ rtk cargo check -p tqsdk-data --all-features --examples
 
 `history_series_single_file_store`、`history_series_cache`、`history_series_tqbn_compaction`
 和 `history_series_tqbn_corruption` 覆盖当前默认 TQBN history cache 行为、embedded coverage、
-coverage index chain 的多段读取、旧文件/尾部 rows 回退与引用 coverage block 损坏保护、daily partition
-file identity、records range index 的无关 block 跳过与未知 flags 拒绝、scan、损坏报告、
+coverage index chain 的多段读取、tail checkpoint 的 confirmed length/checksum/index head、未确认截断或坏
+checksum suffix 的 read 隔离与 writer 恢复、无 checkpoint 旧文件的严格全量校验、首次原子初始化等待、
+opened-file snapshot 不阻塞并发 append/atomic replace、引用 coverage block 损坏保护、daily partition file
+identity、records range index 的无关 block 跳过与未知 flags 拒绝、scan、损坏报告、
 size-limit maintenance，以及通过
 `enforce_limits(...)` 执行的 append-log compaction 和
-`BacktestTickCache::compact_symbol_ticks(...)` 的按 symbol 全部 tick 日分区 compact。
+`BacktestTickCache::compact_symbol_ticks(...)` 的按 symbol 全部 tick 日分区 compact、range 版本只触碰相交
+trading day。
 `backtest_tick_cache_ops` 还覆盖 provisional checkpoint 不进入 final coverage、最新 checkpoint
 round-trip、compaction 保留，以及 final coverage 覆盖后立即隐藏并物理淘汰。
 `backtest_tick_cache_ops` 与 `tqsdk-cache` tests 覆盖 TQBN CST `18:00` 交易日边界、read-only
-inspection、fast inventory、deep diagnostic、root lock、closed-day dry-run、完整 cache 无 auth fill、
+inspection、fast inventory、deep diagnostic、shared ordinary fill/exclusive maintenance root gate、minute
+verify/doctor/真实 purge 在并发 shared fill 时返回 `cache_busy`/75、purge dry-run 不取 gate、closed-day
+dry-run、完整 cache 无 auth fill、
 当前日显式 opt-in、已有 checkpoint 无 auth 复用、partial shared high-water、closed-day final
 reconciliation、旧 report 的 `day_complete=complete` 兼容、日历快照 round-trip、
 raw holiday snapshot 的 content-addressed pointer / immutable round-trip、legacy daily snapshot 非破坏性
@@ -230,8 +235,15 @@ final coverage；`facade_contract` 还覆盖
 已检查完整 cache 时发出 physical plan；CLI tests 还覆盖 JSONL `inspection` record。真实远端 fill
 仍只在用户明确授权、提供凭证后手动运行，不进入普通 unit test。
 
+`backtest_history_api` / `backtest_history_query` 还覆盖 public `RemoteOnMiss` client 必须加入 shared root
+gate、exclusive maintenance 存在时返回 `CacheBusy`，以及 fill-only materialization 对完整命中不回读 rows、
+报告 `rows=0`。fill executor 单元测试覆盖跨进程 per-family/per-symbol lease 的争用与 coverage 重查、
+8192-row bounded tick append 与取消短尾不提交 coverage；facade 单元测试覆盖 shared fill 物理写入只计一次、
+final compaction day-range 去重与 provisional skip。
+
 `minute_kline_cache` 与 `minute_kline_cache_ops` 覆盖 v4 `logical symbol × trading month` `.tqmk`
-partition、snapshot hash fail-closed、current-day final-coverage guard、streaming reader、Refresh 只移除
+partition、snapshot hash fail-closed、current-day final-coverage guard、opened month snapshot 不阻塞并发
+atomic replacement、streaming reader、Refresh 只移除
 相交月文件、缺失 root 的 read-only fast inventory，以及 readable v4 / legacy v3
 `LegacyUnsupported` diagnosis。旧 v3 不得被自动迁移、覆盖或当作 cache hit。
 `backtest_history_query`、`facade_contract` 与 `tqsdk-cache` CLI tests 还覆盖 active metadata pointer
@@ -260,7 +272,8 @@ data hash；以及 `tqllm-csv/3` 的 verified metadata gate、默认 Asia/Shangh
 无预算 lossless、预算内 deterministic lossy selection、`--compression off` 超预算失败和 `--output`
 原子发布。metadata 缺失或 active hash 与 terminal report 不一致时，LLM 默认 fail closed；
 `--allow-partial` 只能以 `gap` 省略整个 block。non-Final 或不完整 coverage 必须 hard fail，不能由
-`--allow-partial` 放宽。
+`--allow-partial` 放宽。`RemoteOnMiss` query 在 exclusive root gate 存在时必须返回 `cache_busy`/75；
+大 payload rendering 必须发生在 data run/其 shared gate 生命周期之后。
 
 `facade_contract` 覆盖 `record_ticks(...)` 和 `MarketCachePolicy` 在 live/session mode 下把显式
 symbol 或 selector 解析出的 tick serial 写入同一份 `BacktestTickCache`，并通过

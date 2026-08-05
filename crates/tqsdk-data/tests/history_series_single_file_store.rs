@@ -403,6 +403,45 @@ fn tick_fill_accumulator_accepts_empty_idle_slice() {
     assert_eq!(idle.gap_summary, None);
 }
 
+#[test]
+fn tick_reader_uses_a_file_snapshot_without_blocking_concurrent_appends() {
+    let dir = temp_dir("tick-reader-snapshot");
+    let cache = HistorySeriesCache::open(&dir).unwrap();
+    cache
+        .write_tick_range(
+            "SHFE.rb2601",
+            1_000,
+            3_000,
+            &[tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+        )
+        .unwrap();
+
+    let mut reader = HistorySeriesCache::open_read_only(&dir)
+        .open_tick_data_series_reader(TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 3_000))
+        .unwrap();
+    assert_eq!(reader.next_tick().unwrap().unwrap().id, 1);
+
+    HistorySeriesCache::open(&dir)
+        .unwrap()
+        .write_tick_range("DCE.i2601", 1_000, 2_000, &[tick(1, 1_000, 200.0)])
+        .expect("reading one symbol must not block writing another symbol in the same day");
+    BacktestTickCache::open(&dir)
+        .unwrap()
+        .append_partial_ticks("SHFE.rb2601", [tick(3, 2_500, 102.0)])
+        .expect("an opened reader must not block appending its source file");
+
+    assert_eq!(reader.next_tick().unwrap().unwrap().id, 2);
+    assert!(reader.next_tick().unwrap().is_none());
+
+    let rows = BacktestTickCache::open_read_only(&dir)
+        .load_series(TickDataSeriesRequest::new("SHFE.rb2601", 1_000, 3_000))
+        .unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+}
+
 fn tick(id: i64, datetime: i64, last_price: f64) -> Tick {
     Tick {
         id,
@@ -447,7 +486,10 @@ fn regular_files(root: &Path) -> Vec<PathBuf> {
             if path.is_dir() {
                 walk(&path, files);
             } else if path.is_file()
-                && path.file_name().and_then(|name| name.to_str()) != Some(".tqbn.lock")
+                && !path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".tqbn.lock"))
             {
                 files.push(path);
             }

@@ -67,23 +67,30 @@ synthesis metadata；可在 backtest builder 上用 `.price_tick(...)`、`.instr
 需要直接按时间区间读取缓存，而非启动策略回放时，使用
 `tqsdk::advanced::data::BacktestHistoryClient`。它以 request id 的 `Chunk` / terminal event stream
 返回 Tick 或本地聚合 K 线；只有 `RequestCompleted` 后 chunk 才成功。`collect()` 有默认内存上限，
-`collect_all(max_total_bytes)` 必须显式指定批量内存预算。prelude 故意不导出该高级 API。
+`collect_all(max_total_bytes)` 必须显式指定批量内存预算。`RemoteOnMiss` 查询在 materialize/验证期间
+持 shared cache-root gate，和普通 warmup 并发、与 refresh/repair/稳定检查互斥；结果收集完成后即释放，
+后续大输出格式化不会延长 gate 生命周期。prelude 故意不导出该高级 API。
 
 缓存运维入口保留在同一个 builder 心智里：`.inspect_cache()` / `.purge_cache_symbols()` 是
 tick-only 兼容 API；`.inspect_history_cache()` 返回 tick 与 canonical-minute 的 typed status，
-`.purge_history_cache()` 是两类缓存的显式 destructive operation。`.warmup().await?` 只预热
+`.purge_history_cache()` 是两类缓存的显式 destructive operation；两条 purge API 都先取得 exclusive
+cache-root gate，不能与普通 fill/query 穿插。`.warmup().await?` 只预热
 缓存、不创建策略 runtime；它会先跳过完整缓存，再把物理 tick range 和逻辑 minute symbol 的
 `missing_ranges` 交给对应的官方 server-side backtest stream 补齐。默认不做
 时间切片；只有设置 `TQSDK_REMOTE_FILL_SLICE_SECS` 时才按时间切片 fallback。普通 final 补齐成功后只
-compact 本次 symbol 的 tick 文件，并返回每个 symbol 的报告。远端填充并发由
+按本轮实际远端回填的 `symbol × trading day` 去重 compact 相交 tick 日分区，provisional fill 跳过 compaction，并返回
+每个 symbol 的报告。远端填充并发由
 `TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY` 控制，symbol 合并会话大小由
 `TQSDK_REMOTE_FILL_SYMBOL_BATCH_SIZE` 控制，默认值保持保守以避免放大官方服务压力。
 默认不设置整批墙钟超时，长区间的持续进展不会被固定时限中断；60 秒无 tick 进展仍会触发
 保护，可用 `TQSDK_REMOTE_FILL_IDLE_TIMEOUT_SECS` 调整。只有显式设置正数
 `TQSDK_REMOTE_FILL_BATCH_TIMEOUT_SECS` 时才会启用整批限时，适合诊断或外层作业预算。
-每个成功 slice 都先校验 tick id 连续性后独立提交 coverage；普通 final fill 的全部 slice
-成功后才按 symbol compact，provisional fill 延后到最终重对账再 compact。失败或未确认的 slice
-不会标记 coverage，后续 warmup 会继续补其缺口。
+tick 按 trading day 顺序补缺，以 8192 rows 短批落盘；每个成功 slice 都先校验 tick id 连续性后独立
+提交 coverage。取消时已接受短尾先 flush，物理 tail checkpoint 可随之推进，但未 terminal 的范围不提交
+final/provisional coverage。普通 final
+fill 全部成功后才 compact 相交日分区，provisional fill 延后到最终重对账。fill-only warmup 不回读刚写入
+cache；`rows_written` 只统计实际物理落盘 rows，共享 fill 被多个 logical request 复用时只计一次，完整
+cache hit 合法为 `0`。失败或未确认 slice 留下缺口，后续 warmup 继续补齐。
 `.refresh()` 会在准备远端补齐前清空请求范围：tick 仍按 symbol 全 series 文件粒度，minute
 只删除与请求窗口相交的 `trading-YYYYMM` files。tick 和 minute cache 都没有自动 retention、
 max-byte eviction 或后台清理；`CacheOnly` minute inspection 是只读的，不会创建 v3 namespace。
@@ -96,10 +103,16 @@ checkpoint 前 5 分钟重叠续填，并在 TQBN 18:00 分区结束后改走普
 调用方若需要把 warmup 接入自己的轻量进度或调度器，可配置
 `.on_remote_fill_telemetry(...)`：每检查一个 physical cache range 就先给出累计的 `Inspecting`
 快照（已检查/总范围、命中、缺口和当前 physical symbol）；coverage inspection 完成后（远端模式已
-取得 root fill lock）给出 `RemoteFillPlan`，随后按 physical cache symbol 给出低频生命周期快照。
+取得 shared root gate）给出 `RemoteFillPlan`，随后按 physical cache symbol 给出低频生命周期快照。
 流式更新每个 symbol 至多 500ms 一次，handler 在检查和填充路径同步调用，必须保持快速且不得做
 终端 I/O 或阻塞网络。已有 `.on_remote_fill_progress(...)` 保持兼容；telemetry 额外提供检查、plan、
 cursor、retry 和 split identity，适合 CLI/UI reducer，而不是策略热路径。
+
+root gate 只区分普通并发操作与稳定维护：普通 warmup/RemoteOnMiss query 取 shared gate；refresh、stale
+repair、verify、doctor 和真实 purge 取 exclusive gate。每个 `cache family × physical/logical cache
+symbol` 另有跨进程 fill lease，竞争者等待并重查 coverage，避免相同 series 的重复远端补数；TQBN/
+minute per-file lock 再保护物理文件。该 advisory 协议不保证新旧 binary 进程长期混跑，升级同一 root
+的持续进程时应同步重启。
 
 固定 cache root 的运维作业可选用 workspace 的 `tqsdk-cache` binary：它通过同一个
 `.remote_on_miss().warmup()` / `.cache_only()` 路径执行 `inventory`、closed-day / 自动当前日

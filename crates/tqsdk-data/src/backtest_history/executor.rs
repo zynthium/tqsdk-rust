@@ -1,9 +1,11 @@
 //! Async request scheduler and cache-reader execution for backtest history.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tqsdk_core::{Kline, Tick};
 
@@ -33,6 +35,13 @@ use super::store_worker::{
 use super::telemetry::TelemetryHub;
 
 const MAX_SOURCE_CHUNK_BYTES: usize = 1024 * 1024;
+const REQUEST_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BacktestHistoryExecutionMode {
+    Query,
+    MaterializeCache,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BaseScanKey {
@@ -328,6 +337,7 @@ pub(crate) async fn execute_batch(
     event_sender: mpsc::Sender<BacktestHistoryEvent>,
     telemetry: TelemetryHub,
     cancellation: Arc<AtomicBool>,
+    mode: BacktestHistoryExecutionMode,
 ) -> BacktestHistoryBatchReport {
     let logical_permits = Arc::new(Semaphore::new(config.logical_concurrency));
     let blocking_permits = Arc::new(Semaphore::new(config.blocking_workers));
@@ -344,21 +354,26 @@ pub(crate) async fn execute_batch(
         tasks.spawn(async move {
             let request_id = request.request_id;
             let symbol = request.symbol.clone();
-            let permit = logical_permits.acquire_owned().await.map_err(|_| {
-                DataError::InvalidState("backtest history logical request scheduler is unavailable")
-            });
+            let permit =
+                acquire_logical_permit_until_cancelled(logical_permits, cancellation.as_ref())
+                    .await;
             match permit {
                 Ok(_permit) => {
-                    run_request(
+                    let chunk_bytes = config
+                        .per_symbol_buffer_bytes
+                        .min(MAX_SOURCE_CHUNK_BYTES)
+                        .max(std::mem::size_of::<Kline>());
+                    let context = RequestExecutionContext {
                         config,
-                        request,
                         event_sender,
                         telemetry,
                         cancellation,
                         blocking_permits,
                         scan_registry,
-                    )
-                    .await
+                        chunk_bytes,
+                        mode,
+                    };
+                    run_request(context, request).await
                 }
                 Err(error) => RequestTerminal::failed(request_id, symbol, error.to_string(), 0),
             }
@@ -405,37 +420,39 @@ impl RequestTerminal {
 }
 
 async fn run_request(
-    config: Arc<BacktestHistoryClientConfig>,
+    context: RequestExecutionContext,
     request: ValidatedBacktestHistoryRequest,
-    event_sender: mpsc::Sender<BacktestHistoryEvent>,
-    telemetry: TelemetryHub,
-    cancellation: Arc<AtomicBool>,
-    blocking_permits: Arc<Semaphore>,
-    scan_registry: SharedScanRegistry,
 ) -> RequestTerminal {
     let request_id = request.request_id;
     let symbol = request.symbol.clone();
-    let result = execute_request(
-        config,
-        request,
-        event_sender.clone(),
-        telemetry.clone(),
-        cancellation,
-        blocking_permits,
-        scan_registry,
-    )
-    .await;
+    let event_sender = context.event_sender.clone();
+    let telemetry = context.telemetry.clone();
+    let mode = context.mode;
+    let result = execute_request(&context, request).await;
     match result {
         Ok((report, emitted_rows)) => {
             let _ = event_sender
                 .send(BacktestHistoryEvent::RequestCompleted(report.clone()))
                 .await;
+            let completed_rows = if mode == BacktestHistoryExecutionMode::MaterializeCache {
+                report.rows
+            } else {
+                emitted_rows
+            };
             telemetry.emit_terminal(BacktestHistoryTelemetryEvent {
                 request_id: Some(report.request_id),
                 symbol: report.symbol.clone(),
-                phase: super::report::BacktestHistoryPhase::Read,
-                completed_rows: emitted_rows,
-                message: "backtest history request completed".to_string(),
+                phase: if mode == BacktestHistoryExecutionMode::MaterializeCache {
+                    super::report::BacktestHistoryPhase::Aggregate
+                } else {
+                    super::report::BacktestHistoryPhase::Read
+                },
+                completed_rows,
+                message: if mode == BacktestHistoryExecutionMode::MaterializeCache {
+                    "backtest history cache materialization completed".to_string()
+                } else {
+                    "backtest history request completed".to_string()
+                },
             });
             RequestTerminal::Completed(report)
         }
@@ -452,7 +469,11 @@ async fn run_request(
             telemetry.emit_terminal(BacktestHistoryTelemetryEvent {
                 request_id: Some(failure.request_id),
                 symbol: failure.symbol.clone(),
-                phase: super::report::BacktestHistoryPhase::Read,
+                phase: if mode == BacktestHistoryExecutionMode::MaterializeCache {
+                    super::report::BacktestHistoryPhase::Fill
+                } else {
+                    super::report::BacktestHistoryPhase::Read
+                },
                 completed_rows: failure.emitted_rows,
                 message: format!("backtest history request failed: {}", failure.error),
             });
@@ -475,23 +496,26 @@ struct RequestExecutionContext {
     blocking_permits: Arc<Semaphore>,
     scan_registry: SharedScanRegistry,
     chunk_bytes: usize,
+    mode: BacktestHistoryExecutionMode,
 }
 
 async fn execute_request(
-    config: Arc<BacktestHistoryClientConfig>,
+    context: &RequestExecutionContext,
     request: ValidatedBacktestHistoryRequest,
-    event_sender: mpsc::Sender<BacktestHistoryEvent>,
-    telemetry: TelemetryHub,
-    cancellation: Arc<AtomicBool>,
-    blocking_permits: Arc<Semaphore>,
-    scan_registry: SharedScanRegistry,
 ) -> std::result::Result<(super::report::BacktestHistoryRequestReport, usize), ExecutionFailure> {
-    let plan = plan_request_for_execution(&config, request)
-        .await
-        .map_err(|error| ExecutionFailure {
-            error,
-            emitted_rows: 0,
-        })?;
+    let config = &context.config;
+    let telemetry = &context.telemetry;
+    let cancellation = &context.cancellation;
+    let mode = context.mode;
+    let plan = await_or_request_cancelled(
+        cancellation.as_ref(),
+        plan_request_for_execution(config, request),
+    )
+    .await
+    .map_err(|error| ExecutionFailure {
+        error,
+        emitted_rows: 0,
+    })?;
     telemetry.emit(BacktestHistoryTelemetryEvent {
         request_id: Some(plan.request_id),
         symbol: plan.symbol.clone(),
@@ -503,7 +527,8 @@ async fn execute_request(
     let mut cached_ranges = Vec::new();
     let mut remote_filled_ranges = Vec::new();
     let mut remote_used = false;
-    let fill_coordinator = RemoteFillCoordinator::new(Arc::clone(&config), telemetry.clone());
+    let mut rows_written = 0usize;
+    let fill_coordinator = RemoteFillCoordinator::new(Arc::clone(config), telemetry.clone());
     for slice in &plan.source_slices {
         if cancellation.load(Ordering::Acquire) {
             return Err(ExecutionFailure {
@@ -512,7 +537,7 @@ async fn execute_request(
             });
         }
         let inspection =
-            inspect_source(&config, &plan, slice).map_err(|error| ExecutionFailure {
+            inspect_source(config, &plan, slice).map_err(|error| ExecutionFailure {
                 error,
                 emitted_rows: 0,
             })?;
@@ -543,7 +568,11 @@ async fn execute_request(
             ),
         };
         let outcome = fill_coordinator
-            .ensure_coverage(fill_request)
+            .ensure_coverage_until_cancelled(
+                fill_request,
+                cancellation.as_ref(),
+                mode == BacktestHistoryExecutionMode::MaterializeCache,
+            )
             .await
             .map_err(|error| ExecutionFailure {
                 error,
@@ -551,24 +580,24 @@ async fn execute_request(
             })?;
         remote_filled_ranges.extend(outcome.remote_filled_ranges);
         remote_used |= outcome.remote_used;
+        rows_written = rows_written.saturating_add(outcome.rows_written);
     }
 
-    let chunk_bytes = config
-        .per_symbol_buffer_bytes
-        .min(MAX_SOURCE_CHUNK_BYTES)
-        .max(std::mem::size_of::<Kline>());
-    let context = RequestExecutionContext {
-        config: Arc::clone(&config),
-        event_sender,
-        telemetry,
-        cancellation,
-        blocking_permits,
-        scan_registry,
-        chunk_bytes,
-    };
+    if mode == BacktestHistoryExecutionMode::MaterializeCache {
+        return Ok((
+            plan.report_template(
+                rows_written,
+                merge_ranges(cached_ranges),
+                merge_ranges(remote_filled_ranges),
+                remote_used,
+            ),
+            0,
+        ));
+    }
+
     let emitted_rows = match plan.base_source {
-        PlannedBaseSource::Tick => execute_tick_plan(&context, &plan).await,
-        PlannedBaseSource::CanonicalMinute => execute_minute_plan(&context, &plan).await,
+        PlannedBaseSource::Tick => execute_tick_plan(context, &plan).await,
+        PlannedBaseSource::CanonicalMinute => execute_minute_plan(context, &plan).await,
     }?;
     Ok((
         plan.report_template(
@@ -579,6 +608,47 @@ async fn execute_request(
         ),
         emitted_rows,
     ))
+}
+
+async fn await_or_request_cancelled<T>(
+    cancellation: &AtomicBool,
+    future: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    let cancellation_wait = async {
+        while !cancellation.load(Ordering::Acquire) {
+            tokio::time::sleep(REQUEST_CANCELLATION_POLL_INTERVAL).await;
+        }
+    };
+    tokio::pin!(cancellation_wait);
+    tokio::pin!(future);
+    tokio::select! {
+        biased;
+        _ = &mut cancellation_wait => Err(DataError::InvalidState(
+            "backtest history request was cancelled while planning cache sources",
+        )),
+        result = &mut future => result,
+    }
+}
+
+async fn acquire_logical_permit_until_cancelled(
+    permits: Arc<Semaphore>,
+    cancellation: &AtomicBool,
+) -> Result<OwnedSemaphorePermit> {
+    let cancellation_wait = async {
+        while !cancellation.load(Ordering::Acquire) {
+            tokio::time::sleep(REQUEST_CANCELLATION_POLL_INTERVAL).await;
+        }
+    };
+    tokio::pin!(cancellation_wait);
+    tokio::select! {
+        biased;
+        _ = &mut cancellation_wait => Err(DataError::InvalidState(
+            "backtest history request was cancelled while waiting for scheduler capacity",
+        )),
+        permit = permits.acquire_owned() => permit.map_err(|_| DataError::InvalidState(
+            "backtest history logical request scheduler is unavailable",
+        )),
+    }
 }
 
 async fn plan_request_for_execution(
@@ -1065,6 +1135,8 @@ fn merge_ranges(mut ranges: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use chrono::{TimeZone, Utc};
@@ -1078,6 +1150,54 @@ mod tests {
 
     const SECOND_NS: i64 = 1_000_000_000;
     const MINUTE_NS: i64 = 60 * SECOND_NS;
+
+    #[tokio::test]
+    async fn cancellation_interrupts_a_pending_cache_source_plan() {
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn({
+            let cancellation = Arc::clone(&cancellation);
+            async move {
+                super::await_or_request_cancelled(
+                    cancellation.as_ref(),
+                    std::future::pending::<crate::Result<()>>(),
+                )
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        cancellation.store(true, Ordering::Release);
+
+        let error = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("cache source planning must observe cancellation")
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled while planning"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_a_pending_logical_permit() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let held = Arc::clone(&permits).acquire_owned().await.unwrap();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn({
+            let permits = Arc::clone(&permits);
+            let cancellation = Arc::clone(&cancellation);
+            async move {
+                super::acquire_logical_permit_until_cancelled(permits, cancellation.as_ref()).await
+            }
+        });
+        tokio::task::yield_now().await;
+        cancellation.store(true, Ordering::Release);
+
+        let error = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("scheduler wait must observe cancellation")
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("scheduler capacity"));
+        drop(held);
+    }
 
     #[tokio::test]
     async fn a_cache_hit_batch_fans_out_one_tick_and_one_minute_base_scan() {

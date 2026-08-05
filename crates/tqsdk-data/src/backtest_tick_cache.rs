@@ -454,7 +454,8 @@ impl BacktestTickCache {
         })
     }
 
-    /// Try to acquire the cache-root lock required by remote fill operations.
+    /// Try to acquire the exclusive cache-root gate required by destructive
+    /// remote-fill maintenance such as refresh or stale-partition repair.
     ///
     /// The lock is advisory and intentionally separate from individual TQBN
     /// file locks: it prevents concurrent owners from requesting and writing
@@ -463,9 +464,15 @@ impl BacktestTickCache {
         self.try_acquire_operation_lock("remote fill", true)
     }
 
-    /// Try to acquire a shared stable-view lock for verification and diagnostics.
+    /// Try to acquire the shared cache-root gate used by ordinary missing-range fills.
+    /// Per-family/per-symbol leases still serialize overlapping series writes.
+    pub fn try_acquire_remote_fill_shared_lock(&self) -> Result<BacktestTickCacheOperationLock> {
+        self.try_acquire_operation_lock("remote fill", false)
+    }
+
+    /// Try to acquire an exclusive stable-view gate for verification and diagnostics.
     pub fn try_acquire_consistency_read_lock(&self) -> Result<BacktestTickCacheOperationLock> {
-        self.try_acquire_operation_lock("consistency read", false)
+        self.try_acquire_operation_lock("consistency read", true)
     }
 
     fn try_acquire_operation_lock(
@@ -531,6 +538,24 @@ impl BacktestTickCache {
             ));
         }
         self.history.compact_series(symbol, HistorySeriesKind::Tick)
+    }
+
+    /// Compact only Tick partitions intersecting `[range_start_ns, range_end_ns)`.
+    #[doc(hidden)]
+    pub fn compact_symbol_ticks_in_range(
+        &self,
+        symbol: impl AsRef<str>,
+        range_start_ns: i64,
+        range_end_ns: i64,
+    ) -> Result<()> {
+        let symbol = symbol.as_ref();
+        validate_range(symbol, range_start_ns, range_end_ns)?;
+        self.history.compact_series_range(
+            symbol,
+            HistorySeriesKind::Tick,
+            range_start_ns,
+            range_end_ns,
+        )
     }
 
     pub fn store_ticks(

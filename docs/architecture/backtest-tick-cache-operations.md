@@ -43,8 +43,11 @@ symbols 至少推进到同一个 `complete_through_ns`，report 使用
 - 使用官方交易日历（`DataClient::query_trading_days(...)`）选择“最近 N 个交易日”，不要把
   N 个工作日当作交易日。休市日的空覆盖分区是正常结果。
 - 固定 root 的 operator 作业可以让 `tqsdk-cache fill --last-trading-days N --calendar auto`
-  管理这一步：它优先复用 `<cache-root>/meta/trading-calendar-v1.json`，在没有可用快照且确认
-  存在远端缺口后才拉取通用日历。日历只决定 selector 和进度分母，不能替代 coverage。
+  管理这一步：它优先复用
+  `<cache-root>/meta/trading-calendar-holidays-v1/active.json` 指向的 immutable raw-holiday
+  snapshot；本地 snapshot 不覆盖所需年份时才拉取公开日历。旧
+  `<cache-root>/meta/trading-calendar-v1.json` 不参与选择。日历只决定 selector 和进度分母，
+  不能替代 coverage。
 - `--last-trading-days` 只选择已结束交易日。显式指定
   `--start-day/--end-day <当前交易日>` 时自动写 provisional checkpoint，不能视为完整缓存；
   必须拒绝盘中日的严格任务使用 `--require-final`。`--include-open-day` 仅作为兼容参数保留，
@@ -54,8 +57,10 @@ symbols 至少推进到同一个 `complete_through_ns`，report 使用
 - 对 SHFE 贵金属等夜盘品种，常用窗口从首个交易日前一天 `18:00:00` CST 开始，到最后交易日
   `15:00:01` CST 结束。其他市场必须以合约 `trading_time` 为准。
 
-同一 cache root 同时只运行一个远端 warmup owner。TQBN 文件锁保证写入互斥，但不会去重多个
-进程发出的远端补数请求。
+同一 cache root 的普通 `RemoteOnMiss` warmup 共享 root gate，因此不同 series 可以并发；refresh、
+stale repair、verify、doctor 和真实 purge 使用 exclusive gate。每个实际缺口再由
+`cache family × cache symbol` 的跨进程 fill lease 串行化：竞争进程等待 owner，并在取得 lease 前后
+重查 coverage，已由 owner 补齐时不再发重复远端请求。TQBN per-file lock 继续保护物理 append/compact。
 
 对于长期运行的运维任务，推荐直接使用 CLI 的 closed-day selector，而不是由外层脚本倒推工作日：
 
@@ -81,6 +86,11 @@ checkpoint 的范围、高水位和 as-of 必须在同一 TQBN 日分区。远�
 可以推进 checkpoint；进程取消、超时或未确认结束时只保留已落盘 rows，不推进 checkpoint。
 盘中续填不做全历史 compaction。TQBN 分区在 18:00 CST 后转为 closed day；同一命令再次运行时
 不再使用 provisional checkpoint，而是请求尚缺的 final coverage，并在成功后 compact、淘汰 checkpoint。
+
+tick 补洞按 trading day 顺序处理，接受 rows 以 8192 行缓冲后追加，避免逐事件持锁/fsync 和长窗口
+全量 materialization。fill-only warmup 不回读刚写入的 rows；报告的 `rows_written` 是实际物理写入数，
+同一 shared fill 被多个 logical request 复用时只累计一次，完整命中为 `0`。final 成功后只对本轮实际远端
+回填的 `symbol × trading day` 范围去重 compact；provisional fill 跳过 compaction，等 closed-day reconcile。
 
 默认先动态显示 cache inspection 的 `已检查范围/总范围`、命中、缺口和当前 physical symbol，再显示
 logical batch 和当前 active physical symbol 的 `完整接收日/待填日`。非交互任务可显式使用
@@ -163,6 +173,17 @@ checkpoint 提交方式，不改变普通 replay/CacheOnly coverage；调用方�
 发出开始、流式、重试、split、完成、失败或取消状态；流式事件每个 symbol 至多 500ms 一次，检查和
 生命周期事件立即发出。handler 与检查和远端填充共享执行路径，必须只做快速内存操作，不能写终端、
 阻塞或等待网络。
+
+CLI 第一次 Ctrl-C/SIGTERM 请求协作取消：不再启动新 batch，已接受 tick 短尾会 flush，但未 terminal
+范围不提交 final 或 provisional checkpoint；minute 未 terminal buffer 不落盘。已完成 terminal 范围
+保持有效，命令收敛后返回 130。第二次信号立即退出 130。SDK 调用方使用
+`BacktestRemoteFillCancellation` 获得同一协作取消语义。
+
+TQBN 并发 reader 在 per-file shared lock 内打开 data file、验证 tail checkpoint 并固定 confirmed
+prefix；随后可从 opened-file snapshot 读取而不长期挡住 writer/compaction。首次文件初始化是 sync 后
+原子 rename；checkpoint 后未确认的截断/坏 checksum suffix 不进入 coverage/read，下一 writer 可从确认
+边界恢复。无有效 checkpoint 的旧文件严格全量校验。该协议不承诺新旧 binary 进程长期混用，升级访问
+同一 root 的服务时应同步重启。
 
 ## 4. 用 CacheOnly 和实际回放验收
 

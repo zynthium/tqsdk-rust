@@ -218,6 +218,41 @@ async fn facade_history_cache_operations_include_canonical_minutes() {
 }
 
 #[tokio::test]
+async fn facade_history_cache_purges_require_the_exclusive_root_gate() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    cache
+        .store_ticks(symbol, 1_000, 3_000, [tick(1, 1_000, 100.0)])
+        .unwrap();
+    let builder = Tq::futures()
+        .backtest(1_000, 3_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol(symbol)
+        .cache_only();
+    let shared_fill = cache.try_acquire_remote_fill_shared_lock().unwrap();
+
+    let legacy_error = builder.purge_cache_symbols().unwrap_err();
+    assert!(
+        legacy_error
+            .to_string()
+            .contains("is busy with remote fill"),
+        "unexpected legacy purge error: {legacy_error}"
+    );
+    let history_error = builder.purge_history_cache().await.unwrap_err();
+    assert!(
+        history_error
+            .to_string()
+            .contains("is busy with remote fill"),
+        "unexpected history purge error: {history_error}"
+    );
+    assert!(cache.coverage(symbol, 1_000, 3_000).unwrap().is_complete());
+
+    drop(shared_fill);
+}
+
+#[tokio::test]
 async fn facade_backtest_cache_mode_replays_cached_ticks() {
     let symbol = "SHFE.rb2501";
     let cache_dir = temp_cache_dir();
@@ -437,6 +472,62 @@ async fn facade_backtest_remote_on_miss_requires_auth_only_when_cache_missing() 
         missing
             .to_string()
             .contains("remote backtest cache fill requires auth")
+    );
+}
+
+#[tokio::test]
+async fn facade_remote_cache_modes_gate_metadata_resolution_but_cache_only_does_not() {
+    let cache_dir = temp_cache_dir();
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    let _maintenance = cache.try_acquire_consistency_read_lock().unwrap();
+
+    let warmup_error = Tq::futures()
+        .backtest(1_000, 3_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol("KQ.m@SHFE.au")
+        .remote_on_miss()
+        .warmup()
+        .await
+        .unwrap_err();
+    assert!(
+        warmup_error
+            .to_string()
+            .contains("is busy with remote fill"),
+        "unexpected warmup error: {warmup_error}"
+    );
+
+    let prepare_error = match Tq::futures()
+        .backtest(1_000, 3_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol("KQ.m@SHFE.au")
+        .remote_on_miss()
+        .prepare()
+        .await
+    {
+        Ok(_) => panic!("remote-on-miss prepare unexpectedly bypassed the root gate"),
+        Err(error) => error,
+    };
+    assert!(
+        prepare_error
+            .to_string()
+            .contains("is busy with remote fill"),
+        "unexpected prepare error: {prepare_error}"
+    );
+
+    let cache_only = Tq::futures()
+        .backtest(1_000, 3_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol("SHFE.rb2601")
+        .cache_only()
+        .warmup()
+        .await
+        .unwrap();
+    assert_eq!(
+        cache_only.symbols[0].action,
+        BacktestCacheWarmupAction::MissingCacheOnly
     );
 }
 

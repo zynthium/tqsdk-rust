@@ -244,6 +244,29 @@ fn minute_doctor_reports_the_v4_month_file_without_touching_tick_cache() {
 }
 
 #[test]
+fn minute_doctor_rejects_a_concurrent_shared_fill_root_gate() {
+    let cache_dir = temp_dir("minute-doctor-root-lock-busy");
+    let root_gate = BacktestTickCache::open(&cache_dir).unwrap();
+    let shared_lock = root_gate.try_acquire_remote_fill_shared_lock().unwrap();
+
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "doctor",
+    ]);
+
+    assert_eq!(output.status.code(), Some(75));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let _ = v3_result(&json, "doctor", "error", 75);
+    assert_eq!(json["error"]["code"], "cache_busy");
+
+    drop(shared_lock);
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
 fn minute_fill_dry_run_is_cache_only_and_does_not_create_the_root() {
     let cache_dir = temp_dir("minute-fill-dry-run");
     let output = run_json([
@@ -624,6 +647,35 @@ fn minute_verify_uses_the_persisted_metadata_snapshot() {
 }
 
 #[test]
+fn minute_verify_rejects_a_concurrent_shared_fill_root_gate() {
+    let cache_dir = temp_dir("minute-verify-root-lock-busy");
+    let root_gate = BacktestTickCache::open(&cache_dir).unwrap();
+    let shared_lock = root_gate.try_acquire_remote_fill_shared_lock().unwrap();
+
+    let verified = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "verify",
+        "--symbol",
+        "KQ.i@SHFE.au",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+    ]);
+
+    assert_eq!(verified.status.code(), Some(75));
+    let json: Value = serde_json::from_slice(&verified.stdout).unwrap();
+    let _ = v3_result(&json, "verify", "error", 75);
+    assert_eq!(json["error"]["code"], "cache_busy");
+
+    drop(shared_lock);
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
 fn minute_purge_requires_yes_and_dry_run_only_lists_the_month_partition() {
     let cache_dir = temp_dir("minute-purge");
     let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
@@ -639,6 +691,8 @@ fn minute_purge_requires_yes_and_dry_run_only_lists_the_month_partition() {
         .unwrap();
     let month_path = cache.month_file_path("SHFE.rb2601", "202001");
     assert!(month_path.exists());
+    let root_gate = BacktestTickCache::open(&cache_dir).unwrap();
+    let shared_lock = root_gate.try_acquire_remote_fill_shared_lock().unwrap();
 
     let dry_run = run_json([
         "--cache-dir",
@@ -678,6 +732,27 @@ fn minute_purge_requires_yes_and_dry_run_only_lists_the_month_partition() {
     assert_eq!(not_confirmed.status.code(), Some(2));
     assert!(month_path.exists());
 
+    let busy = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "purge",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--yes",
+    ]);
+    assert_eq!(busy.status.code(), Some(75));
+    let json: Value = serde_json::from_slice(&busy.stdout).unwrap();
+    let _ = v3_result(&json, "purge", "error", 75);
+    assert_eq!(json["error"]["code"], "cache_busy");
+    assert!(month_path.exists());
+
+    drop(shared_lock);
     let purged = run_json([
         "--cache-dir",
         cache_dir.to_str().unwrap(),
@@ -1580,6 +1655,39 @@ fn query_jsonl_reads_a_cache_only_main_contract_and_canonicalizes_fields() {
     assert_eq!(row["data"]["t"], 0);
     assert_eq!(records.last().unwrap()["status"], "success");
 
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn query_remote_on_miss_rejects_an_exclusive_cache_root_gate() {
+    let cache_dir = temp_dir("query-remote-root-lock-busy");
+    let fixture = seed_query_fixture(&cache_dir, 1, false);
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    let exclusive = cache.try_acquire_consistency_read_lock().unwrap();
+    let output = run_query_without_auth(&[
+        "--cache-dir".to_string(),
+        cache_dir.display().to_string(),
+        "--output-format".to_string(),
+        "json".to_string(),
+        "query".to_string(),
+        "--symbol".to_string(),
+        fixture.logical_symbol,
+        "--series".to_string(),
+        "tick".to_string(),
+        "--start".to_string(),
+        rfc3339(fixture.start_ns),
+        "--end".to_string(),
+        rfc3339(fixture.tick_end_ns),
+        "--policy".to_string(),
+        "remote-on-miss".to_string(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(75));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let _ = v3_result(&json, "query", "error", 75);
+    assert_eq!(json["error"]["code"], "cache_busy");
+
+    drop(exclusive);
     let _ = fs::remove_dir_all(cache_dir);
 }
 

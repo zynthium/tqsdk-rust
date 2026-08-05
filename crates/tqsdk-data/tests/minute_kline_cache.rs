@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{TimeZone, Utc};
 use tqsdk_core::Kline;
-use tqsdk_data::{DataError, MinuteKlineCache, MinuteKlineCacheSnapshot};
+use tqsdk_data::{MinuteKlineCache, MinuteKlineCacheSnapshot};
 
 const MINUTE_NS: i64 = 60_000_000_000;
 
@@ -39,53 +39,46 @@ fn final_60s_rows_are_partitioned_by_trading_month_and_streamed() {
 }
 
 #[test]
-fn reader_holds_month_shared_lock_until_it_advances_to_the_next_month() {
-    let root = temp_dir("reader-month-lock");
+fn reader_uses_a_month_snapshot_without_blocking_atomic_replacement() {
+    let root = temp_dir("reader-month-snapshot");
     let cache = MinuteKlineCache::open(&root).unwrap();
     let snapshot = MinuteKlineCacheSnapshot::new(1, "calendar-v1", "session-v1").unwrap();
-    let january = utc_ns(2026, 1, 30, 9, 59);
-    let february = utc_ns(2026, 1, 30, 10, 0);
-    let end = february + MINUTE_NS;
+    let first = utc_ns(2026, 1, 15, 2, 0);
+    let second = first + MINUTE_NS;
+    let end = second + MINUTE_NS;
     cache
         .store_final_range(
             "SHFE.rb2601",
-            january,
+            first,
             end,
             &snapshot,
-            &[kline(1, january, 10.0), kline(2, february, 11.0)],
+            &[kline(1, first, 10.0), kline(2, second, 11.0)],
         )
         .unwrap();
 
     let mut reader = cache
-        .open_reader("SHFE.rb2601", january, end, &snapshot)
+        .open_reader("SHFE.rb2601", first, end, &snapshot)
         .unwrap();
     assert_eq!(reader.next_kline().unwrap().unwrap().id, 1);
 
-    let write_error = cache
-        .store_final_range(
-            "SHFE.rb2601",
-            january,
-            february,
-            &snapshot,
-            &[kline(1, january, 10.0)],
-        )
-        .unwrap_err();
-    assert!(matches!(write_error, DataError::CacheBusy { .. }));
-    let purge_error = cache
-        .purge_range("SHFE.rb2601", january, february)
-        .unwrap_err();
-    assert!(matches!(purge_error, DataError::CacheBusy { .. }));
-
-    assert_eq!(reader.next_kline().unwrap().unwrap().id, 2);
     cache
         .store_final_range(
             "SHFE.rb2601",
-            january,
-            february,
+            first,
+            end,
             &snapshot,
-            &[kline(1, january, 10.0)],
+            &[kline(1, first, 20.0), kline(2, second, 21.0)],
         )
-        .expect("the January lock must release before the February month is read");
+        .expect("an opened reader must not block atomic month replacement");
+
+    assert_eq!(reader.next_kline().unwrap().unwrap().close, 11.0);
+    let replacement = cache
+        .read_range("SHFE.rb2601", first, end, &snapshot)
+        .unwrap();
+    assert_eq!(
+        replacement.iter().map(|row| row.close).collect::<Vec<_>>(),
+        vec![20.0, 21.0]
+    );
 }
 
 #[test]

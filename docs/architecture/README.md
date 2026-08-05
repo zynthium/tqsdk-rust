@@ -208,7 +208,8 @@ V1 是：
   - research/offline data crate
   - `DataClient`
   - `BacktestHistoryClient`：metadata sidecar、source planner、single-flight official fill、
-    bounded async scan、Tick/60s aggregation 与 query terminal report 的唯一 owner
+    bounded async scan、Tick/60s aggregation 与 query terminal report 的唯一 owner；公开
+    `RemoteOnMiss` run 自动持有 shared cache-root gate，facade 已持锁时传递同一守卫，避免嵌套自锁
   - `query_his_cont_quotes`
   - `query_his_cont_underlyings`
   - `query_his_cont_underlying_segments`
@@ -227,6 +228,8 @@ V1 是：
     `LiveTickCacheWriter`
   - 8 MiB 目标 records block、crate-internal `TQRI` 时间索引和按范围选择性解压；旧/不匹配索引
     逐 block 回退
+  - 每日 TQBN 分区使用独立 `.tqbn.lock`，首次文件原子发布；tail checkpoint 记录确认长度、尾部
+    checksum 和 coverage head。reader 固定 opened-file snapshot，只消费确认前缀，writer 可截断未确认坏后缀
   - `LiveTickCacheWriter` 合并连续单 tick push，并用显式 `flush()` / Drop 提交不足一批的尾部
   - 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store
   - shared futures universe selector parser / resolver，relay 和 facade backtest 复用同一套语义
@@ -243,6 +246,8 @@ V1 是：
     `--last-trading-days` 等合同；两类 fill 都有 selectable stderr progress（plain/TTY/JSONL），
     JSONL progress 为 schema v2 并携带 `cache_kind`。tick report 保持 schema v2（兼容 v1），
     minute report 写入 `reports/minute/` 并可由 minute `verify --report` 复用
+  - 普通 fill/query 取得 shared root gate；refresh、stale repair、verify、doctor 和真实 purge 取得
+    exclusive root gate，冲突以退出码 75 / `cache_busy` fail fast。`inventory` 与 purge dry-run 不取稳定视图锁
   - generic trading-calendar snapshot 只用于日期 selector 和进度分母；TQBN coverage、CST `18:00`
     partition 与 CacheOnly verification 仍是完整性权威
   - 复用 `tqsdk` facade / `tqsdk-data` store，不定义或拥有任何缓存格式、session、状态树、live

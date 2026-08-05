@@ -1418,7 +1418,7 @@ async fn fill_minute(
     let cancellation = BacktestRemoteFillCancellation::new();
     let signal_cancellation = cancellation.clone();
     let signal_task = tokio::spawn(async move {
-        wait_for_shutdown_signal(signal_cancellation).await;
+        wait_for_shutdown_signal(signal_cancellation, CacheKind::Minute).await;
     });
     let progress_callback = reporter.clone();
     let telemetry_callback = reporter.clone();
@@ -1442,7 +1442,7 @@ async fn fill_minute(
     let warmup = builder.warmup().await;
     signal_task.abort();
     let _ = signal_task.await;
-    if cancellation.is_cancelled() {
+    if fill_was_interrupted(cancellation.is_cancelled(), warmup.is_ok()) {
         progress_session.finish(
             ProgressTerminalStatus::Interrupted,
             "interrupted; no incomplete minute range was marked final",
@@ -1713,7 +1713,7 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
     let cancellation = BacktestRemoteFillCancellation::new();
     let signal_cancellation = cancellation.clone();
     let signal_task = tokio::spawn(async move {
-        wait_for_shutdown_signal(signal_cancellation).await;
+        wait_for_shutdown_signal(signal_cancellation, CacheKind::Tick).await;
     });
     let (plan_tx, plan_rx) = mpsc::channel(1);
     let calendar_task = tokio::spawn(finish_calendar_after_plan(
@@ -1748,9 +1748,31 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
     }
     let builder = apply_fill_targets(builder, &symbols, universe.as_deref())?;
     let warmup = builder.warmup().await;
+    if fill_was_interrupted(cancellation.is_cancelled(), warmup.is_ok()) {
+        signal_task.abort();
+        let _ = signal_task.await;
+        calendar_task.abort();
+        let _ = calendar_task.await;
+        let summary = "interrupted; partial accepted rows were flushed without committing final or provisional coverage";
+        progress_session.finish(ProgressTerminalStatus::Interrupted, summary);
+        let inventory = cache.fast_inventory()?;
+        return Ok(CommandOutcome {
+            value: json!({
+                "schema_version": REPORT_SCHEMA_VERSION,
+                "command": "fill",
+                "cache_dir": canonical_cache_dir,
+                "status": "interrupted",
+                "partial_inventory": fast_inventory_json(&inventory),
+            }),
+            exit_code: 130,
+        });
+    }
+    // Keep the second-signal hard-exit path alive while calendar preparation
+    // settles after a successful warmup.
+    let calendar_result = calendar_task.await;
     signal_task.abort();
     let _ = signal_task.await;
-    let calendar = match calendar_task.await {
+    let calendar = match calendar_result {
         Ok(Ok(calendar)) => calendar,
         Ok(Err(error)) => {
             progress_session.finish(
@@ -1769,23 +1791,6 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
             )));
         }
     };
-
-    if cancellation.is_cancelled() {
-        let summary =
-            "interrupted; partial accepted rows were flushed without advancing the checkpoint";
-        progress_session.finish(ProgressTerminalStatus::Interrupted, summary);
-        let inventory = cache.fast_inventory()?;
-        return Ok(CommandOutcome {
-            value: json!({
-                "schema_version": REPORT_SCHEMA_VERSION,
-                "command": "fill",
-                "cache_dir": canonical_cache_dir,
-                "status": "interrupted",
-                "partial_inventory": fast_inventory_json(&inventory),
-            }),
-            exit_code: 130,
-        });
-    }
 
     let warmup = match warmup {
         Ok(warmup) => warmup,
@@ -2117,6 +2122,8 @@ async fn verify_minute(
             )
         }
     };
+    let root_gate = BacktestTickCache::open(&canonical_cache_dir)?;
+    let _lock = root_gate.try_acquire_consistency_read_lock()?;
     let cache = MinuteKlineCache::open_read_only(&canonical_cache_dir);
     let snapshots = symbols
         .iter()
@@ -2233,6 +2240,8 @@ fn purge(
         });
     }
 
+    let root_gate = BacktestTickCache::open(&canonical_cache_dir)?;
+    let _lock = root_gate.try_acquire_consistency_read_lock()?;
     let cache = MinuteKlineCache::open(&canonical_cache_dir)?;
     let report = cache.purge_range(&symbol, window.start_ns, window.end_ns)?;
     Ok(CommandOutcome {
@@ -2254,6 +2263,7 @@ fn purge(
 
 fn doctor(cache_dir: Option<&Path>, kind: CacheKind) -> Result<CommandOutcome, CliError> {
     let (read_only_tick_cache, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
+    let _lock = read_only_tick_cache.try_acquire_consistency_read_lock()?;
     let minute_value = || -> Result<Value, CliError> {
         let report = MinuteKlineCache::open_read_only(&canonical_cache_dir).diagnose()?;
         Ok(json!({
@@ -2273,7 +2283,6 @@ fn doctor(cache_dir: Option<&Path>, kind: CacheKind) -> Result<CommandOutcome, C
         }))
     };
     let tick_value = || -> Result<Value, CliError> {
-        let _lock = read_only_tick_cache.try_acquire_consistency_read_lock()?;
         let report = read_only_tick_cache.diagnose()?;
         Ok(json!({
             "backend_format": report.backend_format,
@@ -2541,28 +2550,64 @@ fn minute_diagnostic_status_name(
     }
 }
 
-async fn wait_for_shutdown_signal(cancellation: BacktestRemoteFillCancellation) {
+async fn wait_for_shutdown_signal(cancellation: BacktestRemoteFillCancellation, kind: CacheKind) {
     #[cfg(unix)]
     {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut terminate) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {},
-                    _ = terminate.recv() => {},
+        let mut terminate =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(terminate) => Some(terminate),
+                Err(error) => {
+                    eprintln!(
+                        "tqsdk-cache: SIGTERM handler unavailable ({error}); waiting for Ctrl-C"
+                    );
+                    None
                 }
-            }
-            Err(error) => {
-                eprintln!("tqsdk-cache: SIGTERM handler unavailable ({error}); waiting for Ctrl-C");
-                let _ = tokio::signal::ctrl_c().await;
-            }
-        }
+            };
+        wait_for_one_shutdown_signal(terminate.as_mut()).await;
+        cancellation.cancel();
+        eprintln!("{}", shutdown_cancellation_message(kind));
+        wait_for_one_shutdown_signal(terminate.as_mut()).await;
     }
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+        cancellation.cancel();
+        eprintln!("{}", shutdown_cancellation_message(kind));
+        let _ = tokio::signal::ctrl_c().await;
     }
-    cancellation.cancel();
-    eprintln!("tqsdk-cache: cancellation requested; flushing accepted partial tick rows");
+    eprintln!("tqsdk-cache: second shutdown signal received; exiting immediately");
+    std::process::exit(130);
+}
+
+#[cfg(unix)]
+async fn wait_for_one_shutdown_signal(terminate: Option<&mut tokio::signal::unix::Signal>) {
+    match terminate {
+        Some(terminate) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = terminate.recv() => {},
+            }
+        }
+        None => {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+fn shutdown_cancellation_message(kind: CacheKind) -> &'static str {
+    match kind {
+        CacheKind::Tick => {
+            "tqsdk-cache: cancellation requested; flushing accepted partial tick rows"
+        }
+        CacheKind::Minute => {
+            "tqsdk-cache: cancellation requested; incomplete minute ranges will remain uncommitted"
+        }
+        CacheKind::All => "tqsdk-cache: cancellation requested",
+    }
+}
+
+fn fill_was_interrupted(cancellation_requested: bool, warmup_succeeded: bool) -> bool {
+    cancellation_requested && !warmup_succeeded
 }
 
 fn write_output(value: &Value, pretty: bool) -> Result<(), CliError> {
@@ -2581,7 +2626,7 @@ fn write_output(value: &Value, pretty: bool) -> Result<(), CliError> {
 mod tests {
     use super::{
         CalendarMode, Cli, Command, FillDaysArgs, ProgressMode, current_open_trading_day,
-        persist_calendar_if_needed, resolve_fill_window,
+        fill_was_interrupted, persist_calendar_if_needed, resolve_fill_window,
     };
     use chrono::NaiveDate;
     use clap::Parser;
@@ -2591,6 +2636,13 @@ mod tests {
         write_trading_calendar_snapshot,
     };
     use tqsdk_data::{TradingCalendarHolidays, TradingCalendarRow};
+
+    #[test]
+    fn successful_warmup_wins_a_late_shutdown_signal_race() {
+        assert!(!fill_was_interrupted(true, true));
+        assert!(fill_was_interrupted(true, false));
+        assert!(!fill_was_interrupted(false, false));
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn explicit_auto_range_uses_partition_fallback_without_a_snapshot() {

@@ -23,8 +23,8 @@
 - `BacktestTickCache::mark_provisional(...)` / `provisional_coverage(...)`
 - `BacktestTickCache::open(...).compact_symbol_ticks(...)`
 - `BacktestTickCache::open_read_only(...).fast_inventory()`
-- `BacktestTickCache::diagnose()` / `try_acquire_remote_fill_lock()` /
-  `try_acquire_consistency_read_lock()`
+- `BacktestTickCache::diagnose()` / `try_acquire_remote_fill_shared_lock()` /
+  `try_acquire_remote_fill_lock()` / `try_acquire_consistency_read_lock()`
 - `LiveTickCacheWriter::new(...).push_ticks(...)` / `flush()`
 - `MinuteKlineCache::open(...)` / `open_read_only(...)` / `coverage(...)`
 - `MinuteKlineCache::store_final_range(...)` / `open_reader(...)` / `purge_range(...)`
@@ -50,7 +50,8 @@
 
 `BacktestHistoryClient` 是 local-backtest durable history 的异步入口，不是 `DataClient` 专业历史下载
 API 的别名。它统一拥有 metadata sidecar、CacheOnly/RemoteOnMiss planner、official server-backtest
-fill、跨请求 single-flight、bounded cache reader 与 K 线聚合；`tqsdk-session` 仅提供 Tick/60s
+fill、进程内 single-flight、跨进程 per-series fill lease、shared cache-root gate、bounded cache reader
+与 K 线聚合；`tqsdk-session` 仅提供 Tick/60s
 server-history chart substrate，`tqsdk-task` 仅消费结果来安排 replay event。
 
 | 请求 | durable source | 是否新建 K 线文件 |
@@ -81,6 +82,11 @@ session 变化、损坏文件或不能由同一个 snapshot 解释的混合分�
 storage orchestration 是 async，但 TQBN 解压/解码仍由有界 `spawn_blocking` worker 执行；不提供把
 `tokio::fs` 当作性能开关的第二条 production path。
 
+普通 `RemoteOnMiss` fill/query 持 shared root gate；refresh、stale repair 和稳定维护持 exclusive gate。
+实际缺口再以 `cache family × cache symbol` 的跨进程 lease 串行化，等待者重查 coverage 后复用 owner
+结果。Tick fill 按 trading day 顺序消费并以 8192 rows 缓冲；取消会 flush 已接受短尾但不提交未 terminal
+coverage。fill-only materialization 不回读刚写入的 cache，物理写入计数在 shared fill 中只累计一次。
+
 其中：
 
 - `query_his_cont_quotes` / `query_his_cont_underlyings` / `query_his_cont_underlying_segments` 是纯 HTTP 的一次性 direct query，不需要 live session；分别返回多主连表格、单主连 date -> underlying 映射，以及同一 underlying 相邻交易日压缩后的连续 segment
@@ -106,8 +112,15 @@ storage orchestration 是 async，但 TQBN 解压/解码仍由有界 `spawn_bloc
   provisional checkpoint records 和 forward-compatible record lengths；market-data records
   block 以 8 MiB 未压缩 payload 为目标上限，并紧跟
   crate-internal `TQRI` 时间索引，使范围读取只解压相交 block；新建/compact 日分区还会维护
-  coverage index chain，使完整且未追加尾部 rows 的 coverage inspection 无需解压行情 block。
-  records index 缺失或不匹配时逐 block 回退解码，coverage index 不完整、旧文件或任何校验失败时回退完整扫描；
+  coverage index chain。每个 `.tqbn.lock` sidecar 还记录已确认 file length、bounded tail checksum 和
+  最新 coverage-index head；coverage/range reader 只读取该 confirmed prefix，不要求物理文件尾恰好是
+  coverage index。reader 在 shared lock 内打开 data file 并固定 snapshot，checkpoint 有效时可释放锁后
+  从 opened file handle 解码；并发 append/atomic-rename compaction 不改变该 snapshot。首次初始化写临时
+  文件并 sync 后原子 rename。checkpoint 后未确认的截断或坏 checksum suffix 不阻止下次 writer 恢复；
+  无有效 checkpoint 的旧文件按锁内捕获的完整物理长度严格校验，不能忽略坏 suffix，但 snapshot planning
+  完成后无需把 shared lock 持有到解码结束。coverage/provisional record 与紧邻、引用它的 `TQCI` 构成恢复
+  原子对；孤立 record 属于未确认 tail，恢复时从其起点截断。records index 缺失或不匹配时逐 block 回退
+  解码，coverage index 不完整时回退扫描 confirmed prefix；
   旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也没有兼容读取或迁移 store。
   默认 Cargo features 启用 `tqbn-zstd`：hot append 的 TQBN records block 使用 zstd level 1，
   append-log compaction 重写 records block 时使用 zstd level 3；两者都只在压缩后更小时写入
@@ -148,12 +161,14 @@ storage orchestration 是 async，但 TQBN 解压/解码仍由有界 `spawn_bloc
   eviction 或自动清理，`Refresh`、`purge_range` / `purge_symbol` 都是显式 destructive maintenance
 - `BacktestTickCache::inspect(...)` 输出 backend format、缓存目录、series 文件路径、完整性、
   cached/missing ranges；`tick_series_path(...)` 返回逻辑 series 路径，`purge_symbol_ticks(...)` 和
-  `compact_symbol_ticks(...)` 是按 `(symbol, tick)` 的全部日分区文件粒度的运维入口，供回测 warmup、
-  refresh、远端补缓存后的碎块合并和磁盘清理复用
+  `compact_symbol_ticks(...)` 是按 `(symbol, tick)` 的全部日分区文件粒度的显式运维入口；facade
+  final fill 使用范围版本，只重写本轮实际远端回填范围相交的日分区，避免 cache-hit 历史被重复 compact
 - `BacktestTickCache::open_read_only(...)` 不创建 root，也拒绝任何写入；`fast_inventory()` 只读取
   daily file metadata / magic，`diagnose()` 解码全部 tick partitions 并返回文件级状态。root-scoped
-  `try_acquire_remote_fill_lock()` 与 `try_acquire_consistency_read_lock()` 用于协调远端 fill owner
-  和稳定检查视图；它们是 advisory lock，不替代单 TQBN 文件写锁
+  `try_acquire_remote_fill_shared_lock()` 允许普通 fill/query 并发，
+  `try_acquire_remote_fill_lock()` / `try_acquire_consistency_read_lock()` 提供与普通操作互斥的 exclusive
+  maintenance/stable view；它们是 advisory lock，不替代单 TQBN 文件写锁。每个 series 的远端补洞另有
+  跨进程 lease。锁协议只保证当前实现之间协作，不承诺新旧 binary 进程长期混跑
 - 可选 `tqsdk-cache` binary 只编排上述 data/facade 能力。它以 `--kind tick|minute|all`
   选择 cache family（默认 tick），为 minute 提供 final-only closed-day fill、report-bound verify、
   fast inventory / deep doctor 和显式 purge；它不属于本 crate 的 runtime、store adapter 或 live

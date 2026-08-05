@@ -46,7 +46,11 @@ const ROOT_DIR_NAME: &str = "series";
 const TICK_DIR_NAME: &str = "tick";
 const KLINE_DIR_NAME: &str = "kline";
 const TQBN_FILE_EXTENSION: &str = "tqbn";
-const LOCK_FILE_NAME: &str = ".tqbn.lock";
+const LEGACY_LOCK_FILE_NAME: &str = ".tqbn.lock";
+const TQBN_TAIL_CHECKPOINT_MAGIC: &[u8; 4] = b"TQTC";
+const TQBN_TAIL_CHECKPOINT_VERSION: u8 = 2;
+const TQBN_TAIL_CHECKPOINT_LEN: usize = 32;
+const TQBN_TAIL_CHECKSUM_BYTES: u64 = 64;
 const CST_OFFSET_SECONDS: i32 = 8 * 60 * 60;
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 const TQBN_PREFIX_HEADER_LEN: usize = 4 + 1 + 4 + 4 + 8;
@@ -139,17 +143,10 @@ struct TqbnReader {
 
 struct TqbnStreamingPartition {
     file: File,
-    lock_file: File,
     blocks: Vec<TqbnStreamingBlockPlan>,
     next_block_index: usize,
     active: Vec<TqbnStreamingBlockCursor>,
     spare_records: Vec<u8>,
-}
-
-impl Drop for TqbnStreamingPartition {
-    fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.lock_file);
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -302,6 +299,12 @@ struct TqbnBlockDescriptor {
     payload_len: usize,
     payload_checksum: u64,
     end_offset: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TqbnTailCheckpoint {
+    valid_len: u64,
+    latest_coverage_index_offset: Option<u64>,
 }
 
 impl TqbnHistoryStore {
@@ -687,7 +690,12 @@ impl HistorySeriesStore for TqbnHistoryStore {
     fn scan(&self) -> Result<HistorySeriesCacheScanReport> {
         let mut files = Vec::new();
         for path in list_series_tree_files(self.root_dir.as_path())? {
-            files.push(scan_tqbn_tree_file(self.root_dir.as_path(), path)?);
+            let scan_path = path.clone();
+            if let Some(report) = with_shared_tqbn_lock(path.as_path(), self.read_only, || {
+                scan_tqbn_tree_file(self.root_dir.as_path(), scan_path)
+            })? {
+                files.push(report);
+            }
         }
         files.sort_by(|left, right| left.file_name.cmp(&right.file_name));
         Ok(HistorySeriesCacheScanReport {
@@ -718,6 +726,25 @@ impl HistorySeriesStore for TqbnHistoryStore {
         Ok(())
     }
 
+    fn compact_series_range(
+        &self,
+        symbol: &str,
+        kind: HistorySeriesKind,
+        range_start_ns: i64,
+        range_end_ns: i64,
+    ) -> Result<()> {
+        self.ensure_writable()?;
+        for path in self.partition_paths_for_range(symbol, kind, range_start_ns, range_end_ns)? {
+            match fs::metadata(&path) {
+                Ok(metadata) if metadata.is_file() => compact_tqbn_file(&path, symbol, kind)?,
+                Ok(_) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
     fn coverage(
         &self,
         request: HistorySeriesCoverageRequest,
@@ -729,11 +756,13 @@ impl HistorySeriesStore for TqbnHistoryStore {
             request.range_start_ns,
             request.range_end_ns,
         )? {
-            coverage.extend(parse_tqbn_coverage_file(
-                &path,
-                request.symbol.as_str(),
-                request.kind,
-            )?);
+            if let Some(partition_coverage) =
+                with_shared_tqbn_lock(path.as_path(), self.read_only, || {
+                    parse_tqbn_coverage_file(&path, request.symbol.as_str(), request.kind)
+                })?
+            {
+                coverage.extend(partition_coverage);
+            }
         }
         let cached_ranges = super::merge_datetime_ranges(coverage);
         let cached_ranges = super::rangeset_intersection(
@@ -765,7 +794,12 @@ impl HistorySeriesStore for TqbnHistoryStore {
             request.range_start_ns,
             request.range_end_ns,
         )? {
-            let parsed = parse_tqbn_checkpoint_file(&path, request.symbol.as_str(), request.kind)?;
+            let Some(parsed) = with_shared_tqbn_lock(path.as_path(), self.read_only, || {
+                parse_tqbn_checkpoint_file(&path, request.symbol.as_str(), request.kind)
+            })?
+            else {
+                continue;
+            };
             provisional.extend(parsed.provisional);
             final_coverage.extend(parsed.coverage);
         }
@@ -1236,27 +1270,25 @@ fn append_segment_to_file(
     path: &Path,
     segment: &HistorySeriesWriteSegment<'_>,
 ) -> Result<HistorySeriesSegmentReport> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .append(true)
-        .open(path)?;
-    let first_block_offset = ensure_tqbn_file_initialized(&mut file, segment.symbol, segment.kind)?;
-    let coverage_index_offset = match segment.declared_range_ns {
-        Some(_) => find_latest_tqbn_coverage_index(&mut file, first_block_offset)?,
-        None => None,
-    };
+    let (mut file, first_block_offset) =
+        open_tqbn_file_for_append(path, segment.symbol, segment.kind)?;
+    let mut coverage_index_offset =
+        repair_truncated_tqbn_tail(&mut file, path, first_block_offset)?;
+    if coverage_index_offset.is_none() {
+        coverage_index_offset = find_latest_tqbn_coverage_index(&mut file, first_block_offset)?;
+    }
     let (rows, id_range, datetime_range) = append_rows_block(&mut file, segment)?;
     if let Some((start, end)) = segment.declared_range_ns {
         file.flush()?;
         // Coverage is allowed to lag after a crash, but it must never become
         // durable before the rows it claims to cover.
         file.sync_data()?;
-        let _ =
+        coverage_index_offset =
             append_coverage_block(&mut file, coverage_index_offset, start, end, rows, id_range)?;
     }
     file.flush()?;
     file.sync_data()?;
+    persist_tqbn_tail_checkpoint(path, &mut file, coverage_index_offset)?;
     Ok(HistorySeriesSegmentReport {
         path: path.to_path_buf(),
         symbol: segment.symbol.to_string(),
@@ -1273,13 +1305,13 @@ fn append_segment_and_coverage_to_file(
     segment: &HistorySeriesWriteSegment<'_>,
     coverage: &[HistorySeriesCoverageCommit],
 ) -> Result<HistorySeriesSegmentReport> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .append(true)
-        .open(path)?;
-    let first_block_offset = ensure_tqbn_file_initialized(&mut file, segment.symbol, segment.kind)?;
-    let mut coverage_index_offset = find_latest_tqbn_coverage_index(&mut file, first_block_offset)?;
+    let (mut file, first_block_offset) =
+        open_tqbn_file_for_append(path, segment.symbol, segment.kind)?;
+    let mut coverage_index_offset =
+        repair_truncated_tqbn_tail(&mut file, path, first_block_offset)?;
+    if coverage_index_offset.is_none() {
+        coverage_index_offset = find_latest_tqbn_coverage_index(&mut file, first_block_offset)?;
+    }
     let (rows, id_range, datetime_range) = append_rows_block(&mut file, segment)?;
     file.flush()?;
     // Coverage is allowed to lag after a crash, but it must never become
@@ -1296,6 +1328,8 @@ fn append_segment_and_coverage_to_file(
         )?;
     }
     file.flush()?;
+    file.sync_data()?;
+    persist_tqbn_tail_checkpoint(path, &mut file, coverage_index_offset)?;
     Ok(HistorySeriesSegmentReport {
         path: path.to_path_buf(),
         symbol: segment.symbol.to_string(),
@@ -1308,15 +1342,14 @@ fn append_segment_and_coverage_to_file(
 }
 
 fn append_coverage_to_file(path: &Path, commit: &HistorySeriesCoverageCommit) -> Result<()> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .append(true)
-        .open(path)?;
-    let first_block_offset =
-        ensure_tqbn_file_initialized(&mut file, commit.symbol.as_str(), commit.kind)?;
-    let coverage_index_offset = find_latest_tqbn_coverage_index(&mut file, first_block_offset)?;
-    let _ = append_coverage_block(
+    let (mut file, first_block_offset) =
+        open_tqbn_file_for_append(path, commit.symbol.as_str(), commit.kind)?;
+    let mut coverage_index_offset =
+        repair_truncated_tqbn_tail(&mut file, path, first_block_offset)?;
+    if coverage_index_offset.is_none() {
+        coverage_index_offset = find_latest_tqbn_coverage_index(&mut file, first_block_offset)?;
+    }
+    coverage_index_offset = append_coverage_block(
         &mut file,
         coverage_index_offset,
         commit.range_start_ns,
@@ -1326,6 +1359,7 @@ fn append_coverage_to_file(path: &Path, commit: &HistorySeriesCoverageCommit) ->
     )?;
     file.flush()?;
     file.sync_data()?;
+    persist_tqbn_tail_checkpoint(path, &mut file, coverage_index_offset)?;
     Ok(())
 }
 
@@ -1333,26 +1367,51 @@ fn append_provisional_to_file(
     path: &Path,
     commit: &HistorySeriesProvisionalCoverage,
 ) -> Result<()> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .append(true)
-        .open(path)?;
-    let first_block_offset =
-        ensure_tqbn_file_initialized(&mut file, commit.symbol.as_str(), commit.kind)?;
-    let coverage_index_offset = find_latest_tqbn_coverage_index(&mut file, first_block_offset)?;
-    let _ = append_provisional_block(&mut file, coverage_index_offset, commit)?;
+    let (mut file, first_block_offset) =
+        open_tqbn_file_for_append(path, commit.symbol.as_str(), commit.kind)?;
+    let mut coverage_index_offset =
+        repair_truncated_tqbn_tail(&mut file, path, first_block_offset)?;
+    if coverage_index_offset.is_none() {
+        coverage_index_offset = find_latest_tqbn_coverage_index(&mut file, first_block_offset)?;
+    }
+    coverage_index_offset = append_provisional_block(&mut file, coverage_index_offset, commit)?;
     file.flush()?;
     file.sync_data()?;
+    persist_tqbn_tail_checkpoint(path, &mut file, coverage_index_offset)?;
     Ok(())
 }
 
-fn ensure_tqbn_file_initialized(
-    file: &mut File,
+fn open_tqbn_file_for_append(
+    path: &Path,
     symbol: &str,
     kind: HistorySeriesKind,
-) -> Result<u64> {
-    if file.metadata()?.len() == 0 {
+) -> Result<(File, u64)> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.len() == 0 => {
+            fs::remove_file(path)?;
+            initialize_tqbn_file_atomically(path, symbol, kind)?;
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            initialize_tqbn_file_atomically(path, symbol, kind)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    let mut file = OpenOptions::new().read(true).append(true).open(path)?;
+    file.seek(SeekFrom::Start(0))?;
+    let (_, first_block_offset) = read_and_validate_tqbn_prefix(&mut file, symbol, kind)?;
+    file.seek(SeekFrom::End(0))?;
+    Ok((file, first_block_offset as u64))
+}
+
+fn initialize_tqbn_file_atomically(
+    path: &Path,
+    symbol: &str,
+    kind: HistorySeriesKind,
+) -> Result<()> {
+    let temp_path = compact_temp_path(path)?;
+    let result = (|| -> Result<()> {
         let metadata = match kind {
             HistorySeriesKind::Kline { duration_ns } => {
                 TqbnMetadata::single_series_kline(symbol.to_string(), duration_ns)
@@ -1363,18 +1422,308 @@ fn ensure_tqbn_file_initialized(
         };
         let metadata = encode_metadata(&metadata)?;
         let prefix = encode_file_prefix(&metadata);
+        let mut file = File::create(&temp_path)?;
         file.write_all(&prefix.bytes)?;
-        let first_block_offset = u64::try_from(prefix.bytes.len()).map_err(|_| {
-            DataError::InvalidResponse("TQBN file prefix length exceeds u64::MAX".to_string())
-        })?;
-        append_tqbn_coverage_index_root(&mut *file)?;
-        return Ok(first_block_offset);
+        append_tqbn_coverage_index_root(&mut file)?;
+        file.flush()?;
+        file.sync_all()?;
+        fs::rename(&temp_path, path)?;
+        sync_parent_dir(path)
+    })();
+    if let Err(error) = result {
+        if let Err(cleanup_error) = remove_compact_temp_file(&temp_path) {
+            return Err(DataError::InvalidResponse(format!(
+                "TQBN initialization failed for {}: {error}; also failed to remove temp file {}: {cleanup_error}",
+                path.display(),
+                temp_path.display(),
+            )));
+        }
+        return Err(error);
     }
+    Ok(())
+}
 
-    file.seek(SeekFrom::Start(0))?;
-    let (_, first_block_offset) = read_and_validate_tqbn_prefix(file, symbol, kind)?;
+fn repair_truncated_tqbn_tail(
+    file: &mut File,
+    path: &Path,
+    first_block_offset: u64,
+) -> Result<Option<u64>> {
+    let file_len = file.metadata()?.len();
+    let checkpoint = load_tqbn_tail_checkpoint(path, file, first_block_offset, file_len)?;
+    let can_discard_unconfirmed_suffix = checkpoint.is_some();
+    let mut latest_coverage_index_offset =
+        checkpoint.and_then(|checkpoint| checkpoint.latest_coverage_index_offset);
+    let mut coverage_index_chain_enabled = latest_coverage_index_offset.is_some();
+    let mut pending_coverage = None::<(u64, u8, i64, i64)>;
+    let mut block_start = checkpoint.map_or(first_block_offset, |checkpoint| checkpoint.valid_len);
+    while block_start < file_len {
+        let remaining = file_len.saturating_sub(block_start);
+        if remaining < TQBN_BLOCK_HEADER_LEN as u64 {
+            truncate_tqbn_tail(file, block_start)?;
+            return Ok(latest_coverage_index_offset);
+        }
+
+        file.seek(SeekFrom::Start(block_start))?;
+        let mut header = [0_u8; TQBN_BLOCK_HEADER_LEN];
+        file.read_exact(&mut header)?;
+        if &header[0..4] != b"TQBB" {
+            if can_discard_unconfirmed_suffix {
+                truncate_tqbn_tail(file, block_start)?;
+                return Ok(latest_coverage_index_offset);
+            }
+            return Err(DataError::InvalidResponse(format!(
+                "TQBN block magic mismatch at offset {block_start}"
+            )));
+        }
+        let payload_len = u64::from_le_bytes([
+            header[8], header[9], header[10], header[11], header[12], header[13], header[14],
+            header[15],
+        ]);
+        if payload_len > MAX_TQBN_BLOCK_PAYLOAD_BYTES as u64 {
+            if can_discard_unconfirmed_suffix {
+                truncate_tqbn_tail(file, block_start)?;
+                return Ok(latest_coverage_index_offset);
+            }
+            return Err(DataError::InvalidResponse(format!(
+                "TQBN block records length {payload_len} exceeds max {MAX_TQBN_BLOCK_PAYLOAD_BYTES}"
+            )));
+        }
+        let Some(block_end) = block_start
+            .checked_add(TQBN_BLOCK_HEADER_LEN as u64)
+            .and_then(|offset| offset.checked_add(payload_len))
+        else {
+            if can_discard_unconfirmed_suffix {
+                truncate_tqbn_tail(file, block_start)?;
+                return Ok(latest_coverage_index_offset);
+            }
+            return Err(DataError::InvalidResponse(
+                "TQBN block records length overflow".to_string(),
+            ));
+        };
+        if block_end > file_len {
+            truncate_tqbn_tail(file, block_start)?;
+            return Ok(latest_coverage_index_offset);
+        }
+        let descriptor = TqbnBlockDescriptor {
+            block_type: header[4],
+            flags: header[5],
+            payload_offset: block_start + TQBN_BLOCK_HEADER_LEN as u64,
+            payload_len: usize::try_from(payload_len).map_err(|_| {
+                DataError::InvalidResponse(format!(
+                    "TQBN block records length {payload_len} does not fit in usize"
+                ))
+            })?,
+            payload_checksum: u64::from_le_bytes([
+                header[16], header[17], header[18], header[19], header[20], header[21], header[22],
+                header[23],
+            ]),
+            end_offset: block_end,
+        };
+        let payload = match read_tqbn_block_payload(file, descriptor) {
+            Ok(payload) => payload,
+            Err(_) if can_discard_unconfirmed_suffix => {
+                truncate_tqbn_tail(file, block_start)?;
+                return Ok(latest_coverage_index_offset);
+            }
+            Err(error) => return Err(error),
+        };
+
+        let coverage_index = (descriptor.block_type == TqbnBlockType::Index as u8)
+            .then(|| decode_tqbn_coverage_index(&payload))
+            .flatten();
+        let mut matched_pending_coverage = false;
+        if let Some((coverage_block_offset, flags, range_start_ns, range_end_ns)) = pending_coverage
+        {
+            matched_pending_coverage = coverage_index.is_some_and(|index| {
+                index.flags == flags
+                    && index.coverage_block_offset == coverage_block_offset
+                    && index.range_start_ns == range_start_ns
+                    && index.range_end_ns == range_end_ns
+            });
+            if !matched_pending_coverage {
+                truncate_tqbn_tail(file, coverage_block_offset)?;
+                return Ok(latest_coverage_index_offset);
+            }
+            pending_coverage = None;
+        }
+
+        if let Some(index) = coverage_index {
+            let is_root = index.flags == TQBN_COVERAGE_INDEX_ROOT_FLAG;
+            if (is_root && block_start != first_block_offset)
+                || (!is_root && (!coverage_index_chain_enabled || !matched_pending_coverage))
+            {
+                if can_discard_unconfirmed_suffix {
+                    truncate_tqbn_tail(file, block_start)?;
+                    return Ok(latest_coverage_index_offset);
+                }
+                return Err(DataError::InvalidResponse(format!(
+                    "TQBN coverage index at offset {block_start} is not paired with its coverage block"
+                )));
+            }
+            coverage_index_chain_enabled = true;
+            latest_coverage_index_offset = Some(block_start);
+        } else if coverage_index_chain_enabled
+            && descriptor.block_type == TqbnBlockType::Records as u8
+            && descriptor.flags == 0
+            && let Some((flags, range_start_ns, range_end_ns)) =
+                decode_tqbn_pending_coverage(&payload)?
+        {
+            pending_coverage = Some((block_start, flags, range_start_ns, range_end_ns));
+        }
+        block_start = block_end;
+    }
+    if let Some((coverage_block_offset, ..)) = pending_coverage {
+        truncate_tqbn_tail(file, coverage_block_offset)?;
+        return Ok(latest_coverage_index_offset);
+    }
     file.seek(SeekFrom::End(0))?;
-    Ok(first_block_offset as u64)
+    Ok(latest_coverage_index_offset)
+}
+
+fn decode_tqbn_pending_coverage(payload: &[u8]) -> Result<Option<(u8, i64, i64)>> {
+    if !matches!(
+        payload.len(),
+        len if len == std::mem::size_of::<TqbnCoverageRecordV1>()
+            || len == std::mem::size_of::<TqbnProvisionalCoverageRecordV1>()
+    ) {
+        return Ok(None);
+    }
+    let mut indexed = TqbnIndexedCoverage::default();
+    decode_checkpoint_records_block(payload, &mut indexed)?;
+    match (indexed.coverage.as_slice(), indexed.provisional.as_slice()) {
+        ([range], []) => Ok(Some((0, range.0, range.1))),
+        ([], [checkpoint]) => Ok(Some((
+            TQBN_COVERAGE_INDEX_PROVISIONAL_FLAG,
+            checkpoint.range_start_ns,
+            checkpoint.complete_through_ns,
+        ))),
+        _ => Ok(None),
+    }
+}
+
+fn load_tqbn_tail_checkpoint(
+    path: &Path,
+    file: &mut File,
+    first_block_offset: u64,
+    file_len: u64,
+) -> Result<Option<TqbnTailCheckpoint>> {
+    let mut checkpoint_file = match File::open(tqbn_file_lock_path(path)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut encoded = [0_u8; TQBN_TAIL_CHECKPOINT_LEN];
+    match checkpoint_file.read_exact(&mut encoded) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    if &encoded[0..4] != TQBN_TAIL_CHECKPOINT_MAGIC || encoded[4] != TQBN_TAIL_CHECKPOINT_VERSION {
+        return Ok(None);
+    }
+    let valid_len = u64::from_le_bytes([
+        encoded[8],
+        encoded[9],
+        encoded[10],
+        encoded[11],
+        encoded[12],
+        encoded[13],
+        encoded[14],
+        encoded[15],
+    ]);
+    if valid_len < first_block_offset || valid_len > file_len {
+        return Ok(None);
+    }
+    let expected_checksum = u64::from_le_bytes([
+        encoded[16],
+        encoded[17],
+        encoded[18],
+        encoded[19],
+        encoded[20],
+        encoded[21],
+        encoded[22],
+        encoded[23],
+    ]);
+    let actual_checksum = tqbn_tail_checksum(file, valid_len)?;
+    file.seek(SeekFrom::End(0))?;
+    if actual_checksum != expected_checksum {
+        return Ok(None);
+    }
+    let latest_coverage_index_offset = u64::from_le_bytes([
+        encoded[24],
+        encoded[25],
+        encoded[26],
+        encoded[27],
+        encoded[28],
+        encoded[29],
+        encoded[30],
+        encoded[31],
+    ]);
+    let latest_coverage_index_offset = (latest_coverage_index_offset
+        != TQBN_COVERAGE_INDEX_NO_OFFSET)
+        .then_some(latest_coverage_index_offset);
+    if latest_coverage_index_offset
+        .is_some_and(|offset| offset < first_block_offset || offset >= valid_len)
+    {
+        return Ok(None);
+    }
+    Ok(Some(TqbnTailCheckpoint {
+        valid_len,
+        latest_coverage_index_offset,
+    }))
+}
+
+fn persist_tqbn_tail_checkpoint(
+    path: &Path,
+    file: &mut File,
+    latest_coverage_index_offset: Option<u64>,
+) -> Result<()> {
+    let valid_len = file.metadata()?.len();
+    let checksum = tqbn_tail_checksum(file, valid_len)?;
+    let mut encoded = [0_u8; TQBN_TAIL_CHECKPOINT_LEN];
+    encoded[0..4].copy_from_slice(TQBN_TAIL_CHECKPOINT_MAGIC);
+    encoded[4] = TQBN_TAIL_CHECKPOINT_VERSION;
+    encoded[8..16].copy_from_slice(&valid_len.to_le_bytes());
+    encoded[16..24].copy_from_slice(&checksum.to_le_bytes());
+    encoded[24..32].copy_from_slice(
+        &latest_coverage_index_offset
+            .unwrap_or(TQBN_COVERAGE_INDEX_NO_OFFSET)
+            .to_le_bytes(),
+    );
+
+    let mut checkpoint_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .truncate(false)
+        .write(true)
+        .open(tqbn_file_lock_path(path))?;
+    checkpoint_file.set_len(0)?;
+    checkpoint_file.seek(SeekFrom::Start(0))?;
+    checkpoint_file.write_all(&encoded)?;
+    checkpoint_file.flush()?;
+    file.seek(SeekFrom::End(0))?;
+    Ok(())
+}
+
+fn tqbn_tail_checksum(file: &mut File, valid_len: u64) -> Result<u64> {
+    let checksum_len = valid_len.min(TQBN_TAIL_CHECKSUM_BYTES);
+    let checksum_start = valid_len.saturating_sub(checksum_len);
+    file.seek(SeekFrom::Start(checksum_start))?;
+    let mut tail = vec![
+        0_u8;
+        usize::try_from(checksum_len).map_err(|_| {
+            DataError::InvalidResponse("TQBN tail checksum length overflow".to_string())
+        })?
+    ];
+    file.read_exact(&mut tail)?;
+    Ok(checksum64_fnv1a(&tail))
+}
+
+fn truncate_tqbn_tail(file: &mut File, valid_len: u64) -> Result<()> {
+    file.set_len(valid_len)?;
+    file.sync_data()?;
+    file.seek(SeekFrom::End(0))?;
+    Ok(())
 }
 
 fn append_rows_block(
@@ -1782,10 +2131,9 @@ fn prepare_tqbn_partition(
     spare_records: &mut Vec<u8>,
     read_only: bool,
 ) -> Result<PreparedTqbnPartition> {
-    if !path.exists() {
+    let Some(lock_file) = acquire_tqbn_shared_lock(path, read_only)? else {
         return Ok(PreparedTqbnPartition::Missing);
-    }
-    let lock_file = acquire_tqbn_shared_lock(path, read_only)?;
+    };
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -1794,28 +2142,53 @@ fn prepare_tqbn_partition(
         Err(error) => return Err(error.into()),
     };
     let (_, first_block_offset) = read_and_validate_tqbn_prefix(&mut file, symbol, kind)?;
-    let file_len = file.metadata()?.len();
-    if let Some(blocks) = plan_tqbn_streaming_blocks(
-        &mut file,
-        kind,
-        range_start_ns,
-        range_end_ns,
-        file_len,
-        first_block_offset as u64,
-        spare_records,
-    )? {
-        return Ok(PreparedTqbnPartition::Streaming(TqbnStreamingPartition {
-            file,
-            lock_file,
-            blocks,
-            next_block_index: 0,
-            active: Vec::new(),
-            spare_records: std::mem::take(spare_records),
-        }));
+    let physical_len = file.metadata()?.len();
+    let checkpoint =
+        load_tqbn_tail_checkpoint(path, &mut file, first_block_offset as u64, physical_len)?;
+    let snapshot_len = checkpoint.map_or(physical_len, |checkpoint| checkpoint.valid_len);
+    let release_before_decode = checkpoint.is_some();
+    if release_before_decode {
+        FileExt::unlock(&lock_file)?;
     }
-    Ok(PreparedTqbnPartition::Materialized(
-        parse_tqbn_rows_for_range(file, symbol, kind, range_start_ns, range_end_ns)?,
-    ))
+    let prepared = (|| {
+        if let Some(blocks) = plan_tqbn_streaming_blocks(
+            &mut file,
+            kind,
+            range_start_ns,
+            range_end_ns,
+            snapshot_len,
+            first_block_offset as u64,
+            spare_records,
+        )? {
+            Ok(PreparedTqbnPartition::Streaming(TqbnStreamingPartition {
+                file,
+                blocks,
+                next_block_index: 0,
+                active: Vec::new(),
+                spare_records: std::mem::take(spare_records),
+            }))
+        } else {
+            Ok(PreparedTqbnPartition::Materialized(
+                parse_tqbn_rows_for_range(
+                    file,
+                    symbol,
+                    kind,
+                    range_start_ns,
+                    range_end_ns,
+                    snapshot_len,
+                )?,
+            ))
+        }
+    })();
+    if release_before_decode {
+        return prepared;
+    }
+    let unlock_result = FileExt::unlock(&lock_file);
+    match (prepared, unlock_result) {
+        (Ok(prepared), Ok(())) => Ok(prepared),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error.into()),
+    }
 }
 
 fn plan_tqbn_streaming_blocks(
@@ -1948,12 +2321,20 @@ fn parse_tqbn_rows_for_range(
     kind: HistorySeriesKind,
     range_start_ns: i64,
     range_end_ns: i64,
+    snapshot_len: u64,
 ) -> Result<Vec<HistorySeriesRow>> {
     file.seek(SeekFrom::Start(0))?;
     let (_, offset) = read_and_validate_tqbn_prefix(&mut file, symbol, kind)?;
     file.seek(SeekFrom::Start(offset as u64))?;
     let mut state = TqbnSeriesState::default();
-    decode_blocks_streaming_for_range(&mut file, kind, range_start_ns, range_end_ns, &mut state)?;
+    decode_blocks_streaming_for_range(
+        &mut file,
+        kind,
+        range_start_ns,
+        range_end_ns,
+        snapshot_len,
+        &mut state,
+    )?;
     Ok(rows_for_request(
         state.rows,
         kind,
@@ -1983,12 +2364,26 @@ fn parse_tqbn_checkpoint_file(
         Err(error) => return Err(error.into()),
     };
     let (_, offset) = read_and_validate_tqbn_prefix(&mut file, symbol, kind)?;
-    if let Some(indexed) = try_parse_tqbn_checkpoint_index_chain(&mut file, offset as u64)? {
+    let file_len = file.metadata()?.len();
+    let checkpoint = load_tqbn_tail_checkpoint(path, &mut file, offset as u64, file_len)?;
+    let snapshot_len = checkpoint.map_or(file_len, |checkpoint| checkpoint.valid_len);
+    if let Some(checkpoint) = checkpoint {
+        if let Some(index_offset) = checkpoint.latest_coverage_index_offset
+            && let Some(indexed) = try_parse_tqbn_checkpoint_index_chain_at(
+                &mut file,
+                offset as u64,
+                index_offset,
+                checkpoint.valid_len,
+            )?
+        {
+            return Ok(indexed);
+        }
+    } else if let Some(indexed) = try_parse_tqbn_checkpoint_index_chain(&mut file, offset as u64)? {
         return Ok(indexed);
     }
     file.seek(SeekFrom::Start(offset as u64))?;
     let mut indexed = TqbnIndexedCoverage::default();
-    decode_blocks_streaming_with(&mut file, |records| {
+    decode_blocks_streaming_with_snapshot(&mut file, snapshot_len, |records| {
         decode_checkpoint_records_block(records, &mut indexed)
     })?;
     Ok(indexed)
@@ -2017,11 +2412,24 @@ fn try_parse_tqbn_checkpoint_index_chain(
     if tail_offset < first_block_offset {
         return Ok(None);
     }
-    let Some(mut index) = read_tqbn_coverage_index_at(file, tail_offset, file_len)? else {
+    try_parse_tqbn_checkpoint_index_chain_at(file, first_block_offset, tail_offset, file_len)
+}
+
+fn try_parse_tqbn_checkpoint_index_chain_at(
+    file: &mut File,
+    first_block_offset: u64,
+    head_index_offset: u64,
+    file_len: u64,
+) -> Result<Option<TqbnIndexedCoverage>> {
+    let index_block_len = (TQBN_BLOCK_HEADER_LEN + TQBN_COVERAGE_INDEX_PAYLOAD_LEN) as u64;
+    if head_index_offset < first_block_offset || head_index_offset >= file_len {
+        return Ok(None);
+    }
+    let Some(mut index) = read_tqbn_coverage_index_at(file, head_index_offset, file_len)? else {
         return Ok(None);
     };
 
-    let mut index_offset = tail_offset;
+    let mut index_offset = head_index_offset;
     let mut indexed = TqbnIndexedCoverage::default();
     let max_links = file_len / index_block_len + 1;
     for _ in 0..max_links {
@@ -2388,9 +2796,9 @@ fn decode_blocks_streaming_for_range(
     kind: HistorySeriesKind,
     range_start_ns: i64,
     range_end_ns: i64,
+    file_len: u64,
     state: &mut TqbnSeriesState,
 ) -> Result<()> {
-    let file_len = file.metadata()?.len();
     let mut next_block_offset = file.stream_position()?;
     while let Some(descriptor) = read_next_tqbn_records_block_descriptor_for_range(
         file,
@@ -2504,6 +2912,32 @@ fn read_decoded_tqbn_block_payload_into(
         MAX_TQBN_BLOCK_PAYLOAD_BYTES,
         decoded,
     )
+}
+
+fn decode_blocks_streaming_with_snapshot(
+    file: &mut File,
+    snapshot_len: u64,
+    mut decode_records: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
+    let mut offset = file.stream_position()?;
+    while offset < snapshot_len {
+        let descriptor = read_tqbn_block_descriptor_at(file, offset, snapshot_len)?;
+        validate_block_flags(descriptor.block_type, descriptor.flags)?;
+        let records = read_decoded_tqbn_block_payload(file, descriptor)?;
+        match descriptor.block_type {
+            value if value == TqbnBlockType::Records as u8 => decode_records(&records)?,
+            value
+                if value == TqbnBlockType::Metadata as u8
+                    || value == TqbnBlockType::Index as u8 => {}
+            value => {
+                return Err(DataError::InvalidResponse(format!(
+                    "TQBN block type {value} is unknown"
+                )));
+            }
+        }
+        offset = descriptor.end_offset;
+    }
+    Ok(())
 }
 
 fn decode_blocks_streaming_with(
@@ -3633,6 +4067,8 @@ fn compact_tqbn_file_locked(path: &Path, symbol: &str, kind: HistorySeriesKind) 
         file.sync_all()?;
         fs::rename(&temp_path, path)?;
         sync_parent_dir(path)?;
+        let mut compacted_file = File::open(path)?;
+        persist_tqbn_tail_checkpoint(path, &mut compacted_file, Some(coverage_index_offset))?;
         Ok(())
     })();
     if let Err(error) = result {
@@ -3817,65 +4253,150 @@ fn with_exclusive_tqbn_lock<T>(path: &Path, f: impl FnOnce() -> Result<T>) -> Re
     let lock_dir = path.parent().ok_or_else(|| {
         DataError::InvalidResponse("history TQBN lock path is invalid".to_string())
     })?;
-    let lock_path = lock_dir.join(LOCK_FILE_NAME);
+    fs::create_dir_all(lock_dir)?;
+    let lock_path = tqbn_file_lock_path(path);
+    let legacy_lock_path = lock_dir.join(LEGACY_LOCK_FILE_NAME);
+    let legacy_lock = if !lock_path.exists() {
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&legacy_lock_path)
+        {
+            Ok(file) => {
+                FileExt::lock_exclusive(&file)?;
+                Some(file)
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        None
+    };
     let lock_file = OpenOptions::new()
         .create(true)
         .read(true)
         .truncate(false)
         .write(true)
         .open(lock_path)?;
-    match FileExt::try_lock_exclusive(&lock_file) {
-        Ok(()) => {}
-        Err(error) if error.kind() == ErrorKind::WouldBlock => {
-            return Err(DataError::CacheBusy {
-                cache_dir: lock_dir.to_path_buf(),
-                operation: "history TQBN partition write",
-            });
+    FileExt::lock_exclusive(&lock_file)?;
+    let data_lock = match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => {
+            FileExt::lock_exclusive(&file)?;
+            Some(file)
         }
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
-    }
+    };
     let result = f();
+    let data_unlock_result = data_lock.as_ref().map_or(Ok(()), FileExt::unlock);
     let unlock_result = fs2::FileExt::unlock(&lock_file);
-    match (result, unlock_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(DataError::from(error)),
+    let legacy_unlock_result = legacy_lock.as_ref().map_or(Ok(()), FileExt::unlock);
+    match (
+        result,
+        data_unlock_result,
+        unlock_result,
+        legacy_unlock_result,
+    ) {
+        (Ok(value), Ok(()), Ok(()), Ok(())) => Ok(value),
+        (Err(error), _, _, _) => Err(error),
+        (Ok(_), Err(error), _, _) | (Ok(_), Ok(()), Err(error), _) => Err(DataError::from(error)),
+        (Ok(_), Ok(()), Ok(()), Err(error)) => Err(DataError::from(error)),
     }
 }
 
-fn acquire_tqbn_shared_lock(path: &Path, read_only: bool) -> Result<File> {
+fn acquire_tqbn_shared_lock(path: &Path, read_only: bool) -> Result<Option<File>> {
     let lock_dir = path.parent().ok_or_else(|| {
         DataError::InvalidResponse("history TQBN lock path is invalid".to_string())
     })?;
-    let lock_path = lock_dir.join(LOCK_FILE_NAME);
-    let lock_file = if read_only {
+    let lock_path = tqbn_file_lock_path(path);
+    let legacy_path = lock_dir.join(LEGACY_LOCK_FILE_NAME);
+    let open_lock_file = |candidate: &Path| {
         OpenOptions::new()
             .read(true)
-            .open(lock_path)
-            .map_err(|error| {
-                if error.kind() == ErrorKind::NotFound {
-                    DataError::InvalidState("read-only history TQBN partition lock is missing")
-                } else {
-                    DataError::from(error)
-                }
-            })?
-    } else {
-        fs::create_dir_all(lock_dir)?;
-        OpenOptions::new()
-            .create(true)
-            .read(true)
-            .truncate(false)
-            .write(true)
-            .open(lock_path)?
+            .write(!read_only)
+            .open(candidate)
     };
-    match FileExt::try_lock_shared(&lock_file) {
-        Ok(()) => Ok(lock_file),
-        Err(error) if error.kind() == ErrorKind::WouldBlock => Err(DataError::CacheBusy {
-            cache_dir: lock_dir.to_path_buf(),
-            operation: "history TQBN partition read",
-        }),
+    let lock_file = match open_lock_file(&lock_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => match open_lock_file(&legacy_path) {
+            Ok(legacy_file) => {
+                FileExt::lock_shared(&legacy_file)?;
+                match open_lock_file(&lock_path) {
+                    Ok(file_lock) => {
+                        FileExt::lock_shared(&file_lock)?;
+                        FileExt::unlock(&legacy_file)?;
+                        return Ok(Some(file_lock));
+                    }
+                    Err(recheck_error) if recheck_error.kind() == ErrorKind::NotFound => {
+                        return Ok(Some(legacy_file));
+                    }
+                    Err(recheck_error) => return Err(recheck_error.into()),
+                }
+            }
+            Err(legacy_error) if legacy_error.kind() == ErrorKind::NotFound => {
+                let data_file = match File::open(path) {
+                    Ok(file) => file,
+                    Err(data_error) if data_error.kind() == ErrorKind::NotFound => {
+                        for candidate in [&lock_path, &legacy_path] {
+                            match open_lock_file(candidate) {
+                                Ok(file) => {
+                                    FileExt::lock_shared(&file)?;
+                                    return Ok(Some(file));
+                                }
+                                Err(recheck_error)
+                                    if recheck_error.kind() == ErrorKind::NotFound => {}
+                                Err(recheck_error) => return Err(recheck_error.into()),
+                            }
+                        }
+                        return Ok(None);
+                    }
+                    Err(data_error) => return Err(data_error.into()),
+                };
+                FileExt::lock_shared(&data_file)?;
+                for candidate in [&lock_path, &legacy_path] {
+                    match open_lock_file(candidate) {
+                        Ok(file) => {
+                            FileExt::unlock(&data_file)?;
+                            FileExt::lock_shared(&file)?;
+                            return Ok(Some(file));
+                        }
+                        Err(recheck_error) if recheck_error.kind() == ErrorKind::NotFound => {}
+                        Err(recheck_error) => return Err(recheck_error.into()),
+                    }
+                }
+                return Ok(Some(data_file));
+            }
+            Err(legacy_error) => return Err(legacy_error.into()),
+        },
+        Err(error) => return Err(error.into()),
+    };
+    FileExt::lock_shared(&lock_file)?;
+    Ok(Some(lock_file))
+}
+
+fn with_shared_tqbn_lock<T>(
+    path: &Path,
+    read_only: bool,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<Option<T>> {
+    let Some(lock_file) = acquire_tqbn_shared_lock(path, read_only)? else {
+        return Ok(None);
+    };
+    let result = match fs::metadata(path) {
+        Ok(_) => f().map(Some),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
+    };
+    let unlock_result = FileExt::unlock(&lock_file);
+    match (result, unlock_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error.into()),
     }
+}
+
+fn tqbn_file_lock_path(path: &Path) -> PathBuf {
+    path.with_extension(format!("{TQBN_FILE_EXTENSION}.lock"))
 }
 
 #[cfg(unix)]
@@ -4386,7 +4907,8 @@ impl<'a> RecordReader<'a> {
 mod tests {
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
-    use std::sync::Arc;
+    use std::sync::{Arc, mpsc};
+    use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use chrono::NaiveDate;
@@ -4405,14 +4927,58 @@ mod tests {
     use super::{
         TQBN_BLOCK_HEADER_LEN, TQBN_COVERAGE_INDEX_PAYLOAD_LEN, TqbnHistoryStore, TqbnMetadata,
         TqbnReader, coverage_record, encode_metadata, history_row_id,
-        history_rows_are_strictly_increasing, parse_tqbn_coverage_file,
+        history_rows_are_strictly_increasing, load_tqbn_tail_checkpoint, parse_tqbn_coverage_file,
         read_and_validate_tqbn_prefix, read_tqbn_block_descriptor_at, read_tqbn_coverage_index_at,
-        rows_for_request, tick_level_depth, trading_day_range, try_parse_tqbn_coverage_index_chain,
+        rows_for_request, tick_level_depth, trading_day_range,
+        try_parse_tqbn_checkpoint_index_chain_at, try_parse_tqbn_coverage_index_chain,
         write_coverage_record_bytes,
     };
 
     const SYMBOL: &str = "SHFE.rb2601";
     const DURATION_NS: i64 = 60_000_000_000;
+
+    #[test]
+    fn tqbn_shared_read_waits_for_initial_partition_publish() {
+        let store = tqbn_store("shared-read-initial-publish");
+        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let (writer_locked_tx, writer_locked_rx) = mpsc::channel();
+        let (release_writer_tx, release_writer_rx) = mpsc::channel();
+        let writer_path = path.clone();
+        let writer = thread::spawn(move || {
+            super::with_exclusive_tqbn_lock(&writer_path, || {
+                writer_locked_tx.send(()).unwrap();
+                release_writer_rx.recv().unwrap();
+                super::initialize_tqbn_file_atomically(
+                    &writer_path,
+                    SYMBOL,
+                    HistorySeriesKind::Tick,
+                )
+            })
+        });
+        writer_locked_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        let (reader_entered_tx, reader_entered_rx) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            super::with_shared_tqbn_lock(&path, true, || {
+                reader_entered_tx.send(()).unwrap();
+                Ok(())
+            })
+        });
+        assert!(matches!(
+            reader_entered_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        release_writer_tx.send(()).unwrap();
+        writer.join().unwrap().unwrap();
+        reader_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(reader.join().unwrap().unwrap(), Some(()));
+    }
 
     #[test]
     fn tqbn_kline_range_round_trips_through_cache() {
@@ -4776,9 +5342,17 @@ mod tests {
         let mut file = File::open(&path).unwrap();
         let (_, first_block_offset) =
             read_and_validate_tqbn_prefix(&mut file, SYMBOL, kind).unwrap();
+        let compacted_len = file.metadata().unwrap().len();
         assert_eq!(
             try_parse_tqbn_coverage_index_chain(&mut file, first_block_offset as u64).unwrap(),
             Some(vec![(1_000, 2_000)])
+        );
+        assert_eq!(
+            load_tqbn_tail_checkpoint(&path, &mut file, first_block_offset as u64, compacted_len,)
+                .unwrap()
+                .map(|checkpoint| checkpoint.valid_len),
+            Some(compacted_len),
+            "compaction must refresh the append checkpoint for the replacement inode",
         );
     }
 
@@ -6134,6 +6708,311 @@ mod tests {
 
         assert!(
             matches!(error, DataError::InvalidResponse(message) if message.contains("truncated") && message.contains("block"))
+        );
+    }
+
+    #[test]
+    fn tqbn_append_repairs_a_truncated_tail_before_writing() {
+        let store = tqbn_store("truncated-tail-recovery");
+        write_truncated_tick_file(&store);
+        let row = tick5(1, 1_000, 618.5, 623.5);
+
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: Some((1_000, 2_000)),
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&row)),
+            })
+            .expect("a writer must truncate only the incomplete tail and resume");
+
+        let scan = store.scan().unwrap();
+        assert_eq!(scan.files.len(), 1);
+        assert_eq!(scan.files[0].status, HistorySeriesCacheFileStatus::Readable);
+        assert_eq!(scan.files[0].rows, 1);
+        assert!(
+            store
+                .coverage(HistorySeriesCoverageRequest {
+                    symbol: SYMBOL.to_string(),
+                    kind: HistorySeriesKind::Tick,
+                    range_start_ns: 1_000,
+                    range_end_ns: 2_000,
+                })
+                .unwrap()
+                .is_complete()
+        );
+    }
+
+    #[test]
+    fn tqbn_append_recovers_an_empty_interrupted_initialization() {
+        let store = tqbn_store("empty-initialization-recovery");
+        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        File::create(&path).unwrap();
+
+        let row = tick5(1, 1_000, 618.5, 623.5);
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: Some((1_000, 2_000)),
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&row)),
+            })
+            .unwrap();
+
+        let scan = store.scan().unwrap();
+        assert_eq!(scan.files.len(), 1);
+        assert_eq!(scan.files[0].status, HistorySeriesCacheFileStatus::Readable);
+        assert_eq!(scan.files[0].rows, 1);
+    }
+
+    #[test]
+    fn tqbn_tail_checkpoint_limits_recovery_to_the_unconfirmed_suffix() {
+        let store = tqbn_store("tail-checkpoint-recovery");
+        let first = tick5(1, 1_000, 618.5, 623.5);
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: None,
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&first)),
+            })
+            .unwrap();
+
+        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let (_, first_block_offset) =
+            read_and_validate_tqbn_prefix(&mut file, SYMBOL, HistorySeriesKind::Tick).unwrap();
+        let confirmed_len = file.metadata().unwrap().len();
+        assert_eq!(
+            load_tqbn_tail_checkpoint(&path, &mut file, first_block_offset as u64, confirmed_len,)
+                .unwrap()
+                .map(|checkpoint| checkpoint.valid_len),
+            Some(confirmed_len)
+        );
+
+        let mut interrupted_block = encode_block(TqbnBlockType::Records, &[]);
+        interrupted_block.pop();
+        file.write_all(&interrupted_block).unwrap();
+        file.flush().unwrap();
+        drop(file);
+
+        let second = tick5(2, 2_000, 618.6, 623.6);
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: Some((1_000, 3_000)),
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&second)),
+            })
+            .expect("recovery must scan only bytes after the confirmed tail");
+
+        let cache = HistorySeriesCache::from_store(Arc::new(store));
+        let rows = cache
+            .read_tick_data_series(TickDataSeriesRequest::new(SYMBOL, 1_000, 3_000))
+            .unwrap();
+        assert_eq!(
+            rows.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn tqbn_tail_checkpoint_hides_an_unconfirmed_suffix_from_reads() {
+        let store = tqbn_store("tail-checkpoint-read-snapshot");
+        let first = tick5(1, 1_000, 618.5, 623.5);
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: Some((1_000, 2_000)),
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&first)),
+            })
+            .unwrap();
+
+        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
+        let mut interrupted_block = encode_block(TqbnBlockType::Records, &[1, 2, 3, 4]);
+        *interrupted_block.last_mut().unwrap() ^= 0xff;
+        let mut file = OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(&interrupted_block).unwrap();
+        file.flush().unwrap();
+        drop(file);
+
+        let coverage = store
+            .coverage(HistorySeriesCoverageRequest {
+                symbol: SYMBOL.to_string(),
+                kind: HistorySeriesKind::Tick,
+                range_start_ns: 1_000,
+                range_end_ns: 2_000,
+            })
+            .unwrap();
+        assert!(coverage.is_complete());
+
+        let cache = HistorySeriesCache::from_store(Arc::new(store));
+        let rows = cache
+            .read_tick_data_series(TickDataSeriesRequest::new(SYMBOL, 1_000, 2_000))
+            .unwrap();
+        assert_eq!(rows.rows().len(), 1);
+        assert_eq!(rows.rows()[0].id, 1);
+    }
+
+    #[test]
+    fn tqbn_tail_checkpoint_keeps_coverage_lookup_indexed_during_partial_fill() {
+        let store = tqbn_store("tail-checkpoint-coverage-head");
+        let first = tick5(1, 1_000, 618.5, 623.5);
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: Some((1_000, 2_000)),
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&first)),
+            })
+            .unwrap();
+
+        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
+        let mut file = File::open(&path).unwrap();
+        let (_, first_block_offset) =
+            read_and_validate_tqbn_prefix(&mut file, SYMBOL, HistorySeriesKind::Tick).unwrap();
+        let first_len = file.metadata().unwrap().len();
+        let first_checkpoint =
+            load_tqbn_tail_checkpoint(&path, &mut file, first_block_offset as u64, first_len)
+                .unwrap()
+                .unwrap();
+        let coverage_head = first_checkpoint
+            .latest_coverage_index_offset
+            .expect("final coverage must have an indexed head");
+        drop(file);
+
+        let second = tick5(2, 2_000, 618.6, 623.6);
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: None,
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&second)),
+            })
+            .unwrap();
+
+        let mut file = File::open(&path).unwrap();
+        let file_len = file.metadata().unwrap().len();
+        let checkpoint =
+            load_tqbn_tail_checkpoint(&path, &mut file, first_block_offset as u64, file_len)
+                .unwrap()
+                .unwrap();
+        assert!(checkpoint.valid_len > first_checkpoint.valid_len);
+        assert_eq!(checkpoint.latest_coverage_index_offset, Some(coverage_head));
+        assert_eq!(
+            try_parse_tqbn_coverage_index_chain(&mut file, first_block_offset as u64).unwrap(),
+            None,
+            "trailing partial rows mean the coverage head is no longer the tail block",
+        );
+        assert_eq!(
+            try_parse_tqbn_checkpoint_index_chain_at(
+                &mut file,
+                first_block_offset as u64,
+                coverage_head,
+                checkpoint.valid_len,
+            )
+            .unwrap()
+            .unwrap()
+            .coverage,
+            vec![(1_000, 2_000)],
+        );
+        assert_eq!(
+            parse_tqbn_coverage_file(&path, SYMBOL, HistorySeriesKind::Tick).unwrap(),
+            vec![(1_000, 2_000)],
+        );
+    }
+
+    #[test]
+    fn tqbn_recovery_discards_coverage_without_its_adjacent_index() {
+        let store = tqbn_store("orphan-coverage-recovery");
+        let first = tick5(1, 1_000, 618.5, 623.5);
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: Some((1_000, 2_000)),
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&first)),
+            })
+            .unwrap();
+
+        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
+        let index_block_len =
+            u64::try_from(TQBN_BLOCK_HEADER_LEN + TQBN_COVERAGE_INDEX_PAYLOAD_LEN).unwrap();
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        let truncated_len = file.metadata().unwrap().len() - index_block_len;
+        file.set_len(truncated_len).unwrap();
+        file.sync_data().unwrap();
+        drop(file);
+
+        let second = tick5(2, 2_000, 618.6, 623.6);
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: None,
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&second)),
+            })
+            .expect("writer must discard an unindexed coverage tail before resuming");
+
+        std::fs::remove_file(super::tqbn_file_lock_path(&path)).unwrap();
+        let coverage = store
+            .coverage(HistorySeriesCoverageRequest {
+                symbol: SYMBOL.to_string(),
+                kind: HistorySeriesKind::Tick,
+                range_start_ns: 1_000,
+                range_end_ns: 2_000,
+            })
+            .unwrap();
+        assert!(
+            !coverage.is_complete(),
+            "a strict legacy scan must not resurrect coverage that never acquired its index"
+        );
+    }
+
+    #[test]
+    fn tqbn_tail_checkpoint_discards_a_full_length_block_with_a_bad_checksum() {
+        let store = tqbn_store("tail-checkpoint-checksum-recovery");
+        let first = tick5(1, 1_000, 618.5, 623.5);
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: None,
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&first)),
+            })
+            .unwrap();
+
+        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
+        let mut interrupted_block = encode_block(TqbnBlockType::Records, &[1, 2, 3, 4]);
+        *interrupted_block.last_mut().unwrap() ^= 0xff;
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(&interrupted_block).unwrap();
+        file.flush().unwrap();
+        drop(file);
+
+        let second = tick5(2, 2_000, 618.6, 623.6);
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: Some((1_000, 3_000)),
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&second)),
+            })
+            .expect("recovery must reject a checksum-invalid unconfirmed tail block");
+
+        let cache = HistorySeriesCache::from_store(Arc::new(store));
+        let rows = cache
+            .read_tick_data_series(TickDataSeriesRequest::new(SYMBOL, 1_000, 3_000))
+            .unwrap();
+        assert_eq!(
+            rows.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![1, 2]
         );
     }
 

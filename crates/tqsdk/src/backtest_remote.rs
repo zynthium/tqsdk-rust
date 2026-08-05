@@ -18,7 +18,7 @@ use tqsdk_data::{
     BacktestHistoryAuthProvider, BacktestHistoryBatchReport, BacktestHistoryClient,
     BacktestHistoryCredentials, BacktestHistoryEvent, BacktestHistoryPhase, BacktestHistoryPolicy,
     BacktestHistoryRequest, BacktestHistoryRows, BacktestHistoryTelemetryEvent, BacktestTickCache,
-    DataError, MinuteKlineCache,
+    BacktestTickCacheOperationLock, DataError, MinuteKlineCache,
 };
 
 use crate::{Auth, Result, data_validation};
@@ -690,6 +690,14 @@ struct RemoteFillBatchTaskReport {
     symbols: Vec<String>,
     elapsed: Duration,
     rows_by_symbol: BTreeMap<String, usize>,
+    filled_ranges_by_symbol: BTreeMap<String, Vec<(i64, i64)>>,
+}
+
+struct RemoteFillBatchTask {
+    batch_index: usize,
+    total_batches: usize,
+    batch: RemoteFillBatch,
+    kind: FacadeHistoryFillKind,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -736,6 +744,7 @@ pub(crate) async fn fill_backtest_tick_cache(
     pass: String,
     requests: Vec<RemoteBacktestCacheFillRequest>,
     cache: BacktestTickCache,
+    root_gate: Arc<BacktestTickCacheOperationLock>,
     runtime: RemoteBacktestFillRuntime,
 ) -> Result<RemoteBacktestCacheFillReport> {
     let report = fill_backtest_history_cache(
@@ -743,6 +752,7 @@ pub(crate) async fn fill_backtest_tick_cache(
         cache.cache_dir(),
         split_remote_fill_requests(requests, runtime.config())?,
         FacadeHistoryFillKind::Tick,
+        root_gate,
         runtime,
     )
     .await?;
@@ -758,6 +768,7 @@ pub(crate) async fn fill_backtest_minute_kline_cache(
     auth: &Auth,
     cache: &MinuteKlineCache,
     requests: Vec<BacktestMinuteKlineFillRequest>,
+    root_gate: Arc<BacktestTickCacheOperationLock>,
     runtime: RemoteBacktestFillRuntime,
 ) -> Result<BacktestMinuteKlineFillReport> {
     let requests = requests
@@ -771,6 +782,7 @@ pub(crate) async fn fill_backtest_minute_kline_cache(
         cache.root_dir(),
         split_remote_fill_requests(requests, runtime.config())?,
         FacadeHistoryFillKind::CanonicalMinute,
+        root_gate,
         runtime,
     )
     .await?;
@@ -850,6 +862,7 @@ async fn fill_backtest_history_cache(
     cache_dir: &std::path::Path,
     requests: Vec<RemoteBacktestCacheFillRequest>,
     kind: FacadeHistoryFillKind,
+    root_gate: Arc<BacktestTickCacheOperationLock>,
     runtime: RemoteBacktestFillRuntime,
 ) -> Result<BTreeMap<String, usize>> {
     if requests.is_empty() {
@@ -882,6 +895,7 @@ async fn fill_backtest_history_cache(
     let mut next_batch_index = 0usize;
     let mut completed_batches = 0usize;
     let mut rows_by_symbol = BTreeMap::new();
+    let mut filled_ranges_by_symbol = BTreeMap::<String, Vec<(i64, i64)>>::new();
     let mut errors = Vec::new();
     while !pending_batches.is_empty() || !tasks.is_empty() {
         while !runtime.is_cancelled() && tasks.len() < config.symbol_concurrency {
@@ -908,15 +922,19 @@ async fn fill_backtest_history_cache(
             );
             let auth = auth.clone();
             let cache_dir = cache_dir.to_path_buf();
+            let root_gate = Arc::clone(&root_gate);
             let runtime = runtime.clone();
             tasks.spawn(async move {
                 fill_backtest_history_batch(
-                    batch_index,
-                    total_batches,
-                    batch,
-                    kind,
+                    RemoteFillBatchTask {
+                        batch_index,
+                        total_batches,
+                        batch,
+                        kind,
+                    },
                     auth,
                     cache_dir,
+                    root_gate,
                     runtime,
                 )
                 .await
@@ -941,6 +959,12 @@ async fn fill_backtest_history_cache(
                 });
                 for (symbol, count) in report.rows_by_symbol {
                     *rows_by_symbol.entry(symbol).or_insert(0) += count;
+                }
+                for (symbol, ranges) in report.filled_ranges_by_symbol {
+                    filled_ranges_by_symbol
+                        .entry(symbol)
+                        .or_default()
+                        .extend(ranges);
                 }
             }
             Ok(Err(error)) => errors.push(error.to_string()),
@@ -971,7 +995,71 @@ async fn fill_backtest_history_cache(
             "remote backtest cache fill completed without accepted ticks for {requested_symbols} symbols; refusing to mark complete empty coverage"
         )));
     }
+    let compaction_ranges = final_tick_compaction_ranges(kind, &filled_ranges_by_symbol)?;
+    if !compaction_ranges.is_empty() {
+        let compaction_cache_dir = cache_dir.to_path_buf();
+        let compaction_runtime = runtime.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let cache = BacktestTickCache::open(compaction_cache_dir)?;
+            for (symbol, ranges) in compaction_ranges {
+                for (start_ns, end_ns) in ranges {
+                    if compaction_runtime.is_cancelled() {
+                        return Err(remote_fill_cancelled_error());
+                    }
+                    cache.compact_symbol_ticks_in_range(&symbol, start_ns, end_ns)?;
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| {
+            data_validation(format!(
+                "remote backtest cache compaction task failed: {error}"
+            ))
+        })??;
+        if runtime.is_cancelled() {
+            return Err(remote_fill_cancelled_error());
+        }
+    }
     Ok(rows_by_symbol)
+}
+
+fn final_tick_compaction_ranges(
+    kind: FacadeHistoryFillKind,
+    filled_ranges_by_symbol: &BTreeMap<String, Vec<(i64, i64)>>,
+) -> Result<BTreeMap<String, Vec<(i64, i64)>>> {
+    if kind != FacadeHistoryFillKind::Tick {
+        return Ok(BTreeMap::new());
+    }
+    let mut by_symbol = BTreeMap::<String, BTreeSet<(i64, i64)>>::new();
+    for (symbol, ranges) in filled_ranges_by_symbol {
+        for &(start_ns, end_ns) in ranges {
+            if start_ns >= end_ns {
+                return Err(data_validation(
+                    "TQBN filled range for compaction must be non-empty",
+                ));
+            }
+            let mut cursor = start_ns;
+            while cursor < end_ns {
+                let day = tqsdk_data::backtest_tick_trading_day_for_timestamp_ns(cursor)?;
+                let partition = tqsdk_data::backtest_tick_trading_day_range(day)?;
+                if partition.end_ns <= cursor {
+                    return Err(data_validation(
+                        "TQBN trading-day compaction range did not advance",
+                    ));
+                }
+                by_symbol
+                    .entry(symbol.clone())
+                    .or_default()
+                    .insert((partition.start_ns, partition.end_ns));
+                cursor = partition.end_ns.min(end_ns);
+            }
+        }
+    }
+    Ok(by_symbol
+        .into_iter()
+        .map(|(symbol, ranges)| (symbol, ranges.into_iter().collect()))
+        .collect())
 }
 
 fn should_reject_empty_remote_tick_fill(
@@ -989,14 +1077,18 @@ fn should_reject_empty_remote_tick_fill(
 }
 
 async fn fill_backtest_history_batch(
-    batch_index: usize,
-    total_batches: usize,
-    batch: RemoteFillBatch,
-    kind: FacadeHistoryFillKind,
+    task: RemoteFillBatchTask,
     auth: FacadeBacktestHistoryAuthProvider,
     cache_dir: std::path::PathBuf,
+    root_gate: Arc<BacktestTickCacheOperationLock>,
     runtime: RemoteBacktestFillRuntime,
 ) -> Result<RemoteFillBatchTaskReport> {
+    let RemoteFillBatchTask {
+        batch_index,
+        total_batches,
+        batch,
+        kind,
+    } = task;
     let started = tokio::time::Instant::now();
     let requests = batch
         .symbols
@@ -1017,23 +1109,16 @@ async fn fill_backtest_history_batch(
         .logical_concurrency(batch.symbols.len().max(1))
         .auth_provider(auth)
         .build()?;
-    let materialize =
-        materialize_cache_with_runtime(client, requests, batch_index, &batch, kind, &runtime);
-    let report = match runtime.config().batch_timeout {
-        Some(timeout) => tokio::time::timeout(timeout, materialize)
-            .await
-            .map_err(|_| {
-                data_validation(format!(
-                    "remote backtest cache fill batch timed out after {}s for {} symbols ({}) in range [{}, {})",
-                    timeout.as_secs(),
-                    batch.symbols.len(),
-                    batch.symbols.join(","),
-                    batch.start_ns,
-                    batch.end_ns,
-                ))
-            })?,
-        None => materialize.await,
-    };
+    let report = materialize_cache_with_runtime(
+        client,
+        requests,
+        batch_index,
+        &batch,
+        kind,
+        root_gate,
+        &runtime,
+    )
+    .await;
     let report = match report {
         Ok(report) => report,
         Err(error) => {
@@ -1060,8 +1145,21 @@ async fn fill_backtest_history_batch(
         }
     };
     let mut rows_by_symbol = BTreeMap::new();
+    let mut filled_ranges_by_symbol = BTreeMap::<String, Vec<(i64, i64)>>::new();
+    let compact_final_ticks = kind == FacadeHistoryFillKind::Tick
+        && !matches!(batch.commit_mode, RemoteCacheCommitMode::Provisional { .. });
     for completed in report.completed {
-        *rows_by_symbol.entry(completed.symbol).or_insert(0) += completed.rows;
+        let symbol = completed.symbol;
+        if compact_final_ticks
+            && completed.remote_used
+            && !completed.coverage.remote_filled_ranges.is_empty()
+        {
+            filled_ranges_by_symbol
+                .entry(symbol.clone())
+                .or_default()
+                .extend(completed.coverage.remote_filled_ranges);
+        }
+        *rows_by_symbol.entry(symbol).or_insert(0) += completed.rows;
     }
     let rows = rows_by_symbol.values().copied().sum();
     emit_batch_telemetry(
@@ -1079,6 +1177,7 @@ async fn fill_backtest_history_batch(
         symbols: batch.symbols,
         elapsed: started.elapsed(),
         rows_by_symbol,
+        filled_ranges_by_symbol,
     })
 }
 
@@ -1088,12 +1187,19 @@ async fn materialize_cache_with_runtime(
     logical_batch_id: usize,
     batch: &RemoteFillBatch,
     kind: FacadeHistoryFillKind,
+    root_gate: Arc<BacktestTickCacheOperationLock>,
     runtime: &RemoteBacktestFillRuntime,
 ) -> tqsdk_data::Result<BacktestHistoryBatchReport> {
     let started = tokio::time::Instant::now();
-    let mut run = client.query_batch(requests).await?;
+    let mut run = client
+        .materialize_cache_run_with_root_gate(requests, root_gate)
+        .await?;
     let mut telemetry = run.take_telemetry();
     let mut last_activity = tokio::time::Instant::now();
+    let batch_deadline = runtime
+        .config()
+        .batch_timeout
+        .map(|timeout| started + timeout);
     let mut accepted_rows_by_symbol = BTreeMap::<String, usize>::new();
     let mut history_progress = MaterializedHistoryProgress::default();
     loop {
@@ -1124,28 +1230,51 @@ async fn materialize_cache_with_runtime(
                 }
             } => {
                 if let Some(event) = telemetry_event {
-                    last_activity = tokio::time::Instant::now();
-                    observe_materialized_telemetry(
+                    if observe_materialized_telemetry(
                         runtime,
                         logical_batch_id,
                         batch,
                         &mut history_progress,
                         event,
                         started.elapsed(),
-                    );
+                    ) {
+                        last_activity = tokio::time::Instant::now();
+                    }
                 } else {
                     telemetry = None;
                 }
             },
             _ = tokio::time::sleep_until(last_activity + runtime.config().idle_timeout) => {
+                let _ = run.cancel_and_finish().await;
                 return Err(DataError::InvalidState(
                     "remote backtest cache fill became idle before cache coverage was finalized",
                 ));
             }
             _ = tokio::time::sleep(Duration::from_millis(50)) => {
                 if runtime.is_cancelled() {
+                    let _ = run.cancel_and_finish().await;
                     return Err(DataError::InvalidState("remote backtest cache fill cancelled"));
                 }
+            }
+            _ = async {
+                match batch_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let _ = run.cancel_and_finish().await;
+                let timeout = runtime
+                    .config()
+                    .batch_timeout
+                    .expect("batch deadline requires a configured timeout");
+                return Err(DataError::Validation(format!(
+                    "remote backtest cache fill batch timed out after {}s for {} symbols ({}) in range [{}, {})",
+                    timeout.as_secs(),
+                    batch.symbols.len(),
+                    batch.symbols.join(","),
+                    batch.start_ns,
+                    batch.end_ns,
+                )));
             }
         }
     }
@@ -1172,7 +1301,7 @@ fn observe_materialized_telemetry(
     history_progress: &mut MaterializedHistoryProgress,
     event: BacktestHistoryTelemetryEvent,
     elapsed: Duration,
-) {
+) -> bool {
     let phase = match event.phase {
         BacktestHistoryPhase::Retry => BacktestRemoteFillPhase::Retrying,
         BacktestHistoryPhase::Fill
@@ -1182,7 +1311,7 @@ fn observe_materialized_telemetry(
             BacktestRemoteFillPhase::Started
         }
     };
-    let accepted_rows = history_progress.observe(&event);
+    let (accepted_rows, made_progress) = history_progress.observe(&event);
     runtime.emit_telemetry(BacktestRemoteFillTelemetry::lifecycle(
         RemoteFillTelemetryUpdate {
             phase,
@@ -1196,6 +1325,7 @@ fn observe_materialized_telemetry(
             error: None,
         },
     ));
+    made_progress
 }
 
 /// The data layer reports rows cumulatively within one official-server window.
@@ -1208,7 +1338,12 @@ struct MaterializedHistoryProgress {
 }
 
 impl MaterializedHistoryProgress {
-    fn observe(&mut self, event: &BacktestHistoryTelemetryEvent) -> usize {
+    fn observe(&mut self, event: &BacktestHistoryTelemetryEvent) -> (usize, bool) {
+        let previous_accepted = self
+            .accepted_rows
+            .get(event.symbol.as_str())
+            .copied()
+            .unwrap_or_default();
         if event.phase == BacktestHistoryPhase::Fill {
             let previous = self
                 .previous_fill_rows
@@ -1223,13 +1358,16 @@ impl MaterializedHistoryProgress {
             *previous = event.completed_rows;
             let accepted = self.accepted_rows.entry(event.symbol.clone()).or_default();
             *accepted = accepted.saturating_add(added_rows);
-        } else if event.phase == BacktestHistoryPhase::Retry {
-            self.previous_fill_rows.insert(event.symbol.clone(), 0);
+        } else if event.phase == BacktestHistoryPhase::Aggregate {
+            let accepted = self.accepted_rows.entry(event.symbol.clone()).or_default();
+            *accepted = (*accepted).max(event.completed_rows);
         }
-        self.accepted_rows
+        let accepted_rows = self
+            .accepted_rows
             .get(event.symbol.as_str())
             .copied()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        (accepted_rows, accepted_rows > previous_accepted)
     }
 }
 
@@ -1500,11 +1638,12 @@ mod tests {
 
     use super::{
         BacktestRemoteFillConfig, FacadeHistoryFillKind, MaterializedHistoryProgress,
-        RemoteBacktestCacheFillRequest, RemoteCacheCommitMode, parse_remote_fill_allow_empty_idle,
-        parse_remote_fill_batch_timeout, parse_remote_fill_idle_timeout,
-        parse_remote_fill_slice_ns, parse_remote_fill_symbol_batch_size,
-        parse_remote_fill_symbol_concurrency, remote_fill_batches, remote_fill_logical_batch_count,
-        remote_fill_ranges, should_reject_empty_remote_tick_fill, split_remote_fill_requests,
+        RemoteBacktestCacheFillRequest, RemoteCacheCommitMode, final_tick_compaction_ranges,
+        parse_remote_fill_allow_empty_idle, parse_remote_fill_batch_timeout,
+        parse_remote_fill_idle_timeout, parse_remote_fill_slice_ns,
+        parse_remote_fill_symbol_batch_size, parse_remote_fill_symbol_concurrency,
+        remote_fill_batches, remote_fill_logical_batch_count, remote_fill_ranges,
+        should_reject_empty_remote_tick_fill, split_remote_fill_requests,
     };
     use tqsdk_data::{BacktestHistoryPhase, BacktestHistoryTelemetryEvent};
 
@@ -1596,20 +1735,89 @@ mod tests {
     }
 
     #[test]
+    fn final_tick_compaction_uses_only_actual_filled_ranges_and_deduplicates_partitions() {
+        let filled_ranges = std::collections::BTreeMap::from([
+            ("SHFE.au2608".to_string(), vec![(10, 20), (25, 30)]),
+            ("DCE.i2609".to_string(), Vec::new()),
+        ]);
+
+        let ranges =
+            final_tick_compaction_ranges(FacadeHistoryFillKind::Tick, &filled_ranges).unwrap();
+        let day = tqsdk_data::backtest_tick_trading_day_for_timestamp_ns(10).unwrap();
+        let partition = tqsdk_data::backtest_tick_trading_day_range(day).unwrap();
+
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(
+            ranges["SHFE.au2608"],
+            vec![(partition.start_ns, partition.end_ns)]
+        );
+        assert!(
+            final_tick_compaction_ranges(FacadeHistoryFillKind::CanonicalMinute, &filled_ranges,)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn materialized_history_progress_keeps_minute_windows_monotonic() {
         let mut progress = MaterializedHistoryProgress::default();
-        let event = |completed_rows| BacktestHistoryTelemetryEvent {
+        let event = |phase, completed_rows| BacktestHistoryTelemetryEvent {
             request_id: Some(1),
             symbol: "KQ.m@SHFE.au".to_string(),
-            phase: BacktestHistoryPhase::Fill,
+            phase,
             completed_rows,
             message: "buffering canonical-minute rows".to_string(),
         };
 
-        assert_eq!(progress.observe(&event(80)), 80);
-        assert_eq!(progress.observe(&event(120)), 120);
-        // The following bounded official-server window restarts at zero.
-        assert_eq!(progress.observe(&event(0)), 120);
-        assert_eq!(progress.observe(&event(60)), 180);
+        assert_eq!(
+            progress.observe(&event(BacktestHistoryPhase::Fill, 80)),
+            (80, true)
+        );
+        assert_eq!(
+            progress.observe(&event(BacktestHistoryPhase::Fill, 120)),
+            (120, true)
+        );
+        assert_eq!(
+            progress.observe(&event(BacktestHistoryPhase::WaitForFill, 0)),
+            (120, false)
+        );
+        // A retry keeps the data layer's cumulative unique-row counter.
+        assert_eq!(
+            progress.observe(&event(BacktestHistoryPhase::Retry, 0)),
+            (120, false)
+        );
+        assert_eq!(
+            progress.observe(&event(BacktestHistoryPhase::Fill, 150)),
+            (150, true)
+        );
+        // The next bounded source window emits an explicit zero before rows.
+        assert_eq!(
+            progress.observe(&event(BacktestHistoryPhase::Fill, 0)),
+            (150, false)
+        );
+        assert_eq!(
+            progress.observe(&event(BacktestHistoryPhase::Fill, 200)),
+            (350, true)
+        );
+        assert_eq!(
+            progress.observe(&event(BacktestHistoryPhase::Aggregate, 350)),
+            (350, false)
+        );
+
+        let mut coalesced = MaterializedHistoryProgress::default();
+        assert_eq!(
+            coalesced.observe(&event(BacktestHistoryPhase::Fill, 120)),
+            (120, true)
+        );
+        // The zero reset can be coalesced away; aggregate terminal restores
+        // the authoritative physical-write total.
+        assert_eq!(
+            coalesced.observe(&event(BacktestHistoryPhase::Fill, 200)),
+            (200, true)
+        );
+        assert_eq!(
+            coalesced.observe(&event(BacktestHistoryPhase::Aggregate, 320)),
+            (320, true)
+        );
     }
 }

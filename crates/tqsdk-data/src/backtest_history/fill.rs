@@ -18,14 +18,14 @@ use std::time::Duration;
 use chrono::Utc;
 use fs2::FileExt;
 use tokio::sync::Notify;
-use tqsdk_core::Kline;
+use tqsdk_core::{Kline, Tick};
 use tqsdk_session::{
     ServerBacktestHistoryChart, ServerBacktestHistoryEvent, ServerBacktestHistoryKind,
     ServerBacktestHistoryRequest, ServerBacktestMarketKind,
 };
 
 use crate::backtest_tick_cache::{
-    BacktestTickCache, BacktestTickFill, backtest_tick_trading_day_for_timestamp_ns,
+    BacktestTickCache, BacktestTickFillReport, backtest_tick_trading_day_for_timestamp_ns,
     backtest_tick_trading_day_range,
 };
 use crate::minute_kline_cache::{MinuteKlineCache, MinuteKlineCacheSnapshot};
@@ -41,6 +41,7 @@ use super::telemetry::TelemetryHub;
 const TICK_WRITE_BUFFER_ROWS: usize = 8_192;
 const MINUTE_FILL_MAX_SPAN_NS: i64 = 10_000 * 60_000_000_000;
 const CROSS_PROCESS_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
+const EXTERNAL_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const REMOTE_FILL_RETRY_ATTEMPTS: usize = 3;
 
 static NEXT_CHART_ID: AtomicU64 = AtomicU64::new(1);
@@ -199,6 +200,92 @@ impl BacktestHistoryFillRequest {
 pub(crate) struct BacktestHistoryFillOutcome {
     pub(crate) remote_filled_ranges: Vec<(i64, i64)>,
     pub(crate) remote_used: bool,
+    pub(crate) rows_written: usize,
+}
+
+struct StreamingTickFill {
+    symbol: String,
+    range: (i64, i64),
+    chart_id: Option<String>,
+    attempt_last_id: Option<i64>,
+    first_id: Option<i64>,
+    last_id: Option<i64>,
+    first_datetime_ns: Option<i64>,
+    last_datetime_ns: Option<i64>,
+    unique_rows: usize,
+}
+
+impl StreamingTickFill {
+    fn new(symbol: impl Into<String>, range: (i64, i64)) -> Self {
+        Self {
+            symbol: symbol.into(),
+            range,
+            chart_id: None,
+            attempt_last_id: None,
+            first_id: None,
+            last_id: None,
+            first_datetime_ns: None,
+            last_datetime_ns: None,
+            unique_rows: 0,
+        }
+    }
+
+    fn push(&mut self, chart_id: &str, row: &Tick) -> Result<bool> {
+        if row.datetime < self.range.0 || row.datetime >= self.range.1 {
+            return Ok(false);
+        }
+        if self.chart_id.as_deref() != Some(chart_id) {
+            self.chart_id = Some(chart_id.to_string());
+            self.attempt_last_id = None;
+        }
+        if let Some(previous_id) = self.attempt_last_id {
+            if row.id < previous_id {
+                return Err(DataError::InvalidResponse(format!(
+                    "server Tick fill ids moved backwards within one chart: {previous_id} -> {}",
+                    row.id
+                )));
+            }
+            if row.id == previous_id {
+                return Ok(false);
+            }
+        }
+        self.attempt_last_id = Some(row.id);
+
+        if let Some(last_id) = self.last_id {
+            if row.id <= last_id {
+                return Ok(false);
+            }
+            if row.id != last_id.saturating_add(1) {
+                return Err(DataError::InvalidResponse(format!(
+                    "server Tick fill id gap: expected {}, got {}",
+                    last_id.saturating_add(1),
+                    row.id
+                )));
+            }
+        }
+
+        if self.first_id.is_none() {
+            self.first_id = Some(row.id);
+            self.first_datetime_ns = Some(row.datetime);
+        }
+        self.last_id = Some(row.id);
+        self.last_datetime_ns = Some(row.datetime);
+        self.unique_rows = self.unique_rows.saturating_add(1);
+        Ok(true)
+    }
+
+    fn finish_after_idle(&self) -> BacktestTickFillReport {
+        BacktestTickFillReport {
+            symbol: self.symbol.clone(),
+            requested_range: self.range,
+            unique_rows: self.unique_rows,
+            id_range: self.first_id.zip(self.last_id),
+            first_datetime_ns: self.first_datetime_ns,
+            last_datetime_ns: self.last_datetime_ns,
+            complete: true,
+            gap_summary: None,
+        }
+    }
 }
 
 /// A minimal source facade over the session-owned history stream. It makes
@@ -303,6 +390,25 @@ impl RemoteFillCoordinator {
         &self,
         request: BacktestHistoryFillRequest,
     ) -> Result<BacktestHistoryFillOutcome> {
+        self.ensure_coverage_inner(request, None, true).await
+    }
+
+    pub(crate) async fn ensure_coverage_until_cancelled(
+        &self,
+        request: BacktestHistoryFillRequest,
+        cancellation: &AtomicBool,
+        claim_rows: bool,
+    ) -> Result<BacktestHistoryFillOutcome> {
+        self.ensure_coverage_inner(request, Some(cancellation), claim_rows)
+            .await
+    }
+
+    async fn ensure_coverage_inner(
+        &self,
+        request: BacktestHistoryFillRequest,
+        cancellation: Option<&AtomicBool>,
+        claim_rows: bool,
+    ) -> Result<BacktestHistoryFillOutcome> {
         request.validate()?;
         self.emit(
             &request,
@@ -323,14 +429,18 @@ impl RemoteFillCoordinator {
             return Err(DataError::RemoteBacktestHistoryFillUnavailable);
         }
 
-        let mut subscriptions = Vec::new();
+        let mut rows_written = 0usize;
         for missing_range in missing_ranges.iter().copied() {
             for slice in self.split_fill_range(&request, missing_range)? {
-                subscriptions.extend(self.subscribe(slice)?);
+                let terminal_results =
+                    futures::future::join_all(self.subscribe(slice)?.into_iter().map(
+                        |subscription| subscription.wait_until_cancelled(cancellation, claim_rows),
+                    ))
+                    .await;
+                for result in terminal_results {
+                    rows_written = rows_written.saturating_add(result?);
+                }
             }
-        }
-        for subscription in subscriptions {
-            subscription.wait().await?;
         }
 
         let still_missing = self.missing_ranges(&request)?;
@@ -342,6 +452,7 @@ impl RemoteFillCoordinator {
         Ok(BacktestHistoryFillOutcome {
             remote_filled_ranges: missing_ranges,
             remote_used: true,
+            rows_written,
         })
     }
 
@@ -351,7 +462,21 @@ impl RemoteFillCoordinator {
         range: (i64, i64),
     ) -> Result<Vec<BacktestHistoryFillRequest>> {
         if request.family == FillFamily::Tick {
-            return Ok(vec![request.with_range(range)]);
+            let mut slices = Vec::new();
+            let mut start_ns = range.0;
+            while start_ns < range.1 {
+                let day = backtest_tick_trading_day_for_timestamp_ns(start_ns)?;
+                let day_range = backtest_tick_trading_day_range(day)?;
+                let end_ns = day_range.end_ns.min(range.1);
+                if end_ns <= start_ns {
+                    return Err(DataError::InvalidState(
+                        "Tick fill trading-day slice did not advance",
+                    ));
+                }
+                slices.push(request.with_range((start_ns, end_ns)));
+                start_ns = end_ns;
+            }
+            return Ok(slices);
         }
         let mut slices = Vec::new();
         let mut start_ns = range.0;
@@ -427,11 +552,11 @@ impl RemoteFillCoordinator {
         &self,
         request: &BacktestHistoryFillRequest,
         shared: &SharedFill,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         loop {
             self.ensure_not_cancelled(shared)?;
             if self.missing_ranges(request)?.is_empty() {
-                return Ok(());
+                return Ok(0);
             }
             match SeriesFillLease::try_acquire(
                 self.config.cache_dir.as_path(),
@@ -442,7 +567,7 @@ impl RemoteFillCoordinator {
                     // Another process can have finished between the first
                     // inspection and acquiring its series lease.
                     if self.missing_ranges(request)?.is_empty() {
-                        return Ok(());
+                        return Ok(0);
                     }
                     return self.fill_under_lease(request, shared).await;
                 }
@@ -453,7 +578,8 @@ impl RemoteFillCoordinator {
                         0,
                         "another process owns this cache-series fill; waiting for coverage",
                     );
-                    tokio::time::sleep(CROSS_PROCESS_RECHECK_INTERVAL).await;
+                    self.sleep_or_shared_cancel(shared, CROSS_PROCESS_RECHECK_INTERVAL)
+                        .await?;
                 }
             }
         }
@@ -463,7 +589,7 @@ impl RemoteFillCoordinator {
         &self,
         request: &BacktestHistoryFillRequest,
         shared: &SharedFill,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         match request.family {
             FillFamily::Tick => self.fill_ticks(request, shared).await,
             FillFamily::CanonicalMinute => self.fill_minutes(request, shared).await,
@@ -474,67 +600,81 @@ impl RemoteFillCoordinator {
         &self,
         request: &BacktestHistoryFillRequest,
         shared: &SharedFill,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         if request.provisional_as_of_ns.is_none() {
             ensure_final_tick_range_is_closed(request.range)?;
         }
         let cache = BacktestTickCache::open(self.config.cache_dir.as_path())?;
-        let mut fill = BacktestTickFill::new(
-            request.cache_symbol.clone(),
-            request.range.0,
-            request.range.1,
-        );
+        let mut fill = StreamingTickFill::new(request.cache_symbol.clone(), request.range);
         let mut pending_rows = Vec::with_capacity(TICK_WRITE_BUFFER_ROWS);
         let mut completed_rows = 0usize;
+        let mut written_rows = 0usize;
+        self.emit(
+            request,
+            BacktestHistoryPhase::Fill,
+            0,
+            "starting Tick fill slice",
+        );
 
-        self.consume_with_retries(request, shared, |event| match event {
-            ServerBacktestHistoryEvent::Ticks { symbol, rows, .. } => {
-                if symbol != request.cache_symbol {
-                    return Err(DataError::InvalidResponse(format!(
-                        "server Tick fill returned unexpected symbol {symbol}"
-                    )));
-                }
-                for row in rows {
-                    if fill.push(row.clone())? {
-                        pending_rows.push(row);
-                        if pending_rows.len() >= TICK_WRITE_BUFFER_ROWS {
-                            self.ensure_not_cancelled(shared)?;
-                            cache.append_partial_ticks(
-                                request.cache_symbol.as_str(),
-                                pending_rows.drain(..),
-                            )?;
-                        }
-                        completed_rows = completed_rows.saturating_add(1);
+        let consume_result = self
+            .consume_with_retries(request, shared, |event| match event {
+                ServerBacktestHistoryEvent::Ticks {
+                    chart_id,
+                    symbol,
+                    rows,
+                } => {
+                    if symbol != request.cache_symbol {
+                        return Err(DataError::InvalidResponse(format!(
+                            "server Tick fill returned unexpected symbol {symbol}"
+                        )));
                     }
+                    for row in rows {
+                        if fill.push(chart_id.as_str(), &row)? {
+                            pending_rows.push(row);
+                            if pending_rows.len() >= TICK_WRITE_BUFFER_ROWS {
+                                self.ensure_not_cancelled(shared)?;
+                                let report = cache.append_partial_ticks(
+                                    request.cache_symbol.as_str(),
+                                    pending_rows.drain(..),
+                                )?;
+                                written_rows = written_rows.saturating_add(report.rows);
+                            }
+                            completed_rows = completed_rows.saturating_add(1);
+                        }
+                    }
+                    self.emit(
+                        request,
+                        BacktestHistoryPhase::Fill,
+                        completed_rows,
+                        "writing partial Tick rows",
+                    );
+                    Ok(false)
                 }
-                self.emit(
-                    request,
-                    BacktestHistoryPhase::Fill,
-                    completed_rows,
-                    "writing partial Tick rows",
-                );
-                Ok(false)
-            }
-            ServerBacktestHistoryEvent::ChartCompleted { symbol, .. } => {
-                if symbol != request.cache_symbol {
-                    return Err(DataError::InvalidResponse(format!(
-                        "server Tick fill completed unexpected symbol {symbol}"
-                    )));
+                ServerBacktestHistoryEvent::ChartCompleted { symbol, .. } => {
+                    if symbol != request.cache_symbol {
+                        return Err(DataError::InvalidResponse(format!(
+                            "server Tick fill completed unexpected symbol {symbol}"
+                        )));
+                    }
+                    Ok(false)
                 }
-                Ok(false)
-            }
-            ServerBacktestHistoryEvent::StreamCompleted => Ok(true),
-            ServerBacktestHistoryEvent::CanonicalMinutes { .. } => Err(DataError::InvalidResponse(
-                "server Tick fill returned canonical-minute rows".to_string(),
-            )),
-        })
-        .await?;
+                ServerBacktestHistoryEvent::StreamCompleted => Ok(true),
+                ServerBacktestHistoryEvent::CanonicalMinutes { .. } => {
+                    Err(DataError::InvalidResponse(
+                        "server Tick fill returned canonical-minute rows".to_string(),
+                    ))
+                }
+            })
+            .await;
 
-        self.ensure_not_cancelled(shared)?;
         if !pending_rows.is_empty() {
-            cache.append_partial_ticks(request.cache_symbol.as_str(), pending_rows.drain(..))?;
+            let report = cache
+                .append_partial_ticks(request.cache_symbol.as_str(), pending_rows.drain(..))?;
+            written_rows = written_rows.saturating_add(report.rows);
         }
-        let report = fill.finish_after_idle(0)?;
+        consume_result?;
+        self.ensure_not_cancelled(shared)?;
+        let report = fill.finish_after_idle();
         if !report.complete {
             return Err(DataError::InvalidResponse(
                 report
@@ -565,20 +705,26 @@ impl RemoteFillCoordinator {
             completed_rows,
             "Tick fill reached an explicit server terminal and committed coverage",
         );
-        Ok(())
+        Ok(written_rows)
     }
 
     async fn fill_minutes(
         &self,
         request: &BacktestHistoryFillRequest,
         shared: &SharedFill,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         ensure_final_tick_range_is_closed(request.range)?;
         let snapshot = request.minute_snapshot.as_ref().ok_or_else(|| {
             DataError::InvalidState("canonical-minute fill was missing its cache snapshot")
         })?;
         let cache = MinuteKlineCache::open(self.config.cache_dir.as_path())?;
         let mut rows_by_datetime = BTreeMap::<i64, Kline>::new();
+        self.emit(
+            request,
+            BacktestHistoryPhase::Fill,
+            0,
+            "starting canonical-minute fill slice",
+        );
 
         self.consume_with_retries(request, shared, |event| match event {
             ServerBacktestHistoryEvent::CanonicalMinutes { symbol, rows, .. } => {
@@ -629,7 +775,7 @@ impl RemoteFillCoordinator {
             rows.len(),
             "canonical-minute fill reached an explicit server terminal and committed coverage",
         );
-        Ok(())
+        Ok(rows.len())
     }
 
     async fn consume_with_retries<F>(
@@ -657,28 +803,29 @@ impl RemoteFillCoordinator {
                     format!("retrying official server-backtest source (attempt {attempt})"),
                 );
             }
-            let credentials = provider.load().await?;
-            let mut source = match self
+            let credentials = self.await_or_shared_cancel(shared, provider.load()).await?;
+            let open_source = self
                 .config
                 .source_factory
-                .open(credentials, request.server_request())
-                .await
-            {
+                .open(credentials, request.server_request());
+            let mut source = match self.await_or_shared_cancel(shared, open_source).await {
                 Ok(source) => source,
                 Err(error) => {
                     if attempt < REMOTE_FILL_RETRY_ATTEMPTS && is_retryable(&error) {
                         last_error = Some(error);
-                        tokio::time::sleep(retry_delay(attempt)).await;
+                        self.sleep_or_shared_cancel(shared, retry_delay(attempt))
+                            .await?;
                         continue;
                     }
                     return Err(error);
                 }
             };
             loop {
-                self.ensure_not_cancelled(shared)?;
                 let cancellation = shared.state.terminal.notified();
-                let source_event = source.next_event();
                 tokio::pin!(cancellation);
+                let _ = cancellation.as_mut().enable();
+                self.ensure_not_cancelled(shared)?;
+                let source_event = source.next_event();
                 tokio::pin!(source_event);
                 let next_event = tokio::select! {
                     result = &mut source_event => result,
@@ -713,7 +860,8 @@ impl RemoteFillCoordinator {
                     }
                 }
             }
-            tokio::time::sleep(retry_delay(attempt)).await;
+            self.sleep_or_shared_cancel(shared, retry_delay(attempt))
+                .await?;
         }
         Err(last_error.unwrap_or_else(|| {
             DataError::InvalidState("server backtest history source exhausted its retry budget")
@@ -756,6 +904,38 @@ impl RemoteFillCoordinator {
             ));
         }
         Ok(())
+    }
+
+    async fn await_or_shared_cancel<T>(
+        &self,
+        shared: &SharedFill,
+        future: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let cancellation = shared.state.terminal.notified();
+        tokio::pin!(cancellation);
+        let _ = cancellation.as_mut().enable();
+        self.ensure_not_cancelled(shared)?;
+        tokio::pin!(future);
+        tokio::select! {
+            result = &mut future => result,
+            _ = &mut cancellation => {
+                self.ensure_not_cancelled(shared)?;
+                Err(DataError::InvalidState(
+                    "backtest history shared fill cancellation notification was spurious",
+                ))
+            }
+        }
+    }
+
+    async fn sleep_or_shared_cancel(&self, shared: &SharedFill, duration: Duration) -> Result<()> {
+        let cancellation = shared.state.terminal.notified();
+        tokio::pin!(cancellation);
+        let _ = cancellation.as_mut().enable();
+        self.ensure_not_cancelled(shared)?;
+        tokio::select! {
+            _ = tokio::time::sleep(duration) => Ok(()),
+            _ = &mut cancellation => self.ensure_not_cancelled(shared),
+        }
     }
 
     fn emit(
@@ -814,7 +994,8 @@ struct SharedFill {
     range: (i64, i64),
     compatibility: FillCompatibility,
     state: SharedFillState,
-    result: Mutex<Option<std::result::Result<(), String>>>,
+    result: Mutex<Option<std::result::Result<usize, String>>>,
+    rows_claimed: AtomicBool,
 }
 
 struct SharedFillState {
@@ -834,6 +1015,7 @@ impl SharedFill {
                 terminal: Notify::new(),
             },
             result: Mutex::new(None),
+            rows_claimed: AtomicBool::new(false),
         }
     }
 
@@ -841,6 +1023,7 @@ impl SharedFill {
         self.state.consumers.fetch_add(1, Ordering::AcqRel);
         FillConsumerGuard {
             shared: Arc::clone(self),
+            active: true,
         }
     }
 
@@ -848,7 +1031,7 @@ impl SharedFill {
         self.state.cancel_requested.load(Ordering::Acquire)
     }
 
-    fn complete(&self, result: std::result::Result<(), String>) {
+    fn complete(&self, result: std::result::Result<usize, String>) {
         let mut stored = self
             .result
             .lock()
@@ -860,9 +1043,11 @@ impl SharedFill {
         self.state.terminal.notify_waiters();
     }
 
-    async fn wait(&self) -> Result<()> {
+    async fn wait_result(&self) -> Result<usize> {
         loop {
             let notified = self.state.terminal.notified();
+            tokio::pin!(notified);
+            let _ = notified.as_mut().enable();
             if let Some(result) = self
                 .result
                 .lock()
@@ -875,33 +1060,80 @@ impl SharedFill {
             notified.await;
         }
     }
+
+    fn claim_rows(&self, rows: usize) -> usize {
+        if rows == 0
+            || self
+                .rows_claimed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            rows
+        } else {
+            0
+        }
+    }
 }
 
 struct FillSubscription {
     shared: Arc<SharedFill>,
-    _consumer: FillConsumerGuard,
+    consumer: FillConsumerGuard,
 }
 
 impl FillSubscription {
     fn new(shared: Arc<SharedFill>) -> Self {
         let consumer = shared.subscribe();
-        Self {
-            shared,
-            _consumer: consumer,
-        }
+        Self { shared, consumer }
     }
 
-    async fn wait(self) -> Result<()> {
-        self.shared.wait().await
+    async fn wait_until_cancelled(
+        mut self,
+        cancellation: Option<&AtomicBool>,
+        claim_rows: bool,
+    ) -> Result<usize> {
+        let Some(cancellation) = cancellation else {
+            let rows = self.shared.wait_result().await?;
+            return Ok(if claim_rows {
+                self.shared.claim_rows(rows)
+            } else {
+                0
+            });
+        };
+        loop {
+            if cancellation.load(Ordering::Acquire) {
+                let was_last_consumer = self.consumer.release();
+                if was_last_consumer {
+                    let _ = self.shared.wait_result().await;
+                }
+                return Err(DataError::InvalidState(
+                    "backtest history request was cancelled while filling cache coverage",
+                ));
+            }
+            tokio::select! {
+                result = self.shared.wait_result() => {
+                    return result.map(|rows| if claim_rows {
+                        self.shared.claim_rows(rows)
+                    } else {
+                        0
+                    });
+                }
+                _ = tokio::time::sleep(EXTERNAL_CANCELLATION_POLL_INTERVAL) => {}
+            }
+        }
     }
 }
 
 struct FillConsumerGuard {
     shared: Arc<SharedFill>,
+    active: bool,
 }
 
-impl Drop for FillConsumerGuard {
-    fn drop(&mut self) {
+impl FillConsumerGuard {
+    fn release(&mut self) -> bool {
+        if !self.active {
+            return false;
+        }
+        self.active = false;
         let previous = self.shared.state.consumers.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "fill consumer count must not underflow");
         if previous == 1 {
@@ -910,7 +1142,16 @@ impl Drop for FillConsumerGuard {
                 .cancel_requested
                 .store(true, Ordering::Release);
             self.shared.state.terminal.notify_waiters();
+            true
+        } else {
+            false
         }
+    }
+}
+
+impl Drop for FillConsumerGuard {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -1108,6 +1349,7 @@ mod tests {
             .unwrap();
 
         assert!(!outcome.remote_used);
+        assert_eq!(outcome.rows_written, 0);
         assert_eq!(opens.load(Ordering::SeqCst), 0);
         assert_eq!(auth_calls.load(Ordering::SeqCst), 0);
     }
@@ -1142,8 +1384,10 @@ mod tests {
             coordinator.ensure_coverage(request.clone()),
             coordinator.ensure_coverage(request)
         );
-        first.unwrap();
-        second.unwrap();
+        let first_rows = first.unwrap().rows_written;
+        let second_rows = second.unwrap().rows_written;
+        assert_eq!(first_rows.saturating_add(second_rows), 1);
+        assert_ne!(first_rows, second_rows);
 
         assert_eq!(opens.load(Ordering::SeqCst), 1);
         assert_eq!(auth_calls.load(Ordering::SeqCst), 1);
@@ -1197,45 +1441,125 @@ mod tests {
     #[tokio::test]
     async fn cancellation_keeps_partial_ticks_without_final_coverage() {
         let root = temporary_root("fill-cancellation");
-        let range = closed_range();
+        let first_range = closed_range();
+        let second_day = backtest_tick_trading_day_for_timestamp_ns(first_range.1).unwrap();
+        let second_range = backtest_tick_trading_day_range(second_day).unwrap();
+        let range = (first_range.0, second_range.end_ns);
         let opens = Arc::new(AtomicUsize::new(0));
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let cancellation = Arc::new(AtomicBool::new(false));
         let coordinator = coordinator(
             root.clone(),
-            Arc::new(NeverFactory {
+            Arc::new(RowsThenNeverFactory {
                 opens: Arc::clone(&opens),
+                emitted: Arc::clone(&emitted),
+                symbol: "SHFE.au2608".to_string(),
             }),
             Arc::new(CountingAuth::new(Arc::new(AtomicUsize::new(0)))),
         );
         let task = tokio::spawn({
             let coordinator = coordinator.clone();
+            let cancellation = Arc::clone(&cancellation);
             async move {
                 coordinator
-                    .ensure_coverage(BacktestHistoryFillRequest::tick(
-                        "SHFE.au2608",
-                        range,
-                        None,
-                        Some(1),
-                        "SHFE.au2608",
-                    ))
+                    .ensure_coverage_until_cancelled(
+                        BacktestHistoryFillRequest::tick(
+                            "SHFE.au2608",
+                            range,
+                            None,
+                            Some(1),
+                            "SHFE.au2608",
+                        ),
+                        cancellation.as_ref(),
+                        true,
+                    )
                     .await
             }
         });
         tokio::time::timeout(Duration::from_secs(1), async {
-            while opens.load(Ordering::SeqCst) == 0 {
+            while emitted.load(Ordering::SeqCst) < 1 {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .expect("source should have opened");
-        task.abort();
-        let _ = task.await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        cancellation.store(true, Ordering::Release);
+        let error = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("cancellation should reach a terminal after flushing")
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            BacktestTickCache::open_read_only(&root)
+                .inventory()
+                .unwrap()
+                .total_rows,
+            2,
+            "cancellation must not return before every slice's accepted short tail is durable",
+        );
 
         assert!(
-            !BacktestTickCache::open_read_only(root)
+            !BacktestTickCache::open_read_only(&root)
                 .coverage("SHFE.au2608", range.0, range.1)
                 .unwrap()
                 .is_complete()
+        );
+    }
+
+    #[tokio::test]
+    async fn preexisting_shared_cancellation_interrupts_a_pending_operation() {
+        let coordinator = coordinator(
+            temporary_root("fill-preexisting-cancellation"),
+            Arc::new(ScriptedFactory::new(
+                Arc::new(AtomicUsize::new(0)),
+                Vec::new(),
+                Duration::ZERO,
+            )),
+            Arc::new(CountingAuth::new(Arc::new(AtomicUsize::new(0)))),
+        );
+        let shared = SharedFill::new(
+            (1, 2),
+            FillCompatibility {
+                provisional_as_of_ns: None,
+                minute_snapshot: None,
+            },
+        );
+        shared.state.cancel_requested.store(true, Ordering::Release);
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            coordinator
+                .await_or_shared_cancel(&shared, std::future::pending::<crate::Result<()>>()),
+        )
+        .await
+        .expect("preexisting cancellation must not wait for another notification")
+        .unwrap_err();
+
+        assert!(error.to_string().contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn query_waiter_does_not_steal_materialization_row_count() {
+        let shared = Arc::new(SharedFill::new(
+            (1, 2),
+            FillCompatibility {
+                provisional_as_of_ns: None,
+                minute_snapshot: None,
+            },
+        ));
+        let query = FillSubscription::new(Arc::clone(&shared));
+        let materialization = FillSubscription::new(Arc::clone(&shared));
+        shared.complete(Ok(7));
+
+        assert_eq!(query.wait_until_cancelled(None, false).await.unwrap(), 0);
+        assert_eq!(
+            materialization
+                .wait_until_cancelled(None, true)
+                .await
+                .unwrap(),
+            7
         );
     }
 
@@ -1336,6 +1660,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn streaming_tick_fill_deduplicates_a_retried_prefix_with_constant_state() {
+        let range = (1_000, 10_000);
+        let mut fill = StreamingTickFill::new("SHFE.au2608", range);
+
+        assert!(fill.push("chart-1", &tick(1, 1_001)).unwrap());
+        assert!(fill.push("chart-1", &tick(2, 1_002)).unwrap());
+        assert!(!fill.push("chart-2", &tick(1, 1_001)).unwrap());
+        assert!(!fill.push("chart-2", &tick(2, 1_002)).unwrap());
+        assert!(fill.push("chart-2", &tick(3, 1_003)).unwrap());
+
+        let report = fill.finish_after_idle();
+        assert!(report.complete);
+        assert_eq!(report.unique_rows, 3);
+        assert_eq!(report.id_range, Some((1, 3)));
+        assert!(std::mem::size_of_val(&fill) < 256);
+    }
+
+    #[test]
+    fn tick_fill_ranges_are_split_at_trading_day_boundaries() {
+        let first = closed_range();
+        let second_day = backtest_tick_trading_day_for_timestamp_ns(first.1).unwrap();
+        let second = backtest_tick_trading_day_range(second_day).unwrap();
+        let coordinator = coordinator(
+            temporary_root("daily-slices"),
+            Arc::new(ScriptedFactory::new(
+                Arc::new(AtomicUsize::new(0)),
+                Vec::new(),
+                Duration::ZERO,
+            )),
+            Arc::new(CountingAuth::new(Arc::new(AtomicUsize::new(0)))),
+        );
+        let request = BacktestHistoryFillRequest::tick(
+            "SHFE.au2608",
+            (first.0, second.end_ns),
+            None,
+            Some(1),
+            "SHFE.au2608",
+        );
+
+        let slices = coordinator
+            .split_fill_range(&request, request.range)
+            .unwrap();
+
+        assert_eq!(
+            slices.iter().map(|slice| slice.range).collect::<Vec<_>>(),
+            vec![first, (second.start_ns, second.end_ns)]
+        );
+    }
+
     struct CountingAuth {
         calls: Arc<AtomicUsize>,
     }
@@ -1412,28 +1786,54 @@ mod tests {
         }
     }
 
-    struct NeverFactory {
+    struct RowsThenNeverFactory {
         opens: Arc<AtomicUsize>,
+        emitted: Arc<AtomicUsize>,
+        symbol: String,
     }
 
-    impl ServerHistorySourceFactory for NeverFactory {
+    impl ServerHistorySourceFactory for RowsThenNeverFactory {
         fn open<'a>(
             &'a self,
             _credentials: BacktestHistoryCredentials,
-            _request: ServerBacktestHistoryRequest,
+            request: ServerBacktestHistoryRequest,
         ) -> OpenServerHistorySourceFuture<'a> {
             Box::pin(async move {
                 self.opens.fetch_add(1, Ordering::SeqCst);
-                Ok(Box::new(NeverSource) as Box<dyn ServerHistorySource>)
+                let chart_id = request
+                    .charts
+                    .first()
+                    .map(|chart| chart.chart_id.clone())
+                    .unwrap_or_else(|| "tick".to_string());
+                Ok(Box::new(RowsThenNeverSource {
+                    emitted: Arc::clone(&self.emitted),
+                    event: Some(ServerBacktestHistoryEvent::Ticks {
+                        chart_id,
+                        symbol: self.symbol.clone(),
+                        rows: vec![
+                            tick(1, request.start_ns.saturating_add(1)),
+                            tick(2, request.start_ns.saturating_add(2)),
+                        ],
+                    }),
+                }) as Box<dyn ServerHistorySource>)
             })
         }
     }
 
-    struct NeverSource;
+    struct RowsThenNeverSource {
+        emitted: Arc<AtomicUsize>,
+        event: Option<ServerBacktestHistoryEvent>,
+    }
 
-    impl ServerHistorySource for NeverSource {
+    impl ServerHistorySource for RowsThenNeverSource {
         fn next_event<'a>(&'a mut self) -> ServerHistorySourceFuture<'a> {
-            Box::pin(std::future::pending())
+            Box::pin(async move {
+                if let Some(event) = self.event.take() {
+                    self.emitted.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Some(event));
+                }
+                std::future::pending().await
+            })
         }
     }
 }

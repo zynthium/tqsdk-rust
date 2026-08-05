@@ -54,6 +54,12 @@ minute cache 的唯一持久 K 线是 official server-side backtest terminal 成
 成功前保留 rows，成功后才提交该 batch 的 final coverage；合法的零行窗口也可提交 final coverage。
 取消、超时、未确认结束或失败 batch 不得把未完成范围标记为 final。
 
+tick fill 按 TQBN trading day 顺序消费每个 physical symbol 的缺口，并以 8192 rows 为短批写入；这限制
+长窗口的峰值内存和每行 fsync 开销。取消时已接受的短尾先 flush，但不提交本轮 final/provisional
+coverage。fill-only materialization 不再为了生成报告回读刚写入的 cache；`rows_written` 只统计本进程
+实际物理落盘 rows，同一 shared fill 被多个 logical request 复用时只计一次。完整 cache hit 合法返回
+`rows_written=0`。
+
 minute 缓存当前的 format id 是 `tqsdk.minute-kline.monthly.v4`，schema/file version 为 4，按
 `logical symbol × trading month` 分区。目录名有意保持 `minute-kline-v3`：旧 v3 文件不自动迁移、
 覆盖、删除或当作命中；coverage/read fail closed，deep doctor 将其分类为 `legacy_unsupported`。
@@ -111,7 +117,7 @@ block（连续合约会保留必要的 underlying / segment mapping）。这是 
 | `fill --dry-run` | CacheOnly 预检，不取 fill lock、不写 report/rows | 同样只做 final coverage 预检 |
 | `fill` | missing tick ranges 远端补齐；当前日可走 explicit provisional 规则 | 仅 closed-day final ranges，按 60s Kline stream 补齐；显式 `--repair-stale` 才会在 root fill lock 和 auth preflight 后删除已定位的 mixed-snapshot 月分区 |
 | `verify` | CacheOnly coverage，选配 local tick replay | CacheOnly final coverage，选配流式读取 local minute rows |
-| `doctor` | 深度解码 TQBN；tick stable-view lock 协调检查 | 深度解码 `.tqmk`，状态为 `readable` / `legacy_unsupported` / `unsupported_version` / `corrupt` |
+| `doctor` | exclusive root stable view 下深度解码 TQBN | exclusive root stable view 下深度解码 `.tqmk`，状态为 `readable` / `legacy_unsupported` / `unsupported_version` / `corrupt` |
 | `purge` | 不提供 CLI purge | 受控的整月分区删除 |
 
 `verify` 绝不访问远端或写 cache。它接受 explicit closed-day window，或通过 `--report` 绑定一次
@@ -200,9 +206,34 @@ payload，但 stdout 本身没有 atomic-write 保证；`--output PATH` 仅用�
 
 ## 锁、取消与显式维护
 
-fill 复用 facade 的 root-scoped remote-fill 协调；tick file 仍有自己的文件级写锁。inventory 故意
-不取稳定视图锁，可以显示 fill 的中间状态。minute doctor/verify 是 read-only 操作，不承诺 tick
-doctor 所使用的全局 stable-view lock 语义。
+同一 cache root 使用 advisory root gate 协调普通数据流和需要稳定视图的维护；它不替代 TQBN 日文件锁
+或 minute 月文件锁：
+
+| 操作 | root gate | 目的 |
+| --- | --- | --- |
+| 普通 tick/minute `fill` | shared | 多个互不冲突 series 可并发；阻止 refresh/repair/verify/doctor/purge 穿插 |
+| `query --policy remote-on-miss` | shared | coverage inspection、远端补洞和 cache materialization 处于同一普通操作窗口 |
+| cache refresh、`fill --repair-stale` | exclusive | 删除/重建与普通 fill/read plan 互斥 |
+| tick/minute `verify`、`doctor` | exclusive | coverage/replay/深度诊断获得 root-wide stable view |
+| 真实 minute `purge` | exclusive | 月文件删除不与普通 fill/query 交错 |
+| `inventory`、`fill --dry-run`、minute `purge --dry-run` | none | 快速或计划视图；允许显示并发 fill 中间状态 |
+
+`RemoteOnMiss` query 只在收集/验证 durable 结果期间持 shared gate；大 JSONL/LLM payload 的格式化和
+stdout/文件发布在释放 gate 后完成，慢消费者不会阻塞 maintenance。每个实际远端补洞另有
+`cache family × cache symbol` 的跨进程 lease：竞争者等待并重查 coverage，owner 完成后直接复用，避免
+多个 shared root users 对同一 series 重复请求官方流。同进程请求仍复用 single-flight。
+
+TQBN reader/writer 再用 per-file shared/exclusive lock。reader 在锁内打开 data file 并确认 tail
+checkpoint 后，只读取该 opened file 的 confirmed prefix，可提前释放锁；首次初始化采用临时文件 sync +
+原子 rename。无有效 checkpoint 的旧文件严格校验锁内捕获的完整物理长度，不能忽略坏 suffix，但无需在
+整个解码期间持锁。coverage/provisional record 与紧邻 `TQCI` 是恢复原子对；孤立 record 属于未确认
+tail，恢复时从 record 起点截断。root gate 与这些 sidecar lock 是当前版本的协作协议，不保证新旧版本
+进程长期混跑；升级时应同步重启访问同一 root 的进程。
+
+第一次 Ctrl-C 或 SIGTERM 触发协作取消：停止启动新 batch，tick flush 已接受短尾并可推进物理 tail
+checkpoint，但不提交本轮 final/provisional coverage；minute 丢弃尚未 terminal 的内存 batch。已成功
+terminal 并提交的范围继续有效。CLI 等待任务收敛后以 `interrupted` / 130 返回。第二次 shutdown signal
+立即 `exit(130)`，不再等待 flush；tick warmup 成功后的 calendar 收尾期间该二次信号路径仍保持有效。
 
 tick 和 minute 都没有自动 retention、max-byte eviction 或后台 cleanup。refresh/purge/compact 均是
 明确的破坏性维护：tick 的对应操作仍通过显式 SDK API；CLI 常规 minute purge 须同时满足：
@@ -213,7 +244,7 @@ tick 和 minute 都没有自动 retention、max-byte eviction 或后台 cleanup�
 4. 真正删除时传 `--yes`。
 
 `--dry-run` 只列出会移除的月文件、路径与大小，不写任何内容。真实 purge 删除所有与请求 window
-相交的整月分区，并以每月文件锁执行；它不是跨 cache family 的 root-wide transaction。
+相交的整月分区，并在 exclusive root gate 内以每月文件锁执行；它不是跨 cache family 的原子事务。
 `fill --repair-stale` 是另一条显式 minute maintenance path，不能和 `--dry-run` 或 tick 使用；它只在
 同一 root remote-fill lock 和 repair 所需 auth preflight 成功后删除已由 active snapshot 比较定位的冲突整月
 分区，并立刻由同一 remote fill 请求补齐。lock busy 或 auth 缺失时不删除任何分区。

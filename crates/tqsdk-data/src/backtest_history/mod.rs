@@ -19,6 +19,7 @@ use futures::Stream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::backtest_tick_cache::{BacktestTickCache, BacktestTickCacheOperationLock};
 use crate::error::{DataError, Result};
 
 pub use metadata::{
@@ -45,6 +46,7 @@ pub use request::{
 };
 pub use telemetry::BacktestHistoryTelemetryStream;
 
+use executor::BacktestHistoryExecutionMode;
 use request::{BacktestHistoryClientConfig, ValidatedBacktestHistoryRequest};
 
 /// Cache-backed client for Tick and locally derived Kline history used by a
@@ -78,37 +80,50 @@ impl BacktestHistoryClient {
         &self,
         requests: impl IntoIterator<Item = BacktestHistoryRequest>,
     ) -> Result<BacktestHistoryRun> {
-        let mut seen_request_ids = BTreeSet::new();
-        let mut validated = Vec::new();
-        for request in requests {
-            let request = request.validate()?;
-            planner::validate_source_policy(&request)?;
-            if !seen_request_ids.insert(request.request_id) {
-                return Err(DataError::Validation(format!(
-                    "backtest history batch contains duplicate request_id {}",
-                    request.request_id
-                )));
-            }
-            validated.push(request);
-        }
+        let validated = validate_requests(requests)?;
+        self.start_run(validated, BacktestHistoryExecutionMode::Query, None)
+    }
 
-        Ok(self.start_run(validated))
+    /// Opens a terminal-event/telemetry run that only establishes durable
+    /// cache coverage and never scans rows back from disk.
+    #[doc(hidden)]
+    pub async fn materialize_cache_run(
+        &self,
+        requests: impl IntoIterator<Item = BacktestHistoryRequest>,
+    ) -> Result<BacktestHistoryRun> {
+        let validated = validate_requests(requests)?;
+        self.start_run(
+            validated,
+            BacktestHistoryExecutionMode::MaterializeCache,
+            None,
+        )
+    }
+
+    /// Starts cache materialization under a caller-owned cache-root gate.
+    #[doc(hidden)]
+    pub async fn materialize_cache_run_with_root_gate(
+        &self,
+        requests: impl IntoIterator<Item = BacktestHistoryRequest>,
+        root_gate: Arc<BacktestTickCacheOperationLock>,
+    ) -> Result<BacktestHistoryRun> {
+        let validated = validate_requests(requests)?;
+        self.start_run(
+            validated,
+            BacktestHistoryExecutionMode::MaterializeCache,
+            Some(root_gate),
+        )
     }
 
     /// Materializes durable cache coverage for facade-owned replay inputs.
     ///
-    /// This is intentionally hidden from the ordinary query API.  It reuses
-    /// the same planner, remote fill coordinator, metadata sidecars, and
-    /// terminal coverage checks as [`Self::query_batch`], while discarding row
-    /// chunks after they have served their cache-fill purpose.  The default
-    /// facade uses it to avoid maintaining a second server-backtest cache-fill
-    /// implementation.
+    /// Completed report `rows` count only rows newly persisted by this run;
+    /// cache hits report zero. No cached row chunks are read or emitted.
     #[doc(hidden)]
     pub async fn materialize_cache(
         &self,
         requests: impl IntoIterator<Item = BacktestHistoryRequest>,
     ) -> Result<BacktestHistoryBatchReport> {
-        let mut run = self.query_batch(requests).await?;
+        let mut run = self.materialize_cache_run(requests).await?;
         while run.next().await.is_some() {}
         let report = run.finish().await;
         if let Some(failure) = report.failed.first() {
@@ -121,7 +136,32 @@ impl BacktestHistoryClient {
         Ok(report)
     }
 
-    fn start_run(&self, requests: Vec<ValidatedBacktestHistoryRequest>) -> BacktestHistoryRun {
+    fn start_run(
+        &self,
+        requests: Vec<ValidatedBacktestHistoryRequest>,
+        mode: BacktestHistoryExecutionMode,
+        root_gate: Option<Arc<BacktestTickCacheOperationLock>>,
+    ) -> Result<BacktestHistoryRun> {
+        let root_gate = match self.config.policy {
+            BacktestHistoryPolicy::CacheOnly => None,
+            BacktestHistoryPolicy::RemoteOnMiss => {
+                let gate = match root_gate {
+                    Some(gate) => gate,
+                    None => Arc::new(
+                        BacktestTickCache::open(self.config.cache_dir.as_path())?
+                            .try_acquire_remote_fill_shared_lock()?,
+                    ),
+                };
+                if gate.cache_dir() != self.config.cache_dir.as_path() {
+                    return Err(DataError::Validation(format!(
+                        "backtest history root gate {} does not match cache root {}",
+                        gate.cache_dir().display(),
+                        self.config.cache_dir.display(),
+                    )));
+                }
+                Some(gate)
+            }
+        };
         let request_kinds = requests
             .iter()
             .map(|request| (request.request_id, (request.kind, request.duration_ns)))
@@ -136,12 +176,14 @@ impl BacktestHistoryClient {
         let cancellation_for_task = Arc::clone(&cancellation);
         let telemetry_for_task = telemetry.clone();
         let coordinator = tokio::spawn(async move {
+            let _root_gate = root_gate;
             let report = executor::execute_batch(
                 config,
                 requests,
                 event_sender,
                 telemetry_for_task.clone(),
                 cancellation_for_task,
+                mode,
             )
             .await;
             telemetry_for_task.close();
@@ -152,7 +194,7 @@ impl BacktestHistoryClient {
             report
         });
 
-        BacktestHistoryRun {
+        Ok(BacktestHistoryRun {
             events: event_receiver,
             coordinator: Some(coordinator),
             report,
@@ -160,8 +202,27 @@ impl BacktestHistoryClient {
             collect_limit_bytes: self.config.collect_limit_bytes,
             telemetry: Some(telemetry.stream()),
             cancellation,
-        }
+        })
     }
+}
+
+fn validate_requests(
+    requests: impl IntoIterator<Item = BacktestHistoryRequest>,
+) -> Result<Vec<ValidatedBacktestHistoryRequest>> {
+    let mut seen_request_ids = BTreeSet::new();
+    let mut validated = Vec::new();
+    for request in requests {
+        let request = request.validate()?;
+        planner::validate_source_policy(&request)?;
+        if !seen_request_ids.insert(request.request_id) {
+            return Err(DataError::Validation(format!(
+                "backtest history batch contains duplicate request_id {}",
+                request.request_id
+            )));
+        }
+        validated.push(request);
+    }
+    Ok(validated)
 }
 
 /// Stream of rows and terminal outcomes for one query or batch.
@@ -196,6 +257,15 @@ impl BacktestHistoryRun {
 
     /// Drains unconsumed events and returns all terminal outcomes.
     pub async fn finish(mut self) -> BacktestHistoryBatchReport {
+        while self.events.recv().await.is_some() {}
+        self.await_coordinator().await
+    }
+
+    /// Requests cancellation, drains terminal events, and waits for cache-fill
+    /// tasks to flush accepted partial rows before returning.
+    #[doc(hidden)]
+    pub async fn cancel_and_finish(mut self) -> BacktestHistoryBatchReport {
+        self.cancellation.store(true, Ordering::Release);
         while self.events.recv().await.is_some() {}
         self.await_coordinator().await
     }

@@ -159,7 +159,7 @@ impl LiveTickRecorder {
                 }
             };
             recorded.last_persisted_id = write_report.last_seen_id;
-            recorded.last_persisted_at = Some(now);
+            recorded.last_persisted_at = Some(Instant::now());
             recorded.pending_gap_detected = false;
             recorded.needs_rescan = false;
             symbol_reports.push(RecordTicksSymbolFlushReport::from(write_report));

@@ -1055,7 +1055,7 @@ pub struct PreparedBacktest {
     builder: BacktestBuilder,
     data_report: BacktestDataReport,
     mode: PreparedBacktestMode,
-    remote_fill_lock: Option<tqsdk_data::BacktestTickCacheOperationLock>,
+    remote_fill_lock: Option<Arc<tqsdk_data::BacktestTickCacheOperationLock>>,
 }
 
 enum PreparedBacktestMode {
@@ -1838,6 +1838,7 @@ impl BacktestBuilder {
     async fn acquire_remote_fill_lock(
         &self,
         cache: &tqsdk_data::BacktestTickCache,
+        exclusive: bool,
     ) -> Result<tqsdk_data::BacktestTickCacheOperationLock> {
         if self
             .remote_fill_cancellation
@@ -1846,8 +1847,15 @@ impl BacktestBuilder {
         {
             return Err(data_validation("remote backtest cache fill cancelled"));
         }
+        let try_acquire = || {
+            if exclusive {
+                cache.try_acquire_remote_fill_lock()
+            } else {
+                cache.try_acquire_remote_fill_shared_lock()
+            }
+        };
         let Some(wait) = self.remote_fill_lock_wait else {
-            return cache.try_acquire_remote_fill_lock().map_err(Error::from);
+            return try_acquire().map_err(Error::from);
         };
         let deadline = tokio::time::Instant::now() + wait;
         loop {
@@ -1858,7 +1866,7 @@ impl BacktestBuilder {
             {
                 return Err(data_validation("remote backtest cache fill cancelled"));
             }
-            match cache.try_acquire_remote_fill_lock() {
+            match try_acquire() {
                 Ok(lock) => return Ok(lock),
                 Err(tqsdk_data::DataError::CacheBusy { .. })
                     if tokio::time::Instant::now() < deadline =>
@@ -2122,6 +2130,7 @@ impl BacktestBuilder {
             ));
         }
         let cache = self.resolved_cache()?;
+        let _root_gate = cache.try_acquire_remote_fill_lock()?;
         self.symbols
             .iter()
             .map(|symbol| cache.purge_symbol_ticks(symbol).map_err(Error::from))
@@ -2198,6 +2207,7 @@ impl BacktestBuilder {
         self.validate_cache_market_kind()?;
         let cache = self.resolved_cache()?;
         let planned = self.planned_inputs()?;
+        let _root_gate = cache.try_acquire_remote_fill_lock()?;
         let mut tick_sources = resolve_backtest_tick_sources(
             cache.cache_dir(),
             &planned.tick_symbols,
@@ -2267,8 +2277,12 @@ impl BacktestBuilder {
             .ok_or_else(|| data_validation("backtest default cache was not applied"))?;
         let cache_dir = cache.cache_dir().to_path_buf();
         let planned = self.planned_inputs()?;
-        self.ensure_remote_main_contract_metadata(cache_dir.as_path(), &planned)
-            .await?;
+        if matches!(self.cache_policy, BacktestCachePolicy::Disabled) {
+            return Err(data_validation(format!(
+                "backtest cache policy {:?} is not supported in phase 1",
+                self.cache_policy
+            )));
+        }
         let mut minute_klines = planned.canonical_minutes.clone();
         minute_klines.extend(planned.aggregated_minutes.clone());
         minute_klines.extend(planned.auto_quote_minutes.clone());
@@ -2291,44 +2305,72 @@ impl BacktestBuilder {
                 "canonical 60-second Kline cache cannot fill a current or future trading day; retry after that trading day closes",
             ));
         }
-        let (remote_fill_lock, stale_minute_partitions_repaired) =
-            if self.repair_stale_minute_partitions {
-                let remote_fill_lock = Some(self.acquire_remote_fill_lock(&cache).await?);
-                let minute_cache = tqsdk_data::MinuteKlineCache::open(cache.cache_dir())?;
-                let mut stale_plans = Vec::new();
-                for symbol in &repair_minute_symbols {
-                    if let Some(plan) = tqsdk_data::plan_minute_cache_stale_partition_repair(
-                        cache_dir.as_path(),
-                        symbol,
-                        self.start_ns,
-                        self.end_ns,
-                    )? {
-                        stale_plans.push((symbol.clone(), plan));
+        let refresh = matches!(self.cache_policy, BacktestCachePolicy::Refresh);
+        if refresh && self.base.auth.is_none() {
+            return Err(data_validation("remote backtest cache fill requires auth"));
+        }
+        if !minute_klines.is_empty()
+            && matches!(
+                self.cache_policy,
+                BacktestCachePolicy::RemoteOnMiss | BacktestCachePolicy::Refresh
+            )
+            && !minute_range_can_claim_final_coverage(self.end_ns)?
+        {
+            return Err(data_validation(
+                "canonical 60-second Kline cache cannot fill a current or future trading day; retry after that trading day closes",
+            ));
+        }
+        let remote_fill_lock = if matches!(
+            self.cache_policy,
+            BacktestCachePolicy::RemoteOnMiss | BacktestCachePolicy::Refresh
+        ) {
+            Some(Arc::new(
+                self.acquire_remote_fill_lock(
+                    &cache,
+                    refresh || self.repair_stale_minute_partitions,
+                )
+                .await?,
+            ))
+        } else {
+            None
+        };
+        self.ensure_remote_main_contract_metadata(cache_dir.as_path(), &planned)
+            .await?;
+        let stale_minute_partitions_repaired = if self.repair_stale_minute_partitions {
+            let minute_cache = tqsdk_data::MinuteKlineCache::open(cache.cache_dir())?;
+            let mut stale_plans = Vec::new();
+            for symbol in &repair_minute_symbols {
+                if let Some(plan) = tqsdk_data::plan_minute_cache_stale_partition_repair(
+                    cache_dir.as_path(),
+                    symbol,
+                    self.start_ns,
+                    self.end_ns,
+                )? {
+                    stale_plans.push((symbol.clone(), plan));
+                }
+            }
+            if stale_plans.is_empty() {
+                0
+            } else {
+                if self.base.auth.is_none() {
+                    return Err(data_validation("remote backtest cache fill requires auth"));
+                }
+                let mut removed_files = 0_usize;
+                for (symbol, plan) in stale_plans {
+                    for (range_start_ns, range_end_ns) in plan.stale_ranges {
+                        let report = minute_cache.purge_range(
+                            symbol.as_str(),
+                            range_start_ns,
+                            range_end_ns,
+                        )?;
+                        removed_files = removed_files.saturating_add(report.removed_files);
                     }
                 }
-                let stale_minute_partitions_repaired = if stale_plans.is_empty() {
-                    0
-                } else {
-                    if self.base.auth.is_none() {
-                        return Err(data_validation("remote backtest cache fill requires auth"));
-                    }
-                    let mut removed_files = 0_usize;
-                    for (symbol, plan) in stale_plans {
-                        for (range_start_ns, range_end_ns) in plan.stale_ranges {
-                            let report = minute_cache.purge_range(
-                                symbol.as_str(),
-                                range_start_ns,
-                                range_end_ns,
-                            )?;
-                            removed_files = removed_files.saturating_add(report.removed_files);
-                        }
-                    }
-                    removed_files
-                };
-                (remote_fill_lock, stale_minute_partitions_repaired)
-            } else {
-                (None, 0)
-            };
+                removed_files
+            }
+        } else {
+            0
+        };
         let minute_inputs = resolve_backtest_minute_kline_inputs(
             cache_dir.as_path(),
             &minute_klines,
@@ -2369,42 +2411,10 @@ impl BacktestBuilder {
         logical_symbols.sort();
         logical_symbols.dedup();
 
-        if matches!(self.cache_policy, BacktestCachePolicy::Disabled) {
-            return Err(data_validation(format!(
-                "backtest cache policy {:?} is not supported in phase 1",
-                self.cache_policy
-            )));
-        }
         let minute_cache = if matches!(self.cache_policy, BacktestCachePolicy::CacheOnly) {
             tqsdk_data::MinuteKlineCache::open_read_only(cache.cache_dir())
         } else {
             tqsdk_data::MinuteKlineCache::open(cache.cache_dir())?
-        };
-        let refresh = matches!(self.cache_policy, BacktestCachePolicy::Refresh);
-        if refresh && self.base.auth.is_none() {
-            return Err(data_validation("remote backtest cache fill requires auth"));
-        }
-        if !minute_symbols.is_empty()
-            && matches!(
-                self.cache_policy,
-                BacktestCachePolicy::RemoteOnMiss | BacktestCachePolicy::Refresh
-            )
-            && !minute_range_can_claim_final_coverage(self.end_ns)?
-        {
-            return Err(data_validation(
-                "canonical 60-second Kline cache cannot fill a current or future trading day; retry after that trading day closes",
-            ));
-        }
-        let _remote_fill_lock = match remote_fill_lock {
-            Some(lock) => Some(lock),
-            None if matches!(
-                self.cache_policy,
-                BacktestCachePolicy::RemoteOnMiss | BacktestCachePolicy::Refresh
-            ) =>
-            {
-                Some(self.acquire_remote_fill_lock(&cache).await?)
-            }
-            None => None,
         };
         if refresh {
             for (symbol, _, _) in &physical_ranges {
@@ -2482,11 +2492,13 @@ impl BacktestBuilder {
         remote_fill_runtime.emit_plan(build_remote_fill_plan(
             (self.start_ns, self.end_ns),
             logical_symbols.clone(),
-            &physical_ranges,
-            &before_by_range,
-            &fill_requests,
-            &minute_fill_requests,
-            &minute_missing_ranges_by_symbol,
+            RemoteFillPlanInputs {
+                physical_ranges: &physical_ranges,
+                before_by_range: &before_by_range,
+                tick_fill_requests: &fill_requests,
+                minute_fill_requests: &minute_fill_requests,
+                minute_missing_ranges_by_symbol: &minute_missing_ranges_by_symbol,
+            },
             remote_fill_runtime.config(),
         )?);
 
@@ -2553,11 +2565,16 @@ impl BacktestBuilder {
         let remote_used = !fill_requests.is_empty();
         if !fill_requests.is_empty() {
             let auth = self.base.auth.clone().ok_or(Error::MissingAuth)?;
+            let root_gate =
+                Arc::clone(remote_fill_lock.as_ref().ok_or_else(|| {
+                    data_validation("remote backtest cache fill root gate missing")
+                })?);
             let fill_report = backtest_remote::fill_backtest_tick_cache(
                 auth.user,
                 auth.pass,
                 fill_requests,
                 cache.clone(),
+                root_gate,
                 remote_fill_runtime.clone(),
             )
             .await?;
@@ -2569,10 +2586,15 @@ impl BacktestBuilder {
         let remote_minute_kline_used = !minute_fill_requests.is_empty();
         if !minute_fill_requests.is_empty() {
             let auth = self.base.auth.clone().ok_or(Error::MissingAuth)?;
+            let root_gate =
+                Arc::clone(remote_fill_lock.as_ref().ok_or_else(|| {
+                    data_validation("remote backtest cache fill root gate missing")
+                })?);
             let fill_report = backtest_remote::fill_backtest_minute_kline_cache(
                 &auth,
                 &minute_cache,
                 minute_fill_requests,
+                root_gate,
                 remote_fill_runtime,
             )
             .await?;
@@ -2809,6 +2831,26 @@ impl BacktestBuilder {
             .as_ref()
             .ok_or_else(|| data_validation("backtest default cache was not applied"))?;
         let planned = self.planned_inputs()?;
+        if matches!(self.cache_policy, BacktestCachePolicy::Disabled) {
+            return Err(data_validation(format!(
+                "backtest cache policy {:?} is not supported in phase 1",
+                self.cache_policy
+            )));
+        }
+        let refresh = matches!(self.cache_policy, BacktestCachePolicy::Refresh);
+        if refresh && self.base.auth.is_none() {
+            return Err(data_validation("remote backtest cache fill requires auth"));
+        }
+        let remote_fill_lock = if matches!(
+            self.cache_policy,
+            BacktestCachePolicy::RemoteOnMiss | BacktestCachePolicy::Refresh
+        ) {
+            Some(Arc::new(
+                self.acquire_remote_fill_lock(cache, refresh).await?,
+            ))
+        } else {
+            None
+        };
         let prepared_inputs = self.resolved_prepared_inputs().await?;
         if !prepared_inputs.minute_klines.is_empty()
             && matches!(
@@ -2821,18 +2863,7 @@ impl BacktestBuilder {
                 "canonical 60-second Kline cache cannot fill a current or future trading day; retry after that trading day closes",
             ));
         }
-        let remote_fill_lock = if matches!(
-            self.cache_policy,
-            BacktestCachePolicy::RemoteOnMiss | BacktestCachePolicy::Refresh
-        ) {
-            Some(self.acquire_remote_fill_lock(cache).await?)
-        } else {
-            None
-        };
-        if matches!(self.cache_policy, BacktestCachePolicy::Refresh) {
-            if self.base.auth.is_none() {
-                return Err(data_validation("remote backtest cache fill requires auth"));
-            }
+        if refresh {
             for (symbol, _, _) in prepared_input_physical_tick_ranges(&prepared_inputs) {
                 cache.purge_symbol_ticks(symbol)?;
             }
@@ -2932,12 +2963,7 @@ impl BacktestBuilder {
                     minute_fill_requests,
                 }
             }
-            BacktestCachePolicy::Disabled => {
-                return Err(data_validation(format!(
-                    "backtest cache policy {:?} is not supported in phase 1",
-                    self.cache_policy
-                )));
-            }
+            BacktestCachePolicy::Disabled => unreachable!("disabled cache policy rejected above"),
         };
 
         let remote_tick_used = matches!(
@@ -3074,16 +3100,27 @@ fn provisional_fill_requests_from_status(
     Ok(requests)
 }
 
+struct RemoteFillPlanInputs<'a> {
+    physical_ranges: &'a [(String, i64, i64)],
+    before_by_range: &'a BTreeMap<(String, i64, i64), BacktestTickCacheStatus>,
+    tick_fill_requests: &'a [backtest_remote::RemoteBacktestCacheFillRequest],
+    minute_fill_requests: &'a [backtest_remote::BacktestMinuteKlineFillRequest],
+    minute_missing_ranges_by_symbol: &'a BTreeMap<String, Vec<(i64, i64)>>,
+}
+
 fn build_remote_fill_plan(
     requested_range: (i64, i64),
     logical_symbols: Vec<String>,
-    physical_ranges: &[(String, i64, i64)],
-    before_by_range: &BTreeMap<(String, i64, i64), BacktestTickCacheStatus>,
-    tick_fill_requests: &[backtest_remote::RemoteBacktestCacheFillRequest],
-    minute_fill_requests: &[backtest_remote::BacktestMinuteKlineFillRequest],
-    minute_missing_ranges_by_symbol: &BTreeMap<String, Vec<(i64, i64)>>,
+    inputs: RemoteFillPlanInputs<'_>,
     config: BacktestRemoteFillConfig,
 ) -> Result<backtest_remote::RemoteFillPlan> {
+    let RemoteFillPlanInputs {
+        physical_ranges,
+        before_by_range,
+        tick_fill_requests,
+        minute_fill_requests,
+        minute_missing_ranges_by_symbol,
+    } = inputs;
     let tick_logical_batches = backtest_remote::remote_fill_logical_batch_count(
         tick_fill_requests.to_vec(),
         config.symbol_batch_size,
@@ -3239,7 +3276,7 @@ impl PreparedBacktest {
             builder,
             data_report: _,
             mode,
-            remote_fill_lock: _remote_fill_lock,
+            remote_fill_lock,
         } = self;
         let cache = builder
             .cache
@@ -3255,21 +3292,29 @@ impl PreparedBacktest {
             } => {
                 let auth = builder.base.auth.clone().ok_or(Error::MissingAuth)?;
                 if !tick_fill_requests.is_empty() {
+                    let root_gate = Arc::clone(remote_fill_lock.as_ref().ok_or_else(|| {
+                        data_validation("remote backtest cache fill root gate missing")
+                    })?);
                     backtest_remote::fill_backtest_tick_cache(
                         auth.user.clone(),
                         auth.pass.clone(),
                         tick_fill_requests,
                         cache.clone(),
+                        root_gate,
                         remote_fill_runtime.clone(),
                     )
                     .await?;
                 }
                 if !minute_fill_requests.is_empty() {
                     let minute_cache = tqsdk_data::MinuteKlineCache::open(cache.cache_dir())?;
+                    let root_gate = Arc::clone(remote_fill_lock.as_ref().ok_or_else(|| {
+                        data_validation("remote backtest cache fill root gate missing")
+                    })?);
                     let report = backtest_remote::fill_backtest_minute_kline_cache(
                         &auth,
                         &minute_cache,
                         minute_fill_requests,
+                        root_gate,
                         remote_fill_runtime,
                     )
                     .await?;

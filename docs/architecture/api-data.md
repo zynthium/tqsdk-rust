@@ -117,6 +117,12 @@ mapping 以 versioned snapshot sidecar 持久化，terminal report 携带 snapsh
 且覆盖请求窗口的 sidecar，不会向公开 metadata service 查询。当前 cache-backed fill 只支持 futures；
 股票回测必须使用 facade 的 `.disabled_cache()` 官方路径。
 
+每个 `RemoteOnMiss` run 在 planner、fill 和 row scan 生命周期内持有 shared cache-root gate；facade
+已经取得 shared/exclusive gate 时把同一个实际锁守卫传给 data run，不重复加锁。不同 symbol 可以并行，
+同一 `family × cache symbol` 的重叠请求通过进程内 shared fill 和跨进程 lease 合并，并在取得 lease 后再次
+检查 coverage。refresh、stale repair、verify、doctor 和真实 purge 使用 exclusive gate；这些都是
+advisory protocol，不保证旧版本或绕过 API 的进程安全混跑。
+
 可选 `tqsdk-cache query` 只是这个 public query surface 的 CLI adapter：它使用
 `BacktestHistoryClient::query_batch(...).collect_all(...)` 和既有 `BacktestHistoryMetadataCache`，不新增
 data API、cache format、direct TQBN reader 或独立 session owner。它的 `cache-only` / `remote-on-miss`
@@ -134,6 +140,9 @@ CLI 只会把通过 `Final` 与完整 coverage 校验的 terminal report materia
 
 执行图是 async orchestration 加有界 `spawn_blocking` reader：文件读取、TQBN 解压和记录解码仍是
 CPU/blocking 工作，不能仅把 API 换成 `tokio::fs` 就宣称性能提升。
+materialize/fill-only run 在 coverage 提交后直接返回物理写入计数，不扫描 rows 回内存；cache hit
+报告 0，同一 shared fill 的物理 rows 只由一个 subscriber 计数。Tick fill 按交易日顺序切片并以
+8192 行缓冲追加，普通 final facade fill 只 compact 本轮实际远端回填且去重后的日分区，provisional 不 compact。
 
 ## 第一阶段推荐范围
 
@@ -289,7 +298,8 @@ CPU/blocking 工作，不能仅把 API 换成 `tokio::fs` 就宣称性能提升�
    - 后续再考虑路径管理型文件导出
    - deterministic replay / local backtest event source 由 `tqsdk-task` 拥有；
      `tqsdk-data` 只提供 history rows，不提供 JSONL market cache public surface
-   - 跨进程 daemon orchestration、跨进程 cache 管理服务、queue/lock/election/recovery/compaction ownership 等编排表面不属于当前 `tqsdk-data` public API
+   - 跨进程 daemon、queue/election 或通用 cache 管理服务不属于当前 `tqsdk-data` public API；
+     cache-root gate、per-series lease、TQBN 文件锁与 tail recovery 只是当前 store/fill 的窄协调合同
    - 可选 tabular adapters
 
 ## 依赖方向
@@ -331,6 +341,11 @@ tqsdk-wait        tqsdk-data
   旧 `.tqseries` 和旧单文件 `.tqbn` layout 不再作为默认格式，不提供兼容读取或迁移 store。
   旧 Python 兼容 mmap backend 已废弃，也已经落在
   `tqsdk-data`
+- TQBN 每个物理日分区使用独立 `.tqbn.lock`。writer 在独占锁下原子初始化、append/repair/compact；
+  reader 在共享锁内打开文件、验证 prefix/tail checkpoint 并固定确认长度，然后用 opened file handle
+  在锁外解压和流式消费。checkpoint 记录 confirmed length、尾部 checksum 与最新 coverage index head；
+  读侧忽略其后的未确认 suffix，下一 writer 可截断截断块或坏 checksum suffix 后继续。没有 checkpoint
+  的旧文件仍全量校验，不把真实损坏静默当成可恢复尾部
 - `HistorySeriesCache::read_kline_data_series` /
   `HistorySeriesCache::read_tick_data_series` 提供 cache-only 读取，
   `HistorySeriesCache::scan` 和 `HistorySeriesCache::enforce_limits`
@@ -362,8 +377,8 @@ tqsdk-wait        tqsdk-data
   再把所有缺失 symbol 交给内部有界远端调度器；默认不做时间切片，`TQSDK_REMOTE_FILL_SLICE_SECS`
   只作为长区间 fallback。默认不设置整批墙钟超时，持续有进展的长区间由 60 秒 idle watchdog
   保护；`TQSDK_REMOTE_FILL_BATCH_TIMEOUT_SECS` 仅在显式设为正数时启用诊断/作业预算限时。
-  每个成功 slice 先验证 tick id 连续性并独立提交 coverage，全部 slice 成功后才 compact 本次
-  symbol 的 tick series；失败或未确认 slice 只会留下未覆盖范围，不触发全缓存重写
+  每个成功 slice 先验证 tick id 连续性并独立提交 coverage，全部 slice 成功后才 compact 本次实际
+  远端回填范围相交的 tick 日分区；失败或未确认 slice 只会留下未覆盖范围，不触发全缓存重写
 - `LiveTickCacheWriter::push_ticks(...)` / `flush()` 也已经落在 `tqsdk-data`，作为纯数据层 writer
   支持 live/session host 将指定 symbol 的实时 tick 行写入同一份回测缓存；它不创建 session，
   不订阅行情，也不负责后台守护或跨进程协调

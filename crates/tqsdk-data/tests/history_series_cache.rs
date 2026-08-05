@@ -123,8 +123,8 @@ fn tick_data_series_reader_reads_cached_ticks_in_order() {
 }
 
 #[test]
-fn reader_holds_partition_shared_lock_until_it_advances_to_the_next_day() {
-    let dir = temp_dir("reader-partition-lock");
+fn reader_uses_partition_snapshots_without_blocking_concurrent_writes() {
+    let dir = temp_dir("reader-partition-snapshot");
     let cache = HistorySeriesCache::open(&dir).unwrap();
     let first_day = utc_ns(2026, 1, 5, 2, 0);
     let second_day = utc_ns(2026, 1, 6, 2, 0);
@@ -147,29 +147,27 @@ fn reader_holds_partition_shared_lock_until_it_advances_to_the_next_day() {
         .unwrap();
     assert_eq!(reader.next_tick().unwrap().unwrap().id, 1);
 
-    let write_error = cache
-        .write_tick_range(
-            "SHFE.rb2601",
-            first_day,
-            first_day + 2,
-            &[tick(4, first_day + 1, 104.0)],
-        )
-        .unwrap_err();
-    assert!(matches!(write_error, DataError::CacheBusy { .. }));
-    let purge_error = cache.purge_tick_series("SHFE.rb2601").unwrap_err();
-    assert!(matches!(purge_error, DataError::CacheBusy { .. }));
-
-    assert_eq!(reader.next_tick().unwrap().unwrap().id, 2);
-    assert_eq!(reader.next_tick().unwrap().unwrap().id, 3);
-
     cache
         .write_tick_range(
             "SHFE.rb2601",
             first_day,
             first_day + 2,
-            &[tick(4, first_day + 1, 104.0)],
+            &[tick(2, first_day + 1, 104.0)],
         )
-        .expect("the first partition lock must release before the second is read");
+        .expect("an opened partition snapshot must not block an append");
+
+    let original_second = reader.next_tick().unwrap().unwrap();
+    assert_eq!(original_second.id, 2);
+    assert_eq!(original_second.last_price, 102.0);
+    assert_eq!(reader.next_tick().unwrap().unwrap().id, 3);
+    assert!(reader.next_tick().unwrap().is_none());
+
+    let replacement = cache
+        .read_tick_data_series(TickDataSeriesRequest::new("SHFE.rb2601", first_day, end))
+        .unwrap();
+    assert_eq!(replacement.rows().len(), 3);
+    assert_eq!(replacement.rows()[1].id, 2);
+    assert_eq!(replacement.rows()[1].last_price, 104.0);
 }
 
 #[test]

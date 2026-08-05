@@ -106,6 +106,11 @@ cargo run -p tqsdk-cache -- \
 远端 terminal 成功才写 final coverage，合法的零行窗口也可成为 final。取消、超时或失败 batch
 不会标记其未完成范围。
 
+tick fill 按 trading day 顺序执行，以 8192 rows 缓冲追加；取消会 flush 已接受短尾，但不推进未 terminal
+范围的 final/provisional coverage。fill-only 不回读刚写入 rows；`rows_written` 只统计实际物理落盘，
+同一 shared fill 被多个 logical request 复用时只计一次，完整 cache hit 为 `0`。final fill 只按本轮
+实际远端回填的 `symbol × trading day` 去重 compact 相交分区；provisional fill 跳过 compaction。
+
 ## 历史查询与 LLM 上下文
 
 `query` 直接复用 `tqsdk-data::BacktestHistoryClient`，不解析 `.tqbn` 文件，也不增加另一份
@@ -237,6 +242,26 @@ tick `fill` 保留 CST `18:00` TQBN partition、当前交易日 provisional chec
 `--include-open-day` 也不适用于 minute。`--last-trading-days` 与 `--calendar auto|required|off`
 仍可用于选择 closed-day 窗口；日历只做选择和进度，不替代 cache coverage。
 
+## 并发锁与任务中断
+
+root advisory gate 的规则固定如下：
+
+| 操作 | root gate |
+| --- | --- |
+| 普通 tick/minute fill、`query --policy remote-on-miss` | shared |
+| cache refresh、`fill --repair-stale`、tick/minute verify、doctor、真实 minute purge | exclusive |
+| inventory、fill dry-run、minute purge dry-run | none |
+
+shared gate 允许不同 series 并发，同时阻止 destructive/stable-view maintenance 穿插。每个实际补洞再取
+`cache family × cache symbol` 的跨进程 lease；等待者重查 coverage 后复用已有结果，不重复发远端请求。
+TQBN 日分区和 minute 月分区仍使用各自文件锁。TQBN reader 在锁内打开文件并固定 checkpoint-confirmed
+prefix，之后从 opened-file snapshot 读取；首次初始化用 sync + atomic rename，未确认坏 suffix 可在下一次
+fill 恢复，无 checkpoint 的旧文件严格全量校验。该协议不保证新旧 binary 进程长期混跑。
+
+query 的 shared gate 在 `collect_all()` 和 terminal/coverage 验证完成后释放；JSONL/LLM payload 渲染与
+stdout/文件发布不持锁。第一次 Ctrl-C/SIGTERM 请求协作取消：停止新任务，tick flush 已接受短尾但不
+提交未完成 coverage，minute 不提交未 terminal buffer，收敛后返回 130。第二次信号立即退出 130。
+
 ### 原始节假日日历
 
 `fill` 通过 `DataClient::query_trading_calendar_holidays()` 复用 Shinny 的公开节假日源，不需要
@@ -294,8 +319,8 @@ cargo run -p tqsdk-cache -- \
   --start-day 2026-06-01 --end-day 2026-06-30 --yes
 ```
 
-tick 的 refresh / purge / compact 仍是显式 SDK API，不由 CLI 自动执行。minute purge 使用每月文件锁，
-不是跨 cache family 的全局稳定快照；应先用 dry-run 核对范围。无论哪一类 cache，都不会自行清理。
+tick 的 refresh / purge / compact 仍是显式 SDK API，不由 CLI 自动执行。真实 minute purge 在 exclusive
+root gate 内再取每月文件锁；dry-run 故意不取稳定视图 gate，应先核对范围。无论哪一类 cache，都不会自行清理。
 
 ## 验证
 
