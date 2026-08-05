@@ -18,6 +18,8 @@ use std::time::Duration;
 use chrono::Utc;
 use fs2::FileExt;
 use tokio::sync::Notify;
+#[cfg(all(feature = "live", feature = "services"))]
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tqsdk_core::{Kline, Tick};
 use tqsdk_session::{
     ServerBacktestHistoryChart, ServerBacktestHistoryEvent, ServerBacktestHistoryKind,
@@ -50,6 +52,7 @@ type ServerHistorySourceFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Option<ServerBacktestHistoryEvent>>> + Send + 'a>>;
 type OpenServerHistorySourceFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Box<dyn ServerHistorySource>>> + Send + 'a>>;
+type CloseServerHistorySourceFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
 /// Cache family whose coverage is being remotely materialized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -292,6 +295,10 @@ impl StreamingTickFill {
 /// fake scripted streams possible without widening the public data API.
 pub(crate) trait ServerHistorySource: Send {
     fn next_event<'a>(&'a mut self) -> ServerHistorySourceFuture<'a>;
+
+    fn close<'a>(&'a mut self, _reusable: bool) -> CloseServerHistorySourceFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Factory for an official server-backtest history source.
@@ -310,19 +317,151 @@ pub(crate) trait ServerHistorySourceFactory: Send + Sync {
     ) -> OpenServerHistorySourceFuture<'a>;
 }
 
-pub(crate) fn default_server_history_source_factory() -> Arc<dyn ServerHistorySourceFactory> {
-    #[cfg(all(feature = "live", feature = "services"))]
-    {
-        Arc::new(SessionServerHistorySourceFactory)
+#[cfg(all(feature = "live", feature = "services"))]
+pub(crate) fn default_server_history_source_factory(
+    max_sessions: usize,
+) -> Arc<dyn ServerHistorySourceFactory> {
+    Arc::new(SessionServerHistorySourceFactory::new(max_sessions))
+}
+
+#[cfg(not(all(feature = "live", feature = "services")))]
+pub(crate) fn default_server_history_source_factory(
+    _max_sessions: usize,
+) -> Arc<dyn ServerHistorySourceFactory> {
+    Arc::new(UnavailableServerHistorySourceFactory)
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+struct SessionServerHistorySourceFactory {
+    pool: Arc<ServerHistorySessionPool>,
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+impl SessionServerHistorySourceFactory {
+    fn new(max_sessions: usize) -> Self {
+        Self {
+            pool: Arc::new(ServerHistorySessionPool::new(max_sessions.max(1))),
+        }
     }
-    #[cfg(not(all(feature = "live", feature = "services")))]
-    {
-        Arc::new(UnavailableServerHistorySourceFactory)
+
+    #[cfg(test)]
+    fn created_session_count(&self) -> usize {
+        self.pool.created_sessions.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn idle_session_count(&self) -> usize {
+        self.pool
+            .idle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
     }
 }
 
 #[cfg(all(feature = "live", feature = "services"))]
-struct SessionServerHistorySourceFactory;
+#[derive(PartialEq, Eq)]
+struct ServerHistorySessionCredentials {
+    user: String,
+    pass: String,
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+struct IdleServerHistorySession {
+    credentials: ServerHistorySessionCredentials,
+    session: tqsdk_session::SessionClient,
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+struct ServerHistorySessionPool {
+    permits: Arc<Semaphore>,
+    idle: Mutex<Vec<IdleServerHistorySession>>,
+    #[cfg(test)]
+    created_sessions: AtomicUsize,
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+impl ServerHistorySessionPool {
+    fn new(max_sessions: usize) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(max_sessions)),
+            idle: Mutex::new(Vec::with_capacity(max_sessions)),
+            #[cfg(test)]
+            created_sessions: AtomicUsize::new(0),
+        }
+    }
+
+    fn acquire(
+        self: &Arc<Self>,
+        credentials: BacktestHistoryCredentials,
+    ) -> Result<ServerHistorySessionLease> {
+        let permit = Arc::clone(&self.permits).try_acquire_owned().ok();
+        let (user, pass) = credentials.into_parts();
+        let credentials = ServerHistorySessionCredentials { user, pass };
+        let idle = if permit.is_some() {
+            let mut idle = self
+                .idle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            idle.retain(|entry| entry.credentials == credentials);
+            idle.pop()
+        } else {
+            None
+        };
+        let entry = match idle {
+            Some(entry) => entry,
+            None => {
+                let session = tqsdk_session::SessionClientBuilder::new(
+                    credentials.user.clone(),
+                    credentials.pass.clone(),
+                )
+                .futures_backtest_market()
+                .build()?;
+                #[cfg(test)]
+                self.created_sessions.fetch_add(1, Ordering::AcqRel);
+                IdleServerHistorySession {
+                    credentials,
+                    session,
+                }
+            }
+        };
+        Ok(ServerHistorySessionLease {
+            pool: Arc::clone(self),
+            entry: Some(entry),
+            permit,
+        })
+    }
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+struct ServerHistorySessionLease {
+    pool: Arc<ServerHistorySessionPool>,
+    entry: Option<IdleServerHistorySession>,
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+impl ServerHistorySessionLease {
+    fn session(&self) -> &tqsdk_session::SessionClient {
+        &self
+            .entry
+            .as_ref()
+            .expect("active server-history session lease must own its entry")
+            .session
+    }
+
+    fn recycle(mut self) {
+        if self.permit.is_some()
+            && let Some(entry) = self.entry.take()
+        {
+            self.pool
+                .idle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(entry);
+        }
+    }
+}
 
 #[cfg(all(feature = "live", feature = "services"))]
 impl ServerHistorySourceFactory for SessionServerHistorySourceFactory {
@@ -332,25 +471,50 @@ impl ServerHistorySourceFactory for SessionServerHistorySourceFactory {
         request: ServerBacktestHistoryRequest,
     ) -> OpenServerHistorySourceFuture<'a> {
         Box::pin(async move {
-            let (user, pass) = credentials.into_parts();
-            let session = tqsdk_session::SessionClientBuilder::new(user, pass)
-                .futures_backtest_market()
-                .build()?;
-            let stream = tqsdk_session::ServerBacktestHistoryStream::open(session, request).await?;
-            Ok(Box::new(SessionServerHistorySource { stream }) as Box<dyn ServerHistorySource>)
+            let lease = self.pool.acquire(credentials)?;
+            let stream =
+                tqsdk_session::ServerBacktestHistoryStream::open(lease.session().clone(), request)
+                    .await?;
+            Ok(Box::new(SessionServerHistorySource {
+                stream: Some(stream),
+                lease: Some(lease),
+            }) as Box<dyn ServerHistorySource>)
         })
     }
 }
 
 #[cfg(all(feature = "live", feature = "services"))]
 struct SessionServerHistorySource {
-    stream: tqsdk_session::ServerBacktestHistoryStream,
+    stream: Option<tqsdk_session::ServerBacktestHistoryStream>,
+    lease: Option<ServerHistorySessionLease>,
 }
 
 #[cfg(all(feature = "live", feature = "services"))]
 impl ServerHistorySource for SessionServerHistorySource {
     fn next_event<'a>(&'a mut self) -> ServerHistorySourceFuture<'a> {
-        Box::pin(async move { self.stream.next_event(None).await.map_err(Into::into) })
+        Box::pin(async move {
+            let stream = self.stream.as_mut().ok_or(DataError::InvalidState(
+                "server-history source was already closed",
+            ))?;
+            stream.next_event(None).await.map_err(Into::into)
+        })
+    }
+
+    fn close<'a>(&'a mut self, reusable: bool) -> CloseServerHistorySourceFuture<'a> {
+        Box::pin(async move {
+            let cleanup_result = match self.stream.take() {
+                Some(stream) => stream.close().await.map_err(Into::into),
+                None => Ok(()),
+            };
+            if reusable && cleanup_result.is_ok() {
+                if let Some(lease) = self.lease.take() {
+                    lease.recycle();
+                }
+            } else {
+                self.lease.take();
+            }
+            cleanup_result
+        })
     }
 }
 
@@ -820,45 +984,52 @@ impl RemoteFillCoordinator {
                     return Err(error);
                 }
             };
-            loop {
+            let attempt_result = loop {
                 let cancellation = shared.state.terminal.notified();
                 tokio::pin!(cancellation);
                 let _ = cancellation.as_mut().enable();
-                self.ensure_not_cancelled(shared)?;
+                if let Err(error) = self.ensure_not_cancelled(shared) {
+                    break Err(error);
+                }
                 let source_event = source.next_event();
                 tokio::pin!(source_event);
                 let next_event = tokio::select! {
-                    result = &mut source_event => result,
-                    _ = &mut cancellation => {
-                        self.ensure_not_cancelled(shared)?;
-                        continue;
+                    result = &mut source_event => Some(result),
+                    _ = &mut cancellation => None,
+                };
+                let Some(next_event) = next_event else {
+                    match self.ensure_not_cancelled(shared) {
+                        Ok(()) => continue,
+                        Err(error) => break Err(error),
                     }
                 };
                 match next_event {
-                    Ok(Some(event)) => {
-                        if consume(event)? {
-                            return Ok(());
-                        }
-                    }
+                    Ok(Some(event)) => match consume(event) {
+                        Ok(true) => break Ok(()),
+                        Ok(false) => {}
+                        Err(error) => break Err(error),
+                    },
                     Ok(None) => {
-                        let error = DataError::InvalidResponse(
+                        break Err(DataError::InvalidResponse(
                             "server backtest history source ended without StreamCompleted"
                                 .to_string(),
-                        );
-                        if attempt < REMOTE_FILL_RETRY_ATTEMPTS && is_retryable(&error) {
-                            last_error = Some(error);
-                            break;
-                        }
-                        return Err(error);
+                        ));
                     }
-                    Err(error) => {
-                        if attempt < REMOTE_FILL_RETRY_ATTEMPTS && is_retryable(&error) {
-                            last_error = Some(error);
-                            break;
-                        }
-                        return Err(error);
-                    }
+                    Err(error) => break Err(error),
                 }
+            };
+            let reusable = attempt_result.is_ok();
+            let close_result = source.close(reusable).await;
+            let attempt_result = match (attempt_result, close_result) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Ok(()), Err(error)) | (Err(error), _) => Err(error),
+            };
+            match attempt_result {
+                Ok(()) => return Ok(()),
+                Err(error) if attempt < REMOTE_FILL_RETRY_ATTEMPTS && is_retryable(&error) => {
+                    last_error = Some(error);
+                }
+                Err(error) => return Err(error),
             }
             self.sleep_or_shared_cancel(shared, retry_delay(attempt))
                 .await?;
@@ -1447,12 +1618,14 @@ mod tests {
         let range = (first_range.0, second_range.end_ns);
         let opens = Arc::new(AtomicUsize::new(0));
         let emitted = Arc::new(AtomicUsize::new(0));
+        let discarded_closes = Arc::new(AtomicUsize::new(0));
         let cancellation = Arc::new(AtomicBool::new(false));
         let coordinator = coordinator(
             root.clone(),
             Arc::new(RowsThenNeverFactory {
                 opens: Arc::clone(&opens),
                 emitted: Arc::clone(&emitted),
+                discarded_closes: Arc::clone(&discarded_closes),
                 symbol: "SHFE.au2608".to_string(),
             }),
             Arc::new(CountingAuth::new(Arc::new(AtomicUsize::new(0)))),
@@ -1491,6 +1664,7 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("cancelled"));
         assert_eq!(opens.load(Ordering::SeqCst), 1);
+        assert_eq!(discarded_closes.load(Ordering::SeqCst), 1);
         assert_eq!(
             BacktestTickCache::open_read_only(&root)
                 .inventory()
@@ -1604,6 +1778,128 @@ mod tests {
                 .is_complete()
         );
         assert_eq!(opens.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(all(feature = "live", feature = "services"))]
+    #[tokio::test]
+    async fn session_source_factory_reuses_only_cleanly_closed_sessions() {
+        let factory = SessionServerHistorySourceFactory::new(1);
+        let first_request = BacktestHistoryFillRequest::tick(
+            "SHFE.au2608",
+            (1_000, 2_000),
+            None,
+            Some(1),
+            "SHFE.au2608",
+        )
+        .server_request();
+        let mut first = factory
+            .open(
+                BacktestHistoryCredentials::new("test-user", "test-pass"),
+                first_request,
+            )
+            .await
+            .unwrap();
+
+        first.close(true).await.unwrap();
+        assert_eq!(factory.created_session_count(), 1);
+        assert_eq!(factory.idle_session_count(), 1);
+
+        let second_request = BacktestHistoryFillRequest::tick(
+            "SHFE.au2608",
+            (2_000, 3_000),
+            None,
+            Some(2),
+            "SHFE.au2608",
+        )
+        .server_request();
+        let mut second = factory
+            .open(
+                BacktestHistoryCredentials::new("test-user", "test-pass"),
+                second_request,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(factory.created_session_count(), 1);
+        assert_eq!(factory.idle_session_count(), 0);
+
+        let overflow_request = BacktestHistoryFillRequest::tick(
+            "SHFE.au2608",
+            (3_000, 4_000),
+            None,
+            Some(3),
+            "SHFE.au2608",
+        )
+        .server_request();
+        let mut overflow = tokio::time::timeout(
+            Duration::from_millis(100),
+            factory.open(
+                BacktestHistoryCredentials::new("test-user", "test-pass"),
+                overflow_request,
+            ),
+        )
+        .await
+        .expect("pool overflow must not wait while a reusable lane is active")
+        .unwrap();
+        assert_eq!(factory.created_session_count(), 2);
+        overflow.close(true).await.unwrap();
+        assert_eq!(factory.idle_session_count(), 0);
+        second.close(false).await.unwrap();
+
+        let third_request = BacktestHistoryFillRequest::tick(
+            "SHFE.au2608",
+            (4_000, 5_000),
+            None,
+            Some(4),
+            "SHFE.au2608",
+        )
+        .server_request();
+        let mut third = factory
+            .open(
+                BacktestHistoryCredentials::new("test-user", "test-pass"),
+                third_request,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(factory.created_session_count(), 3);
+        third.close(false).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn completed_daily_slices_close_their_sources_as_reusable() {
+        let root = temporary_root("daily-source-recycle");
+        let first = closed_range();
+        let second_day = backtest_tick_trading_day_for_timestamp_ns(first.1).unwrap();
+        let second = backtest_tick_trading_day_range(second_day).unwrap();
+        let opens = Arc::new(AtomicUsize::new(0));
+        let reusable_closes = Arc::new(AtomicUsize::new(0));
+        let discarded_closes = Arc::new(AtomicUsize::new(0));
+        let coordinator = coordinator(
+            root,
+            Arc::new(CloseTrackingFactory {
+                opens: Arc::clone(&opens),
+                reusable_closes: Arc::clone(&reusable_closes),
+                discarded_closes: Arc::clone(&discarded_closes),
+                symbol: "SHFE.au2608".to_string(),
+            }),
+            Arc::new(CountingAuth::new(Arc::new(AtomicUsize::new(0)))),
+        );
+
+        coordinator
+            .ensure_coverage(BacktestHistoryFillRequest::tick(
+                "SHFE.au2608",
+                (first.0, second.end_ns),
+                None,
+                Some(1),
+                "SHFE.au2608",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(opens.load(Ordering::SeqCst), 2);
+        assert_eq!(reusable_closes.load(Ordering::SeqCst), 2);
+        assert_eq!(discarded_closes.load(Ordering::SeqCst), 0);
     }
 
     fn coordinator(
@@ -1789,6 +2085,7 @@ mod tests {
     struct RowsThenNeverFactory {
         opens: Arc<AtomicUsize>,
         emitted: Arc<AtomicUsize>,
+        discarded_closes: Arc<AtomicUsize>,
         symbol: String,
     }
 
@@ -1807,6 +2104,7 @@ mod tests {
                     .unwrap_or_else(|| "tick".to_string());
                 Ok(Box::new(RowsThenNeverSource {
                     emitted: Arc::clone(&self.emitted),
+                    discarded_closes: Arc::clone(&self.discarded_closes),
                     event: Some(ServerBacktestHistoryEvent::Ticks {
                         chart_id,
                         symbol: self.symbol.clone(),
@@ -1822,6 +2120,7 @@ mod tests {
 
     struct RowsThenNeverSource {
         emitted: Arc<AtomicUsize>,
+        discarded_closes: Arc<AtomicUsize>,
         event: Option<ServerBacktestHistoryEvent>,
     }
 
@@ -1833,6 +2132,74 @@ mod tests {
                     return Ok(Some(event));
                 }
                 std::future::pending().await
+            })
+        }
+
+        fn close<'a>(&'a mut self, reusable: bool) -> CloseServerHistorySourceFuture<'a> {
+            Box::pin(async move {
+                assert!(!reusable);
+                self.discarded_closes.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+    }
+
+    struct CloseTrackingFactory {
+        opens: Arc<AtomicUsize>,
+        reusable_closes: Arc<AtomicUsize>,
+        discarded_closes: Arc<AtomicUsize>,
+        symbol: String,
+    }
+
+    impl ServerHistorySourceFactory for CloseTrackingFactory {
+        fn open<'a>(
+            &'a self,
+            _credentials: BacktestHistoryCredentials,
+            request: ServerBacktestHistoryRequest,
+        ) -> OpenServerHistorySourceFuture<'a> {
+            Box::pin(async move {
+                self.opens.fetch_add(1, Ordering::SeqCst);
+                let chart_id = request
+                    .charts
+                    .first()
+                    .map(|chart| chart.chart_id.clone())
+                    .unwrap_or_else(|| "tick".to_string());
+                Ok(Box::new(CloseTrackingSource {
+                    events: vec![
+                        ServerBacktestHistoryEvent::Ticks {
+                            chart_id,
+                            symbol: self.symbol.clone(),
+                            rows: vec![tick(1, request.start_ns.saturating_add(1))],
+                        },
+                        ServerBacktestHistoryEvent::StreamCompleted,
+                    ]
+                    .into(),
+                    reusable_closes: Arc::clone(&self.reusable_closes),
+                    discarded_closes: Arc::clone(&self.discarded_closes),
+                }) as Box<dyn ServerHistorySource>)
+            })
+        }
+    }
+
+    struct CloseTrackingSource {
+        events: VecDeque<ServerBacktestHistoryEvent>,
+        reusable_closes: Arc<AtomicUsize>,
+        discarded_closes: Arc<AtomicUsize>,
+    }
+
+    impl ServerHistorySource for CloseTrackingSource {
+        fn next_event<'a>(&'a mut self) -> ServerHistorySourceFuture<'a> {
+            Box::pin(async move { Ok(self.events.pop_front()) })
+        }
+
+        fn close<'a>(&'a mut self, reusable: bool) -> CloseServerHistorySourceFuture<'a> {
+            Box::pin(async move {
+                if reusable {
+                    self.reusable_closes.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    self.discarded_closes.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(())
             })
         }
     }

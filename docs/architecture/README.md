@@ -108,6 +108,10 @@ V1 是：
     `TQSDK_HISTORY_CACHE_DIR` 覆盖）；默认 `RemoteOnMiss` 先复用本地 TQBN daily
     tick cache 与独立 canonical final-60s monthly cache，缺失时由 `tqsdk-data`
     `BacktestHistoryClient` 通过官方 server-side backtest stream 填充对应输入并驱动本地 `TqSim`。
+    一个 client 最多保留 logical concurrency 个 clean source lanes；Tick 每日 coverage checkpoint 与
+    minute bounded window 保持不变，但 clean terminal 后复用 lane/session，避免每段重复鉴权和建连。
+    pool 饱和时 overflow 不在 series lease 内等待且不会回池；取消、协议/传输错误或 chart cleanup
+    失败也会丢弃 lane。
     minute cache 使用 v4 文件身份，只有远端 terminal 成功后才提交 final coverage；`KQ.m@...`
     使用 data 持久化的 calendar/session/physical-segment metadata sidecar 解析为 dated
     concrete-contract tick ranges，因而与具体合约共用物理 cache、coverage 和远端补缺请求。
@@ -154,6 +158,8 @@ V1 是：
   - `subscribe_quotes()` / `unsubscribe_quotes()` 这类低层命令 helper
   - session-scoped market interest registry，用于 quote、trading status 和 chart
     lease 的去重、引用计数与最后 owner 释放
+  - `ServerBacktestHistoryStream::close().await` 在 session 复用前同步完成 chart lease cleanup；
+    Drop 仍只承担无法显式 close 时的异步兜底
   - `wait_command_completed()` 这个最小 control-plane 等待原语
   - `command_status_typed()` 这个 additive typed 命令状态读取 helper
   - direct query / schema refresh 薄层入口

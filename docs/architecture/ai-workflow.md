@@ -122,6 +122,8 @@ tqsdk
 - 官方单日 replay session 创建、facade 自动 heartbeat 与显式控速/terminate 这类
   authenticated service helper；terminate 仍不伪装成 async Drop
 - session-level error diagnostics / retry hints
+- `ServerBacktestHistoryStream::close().await` 在复用 session 前等待 chart leases 释放；Drop 仅作为
+  无法显式 close 时的异步 best-effort cleanup
 - 天勤特定 auth/http/TqKq 实现的内部落点
 
 设计原因：
@@ -220,6 +222,11 @@ tqsdk
 - `BacktestHistoryClient`：持久 metadata sidecar、请求 planner、official server-backtest
   fill/single-flight、bounded async cache scan 与 Tick/60s 派生 K 线查询。它是回测数据路径的
   唯一 cache/fill owner；`tqsdk-wait` 不参与 data fill，`tqsdk-task` 不拥有 durable partition
+- `RemoteOnMiss` 在单个 client 内最多保留 `logical_concurrency` 个 clean server-backtest source lanes；
+  同一 lane 可顺序服务多个 Tick 交易日或 minute window，但只有显式 terminal 且 chart lease 清理成功
+  才能复用。pool 饱和时不得在持有 series lease 期间等待，overflow session 完成后直接销毁。取消、
+  transport/protocol error 或 cleanup error 也必须销毁 lane。lane 调度属于 data fill，session 推进、
+  分页和 chart 生命周期仍由 `tqsdk-session` substrate 拥有
 - `RemoteOnMiss` client/facade/CLI 必须进入 shared cache-root gate，并由 `family × symbol` lease 去重
   重叠 fill；refresh、stale repair、verify、doctor 和真实 purge 使用 exclusive gate。不要绕过该门禁
   增加另一条远端 fill 路径，也不要承诺不理解该协议的旧进程可与新进程长期混跑

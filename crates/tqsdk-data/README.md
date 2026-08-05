@@ -86,6 +86,10 @@ storage orchestration 是 async，但 TQBN 解压/解码仍由有界 `spawn_bloc
 实际缺口再以 `cache family × cache symbol` 的跨进程 lease 串行化，等待者重查 coverage 后复用 owner
 结果。Tick fill 按 trading day 顺序消费并以 8192 rows 缓冲；取消会 flush 已接受短尾但不提交未 terminal
 coverage。fill-only materialization 不回读刚写入的 cache，物理写入计数在 shared fill 中只累计一次。
+一个 client 最多保留 `logical_concurrency` 个 clean server-backtest source lanes；clean terminal 与
+chart cleanup 成功后，同一 session 可顺序服务后续 trading-day/minute slices。pool 饱和时 overflow
+不等待且不回池；取消、source error 或 cleanup error 也会丢弃 lane。coverage 仍按 slice 独立提交，
+因此连接复用不改变中断恢复粒度。
 
 其中：
 

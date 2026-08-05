@@ -319,7 +319,7 @@ impl BacktestHistoryClientBuilder {
                 per_symbol_buffer_bytes: self.per_symbol_buffer_bytes,
                 collect_limit_bytes: self.collect_limit_bytes,
                 auth_provider: self.auth_provider,
-                source_factory: default_server_history_source_factory(),
+                source_factory: default_server_history_source_factory(self.logical_concurrency),
             },
         ))
     }

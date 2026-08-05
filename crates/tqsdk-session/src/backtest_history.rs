@@ -157,6 +157,9 @@ struct StreamCleanup {
     cancellation_requested: Arc<AtomicBool>,
     cancellation: Arc<Notify>,
     leases: Arc<Mutex<BTreeMap<String, MarketChartLease>>>,
+    finished: Arc<AtomicBool>,
+    result: Arc<Mutex<Option<Result<()>>>>,
+    finished_notification: Arc<Notify>,
 }
 
 impl StreamCleanup {
@@ -165,15 +168,23 @@ impl StreamCleanup {
             cancellation_requested: Arc::new(AtomicBool::new(false)),
             cancellation: Arc::new(Notify::new()),
             leases: Arc::new(Mutex::new(BTreeMap::new())),
+            finished: Arc::new(AtomicBool::new(false)),
+            result: Arc::new(Mutex::new(None)),
+            finished_notification: Arc::new(Notify::new()),
         }
     }
 
     fn start_coordinator(&self) {
         let cancellation = Arc::clone(&self.cancellation);
         let leases = Arc::clone(&self.leases);
+        let finished = Arc::clone(&self.finished);
+        let result = Arc::clone(&self.result);
+        let finished_notification = Arc::clone(&self.finished_notification);
         let _cleanup_task = tokio::spawn(async move {
             cancellation.notified().await;
-            close_leases(leases).await;
+            *result.lock().await = Some(close_leases(leases).await);
+            finished.store(true, Ordering::Release);
+            finished_notification.notify_waiters();
         });
     }
 
@@ -194,13 +205,38 @@ impl StreamCleanup {
             self.cancellation.notify_one();
         }
     }
+
+    async fn close_and_wait(&self) -> Result<()> {
+        self.request_cancellation();
+        loop {
+            let finished = self.finished_notification.notified();
+            if self.finished.load(Ordering::Acquire) {
+                break;
+            }
+            finished.await;
+        }
+        self.result.lock().await.take().unwrap_or_else(|| {
+            Err(validation_error(
+                "server-backtest history stream cleanup finished without a result",
+            ))
+        })
+    }
 }
 
-async fn close_leases(leases: Arc<Mutex<BTreeMap<String, MarketChartLease>>>) {
+async fn close_leases(leases: Arc<Mutex<BTreeMap<String, MarketChartLease>>>) -> Result<()> {
     let leases = std::mem::take(&mut *leases.lock().await);
+    let mut first_error = None;
     for lease in leases.into_values() {
-        let _ = lease.close().await;
+        if let Err(error) = lease.close().await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
     }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    Ok(())
 }
 
 impl ServerBacktestHistoryStream {
@@ -235,6 +271,15 @@ impl ServerBacktestHistoryStream {
         }
         stream.cursor = stream.reader.cursor();
         Ok(stream)
+    }
+
+    /// Releases every chart lease and waits until cleanup has completed.
+    ///
+    /// Call this before reusing the underlying shared session for another
+    /// server-backtest stream. Dropping the stream still requests best-effort
+    /// asynchronous cleanup when an explicit close is not possible.
+    pub async fn close(self) -> Result<()> {
+        self.cleanup.close_and_wait().await
     }
 
     /// Advances the shared session until one history event is available.

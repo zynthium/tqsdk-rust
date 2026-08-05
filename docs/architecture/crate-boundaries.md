@@ -345,6 +345,10 @@ sink、WAL、journal 或 cache writer。
   planner、跨 client single-flight fill、bounded `spawn_blocking` cache readers、request chunk 与
   terminal report。production orchestration 是 async；TQBN 解压/解码仍在有界 blocking worker 中，
   不将 `tokio::fs` 误称为吞吐优化
+- RemoteOnMiss source-lane 调度：最多保留 logical concurrency 个 clean lanes，顺序 slice 可复用
+  session；只有 terminal 与 chart cleanup 都成功才回池，pool overflow、取消和错误直接销毁且不在
+  series lease 内等待。data 不实现 session protocol，只组合
+  `tqsdk-session::ServerBacktestHistoryStream`
 - `LiveTickCacheWriter` 这类纯数据层 live tick row writer：只接收已解码 tick rows，按连续
   tick id 推进 coverage；可合并连续单 tick push，并通过 `flush()` / Drop 提交短尾，但不拥有
   session、订阅、wait loop、timer task 或后台进程
@@ -367,7 +371,7 @@ sink、WAL、journal 或 cache writer。
 - strategy execution / 本地撮合
 - wait-update live object facade
 - shared market cache policy、live session 或订阅 ownership
-- remote-on-miss 的 session 推进 loop
+- remote-on-miss 的 session protocol、分页或推进 loop 实现
 - relay 进程、dashboard 或多客户端 market service
 
 ## `tqsdk-cache`

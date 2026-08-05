@@ -130,7 +130,9 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 `ServerBacktestHistoryStream` 是同一 session 层提供给 data 的 server-backtest history chart
 substrate：它只负责连接、chart 分页和 terminal signal，可读取 Tick 或 canonical 60s K。它不拥有
 cache directory、coverage、metadata sidecar、缺口规划、K 线聚合或 retention；这些都归
-`tqsdk-data::BacktestHistoryClient`。高周期和 sub-minute K 的本地派生也不应回流到 session。
+`tqsdk-data::BacktestHistoryClient`。顺序复用同一 session 前调用 `close().await`，可等待所有 chart
+leases 完成释放；直接 Drop 仍会请求异步 best-effort cleanup。高周期和 sub-minute K 的本地派生也不应
+回流到 session。
 
 交易日历的 holiday JSON 是官方公开静态文件，请求时不会携带天勤鉴权 token。
 同一个 `SessionClient` 会缓存已解析的 holiday payload，重复

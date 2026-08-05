@@ -91,6 +91,8 @@ tick 补洞按 trading day 顺序处理，接受 rows 以 8192 行缓冲后追�
 全量 materialization。fill-only warmup 不回读刚写入的 rows；报告的 `rows_written` 是实际物理写入数，
 同一 shared fill 被多个 logical request 复用时只累计一次，完整命中为 `0`。final 成功后只对本轮实际远端
 回填的 `symbol × trading day` 范围去重 compact；provisional fill 跳过 compaction，等 closed-day reconcile。
+交易日仍是 coverage/recovery checkpoint，不再是连接生命周期：同一有界 source lane 在显式 terminal 和
+chart cleanup 成功后复用 session；取消、网络/协议错误或 cleanup 失败时销毁该 lane。
 
 默认先动态显示 cache inspection 的 `已检查范围/总范围`、命中、缺口和当前 physical symbol，再显示
 logical batch 和当前 active physical symbol 的 `完整接收日/待填日`。非交互任务可显式使用
@@ -161,7 +163,9 @@ checkpoint 提交方式，不改变普通 replay/CacheOnly coverage；调用方�
 
 `batch_size(...)` 只保留兼容报告 hint，不再串行切远端任务。多 symbol 的网络并发由
 `TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY` 控制，合并会话大小由
-`TQSDK_REMOTE_FILL_SYMBOL_BATCH_SIZE` 控制；未做基准测试时保持默认值。
+`TQSDK_REMOTE_FILL_SYMBOL_BATCH_SIZE` 控制；data client 最多保留 logical concurrency 个 clean source
+lanes。pool 饱和时 overflow 不等待且不会回池。未做基准测试时保持默认值，也不要设置过小的
+`TQSDK_REMOTE_FILL_SLICE_SECS`。
 
 长区间正常以持续进展为准。默认 60 秒无 tick 进展会触发保护；可按作业环境设置
 `TQSDK_REMOTE_FILL_IDLE_TIMEOUT_SECS`。`TQSDK_REMOTE_FILL_BATCH_TIMEOUT_SECS` 默认关闭，

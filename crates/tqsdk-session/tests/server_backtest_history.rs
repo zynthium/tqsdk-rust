@@ -472,6 +472,47 @@ async fn dropping_the_stream_asynchronously_releases_its_chart_lease() {
             && body.get("chart_id") == Some(&json!("ticks-au"))
             && body.get("ins_list") == Some(&json!(""))
     }));
+
+    let reused = ServerBacktestHistoryStream::open(
+        session.client_clone(),
+        request(vec![chart(
+            "ticks-au-reused",
+            "SHFE.au2608",
+            ServerBacktestHistoryKind::Tick,
+        )]),
+    )
+    .await
+    .unwrap();
+    assert!(transport_bodies(&session).iter().any(|body| {
+        body.get("aid") == Some(&json!("set_chart"))
+            && body.get("chart_id") == Some(&json!("ticks-au-reused"))
+            && body.get("ins_list") == Some(&json!("SHFE.au2608"))
+    }));
+    reused.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn closing_the_stream_waits_until_its_chart_lease_is_released() {
+    let session = manual_session();
+    let stream = ServerBacktestHistoryStream::open(
+        session.client_clone(),
+        request(vec![chart(
+            "ticks-au",
+            "SHFE.au2608",
+            ServerBacktestHistoryKind::Tick,
+        )]),
+    )
+    .await
+    .unwrap();
+    let _ = transport_bodies(&session);
+
+    stream.close().await.unwrap();
+
+    assert!(transport_bodies(&session).iter().any(|body| {
+        body.get("aid") == Some(&json!("set_chart"))
+            && body.get("chart_id") == Some(&json!("ticks-au"))
+            && body.get("ins_list") == Some(&json!(""))
+    }));
 }
 
 #[tokio::test(flavor = "current_thread")]

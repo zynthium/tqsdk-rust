@@ -117,6 +117,11 @@ mapping 以 versioned snapshot sidecar 持久化，terminal report 携带 snapsh
 且覆盖请求窗口的 sidecar，不会向公开 metadata service 查询。当前 cache-backed fill 只支持 futures；
 股票回测必须使用 facade 的 `.disabled_cache()` 官方路径。
 
+一个 client 最多保留 `logical_concurrency` 个 clean server-backtest source lanes。Tick trading-day
+slice 与 canonical-minute bounded window 仍分别提交 coverage，但 clean terminal 后 lane 保留底层
+session 供下一 slice 顺序复用；服务端 10,000-row page 不重建 session。pool 饱和时 overflow session
+不等待且不回池；取消、source error 或显式 chart cleanup 失败时 lane 也直接销毁。
+
 每个 `RemoteOnMiss` run 在 planner、fill 和 row scan 生命周期内持有 shared cache-root gate；facade
 已经取得 shared/exclusive gate 时把同一个实际锁守卫传给 data run，不重复加锁。不同 symbol 可以并行，
 同一 `family × cache symbol` 的重叠请求通过进程内 shared fill 和跨进程 lease 合并，并在取得 lease 后再次
