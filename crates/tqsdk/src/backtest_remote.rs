@@ -809,12 +809,13 @@ pub(crate) async fn ensure_remote_main_contract_metadata(
         return Ok(());
     }
 
-    let metadata = tqsdk_data::BacktestHistoryMetadataCache::open_read_only(cache_dir);
     let mut missing = Vec::new();
     for symbol in symbols {
-        let is_covered = metadata.load_active(&symbol)?.is_some_and(|snapshot| {
-            metadata_covers_range(&snapshot.physical_segments, start_ns, end_ns)
-        });
+        let is_covered =
+            tqsdk_data::resolve_backtest_metadata_snapshot(cache_dir, &symbol, start_ns, end_ns)?
+                .is_some_and(|snapshot| {
+                    metadata_covers_range(&snapshot.physical_segments, start_ns, end_ns)
+                });
         if !is_covered {
             missing.push(symbol);
         }
@@ -830,8 +831,27 @@ pub(crate) async fn ensure_remote_main_contract_metadata(
             auth.pass.clone(),
         ))
         .build()?;
-    for symbol in missing {
-        client.refresh_metadata(&symbol, start_ns, end_ns).await?;
+
+    let mut pending = missing.into_iter();
+    let mut tasks = JoinSet::new();
+    loop {
+        while tasks.len() < REMOTE_FILL_SYMBOL_CONCURRENCY_MAX {
+            let Some(symbol) = pending.next() else {
+                break;
+            };
+            let client = client.clone();
+            tasks.spawn(async move {
+                client
+                    .refresh_metadata(&symbol, start_ns, end_ns)
+                    .await
+                    .map(|_| ())
+            });
+        }
+        let Some(result) = tasks.join_next().await else {
+            break;
+        };
+        result
+            .map_err(|error| data_validation(format!("metadata refresh task failed: {error}")))??;
     }
     Ok(())
 }
@@ -1638,7 +1658,8 @@ mod tests {
 
     use super::{
         BacktestRemoteFillConfig, FacadeHistoryFillKind, MaterializedHistoryProgress,
-        RemoteBacktestCacheFillRequest, RemoteCacheCommitMode, final_tick_compaction_ranges,
+        RemoteBacktestCacheFillRequest, RemoteCacheCommitMode,
+        ensure_remote_main_contract_metadata, final_tick_compaction_ranges,
         parse_remote_fill_allow_empty_idle, parse_remote_fill_batch_timeout,
         parse_remote_fill_idle_timeout, parse_remote_fill_slice_ns,
         parse_remote_fill_symbol_batch_size, parse_remote_fill_symbol_concurrency,
@@ -1646,6 +1667,26 @@ mod tests {
         should_reject_empty_remote_tick_fill, split_remote_fill_requests,
     };
     use tqsdk_data::{BacktestHistoryPhase, BacktestHistoryTelemetryEvent};
+
+    #[tokio::test]
+    async fn retained_metadata_coverage_does_not_require_remote_refresh() {
+        let root = test_root("retained-metadata-coverage");
+        let cache = tqsdk_data::BacktestHistoryMetadataCache::open(&root).unwrap();
+        cache.store_snapshot(snapshot(1_000, 2_000, 1)).unwrap();
+        cache.store_snapshot(snapshot(3_000, 4_000, 2)).unwrap();
+
+        ensure_remote_main_contract_metadata(
+            None,
+            &root,
+            ["KQ.m@SHFE.au".to_string()],
+            1_000,
+            2_000,
+        )
+        .await
+        .expect("a retained covering snapshot must remain an offline cache hit");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn remote_fill_config_normalizes_legacy_values() {
@@ -1819,5 +1860,42 @@ mod tests {
             coalesced.observe(&event(BacktestHistoryPhase::Aggregate, 320)),
             (320, true)
         );
+    }
+
+    fn snapshot(
+        start_ns: i64,
+        end_ns: i64,
+        captured_at_ns: i64,
+    ) -> tqsdk_data::BacktestHistoryMetadataSnapshot {
+        tqsdk_data::BacktestHistoryMetadataSnapshot {
+            schema_version: tqsdk_data::BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+            market_kind: tqsdk_data::BacktestHistoryMarketKind::Futures,
+            logical_symbol: "KQ.m@SHFE.au".to_string(),
+            captured_at_ns,
+            trading_days: vec![tqsdk_data::BacktestHistoryTradingDay {
+                date: "2026-01-05".to_string(),
+                is_trading_day: true,
+                start_ns,
+                end_ns,
+            }],
+            session: tqsdk_data::KlineSessionTemplate::cst_trading_day(),
+            physical_segments: vec![tqsdk_data::BacktestHistoryPhysicalSegment {
+                physical_symbol: "SHFE.au2606".to_string(),
+                start_ns,
+                end_ns,
+            }],
+            snapshot_hash: String::new(),
+        }
+    }
+
+    fn test_root(label: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "tqsdk-backtest-remote-{label}-{}-{unique}",
+            std::process::id()
+        ))
     }
 }

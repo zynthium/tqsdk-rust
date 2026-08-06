@@ -156,6 +156,105 @@ async fn history_backtest_replay_synthesizes_main_contract_kline_from_physical_t
 }
 
 #[tokio::test]
+async fn projected_tick_segments_open_later_files_only_when_reached() {
+    let dir = temp_dir("projected-segments-lazy-open");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let main = "KQ.m@SHFE.au";
+    let first_physical = "SHFE.au2608";
+    let second_physical = "SHFE.au2610";
+    cache
+        .store_ticks(first_physical, 1_000, 2_000, [tick(1, 1_500, 500.0, 1)])
+        .unwrap();
+    cache
+        .store_ticks(second_physical, 2_000, 3_000, [tick(2, 2_500, 501.0, 2)])
+        .unwrap();
+    let second_path = tick_partition_path(&dir, second_physical);
+    std::fs::write(second_path, b"corrupt-later-segment").unwrap();
+
+    let mut stream =
+        HistoryBacktestReplayStream::new_projected(HistoryBacktestProjectedReplayRequest {
+            cache: HistorySeriesCache::open(&dir).unwrap(),
+            start_ns: 1_000,
+            end_ns: 3_000,
+            tick_sources: vec![
+                HistoryBacktestTickSource {
+                    replay_symbol: main.to_string(),
+                    cache_symbol: first_physical.to_string(),
+                    start_ns: 1_000,
+                    end_ns: 2_000,
+                },
+                HistoryBacktestTickSource {
+                    replay_symbol: main.to_string(),
+                    cache_symbol: second_physical.to_string(),
+                    start_ns: 2_000,
+                    end_ns: 3_000,
+                },
+            ],
+            native_klines: Vec::new(),
+            synthetic_kline_sources: Vec::new(),
+            minute_kline_sources: Vec::new(),
+        })
+        .expect("later physical segments must not be opened during construction");
+
+    let first = stream.next_event().await.unwrap().unwrap();
+    assert_eq!(first.symbol(), main);
+    assert_eq!(first.underlying_symbol(), Some(first_physical));
+    assert!(stream.next_event().await.is_err());
+}
+
+#[tokio::test]
+async fn projected_synthetic_klines_continue_across_physical_segments() {
+    let dir = temp_dir("projected-synthetic-segments");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let main = "KQ.m@SHFE.au";
+    let first_physical = "SHFE.au2608";
+    let second_physical = "SHFE.au2610";
+    cache
+        .store_ticks(first_physical, 1_000, 2_000, [tick(1, 1_500, 500.0, 1)])
+        .unwrap();
+    cache
+        .store_ticks(second_physical, 2_000, 3_000, [tick(2, 2_500, 501.0, 2)])
+        .unwrap();
+
+    let mut stream =
+        HistoryBacktestReplayStream::new_projected(HistoryBacktestProjectedReplayRequest {
+            cache: HistorySeriesCache::open(&dir).unwrap(),
+            start_ns: 1_000,
+            end_ns: 3_000,
+            tick_sources: Vec::new(),
+            native_klines: Vec::new(),
+            synthetic_kline_sources: vec![
+                HistoryBacktestSyntheticKlineSource {
+                    tick_source: HistoryBacktestTickSource {
+                        replay_symbol: main.to_string(),
+                        cache_symbol: first_physical.to_string(),
+                        start_ns: 1_000,
+                        end_ns: 2_000,
+                    },
+                    duration_ns: SUB_MINUTE_NS,
+                },
+                HistoryBacktestSyntheticKlineSource {
+                    tick_source: HistoryBacktestTickSource {
+                        replay_symbol: main.to_string(),
+                        cache_symbol: second_physical.to_string(),
+                        start_ns: 2_000,
+                        end_ns: 3_000,
+                    },
+                    duration_ns: SUB_MINUTE_NS,
+                },
+            ],
+            minute_kline_sources: Vec::new(),
+        })
+        .expect("continuous synthetic sources may start after the replay start");
+
+    let first = stream.next_event().await.unwrap().unwrap();
+    let second = stream.next_event().await.unwrap().unwrap();
+    assert_eq!(first.underlying_symbol(), Some(first_physical));
+    assert_eq!(second.underlying_symbol(), Some(second_physical));
+    assert!(stream.next_event().await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn projected_synthetic_klines_prime_volume_without_replaying_pre_request_ticks() {
     let dir = temp_dir("projected-synthetic-priming");
     let cache = BacktestTickCache::open(&dir).unwrap();
@@ -564,4 +663,19 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+fn tick_partition_path(root: &std::path::Path, symbol: &str) -> std::path::PathBuf {
+    let series = root.join("series");
+    for day in std::fs::read_dir(series).unwrap() {
+        let path = day
+            .unwrap()
+            .path()
+            .join("tick")
+            .join(format!("{symbol}.tqbn"));
+        if path.is_file() {
+            return path;
+        }
+    }
+    panic!("tick partition for {symbol} was not found");
 }

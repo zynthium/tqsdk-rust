@@ -154,7 +154,7 @@ const SERVER_REPLAY_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 #[cfg(all(feature = "services", feature = "live"))]
 const SERVER_REPLAY_TERMINATE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_BACKTEST_WARMUP_BATCH_SIZE: usize = 20;
-const MAX_BACKTEST_CACHE_INSPECTION_CONCURRENCY: usize = 4;
+const MAX_BACKTEST_CACHE_INSPECTION_CONCURRENCY: usize = 8;
 const BACKTEST_SYNTH_KLINE_MAX_NS: i64 = 60_000_000_000;
 const DEFAULT_PROVISIONAL_OPEN_DAY_OVERLAP_NS: i64 = 5 * 60 * 1_000_000_000;
 
@@ -377,6 +377,9 @@ impl Tq {
     }
 
     fn flush_tick_recorder(&mut self) -> Result<()> {
+        if self.tick_recorder.is_none() {
+            return Ok(());
+        }
         let step = self.api_any().last_step();
         if let Some(recorder) = self.tick_recorder.as_mut() {
             recorder.flush(step.as_ref())?;
@@ -2601,6 +2604,23 @@ impl BacktestBuilder {
             minute_rows_by_symbol = fill_report.rows_by_symbol;
         }
 
+        let ranges_to_reinspect = physical_ranges
+            .iter()
+            .filter(|(symbol, start_ns, end_ns)| {
+                refresh
+                    || before_by_range
+                        .get(&(symbol.clone(), *start_ns, *end_ns))
+                        .is_none_or(|before| !before.is_complete())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let after_by_range =
+            inspect_backtest_tick_cache_ranges(cache.clone(), ranges_to_reinspect.as_slice())
+                .await?
+                .into_iter()
+                .map(|(symbol, start_ns, end_ns, status)| ((symbol, start_ns, end_ns), status))
+                .collect::<BTreeMap<_, _>>();
+
         let mut symbols = Vec::new();
         let mut reported_rows_by_symbol = BTreeSet::new();
         for (symbol, start_ns, end_ns) in &physical_ranges {
@@ -2613,7 +2633,14 @@ impl BacktestBuilder {
             } else {
                 0
             };
-            let after = cache.inspect(symbol, *start_ns, *end_ns)?;
+            let after = if before.is_complete() && !refresh {
+                before.clone()
+            } else {
+                after_by_range
+                    .get(&(symbol.clone(), *start_ns, *end_ns))
+                    .cloned()
+                    .ok_or_else(|| data_validation("warmup physical range reinspection missing"))?
+            };
             let action = if before.is_complete() && !refresh {
                 BacktestCacheWarmupAction::SkippedComplete
             } else if refresh {

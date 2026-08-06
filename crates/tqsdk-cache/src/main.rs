@@ -2420,7 +2420,7 @@ async fn cache_only_replay(
         .cache_dir(cache_dir)?
         .cache_only();
     for symbol in symbols {
-        builder = builder.symbol(symbol).tick(symbol, 1_024);
+        builder = builder.symbol(symbol);
     }
     let mut tq = builder.connect().await?;
     while tq.next().await? {}

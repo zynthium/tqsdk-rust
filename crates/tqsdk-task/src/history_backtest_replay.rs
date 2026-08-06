@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tqsdk_core::{Kline, Tick};
@@ -99,6 +100,7 @@ pub struct HistoryBacktestProjectedReplayRequest {
 pub struct HistoryBacktestReplayStream {
     cursors: Vec<HistoryCursor>,
     heap: BinaryHeap<HeapItem>,
+    refill_cursor: Option<usize>,
 }
 
 struct HistoryCursor {
@@ -119,11 +121,13 @@ enum CursorProducer {
     Tick {
         reader: TickDataSeriesReader,
     },
+    ProjectedTick(Box<ProjectedTickProducer>),
     SyntheticKline {
         reader: TickDataSeriesReader,
         synth: Box<TickKlineAggregator>,
         emit_range: (i64, i64),
     },
+    ProjectedSyntheticKline(Box<ProjectedSyntheticKlineProducer>),
     NativeKline {
         events: VecDeque<QueuedEvent>,
     },
@@ -135,6 +139,28 @@ struct MinuteKlineProducer {
     duration_ns: i64,
     aggregator: Option<MinuteKlineAggregator>,
     pending: VecDeque<QueuedEvent>,
+}
+
+struct ProjectedTickProducer {
+    cache: HistorySeriesCache,
+    sources: VecDeque<HistoryBacktestTickSource>,
+    current: Option<ProjectedTickReader>,
+}
+
+struct ProjectedTickReader {
+    reader: TickDataSeriesReader,
+    underlying_symbol: Option<Arc<str>>,
+}
+
+struct ProjectedTick {
+    tick: Tick,
+    underlying_symbol: Option<Arc<str>>,
+}
+
+struct ProjectedSyntheticKlineProducer {
+    ticks: ProjectedTickProducer,
+    synth: Box<TickKlineAggregator>,
+    emit_range: (i64, i64),
 }
 
 struct QueuedEvent {
@@ -251,7 +277,11 @@ impl HistoryBacktestReplayStream {
             push_next_event(cursor, cursor_index, &mut heap)?;
         }
 
-        Ok(Self { cursors, heap })
+        Ok(Self {
+            cursors,
+            heap,
+            refill_cursor: None,
+        })
     }
 
     pub fn new_projected(request: HistoryBacktestProjectedReplayRequest) -> Result<Self> {
@@ -278,29 +308,31 @@ impl HistoryBacktestReplayStream {
     ) -> Result<Self> {
         validate_request_range(request.start_ns, request.end_ns)?;
         let mut cursors = Vec::new();
+        let cache_dir = request.cache.root_dir().to_path_buf();
 
+        let mut tick_sources = Vec::with_capacity(request.tick_sources.len());
         for source in request.tick_sources {
             validate_projected_tick_source(&source, request.start_ns, request.end_ns)?;
-            let reader = request
-                .cache
-                .open_tick_data_series_reader(TickDataSeriesRequest::new(
-                    &source.cache_symbol,
-                    source.start_ns,
-                    source.end_ns,
-                ))
-                .map_err(data_error_to_task)?;
-            let underlying_projection = (source.replay_symbol != source.cache_symbol)
-                .then_some(source.cache_symbol)
-                .map_or(UnderlyingProjection::None, UnderlyingProjection::Static);
+            tick_sources.push(source);
+        }
+        for sources in consecutive_projected_tick_source_chains(tick_sources) {
+            let symbol = sources
+                .first()
+                .expect("a projected tick source chain is non-empty")
+                .replay_symbol
+                .clone();
             cursors.push(HistoryCursor {
-                symbol: source.replay_symbol,
-                underlying_projection,
+                symbol,
+                underlying_projection: UnderlyingProjection::None,
                 symbol_rank: 0,
-                producer: CursorProducer::Tick { reader },
+                producer: CursorProducer::ProjectedTick(Box::new(ProjectedTickProducer::new(
+                    &cache_dir, sources,
+                ))),
                 next: None,
             });
         }
 
+        let mut synthetic_sources = Vec::with_capacity(request.synthetic_kline_sources.len());
         for source in request.synthetic_kline_sources {
             validate_projected_synthetic_tick_source(
                 &source.tick_source,
@@ -312,36 +344,38 @@ impl HistoryBacktestReplayStream {
                     "projected synthetic kline duration_ns must be positive",
                 ));
             }
-            let reader = request
-                .cache
-                .open_tick_data_series_reader(TickDataSeriesRequest::new(
-                    &source.tick_source.cache_symbol,
-                    source.tick_source.start_ns,
-                    source.tick_source.end_ns,
-                ))
-                .map_err(data_error_to_task)?;
+            synthetic_sources.push(source);
+        }
+        for sources in consecutive_projected_synthetic_source_chains(synthetic_sources) {
+            let first = sources
+                .first()
+                .expect("a projected synthetic source chain is non-empty");
+            let symbol = first.tick_source.replay_symbol.clone();
+            let duration_ns = first.duration_ns;
             let synth = TickKlineAggregator::new(
-                source.tick_source.replay_symbol.clone(),
-                source.duration_ns,
+                symbol.clone(),
+                duration_ns,
                 sessions_by_symbol
-                    .get(source.tick_source.replay_symbol.as_str())
+                    .get(symbol.as_str())
                     .cloned()
                     .unwrap_or_else(KlineSessionTemplate::cst_trading_day),
             )
             .map_err(data_error_to_task)?;
-            let underlying_projection = (source.tick_source.replay_symbol
-                != source.tick_source.cache_symbol)
-                .then_some(source.tick_source.cache_symbol);
+            let tick_sources = sources
+                .into_iter()
+                .map(|source| source.tick_source)
+                .collect();
             cursors.push(HistoryCursor {
-                symbol: source.tick_source.replay_symbol,
-                underlying_projection: underlying_projection
-                    .map_or(UnderlyingProjection::None, UnderlyingProjection::Static),
+                symbol,
+                underlying_projection: UnderlyingProjection::None,
                 symbol_rank: 0,
-                producer: CursorProducer::SyntheticKline {
-                    reader,
-                    synth: Box::new(synth),
-                    emit_range: (request.start_ns, request.end_ns),
-                },
+                producer: CursorProducer::ProjectedSyntheticKline(Box::new(
+                    ProjectedSyntheticKlineProducer {
+                        ticks: ProjectedTickProducer::new(&cache_dir, tick_sources),
+                        synth: Box::new(synth),
+                        emit_range: (request.start_ns, request.end_ns),
+                    },
+                )),
                 next: None,
             });
         }
@@ -427,10 +461,18 @@ impl HistoryBacktestReplayStream {
             push_next_event(cursor, cursor_index, &mut heap)?;
         }
 
-        Ok(Self { cursors, heap })
+        Ok(Self {
+            cursors,
+            heap,
+            refill_cursor: None,
+        })
     }
 
     fn next_event_sync(&mut self) -> Result<Option<ReplayMarketEvent>> {
+        if let Some(cursor_index) = self.refill_cursor.take() {
+            let cursor = &mut self.cursors[cursor_index];
+            push_next_event(cursor, cursor_index, &mut self.heap)?;
+        }
         let Some(item) = self.heap.pop() else {
             return Ok(None);
         };
@@ -445,11 +487,11 @@ impl HistoryBacktestReplayStream {
         let underlying_symbol = cursor
             .underlying_projection
             .resolve(queued.source_datetime_ns)?;
-        push_next_event(cursor, item.cursor_index, &mut self.heap)?;
         let event = match underlying_symbol {
             Some(underlying_symbol) => queued.event.with_underlying_symbol(underlying_symbol)?,
             None => queued.event,
         };
+        self.refill_cursor = Some(item.cursor_index);
         Ok(Some(event))
     }
 }
@@ -493,6 +535,14 @@ impl CursorProducer {
                 };
                 tick_event(symbol, tick).map(Some)
             }
+            Self::ProjectedTick(producer) => producer
+                .next_tick()?
+                .map(|projected| {
+                    tick_event(symbol, projected.tick).and_then(|queued| {
+                        project_queued_event(queued, projected.underlying_symbol.as_deref())
+                    })
+                })
+                .transpose(),
             Self::SyntheticKline {
                 reader,
                 synth,
@@ -514,6 +564,31 @@ impl CursorProducer {
                     update.updated,
                 )
                 .map(Some);
+            },
+            Self::ProjectedSyntheticKline(producer) => loop {
+                let Some(projected) = producer.ticks.next_tick()? else {
+                    return Ok(None);
+                };
+                let Some(update) = producer
+                    .synth
+                    .update(&projected.tick)
+                    .map_err(data_error_to_task)?
+                else {
+                    continue;
+                };
+                if update.event_time_ns < producer.emit_range.0
+                    || update.event_time_ns >= producer.emit_range.1
+                {
+                    continue;
+                }
+                let queued = synthetic_kline_event(
+                    producer.synth.symbol(),
+                    producer.synth.duration_ns(),
+                    update.event_time_ns,
+                    update.updated,
+                )?;
+                return project_queued_event(queued, projected.underlying_symbol.as_deref())
+                    .map(Some);
             },
             Self::NativeKline { events } => Ok(events.pop_front()),
             Self::MinuteKline(producer) => loop {
@@ -572,6 +647,109 @@ impl CursorProducer {
     }
 }
 
+impl ProjectedTickProducer {
+    fn new(cache_dir: &std::path::Path, sources: Vec<HistoryBacktestTickSource>) -> Self {
+        Self {
+            cache: HistorySeriesCache::open_read_only(cache_dir),
+            sources: sources.into(),
+            current: None,
+        }
+    }
+
+    fn next_tick(&mut self) -> Result<Option<ProjectedTick>> {
+        loop {
+            if let Some(current) = self.current.as_mut() {
+                if let Some(tick) = current.reader.next_tick().map_err(data_error_to_task)? {
+                    return Ok(Some(ProjectedTick {
+                        tick,
+                        underlying_symbol: current.underlying_symbol.clone(),
+                    }));
+                }
+                self.current = None;
+            }
+
+            let Some(source) = self.sources.pop_front() else {
+                return Ok(None);
+            };
+            let reader = self
+                .cache
+                .open_tick_data_series_reader(TickDataSeriesRequest::new(
+                    &source.cache_symbol,
+                    source.start_ns,
+                    source.end_ns,
+                ))
+                .map_err(data_error_to_task)?;
+            let underlying_symbol = (source.replay_symbol != source.cache_symbol)
+                .then(|| Arc::<str>::from(source.cache_symbol));
+            self.current = Some(ProjectedTickReader {
+                reader,
+                underlying_symbol,
+            });
+        }
+    }
+}
+
+fn consecutive_projected_tick_source_chains(
+    sources: Vec<HistoryBacktestTickSource>,
+) -> Vec<Vec<HistoryBacktestTickSource>> {
+    let mut chains: Vec<Vec<HistoryBacktestTickSource>> = Vec::new();
+    for source in sources {
+        let extends_current =
+            chains
+                .last()
+                .and_then(|chain| chain.last())
+                .is_some_and(|previous| {
+                    previous.replay_symbol == source.replay_symbol
+                        && previous.end_ns <= source.start_ns
+                });
+        if extends_current {
+            chains
+                .last_mut()
+                .expect("the current projected tick chain exists")
+                .push(source);
+        } else {
+            chains.push(vec![source]);
+        }
+    }
+    chains
+}
+
+fn consecutive_projected_synthetic_source_chains(
+    sources: Vec<HistoryBacktestSyntheticKlineSource>,
+) -> Vec<Vec<HistoryBacktestSyntheticKlineSource>> {
+    let mut chains: Vec<Vec<HistoryBacktestSyntheticKlineSource>> = Vec::new();
+    for source in sources {
+        let extends_current =
+            chains
+                .last()
+                .and_then(|chain| chain.last())
+                .is_some_and(|previous| {
+                    previous.duration_ns == source.duration_ns
+                        && previous.tick_source.replay_symbol == source.tick_source.replay_symbol
+                        && previous.tick_source.end_ns <= source.tick_source.start_ns
+                });
+        if extends_current {
+            chains
+                .last_mut()
+                .expect("the current projected synthetic chain exists")
+                .push(source);
+        } else {
+            chains.push(vec![source]);
+        }
+    }
+    chains
+}
+
+fn project_queued_event(
+    mut queued: QueuedEvent,
+    underlying_symbol: Option<&str>,
+) -> Result<QueuedEvent> {
+    if let Some(underlying_symbol) = underlying_symbol {
+        queued.event = queued.event.with_underlying_symbol(underlying_symbol)?;
+    }
+    Ok(queued)
+}
+
 fn push_next_event(
     cursor: &mut HistoryCursor,
     cursor_index: usize,
@@ -624,12 +802,12 @@ fn validate_projected_synthetic_tick_source(
             "projected synthetic tick source start_ns must be less than end_ns",
         ));
     }
-    if source.start_ns > request_start_ns
-        || source.end_ns <= request_start_ns
+    if source.end_ns <= request_start_ns
+        || source.start_ns >= request_end_ns
         || source.end_ns > request_end_ns
     {
         return Err(TaskError::InvalidState(
-            "projected synthetic tick source must begin no later than and overlap the replay request range",
+            "projected synthetic tick source must overlap the replay request range",
         ));
     }
     Ok(())

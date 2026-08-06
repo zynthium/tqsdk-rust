@@ -465,6 +465,7 @@ pub async fn resolve_futures_contracts_with_expression<R>(
 where
     R: FuturesUniverseResolver + Send,
 {
+    let mut resolver = CachedActiveFuturesResolver::new(resolver);
     let mut included = BTreeMap::<String, FuturesContract>::new();
     let mut exclusions = Vec::<UniverseMatch>::new();
     for clause in expression.clauses() {
@@ -472,7 +473,7 @@ where
             exclusions.extend(matches_for_clause(clause)?);
             continue;
         }
-        for contract in contracts_for_selector(clause.selector(), resolver).await? {
+        for contract in contracts_for_selector(clause.selector(), &mut resolver).await? {
             included.insert(contract.symbol.clone(), contract);
         }
     }
@@ -481,6 +482,46 @@ where
     }
     retain_supported_futures_universe_contracts(&mut included);
     Ok(included.into_values().collect())
+}
+
+struct CachedActiveFuturesResolver<'a, R> {
+    inner: &'a mut R,
+    active_futures: Option<Vec<FuturesContract>>,
+}
+
+impl<'a, R> CachedActiveFuturesResolver<'a, R> {
+    fn new(inner: &'a mut R) -> Self {
+        Self {
+            inner,
+            active_futures: None,
+        }
+    }
+}
+
+impl<R> FuturesUniverseResolver for CachedActiveFuturesResolver<'_, R>
+where
+    R: FuturesUniverseResolver + Send,
+{
+    async fn active_futures(&mut self) -> Result<Vec<FuturesContract>> {
+        if let Some(contracts) = self.active_futures.as_ref() {
+            return Ok(contracts.clone());
+        }
+        let contracts = self.inner.active_futures().await?;
+        self.active_futures = Some(contracts.clone());
+        Ok(contracts)
+    }
+
+    async fn main_futures(&mut self) -> Result<Vec<String>> {
+        self.inner.main_futures().await
+    }
+
+    async fn quote_snapshots(&mut self, symbols: &[String]) -> Result<Vec<Quote>> {
+        self.inner.quote_snapshots(symbols).await
+    }
+
+    async fn trading_calendar(&mut self) -> Result<Vec<tqsdk_core::TradingCalendarDay>> {
+        self.inner.trading_calendar().await
+    }
 }
 
 fn retain_supported_futures_universe_contracts(contracts: &mut BTreeMap<String, FuturesContract>) {

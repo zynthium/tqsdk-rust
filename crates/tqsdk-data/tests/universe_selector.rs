@@ -1,7 +1,19 @@
 use tqsdk_data::{
-    FuturesContract, StaticFuturesUniverseResolver, UniverseExpression,
+    FuturesContract, FuturesUniverseResolver, StaticFuturesUniverseResolver, UniverseExpression,
     resolve_futures_universe_symbols, resolve_static_symbols_with_expression,
 };
+
+struct CountingFuturesUniverseResolver {
+    contracts: Vec<FuturesContract>,
+    active_futures_calls: usize,
+}
+
+impl FuturesUniverseResolver for CountingFuturesUniverseResolver {
+    async fn active_futures(&mut self) -> tqsdk_data::Result<Vec<FuturesContract>> {
+        self.active_futures_calls += 1;
+        Ok(self.contracts.clone())
+    }
+}
 
 #[tokio::test]
 async fn selector_matches_relay_expression_semantics() {
@@ -46,6 +58,22 @@ async fn selector_excludes_unsupported_kqd_external_contracts() {
         .unwrap();
 
     assert_eq!(symbols, vec!["DCE.m2609", "KQ.i@DCE.m", "KQ.m@DCE.m"]);
+}
+
+#[tokio::test]
+async fn combined_cont_and_index_selectors_load_active_futures_once() {
+    let expression = UniverseExpression::parse("cont:all;index:all").unwrap();
+    let mut resolver = CountingFuturesUniverseResolver {
+        contracts: vec![FuturesContract::new("DCE.m2609", "DCE", "m", false).unwrap()],
+        active_futures_calls: 0,
+    };
+
+    let symbols = resolve_futures_universe_symbols(&expression, &mut resolver)
+        .await
+        .unwrap();
+
+    assert_eq!(symbols, vec!["KQ.i@DCE.m", "KQ.m@DCE.m"]);
+    assert_eq!(resolver.active_futures_calls, 1);
 }
 
 #[test]
