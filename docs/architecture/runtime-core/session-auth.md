@@ -45,6 +45,12 @@ pub trait Transport {
 }
 ```
 
+默认 `WebSocketTransport` 对一次 route 建立使用最多 3 次 socket/TLS 尝试，单次
+最长 15 秒。该有界保护用于吸收初始建连的瞬时黑洞；只有预算耗尽后才向
+`SessionRuntime` 返回 transport error。错误诊断只包含 endpoint `host:port`，不包含
+URL path、query 或 userinfo。它不改变下面的 session-level `ReconnectPolicy`：后者仍
+负责已建立 session 断线后的重建、退避、状态树投影和 attempt 计数。
+
 ## AuthProvider
 ```rust
 pub trait AuthProvider {

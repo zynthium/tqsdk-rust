@@ -22,6 +22,7 @@ use tokio::task::JoinHandle;
 use crate::backtest_tick_cache::{BacktestTickCache, BacktestTickCacheOperationLock};
 use crate::error::{DataError, Result};
 
+pub(crate) use metadata::minute_cache_snapshots_are_compatible;
 pub use metadata::{
     BACKTEST_HISTORY_METADATA_FORMAT_ID, BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
     BacktestHistoryMaintenanceClient, BacktestHistoryMaintenanceClientBuilder,

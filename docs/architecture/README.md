@@ -65,6 +65,8 @@ V1 是：
   - transport trait、session route/topology/config contract
   - yawc-backed `WebSocketTransport` 由默认 feature `websocket-transport` 提供；
     `--no-default-features` 保留 contract 但不拉取 websocket 实现依赖
+  - 单次 WebSocket route 建立包含有界的 3 次尝试，每次 socket/TLS 握手最长
+    15 秒；这只吸收初始链路瞬时黑洞，不替代 session-level `ReconnectPolicy`
 - `SnapshotReadGuard` / `StateReadView`
   - revision-bound 的借用读视图
   - 为 `wait_update`、callback/fan-out facade 提供共同读面

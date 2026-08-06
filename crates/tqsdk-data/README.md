@@ -75,9 +75,11 @@ mapping 是带 snapshot hash 的持久 sidecar；CacheOnly 需要本地 sidecar 
 当前 durable fill 只支持 futures，股票使用 facade `.disabled_cache()` 官方回测路径。
 
 canonical-minute 月文件记录其写入时的 immutable metadata snapshot。active pointer 后续移动时，
-`BacktestHistoryClient` 只会在保留的历史 snapshot 覆盖整个请求窗口、schema/session identity 与 active
-snapshot 相同、且该 snapshot 精确验证现存月文件时读取历史分区；这不会触发认证或网络访问。缺失 sidecar、
-session 变化、损坏文件或不能由同一个 snapshot 解释的混合分区一律 fail closed，不会自动清理、重写或合并。
+`BacktestHistoryClient` 会从 content-addressed sidecar 解析月文件的旧、新 snapshot，并在实际 cached range
+内比较 schema、market、logical symbol、session、交易日和 physical mapping。滚动 snapshot 只新增后续日期
+且重叠区间语义相同时，旧 coverage 可继续离线读取；新增日期仍是缺口，当前月下一次写入时原子迁移 header。
+缺失 sidecar、session/交易日/映射变化、损坏文件或语义冲突的混合分区一律 fail closed，不会自动清理、
+重写或合并。
 
 storage orchestration 是 async，但 TQBN 解压/解码仍由有界 `spawn_blocking` worker 执行；不提供把
 `tokio::fs` 当作性能开关的第二条 production path。
@@ -159,8 +161,9 @@ chart cleanup 成功后，同一 session 可顺序服务后续 trading-day/minut
   由 tick rows 按 session 聚合，`N × 60s` K 由 closed canonical minutes 按固定 CST `18:00`
   trading-day grid 临时聚合；盘中 break 不重置 bucket。task 仅把结果安排为 replay event。facade
   不读取/写入 native higher-period `HistorySeriesCache` K 线，`61s` / `90s` 会拒绝
-- `MinuteKlineCache` 以 calendar/session snapshot hash fail closed，只有完成的远端 60s range
-  才可记录 final coverage；当前/未来 trading day 不可 claim final。v3 文件不会自动迁移、覆盖或
+- `MinuteKlineCache` 以 immutable metadata snapshot fail closed；hash 不同只在双方 sidecar 均存在且实际
+  cached range 的 schema/market/symbol/session/交易日/physical mapping 完全相同时兼容。只有完成的远端
+  60s range 才可记录 final coverage；当前/未来 trading day 不可 claim final。v3 文件不会自动迁移、覆盖或
   被当作 cache hit；`diagnose()` 会将其列为 `LegacyUnsupported`。它没有 retention、max-byte
   eviction 或自动清理，`Refresh`、`purge_range` / `purge_symbol` 都是显式 destructive maintenance
 - `BacktestTickCache::inspect(...)` 输出 backend format、缓存目录、series 文件路径、完整性、

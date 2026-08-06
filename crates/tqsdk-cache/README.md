@@ -29,9 +29,11 @@ minute 的 format id 为 `tqsdk.minute-kline.monthly.v4`，但 namespace 有意�
 `legacy_unsupported`。
 
 每个 v4 月文件绑定写入时的 immutable metadata snapshot。active metadata pointer 随后前移不会单独
-使已有分区失效：`inspect`、`fill --dry-run` 和 `verify` 只会在一个保留 snapshot 覆盖整个窗口、
-schema/session identity 与 active 相同并能精确验证现有月文件时使用它。不能满足这些条件的旧、损坏或
-混合分区仍默认 fail closed；CLI 不会为此自动删除、重写或重新下载数据。只有操作者显式传
+使已有分区失效：`inspect`、`fill --dry-run`、`verify` 和普通 `fill` 遇到滚动扩展的 active snapshot 时，
+会加载月文件绑定的旧 immutable sidecar，并只在实际 cached range 内比较 schema、market、logical symbol、
+session、交易日和 physical mapping。区间语义相同的旧 coverage 直接复用，新增日期保持为缺口；当前月写入
+新数据时才原子迁移 header。缺少 sidecar、session/交易日/映射变化、损坏或语义冲突的混合分区仍默认
+fail closed；CLI 不会为此自动删除、重写或重新下载数据。只有操作者显式传
 `--kind minute fill --repair-stale` 时，CLI 才会在同一次 facade remote-on-miss warmup 中，取得
 root remote-fill lock 并完成认证预检后，删除与覆盖窗口快照冲突的整月分区，再补齐缺口；若没有任何已持久化
 snapshot 覆盖整个请求窗口，则该 flag 会删除窗口内所有已存在的 minute 月分区，让官方 metadata refresh

@@ -13,6 +13,7 @@ use chrono::Utc;
 use fs2::FileExt;
 use tqsdk_core::Kline;
 
+use crate::backtest_history::minute_cache_snapshots_are_compatible;
 use crate::backtest_tick_cache::{
     backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
 };
@@ -48,9 +49,11 @@ std::thread_local! {
 
 /// Compatibility identity for a cache file's calendar and session definition.
 ///
-/// A reader must provide the same snapshot that wrote a month.  A mismatch is
-/// an error, never a best-effort cache miss: aggregation boundaries would no
-/// longer be trustworthy.
+/// Exact identity is the fast path. When immutable metadata snapshots differ,
+/// a reader may reuse only cached coverage whose schema, market, logical
+/// symbol, session, trading days, and physical mapping are identical in that
+/// coverage. Every other mismatch is an error, never a best-effort cache miss:
+/// aggregation boundaries would no longer be trustworthy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MinuteKlineCacheSnapshot {
     pub version: u32,
@@ -157,9 +160,9 @@ impl MinuteKlineCacheStatus {
 
 /// Internal compatibility scan for an explicit stale-partition repair.
 ///
-/// Normal cache reads intentionally stop at the first snapshot mismatch. This
-/// scan instead records only exact snapshot mismatches so an opt-in operator
-/// repair can remove those monthly partitions before retrying the ordinary,
+/// Normal cache reads intentionally stop at the first semantically incompatible
+/// snapshot. This scan records those conflicts so an opt-in operator repair can
+/// remove only the affected monthly partitions before retrying the ordinary,
 /// fail-closed read path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MinuteKlineCacheSnapshotCompatibility {
@@ -392,10 +395,12 @@ impl MinuteKlineCache {
         for slice in split_trading_month_range(range_start_ns, range_end_ns)? {
             let path = self.month_file_path_unchecked(symbol, slice.trading_month.as_str());
             let Some(scan) = scan_existing_month(
+                self.root_dir.as_path(),
                 path.as_path(),
                 symbol,
                 slice.trading_month.as_str(),
                 snapshot,
+                (slice.start_ns, slice.end_ns),
             )?
             else {
                 continue;
@@ -435,10 +440,12 @@ impl MinuteKlineCache {
         for slice in split_trading_month_range(range_start_ns, range_end_ns)? {
             let path = self.month_file_path_unchecked(symbol, slice.trading_month.as_str());
             let scan = scan_existing_month(
+                self.root_dir.as_path(),
                 path.as_path(),
                 symbol,
                 slice.trading_month.as_str(),
                 snapshot,
+                (slice.start_ns, slice.end_ns),
             )?;
             months.push(match scan {
                 Some(scan) => {
@@ -493,10 +500,12 @@ impl MinuteKlineCache {
         for slice in split_trading_month_range(range_start_ns, range_end_ns)? {
             let path = self.month_file_path_unchecked(symbol, slice.trading_month.as_str());
             match scan_existing_month(
+                self.root_dir.as_path(),
                 path.as_path(),
                 symbol,
                 slice.trading_month.as_str(),
                 snapshot,
+                (slice.start_ns, slice.end_ns),
             ) {
                 Ok(Some(_)) => {
                     present_ranges.push((slice.start_ns, slice.end_ns));
@@ -720,10 +729,12 @@ impl MinuteKlineCache {
             let path = self.month_file_path_unchecked(symbol, slice.trading_month.as_str());
             let _lock = MonthFileLock::acquire(path.as_path(), self.root_dir.as_path())?;
             let Some(month) = load_existing_month(
+                self.root_dir.as_path(),
                 path.as_path(),
                 symbol,
                 slice.trading_month.as_str(),
                 snapshot,
+                (slice.start_ns, slice.end_ns),
             )?
             else {
                 continue;
@@ -786,7 +797,17 @@ impl MinuteKlineCache {
         incoming_rows: Vec<Kline>,
     ) -> Result<MinuteKlineCacheMonthReport> {
         let _lock = MonthFileLock::acquire(path, self.root_dir.as_path())?;
-        let existing = load_existing_month(path, symbol, trading_month, snapshot)?;
+        // Rewriting replaces the snapshot header for the whole monthly file.
+        // Authenticate every existing coverage range before carrying any old
+        // rows or finality claims into that new identity.
+        let existing = load_existing_month(
+            self.root_dir.as_path(),
+            path,
+            symbol,
+            trading_month,
+            snapshot,
+            (i64::MIN, i64::MAX),
+        )?;
         let mut rows_by_datetime = existing
             .as_ref()
             .map(|month| {
@@ -948,10 +969,12 @@ impl MinuteKlineReader {
             let data_file = File::open(path.as_path())?;
             let reader = MonthRowReader::open(
                 data_file,
+                self.cache_dir.as_path(),
                 path.as_path(),
                 self.symbol.as_str(),
                 trading_month.as_str(),
                 &self.snapshot,
+                (self.range_start_ns, self.range_end_ns),
             )?;
             FileExt::unlock(&lock_file)?;
             self.current = Some(reader);
@@ -1031,22 +1054,36 @@ struct MonthRowReader {
 impl MonthRowReader {
     fn open(
         file: File,
+        cache_dir: &Path,
         path: &Path,
         symbol: &str,
         trading_month: &str,
         snapshot: &MinuteKlineCacheSnapshot,
+        required_range: (i64, i64),
     ) -> Result<Self> {
         let file_len = file.metadata()?.len();
         let mut reader = BufReader::new(file);
         let (header, metadata_bytes) = read_file_prefix(&mut reader, path, file_len)?;
         let metadata = decode_metadata(path, metadata_bytes.as_slice())?;
-        validate_expected_metadata(path, &metadata, symbol, trading_month, snapshot)?;
         let mut checksum = checksum_bytes(FNV_OFFSET_BASIS, metadata_bytes.as_slice());
+        let mut coverage = Vec::with_capacity(header.coverage_count);
         for _ in 0..header.coverage_count {
             let mut bytes = [0_u8; COVERAGE_BYTES];
             read_exact_format(&mut reader, &mut bytes, path, "coverage")?;
             checksum = checksum_bytes(checksum, &bytes);
+            coverage.push(decode_coverage(bytes.as_slice()));
         }
+        validate_stored_coverage(path, trading_month, coverage.as_slice())?;
+        let comparison_ranges = intersecting_ranges(coverage.as_slice(), required_range);
+        validate_expected_metadata(
+            cache_dir,
+            path,
+            &metadata,
+            symbol,
+            trading_month,
+            snapshot,
+            comparison_ranges.as_slice(),
+        )?;
         Ok(Self {
             path: path.to_path_buf(),
             trading_month: trading_month.to_string(),
@@ -1138,17 +1175,27 @@ impl Drop for MonthFileLock {
 }
 
 fn scan_existing_month(
+    cache_dir: &Path,
     path: &Path,
     symbol: &str,
     trading_month: &str,
     snapshot: &MinuteKlineCacheSnapshot,
+    required_range: (i64, i64),
 ) -> Result<Option<MonthScan>> {
     match fs::metadata(path) {
         Ok(metadata) => {
             if !metadata.is_file() {
                 return Err(format_error(path, "path is not a regular file"));
             }
-            scan_month_file(path, symbol, trading_month, snapshot).map(Some)
+            scan_month_file(
+                cache_dir,
+                path,
+                symbol,
+                trading_month,
+                snapshot,
+                required_range,
+            )
+            .map(Some)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
@@ -1156,17 +1203,27 @@ fn scan_existing_month(
 }
 
 fn load_existing_month(
+    cache_dir: &Path,
     path: &Path,
     symbol: &str,
     trading_month: &str,
     snapshot: &MinuteKlineCacheSnapshot,
+    required_range: (i64, i64),
 ) -> Result<Option<MonthFile>> {
     match fs::metadata(path) {
         Ok(metadata) => {
             if !metadata.is_file() {
                 return Err(format_error(path, "path is not a regular file"));
             }
-            load_month_file(path, symbol, trading_month, snapshot).map(Some)
+            load_month_file(
+                cache_dir,
+                path,
+                symbol,
+                trading_month,
+                snapshot,
+                required_range,
+            )
+            .map(Some)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
@@ -1174,13 +1231,24 @@ fn load_existing_month(
 }
 
 fn scan_month_file(
+    cache_dir: &Path,
     path: &Path,
     symbol: &str,
     trading_month: &str,
     snapshot: &MinuteKlineCacheSnapshot,
+    required_range: (i64, i64),
 ) -> Result<MonthScan> {
     let scan = scan_month_file_unchecked(path)?;
-    validate_expected_metadata(path, &scan.metadata, symbol, trading_month, snapshot)?;
+    let comparison_ranges = intersecting_ranges(scan.coverage.as_slice(), required_range);
+    validate_expected_metadata(
+        cache_dir,
+        path,
+        &scan.metadata,
+        symbol,
+        trading_month,
+        snapshot,
+        comparison_ranges.as_slice(),
+    )?;
     Ok(scan)
 }
 
@@ -1346,17 +1414,18 @@ fn hex_value(value: u8) -> Option<u8> {
 }
 
 fn load_month_file(
+    cache_dir: &Path,
     path: &Path,
     symbol: &str,
     trading_month: &str,
     snapshot: &MinuteKlineCacheSnapshot,
+    required_range: (i64, i64),
 ) -> Result<MonthFile> {
     let file = File::open(path)?;
     let file_len = file.metadata()?.len();
     let mut reader = BufReader::new(file);
     let (header, metadata_bytes) = read_file_prefix(&mut reader, path, file_len)?;
     let metadata = decode_metadata(path, metadata_bytes.as_slice())?;
-    validate_expected_metadata(path, &metadata, symbol, trading_month, snapshot)?;
     let mut checksum = checksum_bytes(FNV_OFFSET_BASIS, metadata_bytes.as_slice());
     let mut coverage = Vec::with_capacity(header.coverage_count);
     for _ in 0..header.coverage_count {
@@ -1366,6 +1435,16 @@ fn load_month_file(
         coverage.push(decode_coverage(bytes.as_slice()));
     }
     validate_stored_coverage(path, trading_month, coverage.as_slice())?;
+    let comparison_ranges = intersecting_ranges(coverage.as_slice(), required_range);
+    validate_expected_metadata(
+        cache_dir,
+        path,
+        &metadata,
+        symbol,
+        trading_month,
+        snapshot,
+        comparison_ranges.as_slice(),
+    )?;
     let mut rows = Vec::with_capacity(header.row_count);
     for _ in 0..header.row_count {
         let mut bytes = [0_u8; KLINE_ROW_BYTES];
@@ -1627,11 +1706,13 @@ fn decode_metadata(path: &Path, bytes: &[u8]) -> Result<MonthMetadata> {
 }
 
 fn validate_expected_metadata(
+    cache_dir: &Path,
     path: &Path,
     metadata: &MonthMetadata,
     symbol: &str,
     trading_month: &str,
     snapshot: &MinuteKlineCacheSnapshot,
+    comparison_ranges: &[(i64, i64)],
 ) -> Result<()> {
     if metadata.symbol != symbol {
         return Err(format_error(path, "symbol metadata mismatch"));
@@ -1639,7 +1720,13 @@ fn validate_expected_metadata(
     if metadata.trading_month != trading_month {
         return Err(format_error(path, "trading month metadata mismatch"));
     }
-    if metadata.snapshot != *snapshot {
+    if !minute_cache_snapshots_are_compatible(
+        cache_dir,
+        symbol,
+        &metadata.snapshot,
+        snapshot,
+        comparison_ranges,
+    )? {
         return Err(format_error(
             path,
             "calendar/session snapshot mismatch; refusing stale minute Kline cache",
@@ -1943,6 +2030,13 @@ fn intersect_ranges(left: (i64, i64), right: (i64, i64)) -> Option<(i64, i64)> {
     let start = left.0.max(right.0);
     let end = left.1.min(right.1);
     (start < end).then_some((start, end))
+}
+
+fn intersecting_ranges(ranges: &[(i64, i64)], required_range: (i64, i64)) -> Vec<(i64, i64)> {
+    ranges
+        .iter()
+        .filter_map(|range| intersect_ranges(*range, required_range))
+        .collect()
 }
 
 fn validate_range(symbol: &str, start_ns: i64, end_ns: i64) -> Result<()> {

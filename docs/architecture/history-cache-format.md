@@ -104,15 +104,18 @@ v4 文件身份如下：
 | time basis | CST trading day，`18:00` 后归入下一交易日 |
 
 每个文件只属于一个 `logical symbol × trading month`。写入前必须验证 calendar/session
-snapshot hash；不匹配、损坏或不完整覆盖一律 fail closed，不能降级为近似命中。完成的远端
+snapshot。hash 相同是快速路径；hash 不同时，只有双方 content-addressed sidecar 都存在，且实际 cached
+range 内 schema、market、logical symbol、session、交易日和 physical mapping 完全相同，才能复用旧
+coverage。缺失 sidecar、语义不匹配、损坏或不完整覆盖一律 fail closed，不能降级为近似命中。完成的远端
 range（包括合法的零行 range）才可标记 final coverage；当前或未来交易日不得标记为 final。
 文件更新按单月原子重写，reader 以流式方式读取，不必把整月 materialize 到内存。
 
 月文件绑定的是写入时的 immutable metadata snapshot，而不是将来某次 refresh 写入的 active pointer。
-因此 active pointer 后续移动不会单独使已完成分区失效。读取方可以选择保留的历史 snapshot，但必须同时
-证明它覆盖完整请求窗口、schema version 与 session identity 仍和 active snapshot 一致，并用它精确验证
-现存月文件。缺失保留 snapshot、session 变化、损坏文件或不能由同一个 snapshot 解释的混合分区仍 fail
-closed；该回退绝不自动 purge、重写或拼接数据。remote-on-miss 的 metadata refresh 会扩展到涉及的完整
+因此 active pointer 后续移动不会单独使已完成分区失效。滚动 refresh 仅延长尾部日期时，读取方逐个已缓存
+range 对比旧、新 immutable sidecar；重叠区间语义完全相同即可继续命中，新增日期保持 miss。写入新增 final
+range 前必须再验证该月全部既有 coverage，全部兼容后才把整月 header 原子迁移到新 snapshot，避免用新 hash
+错误背书旧数据。缺失 sidecar、session/交易日/映射变化、损坏文件或语义冲突的混合分区仍 fail closed；
+该兼容路径绝不自动 purge 或拼接冲突数据。remote-on-miss 的 metadata refresh 会扩展到涉及的完整
 CST trading month，并保留更宽的 active pointer；若 retained snapshot 覆盖请求且 schema/session 与 active
 兼容，可直接复用它，避免短查询把同一月变成不兼容 identity。仅 operator 显式使用
 `tqsdk-cache --kind minute fill --repair-stale` 时，才会在 active snapshot 覆盖窗口时删除其冲突的整月分区，

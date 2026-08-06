@@ -92,6 +92,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | replay step commit | 一次 replay step 产生多对象变化 | 形成单轮或可解释多轮 commit，归属对应 `CommandId` | replay 因果统一 |
 | query response commit | GraphQL / HTTP 查询返回结果 | 结果写入 `query/*`，形成可见 commit | query 结果进入 snapshot |
 | session error commit | auth 失效或 transport 异常 | session 错误进入 `system/*` 并形成 commit | system 错误统一可见 |
+| websocket 初始建连黑洞 | TCP 已接入但 TLS/WebSocket 握手不返回 | 单次尝试按时取消，最多重试 3 次后返回脱敏 transport error | 初始瞬时故障有界恢复，不改变 session reconnect 状态机 |
 | cursor isolation | 两个 cursor 从不同 revision 开始消费 | 各自独立推进 | cursor 独立性 |
 | single-adapter input ownership | 一个输入只被一个 adapter 接受 | 可消费输入且产出与借用式解码相同的 mutation | 输入所有权不改变 commit 语义 |
 | multi-adapter observation | 一个输入被多个 adapter 观察 | 保持借用式 fan-out，只通过 mutation/commit 对外可见 | adapter 无提交权 |
@@ -104,7 +105,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | DIFF 协议对象 | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_batch_commit.rs`、`crates/tqsdk-core/tests/runtime_contract_adapters.rs`、`crates/tqsdk-core/src/adapter.rs` 单元测试 | 覆盖 market diff、trade diff、query/schema/replay 输入归一化与提交，以及单 adapter 消费式解码和多 adapter 借用式广播 |
 | trade 命令与状态 | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_command_ledger.rs` | 覆盖 `req_login`、`insert_order`、`pre_insert_order` 及命令状态写回 |
 | replay/feed 推进 | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_pending_route_executor.rs` | 覆盖 replay pending route 执行与 replay state 提交 |
-| auth/session/system 控制 | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_auth_context.rs`、`crates/tqsdk-core/tests/runtime_contract_session_state.rs`、`crates/tqsdk-core/tests/runtime_contract_session_runtime.rs` | 覆盖 auth context、topology/bootstrap、refresh-auth、session state |
+| auth/session/system 控制 | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_auth_context.rs`、`crates/tqsdk-core/tests/runtime_contract_session_state.rs`、`crates/tqsdk-core/tests/runtime_contract_session_runtime.rs`、`crates/tqsdk-core/tests/runtime_contract_ws_transport.rs`、`crates/tqsdk-core/src/transport/websocket.rs` 单元测试 | 覆盖 auth context、topology/bootstrap、refresh-auth、session state，以及初始 WebSocket 黑洞的有界超时、重试和脱敏错误 |
 | GraphQL / HTTP query | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_pending_route_executor.rs`、`crates/tqsdk-core/tests/runtime_contract_adapters.rs` | 覆盖 GraphQL query 的 HTTP request 合同、pending route 执行与 query snapshot |
 | schema / metadata / bootstrap 交互 | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_pending_route_executor.rs`、`crates/tqsdk-core/tests/runtime_contract_session.rs`、`crates/tqsdk-core/tests/runtime_contract_bootstrap.rs` | 覆盖 schema HTTP 请求、bootstrap topology 与 metadata/state 写入 |
 | reader-first 读契约 | `crates/tqsdk-core/tests/runtime_contract_reader_surface.rs`、`crates/tqsdk-core/tests/runtime_contract_surface.rs`、`crates/tqsdk-core/tests/runtime_contract_runtime_core.rs`、`crates/tqsdk-core/tests/runtime_contract_domain_state.rs` | 覆盖 `RuntimeReader`、`SnapshotReadGuard`、`CommitReadGuard`、`MarketTradeStateReadGuard`、`CursorLagged`、共享 commit identity 与兼容 surface |
@@ -247,9 +248,10 @@ atomic replacement、streaming reader、Refresh 只移除
 相交月文件、缺失 root 的 read-only fast inventory，以及 readable v4 / legacy v3
 `LegacyUnsupported` diagnosis。旧 v3 不得被自动迁移、覆盖或当作 cache hit。
 `backtest_history_query`、`facade_contract` 与 `tqsdk-cache` CLI tests 还覆盖 active metadata pointer
-前移后，完整历史 minute 分区由覆盖整个窗口且 session/schema identity 相同的 immutable snapshot
-继续离线读取；`RemoteOnMiss` 完整命中不得读取 auth。`verify` 必须使用 metadata-backed snapshot，
-而不是固定 CST 默认值；缺失保留 snapshot、session 变化、损坏或混合分区仍必须 fail closed。
+前移后，完整历史 minute 分区继续离线读取；滚动 snapshot 扩展必须复用语义相同的缓存前缀、只报告新增
+尾部缺口，并在追加 final minute 后原子迁移当前月 header。真实 physical mapping 冲突必须仍进入 stale
+repair 或 fail closed；`RemoteOnMiss` 完整命中不得读取 auth。`verify` 必须使用 metadata-backed snapshot，
+而不是固定 CST 默认值；缺失 sidecar、session/交易日/映射变化、损坏或混合分区仍必须 fail closed。
 显式 `fill --repair-stale` 仅在 active snapshot 覆盖完整窗口时，才 purge 与它冲突的整月分区；该 purge
 必须在同一 root remote-fill lock 和 repair 所需 auth preflight 成功后发生。lock busy 或认证缺失必须保留
 所有分区；tick 与 `--dry-run` 必须拒绝该 destructive flag。

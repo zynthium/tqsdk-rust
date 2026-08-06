@@ -191,6 +191,42 @@ impl BacktestHistoryMetadataCache {
             .collect()
     }
 
+    fn load_snapshot_by_hash(
+        &self,
+        logical_symbol: &str,
+        snapshot_hash: &str,
+    ) -> Result<Option<BacktestHistoryMetadataSnapshot>> {
+        if !is_sha1_hex(snapshot_hash) {
+            return Ok(None);
+        }
+        let symbol_dir = self.symbol_dir(logical_symbol)?;
+        match fs::metadata(&symbol_dir) {
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(metadata_response_error(format!(
+                    "symbol namespace {} is not a directory",
+                    symbol_dir.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+
+        let _lock = MetadataLock::acquire_shared(&symbol_dir, &self.root_dir)?;
+        let snapshot_path = symbol_dir
+            .join(SNAPSHOTS_DIR_NAME)
+            .join(format!("{snapshot_hash}.json"));
+        match fs::metadata(snapshot_path.as_path()) {
+            Ok(metadata) if !metadata.is_file() => Err(metadata_response_error(format!(
+                "snapshot {} is not a regular file",
+                snapshot_path.display()
+            ))),
+            Ok(_) => read_snapshot(&symbol_dir, logical_symbol, snapshot_hash).map(Some),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Stores an immutable snapshot and atomically makes it active.
     ///
     /// Existing snapshots are never removed. Supplying a snapshot whose hash is
@@ -410,9 +446,10 @@ pub fn resolve_backtest_metadata_snapshot(
 ///
 /// The active pointer is preferred whenever it covers the range. When it does
 /// not, a compatible retained snapshot can provide the mapping for a remote
-/// miss. For an existing monthly partition, the retained snapshot must still
-/// exactly validate that local month; session or mapping changes never become
-/// best-effort cache hits.
+/// miss. Existing monthly partitions may retain an older snapshot hash only
+/// when immutable sidecars prove identical session, trading-day, and physical
+/// mapping semantics over every cached range that will be read. Session or
+/// mapping changes never become best-effort cache hits.
 #[doc(hidden)]
 pub fn resolve_minute_cache_metadata_snapshot(
     cache_dir: &Path,
@@ -510,6 +547,121 @@ fn minute_cache_snapshot_from_metadata(
         metadata.snapshot_hash.clone(),
         metadata.session.snapshot_hash(),
     )
+}
+
+pub(crate) fn minute_cache_snapshots_are_compatible(
+    cache_dir: &Path,
+    logical_symbol: &str,
+    stored: &MinuteKlineCacheSnapshot,
+    expected: &MinuteKlineCacheSnapshot,
+    comparison_ranges: &[(i64, i64)],
+) -> Result<bool> {
+    if stored == expected || comparison_ranges.is_empty() {
+        return Ok(true);
+    }
+    if stored.version != expected.version || stored.session_hash != expected.session_hash {
+        return Ok(false);
+    }
+
+    let metadata_cache = BacktestHistoryMetadataCache::open_read_only(cache_dir);
+    let Some(stored_metadata) =
+        metadata_cache.load_snapshot_by_hash(logical_symbol, stored.calendar_hash.as_str())?
+    else {
+        return Ok(false);
+    };
+    let Some(expected_metadata) =
+        metadata_cache.load_snapshot_by_hash(logical_symbol, expected.calendar_hash.as_str())?
+    else {
+        return Ok(false);
+    };
+    if !metadata_matches_minute_snapshot(&stored_metadata, stored)
+        || !metadata_matches_minute_snapshot(&expected_metadata, expected)
+        || stored_metadata.schema_version != expected_metadata.schema_version
+        || stored_metadata.market_kind != expected_metadata.market_kind
+        || stored_metadata.logical_symbol != expected_metadata.logical_symbol
+        || stored_metadata.session != expected_metadata.session
+    {
+        return Ok(false);
+    }
+
+    Ok(comparison_ranges.iter().all(|range| {
+        physical_segments_cover_range(stored_metadata.physical_segments.as_slice(), *range)
+            && physical_segments_cover_range(expected_metadata.physical_segments.as_slice(), *range)
+            && trading_days_cover_range(stored_metadata.trading_days.as_slice(), *range)
+            && trading_days_cover_range(expected_metadata.trading_days.as_slice(), *range)
+            && clipped_physical_segments(&stored_metadata, *range)
+                == clipped_physical_segments(&expected_metadata, *range)
+            && clipped_trading_days(&stored_metadata, *range)
+                == clipped_trading_days(&expected_metadata, *range)
+    }))
+}
+
+fn metadata_matches_minute_snapshot(
+    metadata: &BacktestHistoryMetadataSnapshot,
+    snapshot: &MinuteKlineCacheSnapshot,
+) -> bool {
+    metadata.schema_version == snapshot.version
+        && metadata.snapshot_hash == snapshot.calendar_hash
+        && metadata.session.snapshot_hash() == snapshot.session_hash
+}
+
+fn clipped_physical_segments(
+    metadata: &BacktestHistoryMetadataSnapshot,
+    range: (i64, i64),
+) -> Vec<BacktestHistoryPhysicalSegment> {
+    metadata
+        .physical_segments
+        .iter()
+        .filter_map(|segment| {
+            let start_ns = segment.start_ns.max(range.0);
+            let end_ns = segment.end_ns.min(range.1);
+            (start_ns < end_ns).then(|| BacktestHistoryPhysicalSegment {
+                physical_symbol: segment.physical_symbol.clone(),
+                start_ns,
+                end_ns,
+            })
+        })
+        .collect()
+}
+
+fn clipped_trading_days(
+    metadata: &BacktestHistoryMetadataSnapshot,
+    range: (i64, i64),
+) -> Vec<BacktestHistoryTradingDay> {
+    metadata
+        .trading_days
+        .iter()
+        .filter_map(|day| {
+            let start_ns = day.start_ns.max(range.0);
+            let end_ns = day.end_ns.min(range.1);
+            (start_ns < end_ns).then(|| BacktestHistoryTradingDay {
+                date: day.date.clone(),
+                is_trading_day: day.is_trading_day,
+                start_ns,
+                end_ns,
+            })
+        })
+        .collect()
+}
+
+fn trading_days_cover_range(days: &[BacktestHistoryTradingDay], range: (i64, i64)) -> bool {
+    if range.0 >= range.1 {
+        return false;
+    }
+    let mut cursor = range.0;
+    for day in days {
+        if day.end_ns <= cursor || day.start_ns >= range.1 {
+            continue;
+        }
+        if day.start_ns > cursor {
+            return false;
+        }
+        cursor = cursor.max(day.end_ns);
+        if cursor >= range.1 {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_minute_snapshot_mismatch(error: &DataError) -> bool {

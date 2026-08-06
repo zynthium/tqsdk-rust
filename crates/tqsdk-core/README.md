@@ -20,7 +20,10 @@
 - 官方对象与相关 metadata/query 结果的 typed schema contract。
 - 纯交易时段状态 helper，例如 `TradingSessionSchedule`，用于在无网络和无 runtime side effect 的前提下判断 open / pre-close / closed 与下一边界倒计时。
 - transport、auth、topology bootstrap、HTTP executor、session orchestration 等底层原语；
-  yawc-backed websocket transport 由默认 feature `websocket-transport` 提供。
+  yawc-backed websocket transport 由默认 feature `websocket-transport` 提供。每次初始
+  socket/TLS 建连最多尝试 3 次、单次上限 15 秒；最终错误只记录 endpoint 的
+  `host:port`，不会带 URL path、query 或 userinfo。已建立 session 的恢复仍由
+  `ReconnectPolicy` 管理。
 
 ## 依赖方式
 

@@ -289,6 +289,149 @@ async fn cache_only_minute_query_reuses_immutable_snapshot_after_active_metadata
     assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![1]);
 }
 
+#[test]
+fn rolling_minute_metadata_extension_preserves_compatible_cached_prefix() {
+    let root = temp_dir("minute-compatible-metadata-extension");
+    let symbol = "KQ.m@SHFE.au";
+    let start_ns = utc_ns(2026, 1, 5, 1, 0, 0);
+    let cached_end_ns = start_ns + MINUTE_NS;
+    let extended_end_ns = cached_end_ns + MINUTE_NS;
+    let metadata_cache = BacktestHistoryMetadataCache::open(&root).unwrap();
+    let initial = metadata_cache
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+            market_kind: BacktestHistoryMarketKind::Futures,
+            logical_symbol: symbol.to_string(),
+            captured_at_ns: start_ns,
+            trading_days: vec![BacktestHistoryTradingDay {
+                date: "2026-01-05".to_string(),
+                is_trading_day: true,
+                start_ns,
+                end_ns: cached_end_ns,
+            }],
+            session: KlineSessionTemplate::cst_trading_day(),
+            physical_segments: vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: "SHFE.au2602".to_string(),
+                start_ns,
+                end_ns: cached_end_ns,
+            }],
+            snapshot_hash: String::new(),
+        })
+        .unwrap();
+    let initial_snapshot = MinuteKlineCacheSnapshot::new(
+        initial.schema_version,
+        initial.snapshot_hash.clone(),
+        initial.session.snapshot_hash(),
+    )
+    .unwrap();
+    let cache = MinuteKlineCache::open(&root).unwrap();
+    cache
+        .store_final_range(
+            symbol,
+            start_ns,
+            cached_end_ns,
+            &initial_snapshot,
+            &[kline(1, start_ns, 10.0)],
+        )
+        .unwrap();
+
+    let extended = metadata_cache
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            captured_at_ns: cached_end_ns,
+            trading_days: vec![BacktestHistoryTradingDay {
+                date: "2026-01-05".to_string(),
+                is_trading_day: true,
+                start_ns,
+                end_ns: extended_end_ns,
+            }],
+            physical_segments: vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: "SHFE.au2602".to_string(),
+                start_ns,
+                end_ns: extended_end_ns,
+            }],
+            snapshot_hash: String::new(),
+            ..initial.clone()
+        })
+        .unwrap();
+    assert_ne!(initial.snapshot_hash, extended.snapshot_hash);
+
+    let resolved = resolve_minute_cache_metadata_snapshot(&root, symbol, start_ns, extended_end_ns)
+        .unwrap()
+        .expect("extended metadata should remain compatible with the cached prefix");
+    assert_eq!(resolved.snapshot_hash, extended.snapshot_hash);
+    let resolved_snapshot = MinuteKlineCacheSnapshot::new(
+        resolved.schema_version,
+        resolved.snapshot_hash,
+        resolved.session.snapshot_hash(),
+    )
+    .unwrap();
+    let status = cache
+        .inspect(symbol, start_ns, extended_end_ns, &resolved_snapshot)
+        .unwrap();
+    assert_eq!(status.cached_ranges, vec![(start_ns, cached_end_ns)]);
+    assert_eq!(
+        status.missing_ranges,
+        vec![(cached_end_ns, extended_end_ns)]
+    );
+
+    cache
+        .store_final_range(
+            symbol,
+            cached_end_ns,
+            extended_end_ns,
+            &resolved_snapshot,
+            &[kline(2, cached_end_ns, 11.0)],
+        )
+        .unwrap();
+    let status = cache
+        .inspect(symbol, start_ns, extended_end_ns, &resolved_snapshot)
+        .unwrap();
+    assert!(status.is_complete());
+    assert_eq!(
+        cache
+            .read_range(symbol, start_ns, extended_end_ns, &resolved_snapshot)
+            .unwrap()
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+
+    let changed_calendar = metadata_cache
+        .store_snapshot(BacktestHistoryMetadataSnapshot {
+            captured_at_ns: extended_end_ns,
+            trading_days: vec![BacktestHistoryTradingDay {
+                date: "2026-01-05".to_string(),
+                is_trading_day: false,
+                start_ns,
+                end_ns: extended_end_ns,
+            }],
+            snapshot_hash: String::new(),
+            ..extended
+        })
+        .unwrap();
+    let changed_calendar_snapshot = MinuteKlineCacheSnapshot::new(
+        changed_calendar.schema_version,
+        changed_calendar.snapshot_hash,
+        changed_calendar.session.snapshot_hash(),
+    )
+    .unwrap();
+    let error = cache
+        .inspect(
+            symbol,
+            start_ns,
+            extended_end_ns,
+            &changed_calendar_snapshot,
+        )
+        .expect_err("a trading-day change must invalidate cached minute coverage");
+    assert!(
+        error
+            .to_string()
+            .contains("calendar/session snapshot mismatch"),
+        "{error}"
+    );
+}
+
 #[tokio::test]
 async fn remote_on_miss_minute_query_uses_a_complete_historical_snapshot_without_auth() {
     let root = temp_dir("minute-historical-metadata-without-auth");
@@ -435,6 +578,11 @@ fn minute_stale_repair_targets_only_months_stale_against_the_active_snapshot() {
     let outlier = metadata_cache
         .store_snapshot(BacktestHistoryMetadataSnapshot {
             captured_at_ns: january_start + 1,
+            physical_segments: vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: "SHFE.au9999".to_string(),
+                start_ns: january_start,
+                end_ns,
+            }],
             snapshot_hash: String::new(),
             ..snapshot_body.clone()
         })

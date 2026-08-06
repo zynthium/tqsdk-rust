@@ -65,9 +65,11 @@ minute 缓存当前的 format id 是 `tqsdk.minute-kline.monthly.v4`，schema/fi
 覆盖、删除或当作命中；coverage/read fail closed，deep doctor 将其分类为 `legacy_unsupported`。
 
 每个 v4 月文件绑定写入时的 immutable metadata snapshot。active pointer 后续变化不会单独令历史
-月文件失效：minute `inspect`、`fill --dry-run`、`verify` 和 cache-backed reader 仅会在一个保留
-snapshot 覆盖完整窗口、schema/session identity 与 active 一致、并能精确验证现存月文件时选择它。
-缺少保留 snapshot、session 变化、损坏文件或不能由单一 snapshot 解释的混合分区仍 fail closed，且不会
+月文件失效：minute `inspect`、`fill --dry-run`、`verify`、普通 `fill` 和 cache-backed reader 在 hash
+不同时加载月文件绑定的旧 sidecar 与目标 sidecar，只对实际 cached range 比较 schema、market、logical
+symbol、session、交易日和 physical mapping。语义相同的旧 coverage 继续命中，新增尾部日期仍是 miss；
+当前月下一次原子写入才迁移 header。缺少 sidecar、session/交易日/映射变化、损坏文件或语义冲突的混合
+分区仍 fail closed，且不会
 自动 purge、重写、下载或拼接数据。唯一例外是显式的 `--kind minute fill --repair-stale`：active snapshot
 覆盖窗口时，它仅在同一 root remote-fill lock 已取得且 repair 所需认证预检成功后删除与 active snapshot
 冲突的整月分区，随后由同一次 remote-on-miss fill 重建；锁忙或认证缺失时不删除分区。普通 `fill`、

@@ -234,8 +234,10 @@ tqsdk
   `N × 60s` 从 canonical minutes 按固定 CST `18:00` trading-day grid 临时聚合。盘中 break 不重置
   高周期 bucket；Tick/60s 分区没有自动清理，派生 K 不落盘
 - canonical-minute 月分区绑定写入时的 immutable metadata snapshot。active metadata pointer 前移不单独
-  使旧分区失效；只有保留 snapshot 覆盖完整请求窗口、schema/session identity 与 active 相同并精确验证
-  月文件时才可读取它。缺失、session 变化、损坏或无法由同一 snapshot 解释的混合分区必须 fail closed，
+  使旧分区失效。snapshot hash 不同时，必须加载月文件绑定的旧 sidecar 与目标 sidecar，并仅对实际读取的
+  cached range 比较 schema、market、logical symbol、session、交易日和 physical mapping；全部相同才可
+  复用旧 coverage。新增尾部日期保持为 miss，当前月下一次原子写入时才迁移 header。缺失 sidecar、session/
+  交易日/映射变化、损坏或语义冲突的混合分区必须 fail closed，
   不得自动删除、重写或拼接缓存。唯一例外是 operator 显式传 `tqsdk-cache --kind minute fill
   --repair-stale`：active snapshot 覆盖窗口时，它仅删除与 active snapshot 冲突的整月分区，随后由同一次
   remote-on-miss fill 重建；这不是 reader 或普通 fill 的自动修复

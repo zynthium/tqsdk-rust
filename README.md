@@ -202,9 +202,11 @@ minute 的 remote metadata refresh 会扩展到涉及的完整 CST trading month
 `tqllm-csv/3`；详情见 [`tqsdk-cache` README](crates/tqsdk-cache/README.md)。
 
 每个 `.tqmk` 月分区绑定写入时的 immutable metadata snapshot；active pointer 后续前移本身不会使
-旧分区失效。读取方只会在该历史 snapshot 覆盖整个请求窗口、schema 与 session identity 仍和 active
-snapshot 一致、且现存月文件可用该 snapshot 精确验证时回退使用它；缺少保留 snapshot、session 变化、
-损坏文件或无法由同一 snapshot 解释的混合分区仍默认 fail closed，不会自动删除、重写或拼接数据。只有
+旧分区失效。若 active snapshot 只是向后扩展日期，读取方会加载月文件绑定的旧 immutable sidecar，并逐个
+cached range 比较 schema、market、logical symbol、session、交易日和主连 physical mapping；该区间语义
+完全相同即可复用旧 coverage，新增日期只作为缺口填充，当前月下一次原子写入时迁移到新 snapshot hash。
+缺少任一 sidecar、session/交易日/映射变化、损坏文件或语义冲突的混合分区仍默认 fail closed，不会自动
+删除、重写或拼接数据。只有
 操作者显式传 `tqsdk-cache --kind minute fill --repair-stale` 时，CLI 才会在 active snapshot 覆盖窗口时，
 删除该窗口内与它冲突的整月分区，再走普通 `remote-on-miss` 补齐；它不适用于 tick 或
 `--dry-run`，普通读取与 fill 仍不会删除数据。
