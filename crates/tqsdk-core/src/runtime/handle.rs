@@ -3,6 +3,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[cfg(test)]
+use std::time::{Duration, Instant};
+
 use serde_json::{Map, Value, json};
 
 use crate::{
@@ -50,8 +53,23 @@ pub(crate) struct OutboundEnvelope {
 #[derive(Clone)]
 pub struct RuntimeHandle {
     inner: Arc<Mutex<RuntimeCore>>,
+    // Preserves one ordered decode -> apply -> publish stream without making command
+    // submission wait for a blocked state write.
+    commit_gate: Arc<Mutex<()>>,
     state: SharedState,
     commit_log: CommitLog,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default)]
+struct IngestPhaseTiming {
+    commit_gate_wait: Duration,
+    adapter_lock_wait: Duration,
+    adapter_decode: Duration,
+    normalize_and_validate: Duration,
+    state_apply: Duration,
+    publish: Duration,
+    total: Duration,
 }
 
 impl RuntimeHandle {
@@ -88,6 +106,7 @@ impl RuntimeHandle {
                 adapters,
                 max_retained_terminal_commands,
             ))),
+            commit_gate: Arc::new(Mutex::new(())),
             state: Arc::new(StateStore::new(Revision::new(0))),
             commit_log: CommitLog::with_retention(max_commit_log_entries),
         }
@@ -149,9 +168,90 @@ impl RuntimeHandle {
         scope: CommitScope,
     ) -> Result<Option<SharedCommitResult>> {
         let domains = input_domains(&input);
+        let _commit_gate = mutex_lock(&self.commit_gate);
+        let mutations = {
+            let mut inner = mutex_lock(&self.inner);
+            inner.adapters.decode_input_owned(input)?
+        };
+        self.apply_and_publish_under_commit_gate(mutations, domains, caused_by, scope)
+    }
+
+    #[cfg(test)]
+    fn ingest_with_phase_timing(
+        &self,
+        input: RuntimeInput,
+        caused_by: Vec<CommandId>,
+        scope: CommitScope,
+    ) -> Result<(Option<SharedCommitResult>, IngestPhaseTiming)> {
+        self.ingest_with_phase_timing_before_adapter_decode(input, caused_by, scope, || {})
+    }
+
+    #[cfg(test)]
+    fn ingest_with_phase_timing_before_adapter_decode<F>(
+        &self,
+        input: RuntimeInput,
+        caused_by: Vec<CommandId>,
+        scope: CommitScope,
+        before_adapter_decode: F,
+    ) -> Result<(Option<SharedCommitResult>, IngestPhaseTiming)>
+    where
+        F: FnOnce(),
+    {
+        let total_started = Instant::now();
+        let domains = input_domains(&input);
+        let mut timing = IngestPhaseTiming::default();
+
+        let commit_gate_started = Instant::now();
+        let _commit_gate = mutex_lock(&self.commit_gate);
+        timing.commit_gate_wait = commit_gate_started.elapsed();
+
+        let adapter_lock_started = Instant::now();
         let mut inner = mutex_lock(&self.inner);
+        timing.adapter_lock_wait = adapter_lock_started.elapsed();
+        // The optional hook aligns a contender with adapter decode. It is probe
+        // control-plane work, not runtime work, so exclude it from total latency.
+        let probe_alignment_started = Instant::now();
+        before_adapter_decode();
+        let probe_alignment_wait = probe_alignment_started.elapsed();
+        let adapter_decode_started = Instant::now();
         let mutations = inner.adapters.decode_input_owned(input)?;
-        self.apply_and_publish_locked(&mut inner, mutations, domains, caused_by, scope)
+        timing.adapter_decode = adapter_decode_started.elapsed();
+        drop(inner);
+
+        let normalize_and_validate_started = Instant::now();
+        let mutations = if domains_are_pure_market(&domains) {
+            mutations
+        } else {
+            normalize_order_lifecycle_mutations(&self.state, mutations)?
+        };
+        validate_mutation_domains(&mutations)?;
+        timing.normalize_and_validate = normalize_and_validate_started.elapsed();
+
+        let state_apply_started = Instant::now();
+        let mut state_apply = Duration::ZERO;
+        let mut publish = Duration::ZERO;
+        let commit = CommitEngine::apply(
+            &self.state,
+            mutations,
+            domains,
+            caused_by,
+            scope,
+            |commit| {
+                state_apply = state_apply_started.elapsed();
+                let publish_started = Instant::now();
+                self.commit_log.publish(commit);
+                publish = publish_started.elapsed();
+            },
+        );
+        timing.state_apply = if commit.is_some() {
+            state_apply
+        } else {
+            state_apply_started.elapsed()
+        };
+        timing.publish = publish;
+        timing.total = total_started.elapsed().saturating_sub(probe_alignment_wait);
+
+        Ok((commit, timing))
     }
 
     pub fn ingest_batch(
@@ -161,12 +261,16 @@ impl RuntimeHandle {
         scope: CommitScope,
     ) -> Result<Option<SharedCommitResult>> {
         let domains = batch_input_domains(&inputs);
-        let mut inner = mutex_lock(&self.inner);
-        let mut mutations = Vec::new();
-        for input in inputs {
-            mutations.extend(inner.adapters.decode_input_owned(input)?);
-        }
-        self.apply_and_publish_locked(&mut inner, mutations, domains, caused_by, scope)
+        let _commit_gate = mutex_lock(&self.commit_gate);
+        let mutations = {
+            let mut inner = mutex_lock(&self.inner);
+            let mut mutations = Vec::new();
+            for input in inputs {
+                mutations.extend(inner.adapters.decode_input_owned(input)?);
+            }
+            mutations
+        };
+        self.apply_and_publish_under_commit_gate(mutations, domains, caused_by, scope)
     }
 
     #[doc(hidden)]
@@ -261,6 +365,7 @@ impl RuntimeHandle {
         detail: Option<Value>,
         scope: CommitScope,
     ) -> Result<Option<SharedCommitResult>> {
+        let _commit_gate = mutex_lock(&self.commit_gate);
         let mut inner = mutex_lock(&self.inner);
         let domain_from_ledger = inner.command_ledger.domain(command_id);
         let detail_seed_from_ledger = inner.command_ledger.detail_seed(command_id);
@@ -332,8 +437,7 @@ impl RuntimeHandle {
             mutations.push(command_cleanup_mutation(evicted_command_id));
         }
 
-        let commit = self.apply_and_publish_locked(
-            &mut inner,
+        let commit = self.apply_and_publish_under_commit_gate(
             mutations,
             vec![domain],
             vec![command_id],
@@ -444,13 +548,12 @@ impl RuntimeHandle {
         caused_by: Vec<CommandId>,
         scope: CommitScope,
     ) -> Result<Option<SharedCommitResult>> {
-        let mut inner = mutex_lock(&self.inner);
-        self.apply_and_publish_locked(&mut inner, mutations, domains, caused_by, scope)
+        let _commit_gate = mutex_lock(&self.commit_gate);
+        self.apply_and_publish_under_commit_gate(mutations, domains, caused_by, scope)
     }
 
-    fn apply_and_publish_locked(
+    fn apply_and_publish_under_commit_gate(
         &self,
-        _inner: &mut RuntimeCore,
         mutations: Vec<NormalizedMutation>,
         domains: Vec<ProtocolDomain>,
         caused_by: Vec<CommandId>,
@@ -848,20 +951,24 @@ fn dispatch_account_id_from_seed(seed: &serde_json::Map<String, Value>) -> Optio
 #[cfg(test)]
 mod tests {
     use std::{
+        env, fs,
         future::Future,
         panic::{AssertUnwindSafe, catch_unwind},
         pin::Pin,
+        sync::{Arc, Barrier, mpsc},
         task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
+        thread,
+        time::{Duration, Instant},
     };
 
-    use serde_json::json;
+    use serde_json::{Map, Number, Value, json};
 
     use crate::{
-        adapter::AdapterRegistry,
+        adapter::{AdapterRegistry, ProtocolAdapter},
         commands::{
-            CommandStatus, RuntimeCommand, SystemCommand, TradeCommand, TradeDirection,
-            TradeInsertOrderCommand, TradeOffset, TradePriceType, TradeTimeCondition,
-            TradeVolumeCondition,
+            CommandStatus, MarketCommand, OutboundRequest, RuntimeCommand, SystemCommand,
+            TradeCommand, TradeDirection, TradeInsertOrderCommand, TradeOffset, TradePriceType,
+            TradeTimeCondition, TradeVolumeCondition,
         },
         events::{
             FieldMutation, InputPayload, IoEvent, MutationSource, NormalizedMutation, RuntimeInput,
@@ -871,6 +978,483 @@ mod tests {
     };
 
     use super::{Runtime, RuntimeHandle};
+
+    struct DecodeGateMarketAdapter {
+        gate: Arc<Barrier>,
+    }
+
+    impl ProtocolAdapter for DecodeGateMarketAdapter {
+        fn domain(&self) -> ProtocolDomain {
+            ProtocolDomain::Market
+        }
+
+        fn accepts_command(&self, _cmd: &RuntimeCommand) -> bool {
+            false
+        }
+
+        fn encode(&mut self, _cmd: &RuntimeCommand) -> crate::Result<Vec<OutboundRequest>> {
+            Ok(Vec::new())
+        }
+
+        fn accepts_input(&self, input: &RuntimeInput) -> bool {
+            matches!(input, RuntimeInput::Io(_))
+        }
+
+        fn decode(&mut self, _input: &RuntimeInput) -> crate::Result<Vec<NormalizedMutation>> {
+            self.gate.wait();
+            Ok(vec![NormalizedMutation {
+                path: StatePath::new(["quotes", "SHFE.lock"]),
+                object: Some(ObjectKey::Quote {
+                    symbol: Symbol::new("SHFE.lock"),
+                }),
+                fields: vec![FieldMutation {
+                    field: "last_price".to_string(),
+                    value: json!(1.0),
+                }],
+                source: MutationSource::MarketDiff,
+            }])
+        }
+    }
+
+    #[test]
+    fn command_submit_is_not_blocked_by_market_state_apply() {
+        let gate = Arc::new(Barrier::new(2));
+        let mut adapters = AdapterRegistry::new();
+        adapters.register_default_adapters();
+        adapters.register_adapter(DecodeGateMarketAdapter {
+            gate: Arc::clone(&gate),
+        });
+        let handle = RuntimeHandle::with_adapters(adapters);
+        let market_read = handle.state.read_market_state();
+
+        let ingest_handle = handle.clone();
+        let ingest = thread::spawn(move || {
+            ingest_handle.ingest(
+                RuntimeInput::Io(IoEvent {
+                    route: "market".to_string(),
+                    domains: vec![ProtocolDomain::Market],
+                    payload: InputPayload::Json(json!({})),
+                }),
+                vec![],
+                CommitScope::RealtimeUpdate,
+            )
+        });
+        gate.wait();
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let command_handle = handle.clone();
+        let command = thread::spawn(move || {
+            let result =
+                block_on(command_handle.submit(RuntimeCommand::System(SystemCommand::RefreshAuth)));
+            command_tx
+                .send(result)
+                .expect("test command receiver should remain available");
+        });
+
+        let command_result = command_rx.recv_timeout(Duration::from_millis(250));
+        drop(market_read);
+
+        assert!(
+            ingest
+                .join()
+                .expect("ingest thread should join")
+                .expect("ingest should succeed")
+                .is_some()
+        );
+        command.join().expect("command thread should join");
+        assert!(
+            command_result
+                .expect("command submit should complete before market state apply unblocks")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn timed_market_ingest_preserves_commit_and_records_phase_boundaries() {
+        let mut adapters = AdapterRegistry::new();
+        adapters.register_default_adapters();
+        let handle = RuntimeHandle::with_adapters(adapters);
+
+        let (commit, timing) = handle
+            .ingest_with_phase_timing(
+                RuntimeInput::Io(IoEvent {
+                    route: "market".to_string(),
+                    domains: vec![ProtocolDomain::Market],
+                    payload: InputPayload::Json(json!({
+                        "aid": "rtn_data",
+                        "data": [{
+                            "quotes": {
+                                "SHFE.phase": {
+                                    "datetime": "2026-08-14 09:30:00.000000000",
+                                    "last_price": 600.0,
+                                    "bid_price1": 599.8,
+                                    "bid_volume1": 10,
+                                    "ask_price1": 600.2,
+                                    "ask_volume1": 12
+                                }
+                            }
+                        }]
+                    })),
+                }),
+                vec![],
+                CommitScope::RealtimeUpdate,
+            )
+            .expect("timed market ingest should succeed");
+
+        assert_eq!(
+            commit.expect("timed market ingest should publish").revision,
+            Revision::new(1)
+        );
+        assert_eq!(handle.commit_log().head_revision(), Some(Revision::new(1)));
+
+        let accounted = timing.commit_gate_wait
+            + timing.adapter_lock_wait
+            + timing.adapter_decode
+            + timing.normalize_and_validate
+            + timing.state_apply
+            + timing.publish;
+        assert!(
+            timing.total >= accounted,
+            "total={:?}, accounted={accounted:?}",
+            timing.total
+        );
+    }
+
+    #[test]
+    fn timed_market_ingest_excludes_probe_alignment_wait_from_total() {
+        let handle = runtime_with_default_adapters();
+
+        let (_commit, timing) = handle
+            .ingest_with_phase_timing_before_adapter_decode(
+                phase_probe_market_input(l2_phase_probe_frame(1, 0)),
+                vec![],
+                CommitScope::RealtimeUpdate,
+                || thread::sleep(Duration::from_millis(50)),
+            )
+            .expect("timed market ingest should succeed");
+
+        assert!(
+            timing.total < Duration::from_millis(25),
+            "alignment wait leaked into ingest total: {:?}",
+            timing.total
+        );
+    }
+
+    #[test]
+    fn duration_percentile_uses_nearest_rank() {
+        let samples = (1..=1_000).map(Duration::from_nanos).collect::<Vec<_>>();
+
+        assert_eq!(
+            duration_percentile(&samples, 50, 100),
+            Duration::from_nanos(500)
+        );
+        assert_eq!(
+            duration_percentile(&samples, 99, 100),
+            Duration::from_nanos(990)
+        );
+        assert_eq!(
+            duration_percentile(&samples, 999, 1_000),
+            Duration::from_nanos(999)
+        );
+    }
+
+    #[test]
+    fn l2_phase_probe_frame_contains_all_five_book_levels() {
+        let frame = l2_phase_probe_frame(1, 7);
+        let fields = frame["data"][0]["quotes"]["SHFE.phase0000"]
+            .as_object()
+            .expect("phase probe should contain a quote object");
+
+        for level in 1..=5 {
+            assert!(fields.contains_key(&format!("bid_price{level}")));
+            assert!(fields.contains_key(&format!("bid_volume{level}")));
+            assert!(fields.contains_key(&format!("ask_price{level}")));
+            assert!(fields.contains_key(&format!("ask_volume{level}")));
+        }
+    }
+
+    #[test]
+    fn advancing_phase_probe_quotes_changes_each_quote() {
+        let mut frame = l2_phase_probe_frame(2, 0);
+
+        assert_eq!(advance_phase_probe_quotes(&mut frame, 9), 2);
+        assert_eq!(
+            frame["data"][0]["quotes"]["SHFE.phase0000"]["last_price"],
+            json!(60_000.009)
+        );
+        assert_eq!(
+            frame["data"][0]["quotes"]["SHFE.phase0001"]["last_price"],
+            json!(60_001.009)
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark-style L2 phase probe; run explicitly with --ignored --nocapture"]
+    fn l2_ingest_phase_latency_probe_reports_p50_p99_p999() {
+        const DEFAULT_SAMPLES: usize = 1_000;
+        const DEFAULT_SYMBOLS: usize = 64;
+
+        let samples = positive_usize_env("TQSDK_RUNTIME_PHASE_PROBE_SAMPLES", DEFAULT_SAMPLES);
+        let symbols = positive_usize_env("TQSDK_RUNTIME_PHASE_PROBE_SYMBOLS", DEFAULT_SYMBOLS);
+        let (frame_text, source) = phase_probe_frame_text(symbols);
+        let mut warmup_payload: Value =
+            serde_json::from_str(&frame_text).expect("phase probe frame should be valid JSON");
+        assert!(
+            advance_phase_probe_quotes(&mut warmup_payload, u64::MAX) > 0,
+            "phase probe frame must contain data[].quotes objects"
+        );
+
+        let handle = runtime_with_default_adapters();
+        handle
+            .ingest(
+                phase_probe_market_input(warmup_payload),
+                vec![],
+                CommitScope::RealtimeUpdate,
+            )
+            .expect("phase probe warmup should succeed");
+
+        let no_load = command_submit_latencies(
+            &runtime_with_default_adapters(),
+            phase_probe_commands(samples),
+        );
+
+        let adapter_lock_barrier = Arc::new(Barrier::new(2));
+        let command_handle = handle.clone();
+        let command_barrier = Arc::clone(&adapter_lock_barrier);
+        let command_worker = thread::spawn(move || {
+            let mut latencies = Vec::with_capacity(samples);
+            for command in phase_probe_commands(samples) {
+                command_barrier.wait();
+                let started = Instant::now();
+                let command_id = block_on(command_handle.submit(command))
+                    .expect("phase probe command submission should succeed");
+                assert!(command_id.get() > 0);
+                latencies.push(started.elapsed());
+            }
+            latencies
+        });
+
+        let mut frame_decode = Vec::with_capacity(samples);
+        let mut commit_gate_wait = Vec::with_capacity(samples);
+        let mut adapter_lock_wait = Vec::with_capacity(samples);
+        let mut adapter_decode = Vec::with_capacity(samples);
+        let mut normalize_and_validate = Vec::with_capacity(samples);
+        let mut state_apply = Vec::with_capacity(samples);
+        let mut publish = Vec::with_capacity(samples);
+        let mut ingest_total = Vec::with_capacity(samples);
+
+        for sequence in 0..samples {
+            let frame_started = Instant::now();
+            let mut payload: Value = serde_json::from_str(&frame_text)
+                .expect("phase probe frame should remain valid JSON");
+            frame_decode.push(frame_started.elapsed());
+            assert!(
+                advance_phase_probe_quotes(&mut payload, sequence as u64) > 0,
+                "phase probe frame must contain data[].quotes objects"
+            );
+
+            let barrier = Arc::clone(&adapter_lock_barrier);
+            let (commit, timing) = handle
+                .ingest_with_phase_timing_before_adapter_decode(
+                    phase_probe_market_input(payload),
+                    vec![],
+                    CommitScope::RealtimeUpdate,
+                    move || {
+                        barrier.wait();
+                    },
+                )
+                .expect("timed L2 ingest should succeed");
+            assert!(commit.is_some(), "each phase probe frame should commit");
+
+            commit_gate_wait.push(timing.commit_gate_wait);
+            adapter_lock_wait.push(timing.adapter_lock_wait);
+            adapter_decode.push(timing.adapter_decode);
+            normalize_and_validate.push(timing.normalize_and_validate);
+            state_apply.push(timing.state_apply);
+            publish.push(timing.publish);
+            ingest_total.push(timing.total);
+        }
+
+        let command_while_adapter_decode = command_worker
+            .join()
+            .expect("phase probe command worker should join");
+
+        eprintln!(
+            "L2 phase probe source={source} samples={samples} frame_bytes={}",
+            frame_text.len()
+        );
+        report_latency_percentiles("frame_decode", &frame_decode);
+        report_latency_percentiles("commit_gate_wait", &commit_gate_wait);
+        report_latency_percentiles("adapter_lock_wait", &adapter_lock_wait);
+        report_latency_percentiles("adapter_decode", &adapter_decode);
+        report_latency_percentiles("normalize_and_validate", &normalize_and_validate);
+        report_latency_percentiles("state_apply", &state_apply);
+        report_latency_percentiles("publish", &publish);
+        report_latency_percentiles("ingest_total", &ingest_total);
+        report_latency_percentiles("command_submit_no_load", &no_load);
+        report_latency_percentiles(
+            "command_submit_while_adapter_decode",
+            &command_while_adapter_decode,
+        );
+    }
+
+    fn duration_percentile(samples: &[Duration], numerator: usize, denominator: usize) -> Duration {
+        assert!(!samples.is_empty(), "latency samples must not be empty");
+        assert!(
+            (1..=denominator).contains(&numerator),
+            "percentile must be in (0, 1]"
+        );
+
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let rank = (sorted.len() * numerator).div_ceil(denominator);
+        sorted[rank - 1]
+    }
+
+    fn report_latency_percentiles(label: &str, samples: &[Duration]) {
+        eprintln!(
+            "{label}: p50={:?} p99={:?} p999={:?}",
+            duration_percentile(samples, 50, 100),
+            duration_percentile(samples, 99, 100),
+            duration_percentile(samples, 999, 1_000),
+        );
+    }
+
+    fn positive_usize_env(name: &str, default: usize) -> usize {
+        env::var(name)
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(default)
+    }
+
+    fn phase_probe_frame_text(symbols: usize) -> (String, &'static str) {
+        match env::var_os("TQSDK_RUNTIME_PHASE_PAYLOAD_PATH") {
+            Some(path) => (
+                fs::read_to_string(path).expect("phase probe payload path should be readable"),
+                "local_capture",
+            ),
+            None => (l2_phase_probe_frame(symbols, 0).to_string(), "synthetic_l2"),
+        }
+    }
+
+    fn phase_probe_market_input(payload: Value) -> RuntimeInput {
+        RuntimeInput::Io(IoEvent {
+            route: "market".to_string(),
+            domains: vec![ProtocolDomain::Market],
+            payload: InputPayload::Json(payload),
+        })
+    }
+
+    fn phase_probe_commands(samples: usize) -> Vec<RuntimeCommand> {
+        (0..samples)
+            .map(|index| {
+                RuntimeCommand::Market(MarketCommand::SubscribeQuotes {
+                    symbols: vec![Symbol::new(format!("SHFE.phase_command{index:04}"))],
+                })
+            })
+            .collect()
+    }
+
+    fn command_submit_latencies(
+        handle: &RuntimeHandle,
+        commands: Vec<RuntimeCommand>,
+    ) -> Vec<Duration> {
+        commands
+            .into_iter()
+            .map(|command| {
+                let started = Instant::now();
+                let command_id = block_on(handle.submit(command))
+                    .expect("phase probe command submission should succeed");
+                assert!(command_id.get() > 0);
+                started.elapsed()
+            })
+            .collect()
+    }
+
+    fn l2_phase_probe_frame(symbols: usize, sequence: u64) -> Value {
+        let mut quotes = Map::with_capacity(symbols);
+        for index in 0..symbols {
+            let midpoint = 600.0 + index as f64 * 0.01 + sequence as f64 * 0.001;
+            let mut fields = Map::new();
+            fields.insert(
+                "datetime".to_string(),
+                Value::String(format!(
+                    "2026-08-14 09:30:{:02}.{:09}",
+                    sequence % 60,
+                    sequence % 1_000_000_000
+                )),
+            );
+            fields.insert("last_price".to_string(), finite_number(midpoint));
+            fields.insert("average".to_string(), finite_number(midpoint - 0.03));
+            fields.insert("highest".to_string(), finite_number(midpoint + 0.8));
+            fields.insert("lowest".to_string(), finite_number(midpoint - 0.8));
+            fields.insert("volume".to_string(), Value::from(sequence + index as u64));
+            fields.insert(
+                "open_interest".to_string(),
+                Value::from(10_000_u64 + index as u64),
+            );
+
+            for level in 1..=5 {
+                let offset = level as f64 * 0.2;
+                fields.insert(
+                    format!("bid_price{level}"),
+                    finite_number(midpoint - offset),
+                );
+                fields.insert(
+                    format!("bid_volume{level}"),
+                    Value::from(10_i64 + index as i64 + level as i64),
+                );
+                fields.insert(
+                    format!("ask_price{level}"),
+                    finite_number(midpoint + offset),
+                );
+                fields.insert(
+                    format!("ask_volume{level}"),
+                    Value::from(20_i64 + index as i64 + level as i64),
+                );
+            }
+
+            quotes.insert(format!("SHFE.phase{index:04}"), Value::Object(fields));
+        }
+
+        let mut root = Map::new();
+        root.insert("quotes".to_string(), Value::Object(quotes));
+
+        let mut frame = Map::new();
+        frame.insert("aid".to_string(), Value::String("rtn_data".to_string()));
+        frame.insert("data".to_string(), Value::Array(vec![Value::Object(root)]));
+        Value::Object(frame)
+    }
+
+    fn advance_phase_probe_quotes(frame: &mut Value, sequence: u64) -> usize {
+        let Some(data) = frame.get_mut("data").and_then(Value::as_array_mut) else {
+            return 0;
+        };
+
+        let mut changed = 0_usize;
+        for root in data {
+            let Some(quotes) = root.get_mut("quotes").and_then(Value::as_object_mut) else {
+                continue;
+            };
+            for quote in quotes.values_mut() {
+                let Some(fields) = quote.as_object_mut() else {
+                    continue;
+                };
+                fields.insert(
+                    "last_price".to_string(),
+                    finite_number(60_000.0 + changed as f64 + sequence as f64 * 0.001),
+                );
+                changed += 1;
+            }
+        }
+
+        changed
+    }
+
+    fn finite_number(value: f64) -> Value {
+        Value::Number(Number::from_f64(value).expect("probe price should be finite"))
+    }
 
     #[test]
     fn market_diff_allows_symbols_root_from_market_sessions() {
