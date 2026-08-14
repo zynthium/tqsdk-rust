@@ -411,7 +411,7 @@ let page = client.get_kline_data_page(request).await?;
 | 默认 facade 实时 tick 记录 | `TQ_RUN_LIVE_RECORD_TICKS=1 cargo run -p tqsdk --example api_contract_s46_facade_record_ticks` | 显式 `record_ticks(...)` 把指定合约 live tick 写入同一份回测缓存；需要账号 |
 | 默认 facade 共享缓存 policy | `TQ_RUN_LIVE_RECORD_TICKS=1 cargo run -p tqsdk --example api_contract_s47_facade_market_cache_policy` | `MarketCachePolicy` 同时驱动 live tick recording 和 cache-backed local backtest 输入 |
 | 回测缓存运维 CLI | `cargo run -p tqsdk-cache -- --help` | 可选 binary；以 `--kind tick|minute|all` 管理 daily TQBN tick 与 canonical-minute cache，不启动 relay 或守护进程 |
-| 修复遗失的 tick companion lock | `cargo run -p tqsdk-cache -- --kind tick repair-locks` | 默认只检查并逐文件报告缺失 `.tqbn.lock`；停止同一 root 的读写者后，才用 `--apply` 补建 sidecar，不填数、不重写 TQBN |
+| 修复遗失的 tick companion lock | `cargo run -p tqsdk-cache -- --kind tick repair-locks` | 默认检查每个 Tick 分区的 legacy `.tqbn.lock` 与逐文件 sidecar；停止同一 root 的读写者后，才用 `--apply` 补建缺失 lock，不填数、不重写 TQBN |
 | 回测历史查询 / LLM 上下文 CLI | `cargo run -p tqsdk-cache -- query --help` | 同一 cache-backed history query 的 CLI adapter；`jsonl` 用于无损 rows，`llm-csv` 用于 token-aware 模型输入 |
 | 默认 facade 多合约同主体 | `cargo run -p tqsdk --example api_contract_s39_facade_same_body` | 同一两腿价差策略只接受 `&mut Tq`，`TQ_EXAMPLE_MODE` 决定本地回测、快期模拟或实盘 |
 | 默认 facade 本地回测 TargetPos | `cargo run -p tqsdk --example api_contract_s40_facade_local_backtest_target_pos` | 同一 `Tq::next()` 策略主体在本地 replay 中读取持仓并用 `TargetPos` 调仓 |

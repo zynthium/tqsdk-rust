@@ -6,6 +6,7 @@ use crate::{DataError, Result};
 
 use super::{
     HistorySeriesCacheMaintenanceReport, HistorySeriesCacheScanReport,
+    HistorySeriesTickLegacyPartitionLockInspection, HistorySeriesTickLegacyPartitionLockRepair,
     HistorySeriesTickLockInspection, HistorySeriesTickLockRepair,
 };
 
@@ -147,9 +148,23 @@ pub(crate) trait HistorySeriesStore: Send + Sync {
             "history cache backend does not support TQBN companion lock inspection",
         ))
     }
+    fn inspect_tick_legacy_partition_locks(
+        &self,
+    ) -> Result<Vec<HistorySeriesTickLegacyPartitionLockInspection>> {
+        Err(DataError::InvalidState(
+            "history cache backend does not support TQBN legacy partition lock inspection",
+        ))
+    }
     fn repair_tick_locks(&self) -> Result<Vec<HistorySeriesTickLockRepair>> {
         Err(DataError::InvalidState(
             "history cache backend does not support TQBN companion lock repair",
+        ))
+    }
+    fn repair_tick_legacy_partition_locks(
+        &self,
+    ) -> Result<Vec<HistorySeriesTickLegacyPartitionLockRepair>> {
+        Err(DataError::InvalidState(
+            "history cache backend does not support TQBN legacy partition lock repair",
         ))
     }
     fn enforce_limits(

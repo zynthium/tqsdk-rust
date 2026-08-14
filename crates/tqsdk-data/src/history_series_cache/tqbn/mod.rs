@@ -17,6 +17,7 @@ use crate::history_series_cache::{
     HistorySeriesCoverageReport, HistorySeriesCoverageRequest, HistorySeriesKind,
     HistorySeriesProvisionalCoverage, HistorySeriesPurgeReport, HistorySeriesReadRequest,
     HistorySeriesReader, HistorySeriesRow, HistorySeriesSegmentReport, HistorySeriesStore,
+    HistorySeriesTickLegacyPartitionLockInspection, HistorySeriesTickLegacyPartitionLockRepair,
     HistorySeriesTickLockInspection, HistorySeriesTickLockRepair, HistorySeriesWriteRows,
     HistorySeriesWriteSegment,
 };
@@ -735,6 +736,35 @@ impl HistorySeriesStore for TqbnHistoryStore {
             .collect())
     }
 
+    fn inspect_tick_legacy_partition_locks(
+        &self,
+    ) -> Result<Vec<HistorySeriesTickLegacyPartitionLockInspection>> {
+        Ok(tick_tqbn_partition_dirs(self.root_dir.as_path())?
+            .into_iter()
+            .map(|partition_dir| {
+                let lock_path = partition_dir.join(LEGACY_LOCK_FILE_NAME);
+                let (lock_exists, error) = match fs::symlink_metadata(&lock_path) {
+                    Ok(metadata) if metadata.file_type().is_file() => (true, None),
+                    Ok(_) => (
+                        false,
+                        Some(format!(
+                            "history TQBN legacy partition lock {} is not a regular file",
+                            lock_path.display()
+                        )),
+                    ),
+                    Err(error) if error.kind() == ErrorKind::NotFound => (false, None),
+                    Err(error) => (false, Some(error.to_string())),
+                };
+                HistorySeriesTickLegacyPartitionLockInspection {
+                    partition_dir,
+                    lock_path,
+                    lock_exists,
+                    error,
+                }
+            })
+            .collect())
+    }
+
     fn repair_tick_locks(&self) -> Result<Vec<HistorySeriesTickLockRepair>> {
         self.ensure_writable()?;
         let mut repaired = Vec::new();
@@ -762,6 +792,46 @@ impl HistorySeriesStore for TqbnHistoryStore {
             };
             repaired.push(HistorySeriesTickLockRepair {
                 path: file.path,
+                lock_path,
+                lock_created,
+                error,
+            });
+        }
+        Ok(repaired)
+    }
+
+    fn repair_tick_legacy_partition_locks(
+        &self,
+    ) -> Result<Vec<HistorySeriesTickLegacyPartitionLockRepair>> {
+        self.ensure_writable()?;
+        let mut repaired = Vec::new();
+        for partition_dir in tick_tqbn_partition_dirs(self.root_dir.as_path())? {
+            let lock_path = partition_dir.join(LEGACY_LOCK_FILE_NAME);
+            let (lock_created, error) = match fs::symlink_metadata(&lock_path) {
+                Ok(metadata) if metadata.file_type().is_file() => (false, None),
+                Ok(_) => (
+                    false,
+                    Some(format!(
+                        "history TQBN legacy partition lock {} is not a regular file",
+                        lock_path.display()
+                    )),
+                ),
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    match OpenOptions::new()
+                        .create(true)
+                        .read(true)
+                        .write(true)
+                        .truncate(false)
+                        .open(&lock_path)
+                    {
+                        Ok(_) => (true, None),
+                        Err(error) => (false, Some(error.to_string())),
+                    }
+                }
+                Err(error) => (false, Some(error.to_string())),
+            };
+            repaired.push(HistorySeriesTickLegacyPartitionLockRepair {
+                partition_dir,
                 lock_path,
                 lock_created,
                 error,
@@ -3957,6 +4027,20 @@ fn list_tqbn_file_metas(root_dir: &Path) -> Result<Vec<TqbnSeriesMeta>> {
     }
     files.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(files)
+}
+
+fn tick_tqbn_partition_dirs(root_dir: &Path) -> Result<BTreeSet<PathBuf>> {
+    let mut partition_dirs = BTreeSet::new();
+    for file in list_tqbn_file_metas(root_dir)?
+        .into_iter()
+        .filter(|file| file.kind == HistorySeriesKind::Tick)
+    {
+        let partition_dir = file.path.parent().ok_or_else(|| {
+            DataError::InvalidResponse("history TQBN partition path is invalid".to_string())
+        })?;
+        partition_dirs.insert(partition_dir.to_path_buf());
+    }
+    Ok(partition_dirs)
 }
 
 fn evict_expired_tqbn_files(

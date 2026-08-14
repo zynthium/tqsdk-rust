@@ -240,11 +240,13 @@ final coverage；`facade_contract` 还覆盖
 已检查完整 cache 时发出 physical plan；CLI tests 还覆盖 JSONL `inspection` record。真实远端 fill
 仍只在用户明确授权、提供凭证后手动运行，不进入普通 unit test。
 
-`BacktestTickCache::repair_tick_locks`、S49 与 CLI tests 还必须覆盖：默认 `DryRun` 不创建 TQBN
-companion lock；`Apply` 幂等地只创建缺失的既有 Tick `<file>.tqbn.lock`，并保留 TQBN bytes、rows 和
-final/provisional coverage；invalid/non-regular companion 的单文件失败会进入 per-file report，同时继续尝试
-后续文件。CLI 只接受 `--kind tick`，在 exclusive root stable-view gate 和 per-file exclusive lock 下运行，
-不访问 remote/auth、不调用 fill 或 compaction；任何 `failed_files > 0` 必须逐文件报告并返回 exit code `1`。
+`BacktestTickCache::repair_tick_locks`、S49 与 CLI tests 还必须覆盖：默认 `DryRun` 不创建 TQBN companion
+lock，并按唯一 Tick 分区报告缺失 legacy `<partition>/.tqbn.lock`；`Apply` 以 non-truncating open 创建它，
+并保留既有逐文件 `<file>.tqbn.lock` repair。Apply 必须幂等，保留 TQBN bytes/hash、rows、final/provisional
+coverage 和 index；只有逐文件 lock、缺目录级 lock 的缓存修复后，read-only legacy fallback 必须可读。目录级和
+逐文件 invalid/non-regular lock 的单目标失败分别进入 report，同时继续尝试后续目标。CLI 只接受 `--kind tick`，
+在 exclusive root stable-view gate 下运行，不访问 remote/auth、不调用 fill 或 compaction；
+`legacy_partition_locks_failed > 0` 或 `failed_files > 0` 都必须返回 exit code `1`。
 
 `backtest_history_api` / `backtest_history_query` 还覆盖 public `RemoteOnMiss` client 必须加入 shared root
 gate、exclusive maintenance 存在时返回 `CacheBusy`，以及 fill-only materialization 对完整命中不回读 rows、

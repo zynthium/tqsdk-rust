@@ -171,6 +171,58 @@ fn repair_locks_apply_creates_missing_companion_lock() {
 }
 
 #[test]
+fn repair_locks_apply_reports_legacy_partition_locks_separately_from_files() {
+    let cache_dir = temp_dir("repair-locks-legacy-partition");
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    cache
+        .store_ticks(
+            "SHFE.rb2601",
+            1_000,
+            2_000,
+            [Tick {
+                id: 1,
+                datetime: 1_000,
+                ..Tick::default()
+            }],
+        )
+        .unwrap();
+    let path = cache.diagnose().unwrap().files.remove(0).path;
+    let lock_path = path.with_extension("tqbn.lock");
+    let partition_dir = path.parent().unwrap();
+    let legacy_lock_path = partition_dir.join(".tqbn.lock");
+    assert!(lock_path.is_file());
+    assert!(!legacy_lock_path.exists());
+
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--output-schema",
+        "v3",
+        "repair-locks",
+        "--apply",
+    ]);
+
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "repair-locks", "success", 0);
+    assert_eq!(result["legacy_partition_locks_created"], 1);
+    assert_eq!(result["created_files"], 0);
+    assert_eq!(result["legacy_partition_locks"][0]["status"], "created");
+    assert_eq!(
+        result["legacy_partition_locks"][0]["lock_path"],
+        fs::canonicalize(partition_dir)
+            .unwrap()
+            .join(".tqbn.lock")
+            .display()
+            .to_string()
+    );
+    assert_eq!(result["files"][0]["status"], "already_present");
+    assert!(legacy_lock_path.is_file());
+
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
 fn repair_locks_dry_run_returns_nonzero_for_an_invalid_companion_lock() {
     let cache_dir = temp_dir("repair-locks-invalid-dry-run");
     let cache = BacktestTickCache::open(&cache_dir).unwrap();

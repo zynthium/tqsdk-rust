@@ -165,7 +165,7 @@ struct OptionalDaysArgs {
 
 #[derive(Debug, Args)]
 struct RepairLocksArgs {
-    /// Create each missing companion lock. Without this flag, only report the repair plan.
+    /// Create each missing legacy partition or per-file companion lock. Without this flag, only report the repair plan.
     #[arg(long)]
     apply: bool,
 }
@@ -2381,6 +2381,17 @@ fn repair_locks(
             "cache_kind": "tick",
             "cache_dir": canonical_cache_dir,
             "dry_run": !args.apply,
+            "legacy_partition_locks_scanned": report.legacy_partition_locks.len(),
+            "legacy_partition_locks_missing": report.legacy_partition_locks_missing,
+            "legacy_partition_locks_created": report.legacy_partition_locks_created,
+            "legacy_partition_locks_already_present": report.legacy_partition_locks_already_present,
+            "legacy_partition_locks_failed": report.legacy_partition_locks_failed,
+            "legacy_partition_locks": report.legacy_partition_locks.into_iter().map(|lock| json!({
+                "partition_dir": lock.partition_dir,
+                "lock_path": lock.lock_path,
+                "status": tick_lock_repair_status_name(lock.status),
+                "error": lock.error,
+            })).collect::<Vec<_>>(),
             "scanned_files": report.files.len(),
             "missing_files": report.missing_files,
             "created_files": report.created_files,
@@ -2393,7 +2404,11 @@ fn repair_locks(
                 "error": file.error,
             })).collect::<Vec<_>>(),
         }),
-        exit_code: if report.failed_files == 0 { 0 } else { 1 },
+        exit_code: if report.legacy_partition_locks_failed == 0 && report.failed_files == 0 {
+            0
+        } else {
+            1
+        },
     })
 }
 

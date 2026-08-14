@@ -213,6 +213,8 @@ tqsdk
   coverage/cache-hit，物理淘汰仅由显式 maintenance/compaction 触发
 - TQBN 每分区 advisory lock、原子首次发布、opened-file snapshot 与 tail checkpoint；新格式 reader
   只读取 checkpoint 确认的长度，解压/流式消费在短锁外完成，未确认坏后缀由下一 writer 截断恢复
+- `repair-locks` 是只修复 lock 的窄维护路径：它对每个 Tick 分区分别报告 legacy
+  `<partition>/.tqbn.lock` 和逐文件 `<file>.tqbn.lock`，绝不重写 TQBN、coverage 或 index，也不访问 remote/auth
 - 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store
 - `LiveTickCacheWriter` 只作为纯数据层 writer，接收已解码 tick rows 并写入共享回测缓存；
   它可以做有界行缓冲和显式 `flush()`，但 live 订阅、`wait_update()` 驱动、timer task 和后台进程

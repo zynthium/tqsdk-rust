@@ -2,8 +2,8 @@ use chrono::{FixedOffset, NaiveDate, TimeZone};
 use tqsdk_core::Tick;
 use tqsdk_data::{
     BacktestTickCache, BacktestTickCacheLockRepairMode, BacktestTickCacheLockRepairStatus,
-    DataError, HistorySeriesCacheFileStatus, backtest_tick_trading_day_for_timestamp_ns,
-    backtest_tick_trading_day_range,
+    DataError, HistorySeriesCacheFileStatus, TickDataSeriesRequest,
+    backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
 };
 
 #[test]
@@ -101,6 +101,117 @@ fn repair_tick_locks_dry_run_reports_missing_companion_lock() {
     );
     assert!(report.files[0].error.is_none());
     assert!(!lock_path.exists());
+}
+
+#[test]
+fn repair_tick_locks_dry_run_reports_missing_legacy_partition_lock() {
+    let dir = temp_dir("repair-tick-legacy-lock-dry-run");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    cache
+        .store_ticks("DCE.i2601", 1_000, 2_000, [tick(1, 1_000)])
+        .unwrap();
+    let path = daily_tick_file(&dir, "19700101", "DCE.i2601");
+    let lock_path = path.with_extension("tqbn.lock");
+    let partition_dir = path.parent().unwrap();
+    let legacy_lock_path = partition_dir.join(".tqbn.lock");
+    assert!(lock_path.is_file());
+    assert!(!legacy_lock_path.exists());
+
+    let report = BacktestTickCache::open_read_only(&dir)
+        .repair_tick_locks(BacktestTickCacheLockRepairMode::DryRun)
+        .unwrap();
+
+    assert_eq!(report.missing_files, 0);
+    assert_eq!(report.legacy_partition_locks_missing, 1);
+    assert_eq!(report.legacy_partition_locks.len(), 1);
+    assert_eq!(
+        report.legacy_partition_locks[0].partition_dir,
+        partition_dir
+    );
+    assert_eq!(report.legacy_partition_locks[0].lock_path, legacy_lock_path);
+    assert_eq!(
+        report.legacy_partition_locks[0].status,
+        BacktestTickCacheLockRepairStatus::Missing
+    );
+    assert!(report.legacy_partition_locks[0].error.is_none());
+    assert!(!legacy_lock_path.exists());
+}
+
+#[test]
+fn repair_tick_locks_apply_repairs_legacy_partition_lock_without_mutating_tqbn() {
+    let dir = temp_dir("repair-tick-legacy-lock-apply");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    for symbol in ["DCE.i2601", "SHFE.rb2601"] {
+        cache
+            .store_ticks(symbol, 1_000, 2_000, [tick(1, 1_000)])
+            .unwrap();
+    }
+    let first_path = daily_tick_file(&dir, "19700101", "DCE.i2601");
+    let second_path = daily_tick_file(&dir, "19700101", "SHFE.rb2601");
+    let first_lock_path = first_path.with_extension("tqbn.lock");
+    let second_lock_path = second_path.with_extension("tqbn.lock");
+    let partition_dir = first_path.parent().unwrap().to_path_buf();
+    assert_eq!(second_path.parent().unwrap(), partition_dir);
+    let legacy_lock_path = partition_dir.join(".tqbn.lock");
+    assert!(first_lock_path.is_file());
+    assert!(second_lock_path.is_file());
+    assert!(!legacy_lock_path.exists());
+
+    let first_tqbn_before = std::fs::read(&first_path).unwrap();
+    let second_tqbn_before = std::fs::read(&second_path).unwrap();
+    let first_coverage_before = cache.coverage("DCE.i2601", 1_000, 2_000).unwrap();
+    let second_coverage_before = cache.coverage("SHFE.rb2601", 1_000, 2_000).unwrap();
+
+    let repaired = cache
+        .repair_tick_locks(BacktestTickCacheLockRepairMode::Apply)
+        .unwrap();
+
+    assert_eq!(repaired.created_files, 0);
+    assert_eq!(repaired.legacy_partition_locks_created, 1);
+    assert_eq!(repaired.legacy_partition_locks.len(), 1);
+    assert_eq!(
+        repaired.legacy_partition_locks[0].partition_dir,
+        partition_dir
+    );
+    assert_eq!(
+        repaired.legacy_partition_locks[0].lock_path,
+        legacy_lock_path
+    );
+    assert_eq!(
+        repaired.legacy_partition_locks[0].status,
+        BacktestTickCacheLockRepairStatus::Created
+    );
+    assert!(legacy_lock_path.is_file());
+    assert_eq!(std::fs::read(&first_path).unwrap(), first_tqbn_before);
+    assert_eq!(std::fs::read(&second_path).unwrap(), second_tqbn_before);
+    assert_eq!(
+        cache.coverage("DCE.i2601", 1_000, 2_000).unwrap(),
+        first_coverage_before
+    );
+    assert_eq!(
+        cache.coverage("SHFE.rb2601", 1_000, 2_000).unwrap(),
+        second_coverage_before
+    );
+
+    let repeated = cache
+        .repair_tick_locks(BacktestTickCacheLockRepairMode::Apply)
+        .unwrap();
+
+    assert_eq!(repeated.created_files, 0);
+    assert_eq!(repeated.legacy_partition_locks_created, 0);
+    assert_eq!(repeated.legacy_partition_locks_already_present, 1);
+    assert_eq!(
+        repeated.legacy_partition_locks[0].status,
+        BacktestTickCacheLockRepairStatus::AlreadyPresent
+    );
+    assert_eq!(std::fs::read(&first_path).unwrap(), first_tqbn_before);
+    assert_eq!(std::fs::read(&second_path).unwrap(), second_tqbn_before);
+
+    std::fs::remove_file(&first_lock_path).unwrap();
+    let series = BacktestTickCache::open_read_only(&dir)
+        .load_series(TickDataSeriesRequest::new("DCE.i2601", 1_000, 2_000))
+        .unwrap();
+    assert_eq!(series.iter().map(|row| row.id).collect::<Vec<_>>(), vec![1]);
 }
 
 #[test]

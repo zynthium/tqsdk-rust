@@ -212,10 +212,26 @@ pub struct BacktestTickCacheLockRepairFile {
     pub error: Option<String>,
 }
 
+/// Legacy directory-level companion-lock repair status for one Tick TQBN partition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestTickCacheLegacyPartitionLockRepair {
+    pub partition_dir: PathBuf,
+    pub lock_path: PathBuf,
+    pub status: BacktestTickCacheLockRepairStatus,
+    pub error: Option<String>,
+}
+
 /// Companion-lock repair report for all existing Tick TQBN partitions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BacktestTickCacheLockRepairReport {
     pub cache_dir: PathBuf,
+    /// Results for legacy `<partition>/.tqbn.lock` files, one per unique Tick partition.
+    pub legacy_partition_locks: Vec<BacktestTickCacheLegacyPartitionLockRepair>,
+    pub legacy_partition_locks_missing: usize,
+    pub legacy_partition_locks_created: usize,
+    pub legacy_partition_locks_already_present: usize,
+    pub legacy_partition_locks_failed: usize,
+    /// Results for current `<file>.tqbn.lock` files, one per Tick TQBN file.
     pub files: Vec<BacktestTickCacheLockRepairFile>,
     pub missing_files: usize,
     pub created_files: usize,
@@ -491,20 +507,49 @@ impl BacktestTickCache {
         })
     }
 
-    /// Inspect or repair companion locks for every existing Tick TQBN partition.
+    /// Inspect or repair current and legacy companion locks for existing Tick TQBN partitions.
     ///
-    /// [`BacktestTickCacheLockRepairMode::DryRun`] never writes a companion
-    /// lock. [`BacktestTickCacheLockRepairMode::Apply`] creates only missing
-    /// `<file>.tqbn.lock` files through the normal exclusive TQBN lock path;
-    /// it never rewrites Tick rows or coverage. Callers that share a cache root
-    /// must first hold an exclusive [`Self::try_acquire_consistency_read_lock`]
-    /// gate.
+    /// [`BacktestTickCacheLockRepairMode::DryRun`] never writes a companion lock.
+    /// [`BacktestTickCacheLockRepairMode::Apply`] first creates missing legacy
+    /// `<partition>/.tqbn.lock` files, then creates missing `<file>.tqbn.lock`
+    /// files through the normal exclusive TQBN lock path. It never rewrites Tick
+    /// bytes, rows, coverage, or indexes. Callers that share a cache root must first
+    /// hold an exclusive [`Self::try_acquire_consistency_read_lock`] gate.
     pub fn repair_tick_locks(
         &self,
         mode: BacktestTickCacheLockRepairMode,
     ) -> Result<BacktestTickCacheLockRepairReport> {
         match mode {
             BacktestTickCacheLockRepairMode::DryRun => {
+                let legacy_partition_locks = self
+                    .history
+                    .inspect_tick_legacy_partition_locks()?
+                    .into_iter()
+                    .map(|lock| BacktestTickCacheLegacyPartitionLockRepair {
+                        partition_dir: lock.partition_dir,
+                        lock_path: lock.lock_path,
+                        status: if lock.error.is_some() {
+                            BacktestTickCacheLockRepairStatus::Failed
+                        } else if lock.lock_exists {
+                            BacktestTickCacheLockRepairStatus::AlreadyPresent
+                        } else {
+                            BacktestTickCacheLockRepairStatus::Missing
+                        },
+                        error: lock.error,
+                    })
+                    .collect::<Vec<_>>();
+                let legacy_partition_locks_missing = legacy_partition_locks
+                    .iter()
+                    .filter(|lock| lock.status == BacktestTickCacheLockRepairStatus::Missing)
+                    .count();
+                let legacy_partition_locks_already_present = legacy_partition_locks
+                    .iter()
+                    .filter(|lock| lock.status == BacktestTickCacheLockRepairStatus::AlreadyPresent)
+                    .count();
+                let legacy_partition_locks_failed = legacy_partition_locks
+                    .iter()
+                    .filter(|lock| lock.status == BacktestTickCacheLockRepairStatus::Failed)
+                    .count();
                 let files = self
                     .history
                     .inspect_tick_locks()?
@@ -536,6 +581,11 @@ impl BacktestTickCache {
                     .count();
                 Ok(BacktestTickCacheLockRepairReport {
                     cache_dir: self.history.root_dir().to_path_buf(),
+                    legacy_partition_locks,
+                    legacy_partition_locks_missing,
+                    legacy_partition_locks_created: 0,
+                    legacy_partition_locks_already_present,
+                    legacy_partition_locks_failed,
                     files,
                     missing_files,
                     created_files: 0,
@@ -544,6 +594,35 @@ impl BacktestTickCache {
                 })
             }
             BacktestTickCacheLockRepairMode::Apply => {
+                let legacy_partition_locks = self
+                    .history
+                    .repair_tick_legacy_partition_locks()?
+                    .into_iter()
+                    .map(|lock| BacktestTickCacheLegacyPartitionLockRepair {
+                        partition_dir: lock.partition_dir,
+                        lock_path: lock.lock_path,
+                        status: if lock.error.is_some() {
+                            BacktestTickCacheLockRepairStatus::Failed
+                        } else if lock.lock_created {
+                            BacktestTickCacheLockRepairStatus::Created
+                        } else {
+                            BacktestTickCacheLockRepairStatus::AlreadyPresent
+                        },
+                        error: lock.error,
+                    })
+                    .collect::<Vec<_>>();
+                let legacy_partition_locks_created = legacy_partition_locks
+                    .iter()
+                    .filter(|lock| lock.status == BacktestTickCacheLockRepairStatus::Created)
+                    .count();
+                let legacy_partition_locks_already_present = legacy_partition_locks
+                    .iter()
+                    .filter(|lock| lock.status == BacktestTickCacheLockRepairStatus::AlreadyPresent)
+                    .count();
+                let legacy_partition_locks_failed = legacy_partition_locks
+                    .iter()
+                    .filter(|lock| lock.status == BacktestTickCacheLockRepairStatus::Failed)
+                    .count();
                 let files = self
                     .history
                     .repair_tick_locks()?
@@ -575,6 +654,11 @@ impl BacktestTickCache {
                     .count();
                 Ok(BacktestTickCacheLockRepairReport {
                     cache_dir: self.history.root_dir().to_path_buf(),
+                    legacy_partition_locks,
+                    legacy_partition_locks_missing: 0,
+                    legacy_partition_locks_created,
+                    legacy_partition_locks_already_present,
+                    legacy_partition_locks_failed,
                     files,
                     missing_files: 0,
                     created_files,

@@ -53,24 +53,25 @@ tick 与 minute cache 都没有自动 retention、max-byte eviction 或后台清
 ### Tick companion lock repair
 
 `repair-locks` 只接受 `--kind tick`（也是默认 kind）；`--kind minute|all repair-locks` 是 usage error。
-它用于补回**既有** tick TQBN 缺失的 `<file>.tqbn.lock` companion lock，而不是修复行情数据。先停止同一
-cache root 的所有 reader/writer，再由可写 owner 执行：CLI 在整个操作中持有 exclusive root stable-view
-gate，`--apply` 还会为每个目标取得 normal exclusive TQBN/file lock。
+它用于补回**既有** tick TQBN 缺失的 legacy `<partition>/.tqbn.lock` 和逐文件
+`<file>.tqbn.lock` companion lock，而不是修复行情数据。先停止同一 cache root 的所有 reader/writer，再由
+可写 owner 执行：CLI 在整个操作中持有 exclusive root stable-view gate；`--apply` 先以非截断方式创建每个
+唯一 Tick 分区缺失的 legacy lock，再为缺失的逐文件 sidecar 取得 normal exclusive TQBN/file lock。
 
 ```bash
-# 默认 DryRun：只逐文件检查既有 Tick TQBN 的 companion lock。
+# 默认 DryRun：检查每个 Tick 分区的 legacy lock，并逐文件检查 sidecar。
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history --kind tick repair-locks
 
-# 只有确认计划且 reader/writer 已停止后，才创建缺失的 regular lock file。
+# 只有确认计划且 reader/writer 已停止后，才创建缺失的 legacy 和逐文件 lock file。
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history --kind tick repair-locks --apply
 ```
 
-DryRun 不创建 TQBN companion lock；`--apply` 只创建缺失的 regular companion lock，绝不改写 TQBN
-bytes、rows、coverage 或 remote/auth state，也绝不调用 fill 或 compaction。每个现有 Tick TQBN 都会报告
-`path`、`lock_path`、`missing` / `already_present` / `created` / `failed` 状态和错误（若有）。无效 sidecar、
-I/O 或 lock 错误会标为 `failed`，但后续文件仍会继续尝试；任何失败都以 exit code `1` 结束。
+DryRun 不创建 TQBN companion lock；`--apply` 只创建缺失的 regular lock，绝不改写 TQBN bytes、rows、coverage、
+index 或 remote/auth state，也绝不调用 fill 或 compaction。JSON 将 unique parent 的 legacy 结果放在
+`legacy_partition_locks[]`（并提供 `legacy_partition_locks_*` 计数），逐文件结果保持在 `files[]`。无效 lock、
+I/O 或 lock 错误会标为 `failed`，但后续目标仍会继续尝试；任一 legacy 或逐文件失败都以 exit code `1` 结束。
 
 ## 常用命令
 
@@ -241,7 +242,7 @@ cargo run -p tqsdk-cache -- \
 | 命令 | tick | minute |
 | --- | --- | --- |
 | `inventory` | 快速枚举日分区和文件问题，不解码 records | 快速枚举月文件，不解码文件内容 |
-| `repair-locks` | 默认 DryRun 逐文件检查 companion lock；`--apply` 只补既有 `.tqbn` 缺失的 lock | 不支持 |
+| `repair-locks` | 默认 DryRun 检查每个 legacy 分区 lock 并逐文件检查 sidecar；`--apply` 只补既有 `.tqbn` 缺失的 lock | 不支持 |
 | `inspect` | 显式 physical cache symbol 的 coverage | 显式 logical cache symbol 的 final-60s coverage |
 | `verify` | CacheOnly coverage，选配完整本地 tick replay | CacheOnly final coverage，选配流式读取 minute rows |
 | `doctor` | 深度解码 TQBN tick partitions | 深度解码 monthly minute files，并报告 `readable`、`legacy_unsupported`、`unsupported_version` 或 `corrupt` |

@@ -359,6 +359,15 @@ fn write_repair_locks(output: &mut impl Write, value: &Value) -> io::Result<()> 
         number(value, "already_present_files"),
         number(value, "failed_files"),
     )?;
+    writeln!(
+        output,
+        "Legacy partitions: {} scanned | Missing: {} | Created: {} | Already present: {} | Failed: {}",
+        number(value, "legacy_partition_locks_scanned"),
+        number(value, "legacy_partition_locks_missing"),
+        number(value, "legacy_partition_locks_created"),
+        number(value, "legacy_partition_locks_already_present"),
+        number(value, "legacy_partition_locks_failed"),
+    )?;
     if boolean(value, "dry_run") {
         writeln!(
             output,
@@ -367,7 +376,22 @@ fn write_repair_locks(output: &mut impl Write, value: &Value) -> io::Result<()> 
     } else {
         writeln!(
             output,
-            "Mode: applied; only missing companion locks were created."
+            "Mode: applied; only missing legacy partition and per-file companion locks were created."
+        )?;
+    }
+    for lock in array(value, "legacy_partition_locks") {
+        let status = string(lock, "status").unwrap_or("unknown");
+        if status == "already_present" {
+            continue;
+        }
+        writeln!(
+            output,
+            "  {}: {status} -> {}{}",
+            string(lock, "partition_dir").unwrap_or("-"),
+            string(lock, "lock_path").unwrap_or("-"),
+            string(lock, "error")
+                .map(|error| format!(" ({error})"))
+                .unwrap_or_default(),
         )?;
     }
     for file in array(value, "files") {
@@ -785,6 +809,17 @@ mod tests {
             "created_files": 0,
             "already_present_files": 2,
             "failed_files": 0,
+            "legacy_partition_locks_scanned": 1,
+            "legacy_partition_locks_missing": 1,
+            "legacy_partition_locks_created": 0,
+            "legacy_partition_locks_already_present": 0,
+            "legacy_partition_locks_failed": 0,
+            "legacy_partition_locks": [{
+                "partition_dir": "/tmp/cache/series/20260728/tick",
+                "lock_path": "/tmp/cache/series/20260728/tick/.tqbn.lock",
+                "status": "missing",
+                "error": null,
+            }],
             "files": [{
                 "path": "/tmp/cache/SHFE.au2608.tqbn",
                 "lock_path": "/tmp/cache/SHFE.au2608.tqbn.lock",
@@ -800,7 +835,13 @@ mod tests {
         assert!(output.contains(
             "Files: 4 scanned | Missing: 2 | Created: 0 | Already present: 2 | Failed: 0"
         ));
+        assert!(output.contains(
+            "Legacy partitions: 1 scanned | Missing: 1 | Created: 0 | Already present: 0 | Failed: 0"
+        ));
         assert!(output.contains("Mode: dry run; pass --apply to create missing companion locks."));
+        assert!(output.contains(
+            "/tmp/cache/series/20260728/tick: missing -> /tmp/cache/series/20260728/tick/.tqbn.lock"
+        ));
         assert!(
             output.contains(
                 "/tmp/cache/SHFE.au2608.tqbn: missing -> /tmp/cache/SHFE.au2608.tqbn.lock"

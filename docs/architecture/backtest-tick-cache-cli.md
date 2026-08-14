@@ -42,14 +42,16 @@ minute 的 `--market futures|stock` 仅在 minute `fill` 时选择 server-side b
 ## Tick companion lock repair
 
 `repair-locks` 是只面向既有 tick `.tqbn` companion lock 的 operator remediation，不是数据修复。
-默认 `DryRun` 仅枚举并逐文件报告 lock 状态；显式 `--apply` 只为缺失的既有 Tick TQBN 创建
-regular `<file>.tqbn.lock`。它绝不改写 TQBN bytes、rows、final/provisional coverage，也不访问 remote
-或 auth，且绝不调用 fill 或 compaction。
+默认 `DryRun` 为每个唯一 Tick 分区报告 legacy `<partition>/.tqbn.lock`，并逐文件报告
+`<file>.tqbn.lock`；显式 `--apply` 先以 non-truncating open 创建缺失 legacy lock，再创建缺失的逐文件
+regular sidecar。它绝不改写 TQBN bytes、rows、final/provisional coverage 或 index，也不访问 remote 或 auth，
+且绝不调用 fill 或 compaction。
 
 操作必须由可写 cache owner 在停止同一 root 的 reader/writer 后进行。CLI 全程持有 exclusive root
-stable-view gate；`--apply` 在每个目标上取得 normal exclusive TQBN/file lock 后才创建 companion。
-单个无效/non-regular sidecar、I/O 或 lock 失败会保留在该文件的结果中，仍继续处理其余文件；只要存在失败，
-命令就以 exit code `1` 结束。
+stable-view gate；`--apply` 直接非截断创建缺失 legacy lock，并在创建缺失逐文件 sidecar 时取得 normal
+exclusive TQBN/file lock。
+单个无效/non-regular legacy lock、sidecar、I/O 或 lock 失败会保留在相应目录级或逐文件结果中，仍继续处理
+其余目标；只要存在任一失败，命令就以 exit code `1` 结束。
 
 同一合同也由 public
 `BacktestTickCache::repair_tick_locks(BacktestTickCacheLockRepairMode::{DryRun, Apply})` 提供。
@@ -135,7 +137,7 @@ block（连续合约会保留必要的 underlying / segment mapping）。这是 
 | --- | --- | --- |
 | `inventory` | 快速枚举日分区、文件/字节/已知问题；不解码、不建 root | 快速枚举月文件、文件/字节；不解码、不建 root |
 | `inspect` | read-only coverage/missing ranges，要求 explicit physical symbols | read-only final-60s coverage/missing ranges，要求 explicit logical symbols |
-| `repair-locks` | 默认 DryRun：只枚举既有 Tick `.tqbn` 及 `<file>.tqbn.lock`，逐文件报告；`--apply` 只创建缺失的 regular companion lock，不改 data/coverage，也不填数或 compact | usage error（仅支持 `--kind tick`） |
+| `repair-locks` | 默认 DryRun：为每个唯一 Tick 分区报告 legacy `.tqbn.lock`，并逐文件报告 sidecar；`--apply` 只创建缺失 lock，不改 data/coverage/index，也不填数或 compact | usage error（仅支持 `--kind tick`） |
 | `fill --dry-run` | CacheOnly 预检，不取 fill lock、不写 report/rows | 同样只做 final coverage 预检 |
 | `fill` | missing tick ranges 远端补齐；当前日可走 explicit provisional 规则 | 仅 closed-day final ranges，按 60s Kline stream 补齐；显式 `--repair-stale` 才会在 root fill lock 和 auth preflight 后删除已定位的 mixed-snapshot 月分区 |
 | `verify` | CacheOnly coverage，选配 local tick replay | CacheOnly final coverage，选配流式读取 local minute rows |
@@ -183,7 +185,7 @@ closed trading day。显式 `--start-day/--end-day` 仍表达调用者的数据�
 ## 输出、报告与进度
 
 默认 stdout 是人工摘要；`--output-format json` 请求稳定机器输出，默认 V3 envelope，
-`--output-schema v2` 仅保留旧兼容 shape。coverage 不完整或 `repair-locks` 存在文件失败时退出 `1`，usage
+`--output-schema v2` 仅保留旧兼容 shape。coverage 不完整或 `repair-locks` 存在 legacy/逐文件失败时退出 `1`，usage
 错误退出 `2`，cache busy 退出 `75`，协作式取消退出 `130`。
 
 - tick normal fill report 为 schema v2，默认路径
@@ -196,10 +198,13 @@ closed trading day。显式 `--start-day/--end-day` 仍表达调用者的数据�
   `not persisted` 与 candidate hash。
 - `--progress jsonl` 始终写 stderr，schema 为 v2、kind 为 `tqsdk-cache.progress`，并含
   `cache_kind: "tick" | "minute"`。脚本不得继续按 schema v1 解析。
-- `repair-locks` 不写 fill report。V3 result 给出 `dry_run`、`scanned_files`、`missing_files`、
-  `created_files`、`already_present_files`、`failed_files`，以及每个既有 Tick TQBN 的
-  `files[]`（`path`、`lock_path`、`status`、`error`）。DryRun 中 `missing` 本身不是失败；
-  `failed` 表示无效/non-regular companion 或 I/O/lock error，后续文件仍会尝试。
+- `repair-locks` 不写 fill report。V3 result 以 `legacy_partition_locks_scanned`、
+  `legacy_partition_locks_missing`、`legacy_partition_locks_created`、
+  `legacy_partition_locks_already_present`、`legacy_partition_locks_failed` 和
+  `legacy_partition_locks[]`（`partition_dir`、`lock_path`、`status`、`error`）报告目录级 legacy 结果；
+  既有 `scanned_files`、`missing_files`、`created_files`、`already_present_files`、`failed_files` 与
+  `files[]` 保持逐文件结果。DryRun 中 `missing` 本身不是失败；`failed` 表示无效/non-regular lock 或
+  I/O/lock error，后续目标仍会尝试。
 
 `query` 的 raw format 只适用于 query 命令，stdout 是 data、stderr 是诊断：
 
@@ -239,7 +244,7 @@ payload，但 stdout 本身没有 atomic-write 保证；`--output PATH` 仅用�
 | --- | --- | --- |
 | 普通 tick/minute `fill` | shared | 多个互不冲突 series 可并发；阻止 refresh/repair/verify/doctor/purge 穿插 |
 | `query --policy remote-on-miss` | shared | coverage inspection、远端补洞和 cache materialization 处于同一普通操作窗口 |
-| tick `repair-locks`（含 DryRun） | exclusive | 枚举到完成期间取得 root-wide stable view，不与协作式 reader/writer/fill 交错 |
+| tick `repair-locks`（含 DryRun） | exclusive | 枚举、创建 legacy/逐文件 lock 到完成期间取得 root-wide stable view，不与协作式 reader/writer/fill 交错 |
 | cache refresh、`fill --repair-stale` | exclusive | 删除/重建与普通 fill/read plan 互斥 |
 | tick/minute `verify`、`doctor` | exclusive | coverage/replay/深度诊断获得 root-wide stable view |
 | 真实 minute `purge` | exclusive | 月文件删除不与普通 fill/query 交错 |
@@ -275,7 +280,7 @@ tick 和 minute 都没有自动 retention、max-byte eviction 或后台 cleanup�
 `fill --repair-stale` 是另一条显式 minute maintenance path，不能和 `--dry-run` 或 tick 使用；它只在
 同一 root remote-fill lock 和 repair 所需 auth preflight 成功后删除已由 active snapshot 比较定位的冲突整月
 分区，并立刻由同一 remote fill 请求补齐。lock busy 或 auth 缺失时不删除任何分区。
-`repair-locks` 不属于上述数据维护：它只补缺失的 tick companion lock，绝不能改用 fill 或 compaction。
+`repair-locks` 不属于上述数据维护：它只补缺失的 tick legacy/逐文件 companion lock，绝不能改用 fill 或 compaction。
 
 ## 验收
 

@@ -193,6 +193,7 @@ materialize/fill-only run 在 coverage 提交后直接返回物理写入计数�
 - `BacktestTickCacheLockRepairMode`
 - `BacktestTickCacheLockRepairStatus`
 - `BacktestTickCacheLockRepairFile`
+- `BacktestTickCacheLegacyPartitionLockRepair`
 - `BacktestTickCacheLockRepairReport`
 - `BacktestTickCoverage`
 - `BacktestTickCacheWriteReport`
@@ -301,11 +302,12 @@ materialize/fill-only run 在 coverage 提交后直接返回物理写入计数�
      它复用 `HistorySeriesCache` 做回测覆盖检查、tick 写入和 tick 读取，不新增第二套
      JSONL tick cache，也不持久化 K 线
    - `BacktestTickCache::repair_tick_locks(BacktestTickCacheLockRepairMode)` 是唯一公开的 tick
-     companion-lock remediation：`DryRun` 只逐文件检查既有 `.tqbn`，`Apply` 只创建缺失的
-     `<file>.tqbn.lock`。直接调用者必须先停止同一 root 的 reader/writer，并在调用期间持有
-     `try_acquire_consistency_read_lock()`；`DryRun` 可用 read-only cache，`Apply` 必须使用 writable
-     cache，且会逐文件取得 normal exclusive TQBN/file lock。该 API 不改 TQBN bytes、rows 或 coverage，
-     不访问 remote/auth，不做 fill 或 compaction；失败保留在 per-file report，仍继续其余文件
+     companion-lock remediation：`DryRun` 为每个唯一 Tick 分区检查 legacy `<partition>/.tqbn.lock`，并
+     逐文件检查 `<file>.tqbn.lock`；`Apply` 先以 non-truncating open 创建缺失 legacy lock，再通过
+     normal exclusive TQBN/file lock 创建缺失逐文件 sidecar。直接调用者必须先停止同一 root 的
+     reader/writer，并在调用期间持有 `try_acquire_consistency_read_lock()`；`DryRun` 可用 read-only cache，
+     `Apply` 必须使用 writable cache。该 API 不改 TQBN bytes、rows、coverage 或 index，不访问 remote/auth，
+     不做 fill 或 compaction；目录级和逐文件失败分别保留在 report，仍继续其余目标
    - `LiveTickCacheWriter` 是 `BacktestTickCache` 上的一层纯 writer；它接收调用方已经消费到的
      live tick rows，追加 rows，并只在 tick id 连续时推进 coverage。连续单 tick push 默认合并到
      128 行；批量、跳号、到期后的下一次 push、显式 `flush()` 或最后一个 clone 销毁会提交短尾。
@@ -356,13 +358,13 @@ tqsdk-wait        tqsdk-data
   旧 `.tqseries` 和旧单文件 `.tqbn` layout 不再作为默认格式，不提供兼容读取或迁移 store。
   旧 Python 兼容 mmap backend 已废弃，也已经落在
   `tqsdk-data`
-- TQBN 每个物理日分区使用独立 `.tqbn.lock`。writer 在独占锁下原子初始化、append/repair/compact；
-  reader 在共享锁内打开文件、验证 prefix/tail checkpoint 并固定确认长度，然后用 opened file handle
+- TQBN 当前每个文件使用独立 `<file>.tqbn.lock`；read-only reader 在其缺失时可回退同分区 legacy
+  `<partition>/.tqbn.lock`。writer 在独占锁下原子初始化、append/repair/compact；reader 在共享锁内打开文件、验证 prefix/tail checkpoint 并固定确认长度，然后用 opened file handle
   在锁外解压和流式消费。checkpoint 记录 confirmed length、尾部 checksum 与最新 coverage index head；
   读侧忽略其后的未确认 suffix，下一 writer 可截断截断块或坏 checksum suffix 后继续。没有 checkpoint
   的旧文件仍全量校验，不把真实损坏静默当成可恢复尾部。缺失 companion lock 的专用 repair path 不属于
-  writer 的 data repair：它由 owner 的 exclusive root gate 串行，`Apply` 只创建缺失的 regular sidecar，
-  不替换 invalid/non-regular sidecar；单文件失败继续扫描并报告，详见
+  writer 的 data repair：它由 owner 的 exclusive root gate 串行，`Apply` 先为每个唯一 Tick 分区创建缺失的
+  regular legacy lock，再创建缺失逐文件 sidecar，不替换 invalid/non-regular lock；单目标失败继续扫描并报告，详见
   [回测缓存 CLI](backtest-tick-cache-cli.md)
 - `HistorySeriesCache::read_kline_data_series` /
   `HistorySeriesCache::read_tick_data_series` 提供 cache-only 读取，

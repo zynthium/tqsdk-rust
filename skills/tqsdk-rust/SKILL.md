@@ -73,14 +73,16 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
   `meta/trading-calendar-v1.json`，日历只用于 selector/进度，不是 coverage truth。`--calendar off`
   拒绝该 selector，`required` 禁止 fallback；`--progress off` 保持 stderr 安静，普通模式显示当前
   physical symbol、trading day 和完整分区日计数。
-- Tick TQBN 缺失 `<file>.tqbn.lock` companion lock 时，不能用 `fill`、`RemoteOnMiss` 或
-  `--compact-cache-only`“修复”。由可写 cache owner 停止同一 root 的 reader/writer、先确认
-  `doctor` clean 后，运行 `tqsdk-cache --cache-dir <root> --kind tick repair-locks` 做逐文件 DryRun；确认
-  计划后才加 `--apply` 创建缺失的 regular sidecar。`repair-locks` 只支持 `--kind tick`，
-  `--kind minute|all` 是 usage error；它不改 TQBN bytes、rows、coverage，也不访问 remote/auth 或调用
-  fill/compaction。脚本调用显式使用 `--output-format json --output-schema v3` 读取 per-file result；任何
-  `failed_files > 0` 都以 exit code `1` 结束。Apply 后再次运行 `--apply` 验证幂等，并以同一范围的
-  CacheOnly replay 验收可读性。程序内 owner 使用
+- Tick TQBN 缺失 legacy `<partition>/.tqbn.lock` 或逐文件 `<file>.tqbn.lock` companion lock 时，不能用
+  `fill`、`RemoteOnMiss` 或 `--compact-cache-only`“修复”。由可写 cache owner 停止同一 root 的
+  reader/writer、先确认 `doctor` clean 后，运行
+  `tqsdk-cache --cache-dir <root> --kind tick repair-locks` 做 DryRun；它按唯一 Tick 分区报告 legacy lock，
+  并逐文件报告 sidecar。确认计划后才加 `--apply`：先以非截断方式创建缺失 legacy lock，再补逐文件 regular
+  sidecar。`repair-locks` 只支持 `--kind tick`，`--kind minute|all` 是 usage error；它不改 TQBN bytes、rows、
+  coverage 或 index，也不访问 remote/auth 或调用 fill/compaction。脚本调用显式使用
+  `--output-format json --output-schema v3`，读取 `legacy_partition_locks_*` 与 `files[]` 两组结果；任何
+  `legacy_partition_locks_failed > 0` 或 `failed_files > 0` 都以 exit code `1` 结束。Apply 后再次运行 `--apply`
+  验证幂等，并以同一范围的 CacheOnly replay 验收可读性。程序内 owner 使用
   `BacktestTickCache::repair_tick_locks(BacktestTickCacheLockRepairMode::{DryRun, Apply})`，调用期间先持有
   `try_acquire_consistency_read_lock()`。
 - “最近 N 个交易日”必须先用官方交易日历确定窗口，不要把 N 个工作日当作交易日。只填到最后一个已结束的交易日；对 SHFE 贵金属等夜盘品种，通常从首个交易日前一日 `18:00:00` CST 起，到最后交易日 `15:00:01` CST 止。其他市场以合约 `trading_time` 为准。按日分区的休市日空覆盖是正常结果，不能仅凭“某日没有 tick”判定失败。

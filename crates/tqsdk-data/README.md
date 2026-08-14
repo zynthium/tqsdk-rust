@@ -172,11 +172,12 @@ chart cleanup 成功后，同一 session 可顺序服务后续 trading-day/minut
   `compact_symbol_ticks(...)` 是按 `(symbol, tick)` 的全部日分区文件粒度的显式运维入口；facade
   final fill 使用范围版本，只重写本轮实际远端回填范围相交的日分区，避免 cache-hit 历史被重复 compact
 - `BacktestTickCache::repair_tick_locks(BacktestTickCacheLockRepairMode)` 是只针对既有 tick
-  `.tqbn` companion lock 的运维 API：`DryRun` 逐文件检查，`Apply` 只创建缺失的
-  `<file>.tqbn.lock`。调用方必须在停止同一 root 的 reader/writer 后持有
-  `try_acquire_consistency_read_lock()`；`Apply` 还要求可写 cache，并逐文件使用正常的排他锁。
-  它不改 TQBN bytes、rows 或 coverage，不访问远端/认证，也不是 fill 或 compaction。每个文件都有
-  `Missing` / `AlreadyPresent` / `Created` / `Failed` report；单个失败不会阻止其余文件继续处理
+  `.tqbn` companion lock 的运维 API：`DryRun` 按唯一 Tick 分区检查 legacy
+  `<partition>/.tqbn.lock`，并逐文件检查 `<file>.tqbn.lock`；`Apply` 先以非截断方式创建缺失的
+  legacy lock，再通过正常逐文件排他锁创建缺失 sidecar。调用方必须在停止同一 root 的 reader/writer 后持有
+  `try_acquire_consistency_read_lock()`；`Apply` 还要求可写 cache。它不改 TQBN bytes、rows、coverage 或
+  index，不访问远端/认证，也不是 fill 或 compaction。目录级和逐文件结果都保留
+  `Missing` / `AlreadyPresent` / `Created` / `Failed` 状态；单个失败不会阻止其余目标继续处理
 - `BacktestTickCache::open_read_only(...)` 不创建 root，也拒绝任何写入；`fast_inventory()` 只读取
   daily file metadata / magic，`diagnose()` 解码全部 tick partitions 并返回文件级状态。root-scoped
   `try_acquire_remote_fill_shared_lock()` 允许普通 fill/query 并发，
@@ -262,6 +263,7 @@ Python-compatible mmap 缓存；旧 binary/mmap history cache 已从 public surf
 - `BacktestTickCacheLockRepairMode`
 - `BacktestTickCacheLockRepairStatus`
 - `BacktestTickCacheLockRepairFile`
+- `BacktestTickCacheLegacyPartitionLockRepair`
 - `BacktestTickCacheLockRepairReport`
 - `BacktestTickCacheOperationLock`
 - `BacktestTickTradingDayRange`
@@ -447,7 +449,8 @@ S49 contract
 [examples/api_contract_s49_tick_lock_repair.rs](examples/api_contract_s49_tick_lock_repair.rs)
 展示 `BacktestTickCache::repair_tick_locks(...)` 的显式 root gate：默认 `DryRun`，只有设置
 `TQ_CACHE_REPAIR_LOCKS_APPLY=1` 才调用 `Apply`。它只补既有 tick `.tqbn` 缺失的 companion lock；运行前
-必须停止同一 root 的 reader/writer，不能把它当作 fill、数据修复或 compaction。
+必须停止同一 root 的 reader/writer。报告将 legacy 分区级 `<partition>/.tqbn.lock` 与逐文件
+`<file>.tqbn.lock` 分开呈现；不能把它当作 fill、数据修复或 compaction。
 
 `history_series_cache_microbench` 默认生成 synthetic ticks。要对本地完整 cache range 复测，设置
 `TQSDK_HISTORY_CACHE_BENCH_INPUT_CACHE_DIR`、`TQSDK_HISTORY_CACHE_BENCH_INPUT_SYMBOL`、
