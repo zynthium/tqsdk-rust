@@ -19,7 +19,7 @@ session owner、后台守护进程、relay 或监控服务。完整合同见
 
 | `--kind` | 管理对象 | 可用命令 |
 | --- | --- | --- |
-| `tick` | `series/<YYYYMMDD>/tick/<symbol>.tqbn` | `inventory`、`inspect`、`fill`、`verify`、`doctor` |
+| `tick` | `series/<YYYYMMDD>/tick/<symbol>.tqbn` | `inventory`、`inspect`、`fill`、`verify`、`doctor`、`repair-locks` |
 | `minute` | canonical final-60s `.tqmk` | `inventory`、`inspect`、`fill`、`verify`、`doctor`、`purge` |
 | `all` | 两类 cache 的汇总 | 仅 `inventory`、`doctor` |
 
@@ -49,6 +49,28 @@ universe selector。tick fill 不支持 stock market；`--kind tick --market sto
 tick 与 minute cache 都没有自动 retention、max-byte eviction 或后台清理。读写、普通回测和
 普通 `--kind minute fill` 都不会删除已有数据；`--repair-stale` 是唯一用于混合 snapshot 的显式、
 受控删除例外。
+
+### Tick companion lock repair
+
+`repair-locks` 只接受 `--kind tick`（也是默认 kind）；`--kind minute|all repair-locks` 是 usage error。
+它用于补回**既有** tick TQBN 缺失的 `<file>.tqbn.lock` companion lock，而不是修复行情数据。先停止同一
+cache root 的所有 reader/writer，再由可写 owner 执行：CLI 在整个操作中持有 exclusive root stable-view
+gate，`--apply` 还会为每个目标取得 normal exclusive TQBN/file lock。
+
+```bash
+# 默认 DryRun：只逐文件检查既有 Tick TQBN 的 companion lock。
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history --kind tick repair-locks
+
+# 只有确认计划且 reader/writer 已停止后，才创建缺失的 regular lock file。
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history --kind tick repair-locks --apply
+```
+
+DryRun 不创建 TQBN companion lock；`--apply` 只创建缺失的 regular companion lock，绝不改写 TQBN
+bytes、rows、coverage 或 remote/auth state，也绝不调用 fill 或 compaction。每个现有 Tick TQBN 都会报告
+`path`、`lock_path`、`missing` / `already_present` / `created` / `failed` 状态和错误（若有）。无效 sidecar、
+I/O 或 lock 错误会标为 `failed`，但后续文件仍会继续尝试；任何失败都以 exit code `1` 结束。
 
 ## 常用命令
 
@@ -219,6 +241,7 @@ cargo run -p tqsdk-cache -- \
 | 命令 | tick | minute |
 | --- | --- | --- |
 | `inventory` | 快速枚举日分区和文件问题，不解码 records | 快速枚举月文件，不解码文件内容 |
+| `repair-locks` | 默认 DryRun 逐文件检查 companion lock；`--apply` 只补既有 `.tqbn` 缺失的 lock | 不支持 |
 | `inspect` | 显式 physical cache symbol 的 coverage | 显式 logical cache symbol 的 final-60s coverage |
 | `verify` | CacheOnly coverage，选配完整本地 tick replay | CacheOnly final coverage，选配流式读取 minute rows |
 | `doctor` | 深度解码 TQBN tick partitions | 深度解码 monthly minute files，并报告 `readable`、`legacy_unsupported`、`unsupported_version` 或 `corrupt` |
@@ -251,6 +274,7 @@ root advisory gate 的规则固定如下：
 | 操作 | root gate |
 | --- | --- |
 | 普通 tick/minute fill、`query --policy remote-on-miss` | shared |
+| tick `repair-locks`（含 DryRun） | exclusive |
 | cache refresh、`fill --repair-stale`、tick/minute verify、doctor、真实 minute purge | exclusive |
 | inventory、fill dry-run、minute purge dry-run | none |
 

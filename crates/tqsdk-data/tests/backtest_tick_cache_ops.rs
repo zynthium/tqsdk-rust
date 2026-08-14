@@ -1,8 +1,9 @@
 use chrono::{FixedOffset, NaiveDate, TimeZone};
 use tqsdk_core::Tick;
 use tqsdk_data::{
-    BacktestTickCache, DataError, HistorySeriesCacheFileStatus,
-    backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
+    BacktestTickCache, BacktestTickCacheLockRepairMode, BacktestTickCacheLockRepairStatus,
+    DataError, HistorySeriesCacheFileStatus, backtest_tick_trading_day_for_timestamp_ns,
+    backtest_tick_trading_day_range,
 };
 
 #[test]
@@ -72,6 +73,139 @@ fn fast_inventory_and_diagnostics_report_bad_tqbn_magic() {
     );
     assert!(report.files[0].is_problem());
     assert!(report.files[0].error.as_deref().unwrap().contains("magic"));
+}
+
+#[test]
+fn repair_tick_locks_dry_run_reports_missing_companion_lock() {
+    let dir = temp_dir("repair-tick-locks-dry-run");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    cache
+        .store_ticks("SHFE.rb2601", 1_000, 2_000, [tick(1, 1_000)])
+        .unwrap();
+    let path = daily_tick_file(&dir, "19700101", "SHFE.rb2601");
+    let lock_path = path.with_extension("tqbn.lock");
+    assert!(lock_path.exists());
+    std::fs::remove_file(&lock_path).unwrap();
+
+    let report = BacktestTickCache::open_read_only(&dir)
+        .repair_tick_locks(BacktestTickCacheLockRepairMode::DryRun)
+        .unwrap();
+
+    assert_eq!(report.files.len(), 1);
+    assert_eq!(report.missing_files, 1);
+    assert_eq!(report.files[0].path, path);
+    assert_eq!(report.files[0].lock_path, lock_path);
+    assert_eq!(
+        report.files[0].status,
+        BacktestTickCacheLockRepairStatus::Missing
+    );
+    assert!(report.files[0].error.is_none());
+    assert!(!lock_path.exists());
+}
+
+#[test]
+fn repair_tick_locks_apply_is_idempotent_and_preserves_tqbn_and_coverage() {
+    let dir = temp_dir("repair-tick-locks-apply");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    cache
+        .store_ticks("SHFE.rb2601", 1_000, 2_000, [tick(1, 1_000)])
+        .unwrap();
+    let path = daily_tick_file(&dir, "19700101", "SHFE.rb2601");
+    let lock_path = path.with_extension("tqbn.lock");
+    std::fs::remove_file(&lock_path).unwrap();
+    let tqbn_before = std::fs::read(&path).unwrap();
+    let coverage_before = cache.coverage("SHFE.rb2601", 1_000, 2_000).unwrap();
+
+    let repaired = cache
+        .repair_tick_locks(BacktestTickCacheLockRepairMode::Apply)
+        .unwrap();
+
+    assert_eq!(repaired.created_files, 1);
+    assert_eq!(
+        repaired.files[0].status,
+        BacktestTickCacheLockRepairStatus::Created
+    );
+    assert!(lock_path.exists());
+    assert_eq!(std::fs::read(&path).unwrap(), tqbn_before);
+    assert_eq!(
+        cache.coverage("SHFE.rb2601", 1_000, 2_000).unwrap(),
+        coverage_before
+    );
+
+    let repeated = cache
+        .repair_tick_locks(BacktestTickCacheLockRepairMode::Apply)
+        .unwrap();
+
+    assert_eq!(repeated.created_files, 0);
+    assert_eq!(repeated.already_present_files, 1);
+    assert_eq!(
+        repeated.files[0].status,
+        BacktestTickCacheLockRepairStatus::AlreadyPresent
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), tqbn_before);
+}
+
+#[test]
+fn repair_tick_locks_continues_after_a_per_file_failure() {
+    let dir = temp_dir("repair-tick-locks-best-effort");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    for symbol in ["DCE.i2601", "SHFE.rb2601"] {
+        cache
+            .store_ticks(symbol, 1_000, 2_000, [tick(1, 1_000)])
+            .unwrap();
+    }
+    let repaired_path = daily_tick_file(&dir, "19700101", "DCE.i2601");
+    let repaired_lock_path = repaired_path.with_extension("tqbn.lock");
+    std::fs::remove_file(&repaired_lock_path).unwrap();
+    let failed_path = daily_tick_file(&dir, "19700101", "SHFE.rb2601");
+    let failed_lock_path = failed_path.with_extension("tqbn.lock");
+    std::fs::remove_file(&failed_lock_path).unwrap();
+    std::fs::create_dir(&failed_lock_path).unwrap();
+
+    let report = cache
+        .repair_tick_locks(BacktestTickCacheLockRepairMode::Apply)
+        .unwrap();
+
+    assert_eq!(report.created_files, 1);
+    assert_eq!(report.failed_files, 1);
+    assert!(repaired_lock_path.is_file());
+    let failed = report
+        .files
+        .iter()
+        .find(|file| file.path == failed_path)
+        .unwrap();
+    assert_eq!(failed.status, BacktestTickCacheLockRepairStatus::Failed);
+    assert!(failed.error.as_deref().unwrap().contains("regular file"));
+}
+
+#[test]
+fn repair_tick_locks_dry_run_reports_an_invalid_companion_lock() {
+    let dir = temp_dir("repair-tick-locks-invalid-dry-run");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    cache
+        .store_ticks("SHFE.rb2601", 1_000, 2_000, [tick(1, 1_000)])
+        .unwrap();
+    let path = daily_tick_file(&dir, "19700101", "SHFE.rb2601");
+    let lock_path = path.with_extension("tqbn.lock");
+    std::fs::remove_file(&lock_path).unwrap();
+    std::fs::create_dir(&lock_path).unwrap();
+
+    let report = cache
+        .repair_tick_locks(BacktestTickCacheLockRepairMode::DryRun)
+        .unwrap();
+
+    assert_eq!(report.failed_files, 1);
+    assert_eq!(
+        report.files[0].status,
+        BacktestTickCacheLockRepairStatus::Failed
+    );
+    assert!(
+        report.files[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("regular file")
+    );
 }
 
 #[test]

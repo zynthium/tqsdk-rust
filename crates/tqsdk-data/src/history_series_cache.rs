@@ -125,6 +125,22 @@ pub struct HistorySeriesCacheMaintenanceReport {
     pub removed_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HistorySeriesTickLockInspection {
+    pub path: PathBuf,
+    pub lock_path: PathBuf,
+    pub lock_exists: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HistorySeriesTickLockRepair {
+    pub path: PathBuf,
+    pub lock_path: PathBuf,
+    pub lock_created: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Clone)]
 /// Coverage-aware local history series cache.
 ///
@@ -628,6 +644,14 @@ impl HistorySeriesCache {
 
     pub fn scan(&self) -> Result<HistorySeriesCacheScanReport> {
         self.store.scan()
+    }
+
+    pub(crate) fn inspect_tick_locks(&self) -> Result<Vec<HistorySeriesTickLockInspection>> {
+        self.store.inspect_tick_locks()
+    }
+
+    pub(crate) fn repair_tick_locks(&self) -> Result<Vec<HistorySeriesTickLockRepair>> {
+        self.store.repair_tick_locks()
     }
 
     pub fn enforce_limits(

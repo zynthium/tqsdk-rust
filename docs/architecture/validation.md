@@ -164,6 +164,7 @@ rtk cargo check -p tqsdk-data --features tqbn-zstd --example history_series_cach
 TQSDK_HISTORY_CACHE_BENCH_INPUT_CACHE_DIR=<cache-root> TQSDK_HISTORY_CACHE_BENCH_INPUT_SYMBOL=<symbol> TQSDK_HISTORY_CACHE_BENCH_INPUT_START_NS=<start-ns> TQSDK_HISTORY_CACHE_BENCH_INPUT_END_NS=<end-ns> rtk cargo run -p tqsdk-data --release --example history_series_cache_microbench
 rtk cargo test -p tqsdk-data
 rtk cargo test -p tqsdk-data --test backtest_tick_cache_ops
+rtk cargo test -p tqsdk-data --test backtest_tick_cache_ops repair_tick_locks
 rtk cargo test -p tqsdk-data --test minute_kline_cache
 rtk cargo test -p tqsdk-data --test minute_kline_cache_ops
 rtk cargo test -p tqsdk-data --test backtest_history_api
@@ -171,6 +172,7 @@ rtk cargo test -p tqsdk-data --test backtest_history_metadata
 rtk cargo test -p tqsdk-data --test backtest_history_query
 rtk cargo test -p tqsdk-cache
 rtk cargo test -p tqsdk-cache --test cli query_
+rtk cargo test -p tqsdk-cache --test cli repair_locks
 rtk cargo clippy -p tqsdk-cache --all-targets -- -D warnings
 rtk cargo clippy -p tqsdk-data --all-targets -- -D warnings
 rtk cargo test -p tqsdk-data --test universe_selector
@@ -189,6 +191,8 @@ rtk cargo check -p tqsdk --example api_contract_s46_facade_record_ticks
 rtk cargo check -p tqsdk --example api_contract_s47_facade_market_cache_policy
 rtk cargo check -p tqsdk-data --example api_contract_s48_backtest_history_query
 rtk cargo check -p tqsdk-data --no-default-features --example api_contract_s48_backtest_history_query
+rtk cargo check -p tqsdk-data --example api_contract_s49_tick_lock_repair
+rtk cargo check -p tqsdk-data --no-default-features --example api_contract_s49_tick_lock_repair
 rtk python3 scripts/smoke_market_cache_e2e.py --symbols KQ.i@SHFE.au --timeout-secs 300
 rtk python3 scripts/bench_backtest_tick_cache.py --profile release --tqbn-zstd --cargo-offline --verify-existing-cache --cache-root <existing-zstd-cache-root> --batch-sizes 32 --slice-secs none
 ```
@@ -235,6 +239,12 @@ final coverage；`facade_contract` 还覆盖
 `on_remote_fill_telemetry(...)` 在每个 physical cache range 检查后发出累计 inspection telemetry，并在
 已检查完整 cache 时发出 physical plan；CLI tests 还覆盖 JSONL `inspection` record。真实远端 fill
 仍只在用户明确授权、提供凭证后手动运行，不进入普通 unit test。
+
+`BacktestTickCache::repair_tick_locks`、S49 与 CLI tests 还必须覆盖：默认 `DryRun` 不创建 TQBN
+companion lock；`Apply` 幂等地只创建缺失的既有 Tick `<file>.tqbn.lock`，并保留 TQBN bytes、rows 和
+final/provisional coverage；invalid/non-regular companion 的单文件失败会进入 per-file report，同时继续尝试
+后续文件。CLI 只接受 `--kind tick`，在 exclusive root stable-view gate 和 per-file exclusive lock 下运行，
+不访问 remote/auth、不调用 fill 或 compaction；任何 `failed_files > 0` 必须逐文件报告并返回 exit code `1`。
 
 `backtest_history_api` / `backtest_history_query` 还覆盖 public `RemoteOnMiss` client 必须加入 shared root
 gate、exclusive maintenance 存在时返回 `CacheBusy`，以及 fill-only materialization 对完整命中不回读 rows、
@@ -387,6 +397,12 @@ S31 低延迟交易柜台 profile 的正式 contract 位于
 `crates/tqsdk-task/examples/api_contract_s31_low_latency_trading_desk.rs`，并由
 `cargo check -p tqsdk-task --example api_contract_s31_low_latency_trading_desk`
 单独覆盖。
+
+S49 tick companion-lock repair 的正式 contract 位于
+`crates/tqsdk-data/examples/api_contract_s49_tick_lock_repair.rs`：它要求 caller 先取得
+`try_acquire_consistency_read_lock()`，默认只运行
+`BacktestTickCache::repair_tick_locks(BacktestTickCacheLockRepairMode::DryRun)`；只有显式 opt-in 才调用
+`Apply`。该 example 由 `cargo check -p tqsdk-data --example api_contract_s49_tick_lock_repair` 覆盖。
 
 ## Public API Documentation Batch Validation
 

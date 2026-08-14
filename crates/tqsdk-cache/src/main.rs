@@ -19,7 +19,8 @@ use tqsdk_cache::{
     write_minute_fill_report, write_trading_calendar_holidays_snapshot,
 };
 use tqsdk_data::{
-    BacktestTickCache, DataClient, DataError, HistorySeriesCacheFileStatus, MinuteKlineCache,
+    BacktestTickCache, BacktestTickCacheLockRepairMode, BacktestTickCacheLockRepairStatus,
+    DataClient, DataError, HistorySeriesCacheFileStatus, MinuteKlineCache,
     MinuteKlineCacheSnapshot, backtest_tick_trading_day_for_timestamp_ns,
 };
 use tqsdk_session::SessionClientBuilder;
@@ -121,6 +122,8 @@ enum Command {
     Verify(VerifyArgs),
     /// Deep read-only cache health diagnostics; requires a stable cache view.
     Doctor,
+    /// Inspect or repair missing Tick TQBN companion locks.
+    RepairLocks(RepairLocksArgs),
     /// Explicitly remove canonical-minute month partitions.
     Purge(PurgeArgs),
     /// Query cache-backed history and emit raw JSONL or token-aware LLM CSV context.
@@ -135,6 +138,7 @@ impl Command {
             Self::Fill(_) => "fill",
             Self::Verify(_) => "verify",
             Self::Doctor => "doctor",
+            Self::RepairLocks(_) => "repair-locks",
             Self::Purge(_) => "purge",
             Self::Query(_) => "query",
         }
@@ -157,6 +161,13 @@ struct OptionalDaysArgs {
     start_day: Option<NaiveDate>,
     #[arg(long, value_name = "YYYY-MM-DD")]
     end_day: Option<NaiveDate>,
+}
+
+#[derive(Debug, Args)]
+struct RepairLocksArgs {
+    /// Create each missing companion lock. Without this flag, only report the repair plan.
+    #[arg(long)]
+    apply: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1168,6 +1179,7 @@ async fn run(cli: Cli) -> Result<CommandOutcome, CliError> {
         Command::Fill(args) => fill(cli.cache_dir.as_deref(), cli.kind, cli.market, args).await,
         Command::Verify(args) => verify(cli.cache_dir.as_deref(), cli.kind, args).await,
         Command::Doctor => doctor(cli.cache_dir.as_deref(), cli.kind),
+        Command::RepairLocks(args) => repair_locks(cli.cache_dir.as_deref(), cli.kind, args),
         Command::Purge(args) => purge(cli.cache_dir.as_deref(), cli.kind, args),
         Command::Query(_) => unreachable!("main dispatches query output separately"),
     }
@@ -1182,6 +1194,11 @@ fn validate_command_kind(command: &Command, kind: CacheKind) -> Result<(), CliEr
     if matches!(command, Command::Purge(_)) && !matches!(kind, CacheKind::Minute) {
         return Err(CliError::Usage(
             "purge currently supports only --kind minute".to_string(),
+        ));
+    }
+    if matches!(command, Command::RepairLocks(_)) && !matches!(kind, CacheKind::Tick) {
+        return Err(CliError::Usage(
+            "repair-locks currently supports only --kind tick".to_string(),
         ));
     }
     Ok(())
@@ -2335,6 +2352,51 @@ fn doctor(cache_dir: Option<&Path>, kind: CacheKind) -> Result<CommandOutcome, C
     })
 }
 
+fn repair_locks(
+    cache_dir: Option<&Path>,
+    kind: CacheKind,
+    args: RepairLocksArgs,
+) -> Result<CommandOutcome, CliError> {
+    debug_assert!(matches!(kind, CacheKind::Tick));
+    let (cache, canonical_cache_dir) = if args.apply {
+        let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
+        (
+            BacktestTickCache::open(&canonical_cache_dir)?,
+            canonical_cache_dir,
+        )
+    } else {
+        open_read_only_cache(cache_dir)?
+    };
+    let _lock = cache.try_acquire_consistency_read_lock()?;
+    let mode = if args.apply {
+        BacktestTickCacheLockRepairMode::Apply
+    } else {
+        BacktestTickCacheLockRepairMode::DryRun
+    };
+    let report = cache.repair_tick_locks(mode)?;
+    Ok(CommandOutcome {
+        value: json!({
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "command": "repair-locks",
+            "cache_kind": "tick",
+            "cache_dir": canonical_cache_dir,
+            "dry_run": !args.apply,
+            "scanned_files": report.files.len(),
+            "missing_files": report.missing_files,
+            "created_files": report.created_files,
+            "already_present_files": report.already_present_files,
+            "failed_files": report.failed_files,
+            "files": report.files.into_iter().map(|file| json!({
+                "path": file.path,
+                "lock_path": file.lock_path,
+                "status": tick_lock_repair_status_name(file.status),
+                "error": file.error,
+            })).collect::<Vec<_>>(),
+        }),
+        exit_code: if report.failed_files == 0 { 0 } else { 1 },
+    })
+}
+
 fn fill_config(args: &FillArgs) -> BacktestRemoteFillConfig {
     let mut config = BacktestRemoteFillConfig::from_environment();
     if let Some(value) = args.symbol_batch_size {
@@ -2536,6 +2598,15 @@ fn file_status_name(status: HistorySeriesCacheFileStatus) -> &'static str {
         HistorySeriesCacheFileStatus::InvalidRowWidth => "invalid_row_width",
         HistorySeriesCacheFileStatus::IncompleteWrite => "incomplete_write",
         HistorySeriesCacheFileStatus::Ignored => "ignored",
+    }
+}
+
+fn tick_lock_repair_status_name(status: BacktestTickCacheLockRepairStatus) -> &'static str {
+    match status {
+        BacktestTickCacheLockRepairStatus::Missing => "missing",
+        BacktestTickCacheLockRepairStatus::AlreadyPresent => "already_present",
+        BacktestTickCacheLockRepairStatus::Created => "created",
+        BacktestTickCacheLockRepairStatus::Failed => "failed",
     }
 }
 

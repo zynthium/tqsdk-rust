@@ -4,7 +4,10 @@ use tqsdk_core::{Kline, Tick};
 
 use crate::{DataError, Result};
 
-use super::{HistorySeriesCacheMaintenanceReport, HistorySeriesCacheScanReport};
+use super::{
+    HistorySeriesCacheMaintenanceReport, HistorySeriesCacheScanReport,
+    HistorySeriesTickLockInspection, HistorySeriesTickLockRepair,
+};
 
 pub const HISTORY_SERIES_CACHE_FORMAT_ID: &str = "tqsdk.tqbn.daily.v2";
 
@@ -139,6 +142,16 @@ pub(crate) trait HistorySeriesStore: Send + Sync {
         Ok(self.series_path(symbol, kind).exists())
     }
     fn scan(&self) -> Result<HistorySeriesCacheScanReport>;
+    fn inspect_tick_locks(&self) -> Result<Vec<HistorySeriesTickLockInspection>> {
+        Err(DataError::InvalidState(
+            "history cache backend does not support TQBN companion lock inspection",
+        ))
+    }
+    fn repair_tick_locks(&self) -> Result<Vec<HistorySeriesTickLockRepair>> {
+        Err(DataError::InvalidState(
+            "history cache backend does not support TQBN companion lock repair",
+        ))
+    }
     fn enforce_limits(
         &self,
         max_bytes: Option<u64>,

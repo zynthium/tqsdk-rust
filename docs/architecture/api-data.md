@@ -190,6 +190,10 @@ materialize/fill-only run 在 coverage 提交后直接返回物理写入计数�
 - `BacktestHistoryEvent` / `BacktestHistoryRun` / `BacktestHistoryBatchReport`
 - `BacktestHistoryMetadataCache` / `BacktestHistoryMaintenanceClient`
 - `BacktestTickCache`
+- `BacktestTickCacheLockRepairMode`
+- `BacktestTickCacheLockRepairStatus`
+- `BacktestTickCacheLockRepairFile`
+- `BacktestTickCacheLockRepairReport`
 - `BacktestTickCoverage`
 - `BacktestTickCacheWriteReport`
 - `LiveTickCacheWriter`
@@ -296,6 +300,12 @@ materialize/fill-only run 在 coverage 提交后直接返回物理写入计数�
    - `BacktestTickCache` 已作为 tick-only semantic facade 落在 `tqsdk-data`；
      它复用 `HistorySeriesCache` 做回测覆盖检查、tick 写入和 tick 读取，不新增第二套
      JSONL tick cache，也不持久化 K 线
+   - `BacktestTickCache::repair_tick_locks(BacktestTickCacheLockRepairMode)` 是唯一公开的 tick
+     companion-lock remediation：`DryRun` 只逐文件检查既有 `.tqbn`，`Apply` 只创建缺失的
+     `<file>.tqbn.lock`。直接调用者必须先停止同一 root 的 reader/writer，并在调用期间持有
+     `try_acquire_consistency_read_lock()`；`DryRun` 可用 read-only cache，`Apply` 必须使用 writable
+     cache，且会逐文件取得 normal exclusive TQBN/file lock。该 API 不改 TQBN bytes、rows 或 coverage，
+     不访问 remote/auth，不做 fill 或 compaction；失败保留在 per-file report，仍继续其余文件
    - `LiveTickCacheWriter` 是 `BacktestTickCache` 上的一层纯 writer；它接收调用方已经消费到的
      live tick rows，追加 rows，并只在 tick id 连续时推进 coverage。连续单 tick push 默认合并到
      128 行；批量、跳号、到期后的下一次 push、显式 `flush()` 或最后一个 clone 销毁会提交短尾。
@@ -350,7 +360,10 @@ tqsdk-wait        tqsdk-data
   reader 在共享锁内打开文件、验证 prefix/tail checkpoint 并固定确认长度，然后用 opened file handle
   在锁外解压和流式消费。checkpoint 记录 confirmed length、尾部 checksum 与最新 coverage index head；
   读侧忽略其后的未确认 suffix，下一 writer 可截断截断块或坏 checksum suffix 后继续。没有 checkpoint
-  的旧文件仍全量校验，不把真实损坏静默当成可恢复尾部
+  的旧文件仍全量校验，不把真实损坏静默当成可恢复尾部。缺失 companion lock 的专用 repair path 不属于
+  writer 的 data repair：它由 owner 的 exclusive root gate 串行，`Apply` 只创建缺失的 regular sidecar，
+  不替换 invalid/non-regular sidecar；单文件失败继续扫描并报告，详见
+  [回测缓存 CLI](backtest-tick-cache-cli.md)
 - `HistorySeriesCache::read_kline_data_series` /
   `HistorySeriesCache::read_tick_data_series` 提供 cache-only 读取，
   `HistorySeriesCache::scan` 和 `HistorySeriesCache::enforce_limits`

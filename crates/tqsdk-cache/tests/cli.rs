@@ -88,6 +88,129 @@ fn all_kind_is_rejected_for_targeted_cache_operations() {
 }
 
 #[test]
+fn repair_locks_dry_run_reports_missing_companion_without_creating_it() {
+    let cache_dir = temp_dir("repair-locks-dry-run");
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    cache
+        .store_ticks(
+            "SHFE.rb2601",
+            1_000,
+            2_000,
+            [Tick {
+                id: 1,
+                datetime: 1_000,
+                ..Tick::default()
+            }],
+        )
+        .unwrap();
+    let path = cache.diagnose().unwrap().files.remove(0).path;
+    let lock_path = path.with_extension("tqbn.lock");
+    fs::remove_file(&lock_path).unwrap();
+
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "tick",
+        "repair-locks",
+    ]);
+
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "repair-locks", "success", 0);
+    assert_eq!(result["cache_kind"], "tick");
+    assert_eq!(result["dry_run"], true);
+    assert_eq!(result["missing_files"], 1);
+    assert_eq!(
+        result["files"][0]["path"],
+        fs::canonicalize(&path).unwrap().display().to_string()
+    );
+    assert_eq!(result["files"][0]["status"], "missing");
+    assert!(!lock_path.exists());
+
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn repair_locks_apply_creates_missing_companion_lock() {
+    let cache_dir = temp_dir("repair-locks-apply");
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    cache
+        .store_ticks(
+            "SHFE.rb2601",
+            1_000,
+            2_000,
+            [Tick {
+                id: 1,
+                datetime: 1_000,
+                ..Tick::default()
+            }],
+        )
+        .unwrap();
+    let path = cache.diagnose().unwrap().files.remove(0).path;
+    let lock_path = path.with_extension("tqbn.lock");
+    fs::remove_file(&lock_path).unwrap();
+
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "repair-locks",
+        "--apply",
+    ]);
+
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "repair-locks", "success", 0);
+    assert_eq!(result["dry_run"], false);
+    assert_eq!(result["created_files"], 1);
+    assert_eq!(result["failed_files"], 0);
+    assert_eq!(result["files"][0]["status"], "created");
+    assert!(lock_path.is_file());
+
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn repair_locks_dry_run_returns_nonzero_for_an_invalid_companion_lock() {
+    let cache_dir = temp_dir("repair-locks-invalid-dry-run");
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    cache
+        .store_ticks(
+            "SHFE.rb2601",
+            1_000,
+            2_000,
+            [Tick {
+                id: 1,
+                datetime: 1_000,
+                ..Tick::default()
+            }],
+        )
+        .unwrap();
+    let path = cache.diagnose().unwrap().files.remove(0).path;
+    let lock_path = path.with_extension("tqbn.lock");
+    fs::remove_file(&lock_path).unwrap();
+    fs::create_dir(&lock_path).unwrap();
+
+    let output = run_json(["--cache-dir", cache_dir.to_str().unwrap(), "repair-locks"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "repair-locks", "incomplete", 1);
+    assert_eq!(result["dry_run"], true);
+    assert_eq!(result["failed_files"], 1);
+    assert_eq!(result["files"][0]["status"], "failed");
+    assert!(
+        result["files"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("regular file")
+    );
+    assert!(lock_path.is_dir());
+
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
 fn minute_inspect_uses_the_logical_symbol_as_its_cache_key() {
     let cache_dir = temp_dir("minute-inspect");
     let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();

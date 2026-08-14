@@ -107,9 +107,12 @@ pub use backtest_tick_cache::{
     BacktestCachePolicy, BacktestTickCache, BacktestTickCacheDiagnostic,
     BacktestTickCacheDiagnosticReport, BacktestTickCacheFastInventory,
     BacktestTickCacheFastInventorySymbol, BacktestTickCacheInventory,
-    BacktestTickCacheInventorySymbol, BacktestTickCacheOperationLock, BacktestTickCachePurgeReport,
-    BacktestTickCacheStatus, BacktestTickCacheWriteReport, BacktestTickCoverage, BacktestTickFill,
-    BacktestTickFillReport, BacktestTickProvisionalCoverage, BacktestTickTradingDayRange,
+    BacktestTickCacheInventorySymbol, BacktestTickCacheLockRepairFile,
+    BacktestTickCacheLockRepairMode, BacktestTickCacheLockRepairReport,
+    BacktestTickCacheLockRepairStatus, BacktestTickCacheOperationLock,
+    BacktestTickCachePurgeReport, BacktestTickCacheStatus, BacktestTickCacheWriteReport,
+    BacktestTickCoverage, BacktestTickFill, BacktestTickFillReport,
+    BacktestTickProvisionalCoverage, BacktestTickTradingDayRange,
     backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
 };
 pub use client::{

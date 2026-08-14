@@ -21,6 +21,7 @@ pub(crate) fn write_result(
         "fill" => write_fill(&mut output, value)?,
         "verify" => write_verify(&mut output, value)?,
         "doctor" => write_doctor(&mut output, value)?,
+        "repair-locks" => write_repair_locks(&mut output, value)?,
         "purge" => write_purge(&mut output, value)?,
         "query" => write_query(&mut output, value)?,
         _ => writeln!(output, "No terminal summary is available for this command.")?,
@@ -339,6 +340,46 @@ fn write_doctor(output: &mut impl Write, value: &Value) -> io::Result<()> {
             "  {}: {}{}",
             string(file, "path").unwrap_or("-"),
             status,
+            string(file, "error")
+                .map(|error| format!(" ({error})"))
+                .unwrap_or_default(),
+        )?;
+    }
+    Ok(())
+}
+
+fn write_repair_locks(output: &mut impl Write, value: &Value) -> io::Result<()> {
+    write_cache_header(output, value)?;
+    writeln!(
+        output,
+        "Files: {} scanned | Missing: {} | Created: {} | Already present: {} | Failed: {}",
+        number(value, "scanned_files"),
+        number(value, "missing_files"),
+        number(value, "created_files"),
+        number(value, "already_present_files"),
+        number(value, "failed_files"),
+    )?;
+    if boolean(value, "dry_run") {
+        writeln!(
+            output,
+            "Mode: dry run; pass --apply to create missing companion locks."
+        )?;
+    } else {
+        writeln!(
+            output,
+            "Mode: applied; only missing companion locks were created."
+        )?;
+    }
+    for file in array(value, "files") {
+        let status = string(file, "status").unwrap_or("unknown");
+        if status == "already_present" {
+            continue;
+        }
+        writeln!(
+            output,
+            "  {}: {status} -> {}{}",
+            string(file, "path").unwrap_or("-"),
+            string(file, "lock_path").unwrap_or("-"),
             string(file, "error")
                 .map(|error| format!(" ({error})"))
                 .unwrap_or_default(),
@@ -731,6 +772,41 @@ mod tests {
             output
                 .contains("Raw rows: --output-format jsonl | LLM context: --output-format llm-csv")
         );
+    }
+
+    #[test]
+    fn repair_locks_summary_explains_dry_run_without_json() {
+        let value = json!({
+            "command": "repair-locks",
+            "cache_dir": "/tmp/cache",
+            "dry_run": true,
+            "scanned_files": 4,
+            "missing_files": 2,
+            "created_files": 0,
+            "already_present_files": 2,
+            "failed_files": 0,
+            "files": [{
+                "path": "/tmp/cache/SHFE.au2608.tqbn",
+                "lock_path": "/tmp/cache/SHFE.au2608.tqbn.lock",
+                "status": "missing",
+                "error": null,
+            }],
+        });
+        let mut output = Vec::new();
+
+        write_result(&mut output, &value, "success", 0, 12).unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains(
+            "Files: 4 scanned | Missing: 2 | Created: 0 | Already present: 2 | Failed: 0"
+        ));
+        assert!(output.contains("Mode: dry run; pass --apply to create missing companion locks."));
+        assert!(
+            output.contains(
+                "/tmp/cache/SHFE.au2608.tqbn: missing -> /tmp/cache/SHFE.au2608.tqbn.lock"
+            )
+        );
+        assert!(!output.contains("No terminal summary is available"));
     }
 
     #[test]

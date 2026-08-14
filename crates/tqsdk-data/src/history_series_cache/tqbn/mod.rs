@@ -17,7 +17,8 @@ use crate::history_series_cache::{
     HistorySeriesCoverageReport, HistorySeriesCoverageRequest, HistorySeriesKind,
     HistorySeriesProvisionalCoverage, HistorySeriesPurgeReport, HistorySeriesReadRequest,
     HistorySeriesReader, HistorySeriesRow, HistorySeriesSegmentReport, HistorySeriesStore,
-    HistorySeriesWriteRows, HistorySeriesWriteSegment,
+    HistorySeriesTickLockInspection, HistorySeriesTickLockRepair, HistorySeriesWriteRows,
+    HistorySeriesWriteSegment,
 };
 use chrono::{
     DateTime, Datelike, Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveTime, TimeZone,
@@ -703,6 +704,70 @@ impl HistorySeriesStore for TqbnHistoryStore {
             schema_version: TQBN_SCHEMA_VERSION,
             files,
         })
+    }
+
+    fn inspect_tick_locks(&self) -> Result<Vec<HistorySeriesTickLockInspection>> {
+        let files = list_tqbn_file_metas(self.root_dir.as_path())?;
+        Ok(files
+            .into_iter()
+            .filter(|file| file.kind == HistorySeriesKind::Tick)
+            .map(|file| {
+                let lock_path = tqbn_file_lock_path(file.path.as_path());
+                let (lock_exists, error) = match fs::symlink_metadata(&lock_path) {
+                    Ok(metadata) if metadata.file_type().is_file() => (true, None),
+                    Ok(_) => (
+                        false,
+                        Some(format!(
+                            "history TQBN companion lock {} is not a regular file",
+                            lock_path.display()
+                        )),
+                    ),
+                    Err(error) if error.kind() == ErrorKind::NotFound => (false, None),
+                    Err(error) => (false, Some(error.to_string())),
+                };
+                HistorySeriesTickLockInspection {
+                    path: file.path,
+                    lock_path,
+                    lock_exists,
+                    error,
+                }
+            })
+            .collect())
+    }
+
+    fn repair_tick_locks(&self) -> Result<Vec<HistorySeriesTickLockRepair>> {
+        self.ensure_writable()?;
+        let mut repaired = Vec::new();
+        for file in list_tqbn_file_metas(self.root_dir.as_path())?
+            .into_iter()
+            .filter(|file| file.kind == HistorySeriesKind::Tick)
+        {
+            let lock_path = tqbn_file_lock_path(file.path.as_path());
+            let (lock_created, error) = match fs::symlink_metadata(&lock_path) {
+                Ok(metadata) if metadata.file_type().is_file() => (false, None),
+                Ok(_) => (
+                    false,
+                    Some(format!(
+                        "history TQBN companion lock {} is not a regular file",
+                        lock_path.display()
+                    )),
+                ),
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    match with_exclusive_tqbn_lock(file.path.as_path(), || Ok(())) {
+                        Ok(()) => (true, None),
+                        Err(error) => (false, Some(error.to_string())),
+                    }
+                }
+                Err(error) => (false, Some(error.to_string())),
+            };
+            repaired.push(HistorySeriesTickLockRepair {
+                path: file.path,
+                lock_path,
+                lock_created,
+                error,
+            });
+        }
+        Ok(repaired)
     }
 
     fn enforce_limits(

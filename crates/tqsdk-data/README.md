@@ -25,6 +25,7 @@
 - `BacktestTickCache::open_read_only(...).fast_inventory()`
 - `BacktestTickCache::diagnose()` / `try_acquire_remote_fill_shared_lock()` /
   `try_acquire_remote_fill_lock()` / `try_acquire_consistency_read_lock()`
+- `BacktestTickCache::repair_tick_locks(BacktestTickCacheLockRepairMode)`
 - `LiveTickCacheWriter::new(...).push_ticks(...)` / `flush()`
 - `MinuteKlineCache::open(...)` / `open_read_only(...)` / `coverage(...)`
 - `MinuteKlineCache::store_final_range(...)` / `open_reader(...)` / `purge_range(...)`
@@ -170,6 +171,12 @@ chart cleanup 成功后，同一 session 可顺序服务后续 trading-day/minut
   cached/missing ranges；`tick_series_path(...)` 返回逻辑 series 路径，`purge_symbol_ticks(...)` 和
   `compact_symbol_ticks(...)` 是按 `(symbol, tick)` 的全部日分区文件粒度的显式运维入口；facade
   final fill 使用范围版本，只重写本轮实际远端回填范围相交的日分区，避免 cache-hit 历史被重复 compact
+- `BacktestTickCache::repair_tick_locks(BacktestTickCacheLockRepairMode)` 是只针对既有 tick
+  `.tqbn` companion lock 的运维 API：`DryRun` 逐文件检查，`Apply` 只创建缺失的
+  `<file>.tqbn.lock`。调用方必须在停止同一 root 的 reader/writer 后持有
+  `try_acquire_consistency_read_lock()`；`Apply` 还要求可写 cache，并逐文件使用正常的排他锁。
+  它不改 TQBN bytes、rows 或 coverage，不访问远端/认证，也不是 fill 或 compaction。每个文件都有
+  `Missing` / `AlreadyPresent` / `Created` / `Failed` report；单个失败不会阻止其余文件继续处理
 - `BacktestTickCache::open_read_only(...)` 不创建 root，也拒绝任何写入；`fast_inventory()` 只读取
   daily file metadata / magic，`diagnose()` 解码全部 tick partitions 并返回文件级状态。root-scoped
   `try_acquire_remote_fill_shared_lock()` 允许普通 fill/query 并发，
@@ -252,6 +259,10 @@ Python-compatible mmap 缓存；旧 binary/mmap history cache 已从 public surf
 - `BacktestTickCacheInventorySymbol`
 - `BacktestTickCacheDiagnostic`
 - `BacktestTickCacheDiagnosticReport`
+- `BacktestTickCacheLockRepairMode`
+- `BacktestTickCacheLockRepairStatus`
+- `BacktestTickCacheLockRepairFile`
+- `BacktestTickCacheLockRepairReport`
 - `BacktestTickCacheOperationLock`
 - `BacktestTickTradingDayRange`
 - `BacktestTickCoverage`
@@ -403,6 +414,7 @@ facade 或未来可选 relay host 拥有。
 - [examples/api_contract_s28_download_export.rs](examples/api_contract_s28_download_export.rs)
 - [examples/api_contract_s28_option_greeks.rs](examples/api_contract_s28_option_greeks.rs)
 - [examples/api_contract_s30_history_series_cache.rs](examples/api_contract_s30_history_series_cache.rs)
+- [examples/api_contract_s49_tick_lock_repair.rs](examples/api_contract_s49_tick_lock_repair.rs)
 
 session-backed 的历史分页示例见 [examples/kline_data_page.rs](examples/kline_data_page.rs)。
 默认示例符号是 `SHFE.ao2609`，因此示例里会显式使用 `SessionClientBuilder::futures_market()` 走 futures market route。
@@ -430,6 +442,12 @@ S30 contract
 和旧单文件 `.tqbn` layout 直接废弃为默认缓存格式，不提供兼容读取或迁移 store；旧 Python 兼容 binary/mmap cache
 同样不做自动迁移，也不承诺 Python 与 Rust 进程同目录互写。默认 features 启用
 `tqbn-zstd`，只改变 TQBN internal block payload，不新增用户可选 store API。
+
+S49 contract
+[examples/api_contract_s49_tick_lock_repair.rs](examples/api_contract_s49_tick_lock_repair.rs)
+展示 `BacktestTickCache::repair_tick_locks(...)` 的显式 root gate：默认 `DryRun`，只有设置
+`TQ_CACHE_REPAIR_LOCKS_APPLY=1` 才调用 `Apply`。它只补既有 tick `.tqbn` 缺失的 companion lock；运行前
+必须停止同一 root 的 reader/writer，不能把它当作 fill、数据修复或 compaction。
 
 `history_series_cache_microbench` 默认生成 synthetic ticks。要对本地完整 cache range 复测，设置
 `TQSDK_HISTORY_CACHE_BENCH_INPUT_CACHE_DIR`、`TQSDK_HISTORY_CACHE_BENCH_INPUT_SYMBOL`、

@@ -187,6 +187,42 @@ pub struct BacktestTickCacheDiagnosticReport {
     pub problem_files: usize,
 }
 
+/// Selects whether companion-lock repair only reports missing locks or creates them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BacktestTickCacheLockRepairMode {
+    DryRun,
+    Apply,
+}
+
+/// Per-TQBN companion-lock repair result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BacktestTickCacheLockRepairStatus {
+    Missing,
+    AlreadyPresent,
+    Created,
+    Failed,
+}
+
+/// Companion-lock repair status for one existing Tick TQBN partition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestTickCacheLockRepairFile {
+    pub path: PathBuf,
+    pub lock_path: PathBuf,
+    pub status: BacktestTickCacheLockRepairStatus,
+    pub error: Option<String>,
+}
+
+/// Companion-lock repair report for all existing Tick TQBN partitions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestTickCacheLockRepairReport {
+    pub cache_dir: PathBuf,
+    pub files: Vec<BacktestTickCacheLockRepairFile>,
+    pub missing_files: usize,
+    pub created_files: usize,
+    pub already_present_files: usize,
+    pub failed_files: usize,
+}
+
 /// Canonical TQBN trading-day range used by tick cache partitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BacktestTickTradingDayRange {
@@ -453,6 +489,100 @@ impl BacktestTickCache {
             files,
             problem_files,
         })
+    }
+
+    /// Inspect or repair companion locks for every existing Tick TQBN partition.
+    ///
+    /// [`BacktestTickCacheLockRepairMode::DryRun`] never writes a companion
+    /// lock. [`BacktestTickCacheLockRepairMode::Apply`] creates only missing
+    /// `<file>.tqbn.lock` files through the normal exclusive TQBN lock path;
+    /// it never rewrites Tick rows or coverage. Callers that share a cache root
+    /// must first hold an exclusive [`Self::try_acquire_consistency_read_lock`]
+    /// gate.
+    pub fn repair_tick_locks(
+        &self,
+        mode: BacktestTickCacheLockRepairMode,
+    ) -> Result<BacktestTickCacheLockRepairReport> {
+        match mode {
+            BacktestTickCacheLockRepairMode::DryRun => {
+                let files = self
+                    .history
+                    .inspect_tick_locks()?
+                    .into_iter()
+                    .map(|file| BacktestTickCacheLockRepairFile {
+                        path: file.path,
+                        lock_path: file.lock_path,
+                        status: if file.error.is_some() {
+                            BacktestTickCacheLockRepairStatus::Failed
+                        } else if file.lock_exists {
+                            BacktestTickCacheLockRepairStatus::AlreadyPresent
+                        } else {
+                            BacktestTickCacheLockRepairStatus::Missing
+                        },
+                        error: file.error,
+                    })
+                    .collect::<Vec<_>>();
+                let missing_files = files
+                    .iter()
+                    .filter(|file| file.status == BacktestTickCacheLockRepairStatus::Missing)
+                    .count();
+                let already_present_files = files
+                    .iter()
+                    .filter(|file| file.status == BacktestTickCacheLockRepairStatus::AlreadyPresent)
+                    .count();
+                let failed_files = files
+                    .iter()
+                    .filter(|file| file.status == BacktestTickCacheLockRepairStatus::Failed)
+                    .count();
+                Ok(BacktestTickCacheLockRepairReport {
+                    cache_dir: self.history.root_dir().to_path_buf(),
+                    files,
+                    missing_files,
+                    created_files: 0,
+                    already_present_files,
+                    failed_files,
+                })
+            }
+            BacktestTickCacheLockRepairMode::Apply => {
+                let files = self
+                    .history
+                    .repair_tick_locks()?
+                    .into_iter()
+                    .map(|file| BacktestTickCacheLockRepairFile {
+                        path: file.path,
+                        lock_path: file.lock_path,
+                        status: if file.error.is_some() {
+                            BacktestTickCacheLockRepairStatus::Failed
+                        } else if file.lock_created {
+                            BacktestTickCacheLockRepairStatus::Created
+                        } else {
+                            BacktestTickCacheLockRepairStatus::AlreadyPresent
+                        },
+                        error: file.error,
+                    })
+                    .collect::<Vec<_>>();
+                let created_files = files
+                    .iter()
+                    .filter(|file| file.status == BacktestTickCacheLockRepairStatus::Created)
+                    .count();
+                let already_present_files = files
+                    .iter()
+                    .filter(|file| file.status == BacktestTickCacheLockRepairStatus::AlreadyPresent)
+                    .count();
+                let failed_files = files
+                    .iter()
+                    .filter(|file| file.status == BacktestTickCacheLockRepairStatus::Failed)
+                    .count();
+                Ok(BacktestTickCacheLockRepairReport {
+                    cache_dir: self.history.root_dir().to_path_buf(),
+                    files,
+                    missing_files: 0,
+                    created_files,
+                    already_present_files,
+                    failed_files,
+                })
+            }
+        }
     }
 
     /// Try to acquire the exclusive cache-root gate required by destructive
