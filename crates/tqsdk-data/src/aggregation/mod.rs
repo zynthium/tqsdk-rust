@@ -1,9 +1,11 @@
 //! Shared session-aware Kline aggregation for cache-backed queries and replay.
 
+mod daily;
 mod minute;
 mod session;
 mod tick;
 
+pub use daily::DailyKlineAggregator;
 pub use minute::{MinuteKlineAggregationUpdate, MinuteKlineAggregator};
 pub use session::{KlineSessionPosition, KlineSessionTemplate, KlineSessionWindow};
 pub use tick::{TickKlineAggregationUpdate, TickKlineAggregator};

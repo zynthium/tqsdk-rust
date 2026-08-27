@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use tqsdk_data::{DailyKlineCache, DailyKlineCacheSnapshot};
+
 use chrono::{TimeZone, Utc};
 use tqsdk_core::{Kline, Tick};
 use tqsdk_data::{
@@ -831,6 +833,108 @@ async fn kq_main_tick_query_clamps_warmup_to_its_persisted_physical_segment() {
     assert_eq!(
         collected.request.coverage.expanded_source_range,
         (segment_start_ns, segment_start_ns + 30 * SECOND_NS)
+    );
+}
+
+#[tokio::test]
+async fn cache_only_daily_and_multi_day_requests_read_native_daily_cache() {
+    const DAY_NS: i64 = 86_400_000_000_000;
+    let root = temp_dir("daily-and-2d");
+    let symbol = "SHFE.au2402";
+    let start_ns = utc_ns(2024, 1, 2, 0, 0, 0);
+    let end_ns = start_ns + 4 * DAY_NS;
+    let rows = (0..4)
+        .map(|offset| {
+            kline(
+                offset + 1,
+                start_ns + offset * DAY_NS,
+                100.0 + offset as f64,
+            )
+        })
+        .collect::<Vec<_>>();
+    DailyKlineCache::open(&root)
+        .unwrap()
+        .store_final_range(
+            symbol,
+            start_ns,
+            end_ns,
+            &DailyKlineCacheSnapshot::cst_v1(),
+            &rows,
+        )
+        .unwrap();
+    let client = cache_only_client(&root);
+
+    let one_day = client
+        .query(BacktestHistoryRequest::kline(
+            1,
+            symbol,
+            Duration::from_secs(86_400),
+            start_ns,
+            end_ns,
+        ))
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let BacktestHistoryRows::Klines {
+        duration_ns,
+        rows: one_day_rows,
+    } = one_day.rows
+    else {
+        panic!("1d request must return Kline rows");
+    };
+    assert_eq!(duration_ns, DAY_NS);
+    assert_eq!(
+        one_day_rows
+            .iter()
+            .map(|row| row.datetime)
+            .collect::<Vec<_>>(),
+        rows.iter().map(|row| row.datetime).collect::<Vec<_>>()
+    );
+
+    let two_day = client
+        .query(BacktestHistoryRequest::kline(
+            2,
+            symbol,
+            Duration::from_secs(2 * 86_400),
+            start_ns,
+            end_ns,
+        ))
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let BacktestHistoryRows::Klines {
+        duration_ns,
+        rows: two_day_rows,
+    } = two_day.rows
+    else {
+        panic!("2d request must return Kline rows");
+    };
+    assert_eq!(duration_ns, 2 * DAY_NS);
+    assert_eq!(
+        two_day_rows
+            .iter()
+            .map(|row| row.datetime)
+            .collect::<Vec<_>>(),
+        vec![start_ns, start_ns + 2 * DAY_NS]
+    );
+    assert_eq!(
+        two_day_rows.iter().map(|row| row.open).collect::<Vec<_>>(),
+        vec![100.0, 102.0]
+    );
+    assert_eq!(
+        two_day_rows.iter().map(|row| row.close).collect::<Vec<_>>(),
+        vec![101.25, 103.25]
+    );
+    assert_eq!(
+        two_day_rows
+            .iter()
+            .map(|row| row.volume)
+            .collect::<Vec<_>>(),
+        vec![2, 2]
     );
 }
 

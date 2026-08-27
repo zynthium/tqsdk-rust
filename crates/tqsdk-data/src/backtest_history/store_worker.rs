@@ -14,6 +14,7 @@ use tqsdk_core::{Kline, Tick};
 
 use crate::backtest_tick_cache::BacktestTickCache;
 use crate::client::TickDataSeriesRequest;
+use crate::daily_kline_cache::{DailyKlineCache, DailyKlineCacheSnapshot};
 use crate::minute_kline_cache::{MinuteKlineCache, MinuteKlineCacheSnapshot};
 
 #[cfg(test)]
@@ -121,6 +122,19 @@ impl StoreChunk {
             _buffer_permit,
         })
     }
+
+    fn canonical_daily(
+        rows: Vec<Kline>,
+        budget: &SymbolBufferBudget,
+        cancellation: &AtomicBool,
+    ) -> Option<Self> {
+        let bytes = rows.capacity().saturating_mul(size_of::<Kline>());
+        let _buffer_permit = budget.acquire_blocking(bytes, cancellation)?;
+        Some(Self {
+            rows: StoreRows::CanonicalDaily(Arc::from(rows)),
+            _buffer_permit,
+        })
+    }
 }
 
 /// The rows inside a [`StoreChunk`]. Cloning its enclosing `Arc` shares both
@@ -129,6 +143,7 @@ impl StoreChunk {
 pub(crate) enum StoreRows {
     Ticks(Arc<[Tick]>),
     CanonicalMinutes(Arc<[Kline]>),
+    CanonicalDaily(Arc<[Kline]>),
 }
 
 /// One source-reader message. Failures use a string because one failure is
@@ -144,6 +159,7 @@ pub(crate) enum StoreScanMessage {
 pub(crate) enum StoreScanSpec {
     Tick(TickScanSpec),
     CanonicalMinute(MinuteScanSpec),
+    CanonicalDaily(DailyScanSpec),
 }
 
 pub(crate) struct TickScanSpec {
@@ -168,12 +184,23 @@ pub(crate) struct MinuteScanSpec {
     pub(crate) buffer_budget: SymbolBufferBudget,
 }
 
+pub(crate) struct DailyScanSpec {
+    pub(crate) cache_dir: PathBuf,
+    pub(crate) symbol: String,
+    pub(crate) range: (i64, i64),
+    pub(crate) snapshot: DailyKlineCacheSnapshot,
+    pub(crate) cancellation: Arc<AtomicBool>,
+    pub(crate) permits: Arc<Semaphore>,
+    pub(crate) buffer_budget: SymbolBufferBudget,
+}
+
 /// Starts the selected source reader without occupying a Tokio worker while
 /// file decoding or source-buffer backpressure is active.
 pub(crate) fn spawn_scan(spec: StoreScanSpec) -> mpsc::Receiver<StoreScanMessage> {
     match spec {
         StoreScanSpec::Tick(spec) => spawn_tick_scan(spec),
         StoreScanSpec::CanonicalMinute(spec) => spawn_minute_scan(spec),
+        StoreScanSpec::CanonicalDaily(spec) => spawn_daily_scan(spec),
     }
 }
 
@@ -333,6 +360,71 @@ fn spawn_minute_scan(spec: MinuteScanSpec) -> mpsc::Receiver<StoreScanMessage> {
             let _ = sender
                 .send(StoreScanMessage::Failed(format!(
                     "backtest history canonical-minute blocking reader failed: {error}"
+                )))
+                .await;
+        }
+    });
+    receiver
+}
+
+/// Spawns one native-daily reader. A query can request at most 28 daily rows,
+/// so decoding one final-covered symbol file range remains bounded.
+fn spawn_daily_scan(spec: DailyScanSpec) -> mpsc::Receiver<StoreScanMessage> {
+    let DailyScanSpec {
+        cache_dir,
+        symbol,
+        range,
+        snapshot,
+        cancellation,
+        permits,
+        buffer_budget,
+    } = spec;
+    let (sender, receiver) = mpsc::channel(2);
+    tokio::spawn(async move {
+        let permit = match permits.acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                let _ = sender
+                    .send(StoreScanMessage::Failed(
+                        "backtest history blocking scan workers unavailable".to_string(),
+                    ))
+                    .await;
+                return;
+            }
+        };
+        let blocking_sender = sender.clone();
+        let blocking_cancellation = Arc::clone(&cancellation);
+        let join = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            if blocking_cancellation.load(Ordering::Acquire) {
+                return;
+            }
+            let rows = match DailyKlineCache::open_read_only(&cache_dir)
+                .read_range(symbol, range.0, range.1, &snapshot)
+            {
+                Ok(rows) => rows,
+                Err(error) => {
+                    let _ =
+                        blocking_sender.blocking_send(StoreScanMessage::Failed(error.to_string()));
+                    return;
+                }
+            };
+            if rows.is_empty() {
+                return;
+            }
+            let Some(chunk) =
+                StoreChunk::canonical_daily(rows, &buffer_budget, &blocking_cancellation)
+            else {
+                return;
+            };
+            let _ = blocking_sender.blocking_send(StoreScanMessage::Chunk(Arc::new(chunk)));
+        });
+        if let Err(error) = join.await
+            && !cancellation.load(Ordering::Acquire)
+        {
+            let _ = sender
+                .send(StoreScanMessage::Failed(format!(
+                    "backtest history daily blocking reader failed: {error}"
                 )))
                 .await;
         }

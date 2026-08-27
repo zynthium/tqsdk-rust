@@ -30,6 +30,7 @@ use crate::backtest_tick_cache::{
     BacktestTickCache, BacktestTickFillReport, backtest_tick_trading_day_for_timestamp_ns,
     backtest_tick_trading_day_range,
 };
+use crate::daily_kline_cache::DailyKlineCache;
 use crate::minute_kline_cache::{MinuteKlineCache, MinuteKlineCacheSnapshot};
 use crate::{DataError, Result};
 
@@ -59,6 +60,7 @@ type CloseServerHistorySourceFuture<'a> = Pin<Box<dyn Future<Output = Result<()>
 pub(crate) enum FillFamily {
     Tick,
     CanonicalMinute,
+    CanonicalDaily,
 }
 
 impl FillFamily {
@@ -66,6 +68,7 @@ impl FillFamily {
         match self {
             Self::Tick => "tick",
             Self::CanonicalMinute => "minute",
+            Self::CanonicalDaily => "daily",
         }
     }
 
@@ -73,6 +76,7 @@ impl FillFamily {
         match self {
             Self::Tick => ServerBacktestHistoryKind::Tick,
             Self::CanonicalMinute => ServerBacktestHistoryKind::CanonicalMinute,
+            Self::CanonicalDaily => ServerBacktestHistoryKind::CanonicalDaily,
         }
     }
 }
@@ -127,6 +131,24 @@ impl BacktestHistoryFillRequest {
         }
     }
 
+    pub(crate) fn canonical_daily(
+        cache_symbol: impl Into<String>,
+        range: (i64, i64),
+        snapshot: MinuteKlineCacheSnapshot,
+        request_id: Option<BacktestHistoryRequestId>,
+        telemetry_symbol: impl Into<String>,
+    ) -> Self {
+        Self {
+            family: FillFamily::CanonicalDaily,
+            cache_symbol: cache_symbol.into(),
+            range,
+            minute_snapshot: Some(snapshot),
+            provisional_as_of_ns: None,
+            request_id,
+            telemetry_symbol: telemetry_symbol.into(),
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         if self.cache_symbol.trim().is_empty() {
             return Err(DataError::Validation(
@@ -141,24 +163,24 @@ impl BacktestHistoryFillRequest {
         }
         match self.family {
             FillFamily::Tick => {
-                if let Some(as_of_ns) = self.provisional_as_of_ns {
-                    if as_of_ns < self.range.1 {
-                        return Err(DataError::Validation(
-                            "provisional tick fill range must not extend beyond its as-of timestamp"
-                                .to_string(),
-                        ));
-                    }
+                if let Some(as_of_ns) = self.provisional_as_of_ns
+                    && as_of_ns < self.range.1
+                {
+                    return Err(DataError::Validation(
+                        "provisional tick fill range must not extend beyond its as-of timestamp"
+                            .to_string(),
+                    ));
                 }
             }
-            FillFamily::CanonicalMinute => {
+            FillFamily::CanonicalMinute | FillFamily::CanonicalDaily => {
                 if self.minute_snapshot.is_none() {
                     return Err(DataError::Validation(
-                        "canonical-minute fill requires a cache snapshot".to_string(),
+                        "canonical Kline fill requires a cache snapshot".to_string(),
                     ));
                 }
                 if self.provisional_as_of_ns.is_some() {
                     return Err(DataError::Validation(
-                        "canonical-minute fill does not support provisional coverage".to_string(),
+                        "canonical Kline fill does not support provisional coverage".to_string(),
                     ));
                 }
             }
@@ -642,6 +664,9 @@ impl RemoteFillCoordinator {
             }
             return Ok(slices);
         }
+        if request.family == FillFamily::CanonicalDaily {
+            return Ok(vec![request.with_range(range)]);
+        }
         let mut slices = Vec::new();
         let mut start_ns = range.0;
         while start_ns < range.1 {
@@ -757,6 +782,7 @@ impl RemoteFillCoordinator {
         match request.family {
             FillFamily::Tick => self.fill_ticks(request, shared).await,
             FillFamily::CanonicalMinute => self.fill_minutes(request, shared).await,
+            FillFamily::CanonicalDaily => self.fill_daily(request, shared).await,
         }
     }
 
@@ -823,7 +849,8 @@ impl RemoteFillCoordinator {
                     Ok(false)
                 }
                 ServerBacktestHistoryEvent::StreamCompleted => Ok(true),
-                ServerBacktestHistoryEvent::CanonicalMinutes { .. } => {
+                ServerBacktestHistoryEvent::CanonicalMinutes { .. }
+                | ServerBacktestHistoryEvent::CanonicalDaily { .. } => {
                     Err(DataError::InvalidResponse(
                         "server Tick fill returned canonical-minute rows".to_string(),
                     ))
@@ -919,7 +946,8 @@ impl RemoteFillCoordinator {
                 Ok(false)
             }
             ServerBacktestHistoryEvent::StreamCompleted => Ok(true),
-            ServerBacktestHistoryEvent::Ticks { .. } => Err(DataError::InvalidResponse(
+            ServerBacktestHistoryEvent::Ticks { .. }
+            | ServerBacktestHistoryEvent::CanonicalDaily { .. } => Err(DataError::InvalidResponse(
                 "server canonical-minute fill returned Tick rows".to_string(),
             )),
         })
@@ -1039,6 +1067,59 @@ impl RemoteFillCoordinator {
         }))
     }
 
+    async fn fill_daily(
+        &self,
+        request: &BacktestHistoryFillRequest,
+        shared: &SharedFill,
+    ) -> Result<usize> {
+        ensure_final_tick_range_is_closed(request.range)?;
+        let snapshot = request.minute_snapshot.as_ref().ok_or_else(|| {
+            DataError::InvalidState("canonical-daily fill is missing cache snapshot")
+        })?;
+        let mut rows_by_datetime = BTreeMap::<i64, Kline>::new();
+        self.consume_with_retries(request, shared, |event| match event {
+            ServerBacktestHistoryEvent::CanonicalDaily { symbol, rows, .. } => {
+                if symbol != request.cache_symbol {
+                    return Err(DataError::InvalidResponse(format!(
+                        "server canonical-daily fill returned unexpected symbol {symbol}"
+                    )));
+                }
+                for row in rows {
+                    if row.datetime >= request.range.0 && row.datetime < request.range.1 {
+                        rows_by_datetime.insert(row.datetime, row);
+                    }
+                }
+                Ok(false)
+            }
+            ServerBacktestHistoryEvent::ChartCompleted { symbol, .. } => {
+                if symbol != request.cache_symbol {
+                    return Err(DataError::InvalidResponse(format!(
+                        "server canonical-daily fill completed unexpected symbol {symbol}"
+                    )));
+                }
+                Ok(false)
+            }
+            ServerBacktestHistoryEvent::StreamCompleted => Ok(true),
+            ServerBacktestHistoryEvent::Ticks { .. }
+            | ServerBacktestHistoryEvent::CanonicalMinutes { .. } => {
+                Err(DataError::InvalidResponse(
+                    "server canonical-daily fill returned non-daily rows".to_string(),
+                ))
+            }
+        })
+        .await?;
+        self.ensure_not_cancelled(shared)?;
+        let rows = rows_by_datetime.into_values().collect::<Vec<_>>();
+        DailyKlineCache::open(self.config.cache_dir.as_path())?.store_final_range(
+            request.cache_symbol.as_str(),
+            request.range.0,
+            request.range.1,
+            snapshot,
+            rows.as_slice(),
+        )?;
+        Ok(rows.len())
+    }
+
     fn missing_ranges(&self, request: &BacktestHistoryFillRequest) -> Result<Vec<(i64, i64)>> {
         match request.family {
             FillFamily::Tick => Ok(BacktestTickCache::open_read_only(
@@ -1056,6 +1137,21 @@ impl RemoteFillCoordinator {
                 })?;
                 Ok(
                     MinuteKlineCache::open_read_only(self.config.cache_dir.as_path())
+                        .coverage(
+                            request.cache_symbol.as_str(),
+                            request.range.0,
+                            request.range.1,
+                            snapshot,
+                        )?
+                        .missing_ranges,
+                )
+            }
+            FillFamily::CanonicalDaily => {
+                let snapshot = request.minute_snapshot.as_ref().ok_or_else(|| {
+                    DataError::InvalidState("canonical-daily fill is missing cache snapshot")
+                })?;
+                Ok(
+                    DailyKlineCache::open_read_only(self.config.cache_dir.as_path())
                         .coverage(
                             request.cache_symbol.as_str(),
                             request.range.0,
@@ -1780,6 +1876,49 @@ mod tests {
         assert_eq!(opens.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn daily_rows_become_final_only_after_native_daily_stream_terminal() {
+        let root = temporary_root("daily-terminal");
+        let range = closed_range();
+        let snapshot = MinuteKlineCacheSnapshot::cst_v1();
+        let opens = Arc::new(AtomicUsize::new(0));
+        let coordinator = coordinator(
+            root.clone(),
+            Arc::new(ScriptedFactory::new(
+                Arc::clone(&opens),
+                vec![
+                    ServerBacktestHistoryEvent::CanonicalDaily {
+                        chart_id: "daily".to_string(),
+                        symbol: "KQ.i@SHFE.au".to_string(),
+                        rows: vec![kline(1, range.0)],
+                    },
+                    ServerBacktestHistoryEvent::StreamCompleted,
+                ],
+                Duration::ZERO,
+            )),
+            Arc::new(CountingAuth::new(Arc::new(AtomicUsize::new(0)))),
+        );
+
+        coordinator
+            .ensure_coverage(BacktestHistoryFillRequest::canonical_daily(
+                "KQ.i@SHFE.au",
+                range,
+                snapshot.clone(),
+                Some(1),
+                "KQ.i@SHFE.au",
+            ))
+            .await
+            .unwrap();
+
+        assert!(
+            DailyKlineCache::open_read_only(root)
+                .coverage("KQ.i@SHFE.au", range.0, range.1, &snapshot)
+                .unwrap()
+                .is_complete()
+        );
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+    }
+
     #[cfg(all(feature = "live", feature = "services"))]
     #[tokio::test]
     async fn session_source_factory_reuses_only_cleanly_closed_sessions() {
@@ -1922,6 +2061,90 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn daily_fill_refuses_current_trading_day_before_opening_server_source() {
+        let root = temporary_root("daily-current-day");
+        let now_ns = Utc::now().timestamp_nanos_opt().unwrap();
+        let current_day = backtest_tick_trading_day_for_timestamp_ns(now_ns).unwrap();
+        let current_range = backtest_tick_trading_day_range(current_day).unwrap();
+        let opens = Arc::new(AtomicUsize::new(0));
+        let coordinator = coordinator(
+            root,
+            Arc::new(ScriptedFactory::new(
+                Arc::clone(&opens),
+                vec![ServerBacktestHistoryEvent::StreamCompleted],
+                Duration::ZERO,
+            )),
+            Arc::new(CountingAuth::new(Arc::new(AtomicUsize::new(0)))),
+        );
+
+        let error = coordinator
+            .ensure_coverage(BacktestHistoryFillRequest::canonical_daily(
+                "KQ.i@SHFE.au",
+                (current_range.start_ns, current_range.end_ns),
+                MinuteKlineCacheSnapshot::cst_v1(),
+                Some(1),
+                "KQ.i@SHFE.au",
+            ))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("current or future trading-day"));
+        assert_eq!(opens.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn daily_fill_reports_only_newly_written_rows() {
+        const DAY_NS: i64 = 86_400_000_000_000;
+
+        let root = temporary_root("daily-new-row-count");
+        let symbol = "KQ.i@SHFE.au";
+        let range = closed_range();
+        let prior_range = (range.0 - DAY_NS, range.0);
+        let requested_range = (prior_range.0, range.1);
+        let snapshot = MinuteKlineCacheSnapshot::cst_v1();
+        DailyKlineCache::open(&root)
+            .unwrap()
+            .store_final_range(
+                symbol,
+                prior_range.0,
+                prior_range.1,
+                &snapshot,
+                &[kline(1, prior_range.0)],
+            )
+            .unwrap();
+
+        let coordinator = coordinator(
+            root,
+            Arc::new(ScriptedFactory::new(
+                Arc::new(AtomicUsize::new(0)),
+                vec![
+                    ServerBacktestHistoryEvent::CanonicalDaily {
+                        chart_id: "daily".to_string(),
+                        symbol: symbol.to_string(),
+                        rows: vec![kline(2, range.0)],
+                    },
+                    ServerBacktestHistoryEvent::StreamCompleted,
+                ],
+                Duration::ZERO,
+            )),
+            Arc::new(CountingAuth::new(Arc::new(AtomicUsize::new(0)))),
+        );
+
+        let outcome = coordinator
+            .ensure_coverage(BacktestHistoryFillRequest::canonical_daily(
+                symbol,
+                requested_range,
+                snapshot,
+                Some(1),
+                symbol,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.rows_written, 1);
+    }
+
     fn closed_range() -> (i64, i64) {
         let timestamp = (Utc::now() - ChronoDuration::days(10))
             .timestamp_nanos_opt()
@@ -2003,6 +2226,40 @@ mod tests {
         assert_eq!(
             slices.iter().map(|slice| slice.range).collect::<Vec<_>>(),
             vec![first, (second.start_ns, second.end_ns)]
+        );
+    }
+
+    #[test]
+    fn native_daily_fill_requests_exact_missing_range() {
+        let request = BacktestHistoryFillRequest::canonical_daily(
+            "KQ.i@SHFE.au",
+            (1_000, 2_000),
+            MinuteKlineCacheSnapshot::cst_v1(),
+            Some(7),
+            "KQ.i@SHFE.au",
+        );
+        let server = request.server_request();
+        assert_eq!((server.start_ns, server.end_ns), (1_000, 2_000));
+        assert_eq!(server.charts.len(), 1);
+        assert_eq!(
+            server.charts[0].kind,
+            ServerBacktestHistoryKind::CanonicalDaily
+        );
+        let coordinator = coordinator(
+            temporary_root("daily-exact-range"),
+            Arc::new(ScriptedFactory::new(
+                Arc::new(AtomicUsize::new(0)),
+                Vec::new(),
+                Duration::ZERO,
+            )),
+            Arc::new(CountingAuth::new(Arc::new(AtomicUsize::new(0)))),
+        );
+        assert_eq!(
+            coordinator
+                .split_fill_range(&request, (1_000, 2_000))
+                .unwrap()
+                .len(),
+            1
         );
     }
 

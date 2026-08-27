@@ -29,6 +29,7 @@ tokio.workspace = true
 zstd = { version = "0.13", optional = true }
 
 [dev-dependencies]
+sha2 = "0.10"
 tokio.workspace = true
 tqsdk-core = { path = "../tqsdk-core", version = "0.1.0", default-features = false }
 

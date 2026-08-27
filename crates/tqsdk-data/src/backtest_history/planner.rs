@@ -5,6 +5,7 @@ use crate::aggregation::{KlineSessionPosition, KlineSessionTemplate};
 use crate::backtest_tick_cache::{
     backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
 };
+use crate::daily_kline_cache::DAILY_KLINE_DURATION_NS;
 use crate::minute_kline_cache::{MINUTE_KLINE_DURATION_NS, MinuteKlineCacheSnapshot};
 use crate::{
     BacktestHistoryTradingDay, DataError, Result, resolve_backtest_metadata_snapshot,
@@ -23,6 +24,7 @@ use super::request::{
 pub(crate) enum PlannedBaseSource {
     Tick,
     CanonicalMinute,
+    CanonicalDaily,
 }
 
 /// Physical-cache interval consumed for one logical request.
@@ -116,12 +118,14 @@ pub(crate) fn plan_request(
             request.start_ns,
             effective_end_ns,
         )?,
-        PlannedBaseSource::Tick => resolve_backtest_metadata_snapshot(
-            cache_dir,
-            request.symbol.as_str(),
-            request.start_ns,
-            effective_end_ns,
-        )?,
+        PlannedBaseSource::Tick | PlannedBaseSource::CanonicalDaily => {
+            resolve_backtest_metadata_snapshot(
+                cache_dir,
+                request.symbol.as_str(),
+                request.start_ns,
+                effective_end_ns,
+            )?
+        }
     };
     if request.symbol.starts_with("KQ.m@") && metadata.is_none() {
         return Err(DataError::InvalidState(
@@ -234,6 +238,11 @@ pub(crate) fn plan_request(
             )?,
             physical_rank: 0,
         }],
+        PlannedBaseSource::CanonicalDaily => vec![PlannedSourceSlice {
+            cache_symbol: request.symbol.clone(),
+            range: (request.start_ns, effective_end_ns),
+            physical_rank: 0,
+        }],
     };
     let expanded_source_range = source_segments
         .iter()
@@ -269,11 +278,21 @@ pub(crate) fn classify_duration(duration_ns: i64) -> Result<PlannedBaseSource> {
     match duration_ns {
         value if value > 0 && value < MINUTE_KLINE_DURATION_NS => Ok(PlannedBaseSource::Tick),
         MINUTE_KLINE_DURATION_NS => Ok(PlannedBaseSource::CanonicalMinute),
-        value if value > MINUTE_KLINE_DURATION_NS && value % MINUTE_KLINE_DURATION_NS == 0 => {
+        value
+            if value > MINUTE_KLINE_DURATION_NS
+                && value < DAILY_KLINE_DURATION_NS
+                && value % MINUTE_KLINE_DURATION_NS == 0 =>
+        {
             Ok(PlannedBaseSource::CanonicalMinute)
         }
+        value
+            if (DAILY_KLINE_DURATION_NS..=28 * DAILY_KLINE_DURATION_NS).contains(&value)
+                && value % DAILY_KLINE_DURATION_NS == 0 =>
+        {
+            Ok(PlannedBaseSource::CanonicalDaily)
+        }
         _ => Err(DataError::Validation(
-            "Kline duration must be below 60s, exactly 60s, or an integer multiple of 60s"
+            "Kline duration must be below 60s, an integer multiple of 60s below 1d, or an integer number of days from 1d through 28d"
                 .to_string(),
         )),
     }
@@ -496,6 +515,20 @@ mod tests {
             .unwrap();
             assert!(validate_source_policy(&request).is_err(), "{duration}s");
         }
+    }
+
+    #[test]
+    fn daily_periods_use_native_daily_base_and_cap_at_twenty_eight_days() {
+        const DAY_NS: i64 = 86_400_000_000_000;
+        for days in [1, 2, 5, 28] {
+            assert_eq!(
+                classify_duration(days * DAY_NS).unwrap(),
+                PlannedBaseSource::CanonicalDaily,
+                "{days}d"
+            );
+        }
+        let error = classify_duration(29 * DAY_NS).unwrap_err();
+        assert!(error.to_string().contains("1d through 28d"));
     }
 
     #[test]

@@ -48,6 +48,7 @@ mod aggregation;
 mod backtest_history;
 mod backtest_tick_cache;
 mod client;
+mod daily_kline_cache;
 mod download;
 mod error;
 mod export;
@@ -121,6 +122,12 @@ pub use client::{
     KlineDataSeriesRequest, TickDataPage, TickDataPageRequest, TickDataSeries,
     TickDataSeriesRequest, TradingCalendarHolidays, TradingCalendarRow,
     historical_cont_underlying_segments,
+};
+pub use daily_kline_cache::{
+    DAILY_KLINE_CACHE_FORMAT_ID, DAILY_KLINE_CACHE_SCHEMA_VERSION, DAILY_KLINE_DURATION_NS,
+    DailyKlineCache, DailyKlineCacheDiagnosticReport, DailyKlineCacheDiagnosticStatus,
+    DailyKlineCachePurgeReport, DailyKlineCacheSnapshot, DailyKlineCacheStatus,
+    DailyKlineCacheWriteReport, DailyKlineCoverage,
 };
 pub use download::{
     DataDownloadProgress, KlineDataDownload, KlineDataDownloadPage, TickDataDownload,

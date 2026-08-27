@@ -52,18 +52,21 @@
 `BacktestHistoryClient` 是 local-backtest durable history 的异步入口，不是 `DataClient` 专业历史下载
 API 的别名。它统一拥有 metadata sidecar、CacheOnly/RemoteOnMiss planner、official server-backtest
 fill、进程内 single-flight、跨进程 per-series fill lease、shared cache-root gate、bounded cache reader
-与 K 线聚合；`tqsdk-session` 仅提供 Tick/60s
+与 K 线聚合；`tqsdk-session` 仅提供 Tick/60s/native-1d
 server-history chart substrate，`tqsdk-task` 仅消费结果来安排 replay event。
 
 | 请求 | durable source | 是否新建 K 线文件 |
 | --- | --- | --- |
 | Tick | CST trading-day TQBN v3 tick partition | 否 |
 | `15s` / 其他 `<60s` K | Tick partition | 否，按 session 临时聚合 |
-| `60s` K | final canonical-minute v4 `logical symbol × trading month` partition | 是，唯一 durable K |
-| `N × 60s` | canonical-minute partition | 否，按 closed minutes 在固定 CST `18:00` trading-day grid 临时聚合 |
+| `60s` K | final canonical-minute v4 `logical symbol × trading month` partition | 是 |
+| `N × 60s`（`N > 1` 且 `<1d`） | canonical-minute partition | 否，按 closed minutes 在固定 CST `18:00` trading-day grid 临时聚合 |
+| `1d` K | final native-daily v1 `logical symbol` single file | 是，不按时间分区 |
+| `2d` 到 `28d` K | same native-daily file | 否，按 native 1d timestamp phase 临时聚合 |
 
-`61s` / `90s` 被拒绝。Tick 与 60s partition 均没有自动 retention、max-byte eviction 或后台清理；
-派生 K 永不落盘，refresh/purge 是显式 destructive operation。`RemoteOnMiss` 只在 coverage 缺口时
+`61s` / `90s`、非整数日和大于 `28d` 的日周期被拒绝。Tick、60s 与 1d cache 均没有自动 retention、
+max-byte eviction 或后台清理；2d 到 28d 派生 K 永不落盘，1d 的显式 `purge_symbol` 与其他 refresh/purge
+均是 destructive operation。`RemoteOnMiss` 只在 coverage 缺口时
 读取 `TQ_AUTH_*` 并调用官方 futures server-backtest source；`CacheOnly` 永不联网。
 
 `<60s` K 的 metadata trading-session window 仍是聚合边界；相反，`N × 60s` 的盘中 break 只留下
@@ -75,10 +78,11 @@ source-minute 空洞，不会关闭、重开或重置高周期 bucket，因此�
 mapping 是带 snapshot hash 的持久 sidecar；CacheOnly 需要本地 sidecar 覆盖窗口，绝不会查询线上 mapping。
 当前 durable fill 只支持 futures，股票使用 facade `.disabled_cache()` 官方回测路径。
 
-canonical-minute 月文件记录其写入时的 immutable metadata snapshot。active pointer 后续移动时，
-`BacktestHistoryClient` 会从 content-addressed sidecar 解析月文件的旧、新 snapshot，并在实际 cached range
-内比较 schema、market、logical symbol、session、交易日和 physical mapping。滚动 snapshot 只新增后续日期
-且重叠区间语义相同时，旧 coverage 可继续离线读取；新增日期仍是缺口，当前月下一次写入时原子迁移 header。
+canonical-minute 月文件与 native-daily single file 都记录写入时的 immutable metadata snapshot。active pointer
+后续移动时，`BacktestHistoryClient` 会从 content-addressed retained sidecar 解析旧、新 snapshot，并在每个已有
+coverage range 内比较 schema、market、logical symbol、session、交易日和 physical mapping。只有全部证明一致时，
+daily reader 才能复用旧 coverage；写入新缺口会在 per-symbol lock 内原子 reheader 到新 snapshot。任一 sidecar
+缺失/损坏或历史映射不一致都会 fail closed，绝不降级为 cache miss 或重写文件。
 缺失 sidecar、session/交易日/映射变化、损坏文件或语义冲突的混合分区一律 fail closed，不会自动清理、
 重写或合并。
 
@@ -157,19 +161,27 @@ chart cleanup 成功后，同一 session 可顺序服务后续 trading-day/minut
   只用于恢复当前交易日的增量填充，不进入普通 coverage/cache-hit；其范围、高水位和 as-of
   必须属于同一 TQBN 日分区。盘中追加 checkpoint 不触发全历史 compaction，final coverage
   覆盖后才在 compaction 中淘汰。它不持久化 K 线，也不引入第二套 tick cache 文件格式
-- cache-backed facade backtest 的唯一 durable K 线是 `MinuteKlineCache` 的 final 60s series。
-  它只接受官方 server-side backtest terminal 确认完成的 range（合法的零行 range 也可以 final），
-  不回退到 `DataClient` 历史下载路径。当前 format id 是
+- cache-backed facade backtest 的 durable K 线包括 `MinuteKlineCache` 的 final 60s series 和
+  `DailyKlineCache` 的 native final 1d series。两者只接受官方 server-side backtest terminal 确认完成的
+  range（合法的零行 range 也可以 final），不回退到 `DataClient` 历史下载路径。minute format id 是
   `tqsdk.minute-kline.monthly.v4`，文件按 `logical symbol × trading month` 分区，路径仍为
-  `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk`。`BacktestHistoryClient` 的 `<60s` K
-  由 tick rows 按 session 聚合，`N × 60s` K 由 closed canonical minutes 按固定 CST `18:00`
-  trading-day grid 临时聚合；盘中 break 不重置 bucket。task 仅把结果安排为 replay event。facade
-  不读取/写入 native higher-period `HistorySeriesCache` K 线，`61s` / `90s` 会拒绝
+  `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk`。daily format id 是
+  `tqsdk.daily-kline.single-file.v1`，路径为 `daily-kline-v1/<escaped-symbol>.tqdk`；它按 logical
+  symbol 单文件原子替换，不按时间分区。`BacktestHistoryClient` 的 `<60s` K 由 tick rows 按 session
+  聚合，`N × 60s` K 由 closed canonical minutes 按固定 CST `18:00` trading-day grid 临时聚合，`2d` 至
+  `28d` K 由 final native 1d rows 临时聚合。task 仅把结果安排为 replay event。1d row 目前只含 Kline
+  OHLC、volume、open/close OI；结算价和涨跌停价未支持。facade 不读取/写入 native higher-period
+  `HistorySeriesCache` K 线，`61s` / `90s`、非整数日和大于 `28d` 的日周期会拒绝
 - `MinuteKlineCache` 以 immutable metadata snapshot fail closed；hash 不同只在双方 sidecar 均存在且实际
   cached range 的 schema/market/symbol/session/交易日/physical mapping 完全相同时兼容。只有完成的远端
   60s range 才可记录 final coverage；当前/未来 trading day 不可 claim final。v3 文件不会自动迁移、覆盖或
   被当作 cache hit；`diagnose()` 会将其列为 `LegacyUnsupported`。它没有 retention、max-byte
   eviction 或自动清理，`Refresh`、`purge_range` / `purge_symbol` 都是显式 destructive maintenance
+- `DailyKlineCache` 同样以 immutable metadata snapshot fail closed；snapshot hash/identity 不同只有 retained
+  sidecar 对每个已有 coverage 的 schema/market/symbol/session/trading-day/physical mapping 全部证明一致时才能复用，
+  next-gap write 在 per-symbol lock 内原子 reheader。缺 sidecar、损坏或不一致仍是错误而非 cache miss。只有已
+  terminal 的原生 1d range 才能写 final coverage；当前或未来 CST trading day 直接拒绝。`inspect()` / `diagnose()`
+  只读，checksum 或 schema version 错误同样 fail closed；只能由显式 `purge_symbol()` 删除整个 logical-symbol 文件
 - `BacktestTickCache::inspect(...)` 输出 backend format、缓存目录、series 文件路径、完整性、
   cached/missing ranges；`tick_series_path(...)` 返回逻辑 series 路径，`purge_symbol_ticks(...)` 和
   `compact_symbol_ticks(...)` 是按 `(symbol, tick)` 的全部日分区文件粒度的显式运维入口；facade
@@ -256,6 +268,8 @@ Python-compatible mmap 缓存；旧 binary/mmap history cache 已从 public surf
 - `BacktestHistoryRequest` / `BacktestHistoryPolicy`
 - `BacktestHistoryEvent` / `BacktestHistoryRun` / `BacktestHistoryBatchReport`
 - `BacktestHistoryMetadataCache` / `BacktestHistoryMaintenanceClient`
+- `DailyKlineCache` / `DailyKlineCoverage` / `DailyKlineCacheStatus` /
+  `DailyKlineCacheDiagnosticReport` / `DailyKlineCachePurgeReport`
 - `BacktestTickCache`
 - `BacktestTickCacheFastInventory`
 - `BacktestTickCacheFastInventorySymbol`

@@ -9,8 +9,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tqsdk_core::{Kline, Tick};
 
-use crate::aggregation::{MinuteKlineAggregator, TickKlineAggregator};
+use crate::aggregation::{DailyKlineAggregator, MinuteKlineAggregator, TickKlineAggregator};
 use crate::backtest_tick_cache::BacktestTickCache;
+use crate::daily_kline_cache::DailyKlineCache;
 use crate::minute_kline_cache::MinuteKlineCache;
 use crate::{
     BacktestHistoryMetadataCache, DataError, Result, resolve_minute_cache_metadata_snapshot,
@@ -29,8 +30,8 @@ use super::request::{
     BacktestHistoryClientConfig, BacktestHistoryPolicy, ValidatedBacktestHistoryRequest,
 };
 use super::store_worker::{
-    MinuteScanSpec, StoreRows, StoreScanMessage, StoreScanSpec, SymbolBufferBudget, TickScanSpec,
-    spawn_scan,
+    DailyScanSpec, MinuteScanSpec, StoreRows, StoreScanMessage, StoreScanSpec, SymbolBufferBudget,
+    TickScanSpec, spawn_scan,
 };
 use super::telemetry::TelemetryHub;
 
@@ -314,6 +315,17 @@ fn spawn_base_scan(spec: BaseScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 buffer_budget: spec.buffer_budget,
             }))
         }
+        PlannedBaseSource::CanonicalDaily => {
+            spawn_scan(StoreScanSpec::CanonicalDaily(DailyScanSpec {
+                cache_dir: spec.cache_dir,
+                symbol: spec.cache_symbol,
+                range: spec.range,
+                snapshot: spec.minute_snapshot,
+                cancellation: spec.cancellation,
+                permits: spec.blocking_permits,
+                buffer_budget: spec.buffer_budget,
+            }))
+        }
     }
 }
 
@@ -323,7 +335,7 @@ fn chunk_intersects_range(chunk: &super::store_worker::StoreChunk, range: (i64, 
             rows.first().map(|row| row.datetime),
             rows.last().map(|row| row.datetime),
         ),
-        StoreRows::CanonicalMinutes(rows) => (
+        StoreRows::CanonicalMinutes(rows) | StoreRows::CanonicalDaily(rows) => (
             rows.first().map(|row| row.datetime),
             rows.last().map(|row| row.datetime),
         ),
@@ -566,6 +578,13 @@ async fn execute_request(
                 Some(plan.request_id),
                 plan.symbol.clone(),
             ),
+            PlannedBaseSource::CanonicalDaily => BacktestHistoryFillRequest::canonical_daily(
+                slice.cache_symbol.clone(),
+                slice.range,
+                plan.minute_snapshot.clone(),
+                Some(plan.request_id),
+                plan.symbol.clone(),
+            ),
         };
         let outcome = fill_coordinator
             .ensure_coverage_until_cancelled(
@@ -598,6 +617,7 @@ async fn execute_request(
     let emitted_rows = match plan.base_source {
         PlannedBaseSource::Tick => execute_tick_plan(context, &plan).await,
         PlannedBaseSource::CanonicalMinute => execute_minute_plan(context, &plan).await,
+        PlannedBaseSource::CanonicalDaily => execute_daily_plan(context, &plan).await,
     }?;
     Ok((
         plan.report_template(
@@ -741,6 +761,18 @@ fn inspect_source(
         }
         PlannedBaseSource::CanonicalMinute => {
             let coverage = MinuteKlineCache::open_read_only(config.cache_dir.as_path()).coverage(
+                slice.cache_symbol.as_str(),
+                slice.range.0,
+                slice.range.1,
+                &plan.minute_snapshot,
+            )?;
+            Ok(SourceInspection {
+                cached_ranges: coverage.cached_ranges,
+                missing_ranges: coverage.missing_ranges,
+            })
+        }
+        PlannedBaseSource::CanonicalDaily => {
+            let coverage = DailyKlineCache::open_read_only(config.cache_dir.as_path()).coverage(
                 slice.cache_symbol.as_str(),
                 slice.range.0,
                 slice.range.1,
@@ -990,6 +1022,122 @@ async fn execute_minute_plan(
         })
 }
 
+async fn execute_daily_plan(
+    context: &RequestExecutionContext,
+    plan: &PlannedBacktestHistoryRequest,
+) -> std::result::Result<usize, ExecutionFailure> {
+    let duration_ns = plan.duration_ns.ok_or_else(|| ExecutionFailure {
+        error: DataError::InvalidState("daily backtest plan is missing Kline duration"),
+        emitted_rows: 0,
+    })?;
+    let mut emitted_rows = 0usize;
+    let result = async {
+        let mut output = Vec::new();
+        if duration_ns == crate::DAILY_KLINE_DURATION_NS {
+            for slice in &plan.source_slices {
+                let mut source = context.scan_registry.source_stream(
+                    context.config.as_ref(),
+                    plan,
+                    slice,
+                    Arc::clone(&context.cancellation),
+                    Arc::clone(&context.blocking_permits),
+                    context.chunk_bytes,
+                );
+                while let Some(message) = source.recv().await {
+                    if context.cancellation.load(Ordering::Acquire) {
+                        return Err(DataError::InvalidState(
+                            "backtest history request was cancelled",
+                        ));
+                    }
+                    for row in daily_rows_for_slice(message, slice)? {
+                        if row.datetime >= plan.requested_range.0
+                            && row.datetime < plan.effective_end_ns
+                        {
+                            output.push(row);
+                        }
+                    }
+                    if estimated_kline_bytes(output.len()) >= context.chunk_bytes {
+                        emitted_rows = emitted_rows.saturating_add(
+                            send_kline_chunk(
+                                &context.event_sender,
+                                plan,
+                                duration_ns,
+                                std::mem::take(&mut output),
+                                &context.telemetry,
+                                emitted_rows,
+                            )
+                            .await?,
+                        );
+                    }
+                }
+            }
+        } else {
+            let mut aggregator = DailyKlineAggregator::new(duration_ns)?;
+            for slice in &plan.source_slices {
+                let mut source = context.scan_registry.source_stream(
+                    context.config.as_ref(),
+                    plan,
+                    slice,
+                    Arc::clone(&context.cancellation),
+                    Arc::clone(&context.blocking_permits),
+                    context.chunk_bytes,
+                );
+                while let Some(message) = source.recv().await {
+                    if context.cancellation.load(Ordering::Acquire) {
+                        return Err(DataError::InvalidState(
+                            "backtest history request was cancelled",
+                        ));
+                    }
+                    for row in daily_rows_for_slice(message, slice)? {
+                        if let Some(closed) = aggregator.update(&row)?
+                            && should_emit_daily_kline(&closed, plan, duration_ns)?
+                        {
+                            output.push(closed);
+                        }
+                    }
+                    if estimated_kline_bytes(output.len()) >= context.chunk_bytes {
+                        emitted_rows = emitted_rows.saturating_add(
+                            send_kline_chunk(
+                                &context.event_sender,
+                                plan,
+                                duration_ns,
+                                std::mem::take(&mut output),
+                                &context.telemetry,
+                                emitted_rows,
+                            )
+                            .await?,
+                        );
+                    }
+                }
+            }
+            if let Some(closed) = aggregator.finish_closed_through(plan.effective_end_ns)?
+                && should_emit_daily_kline(&closed, plan, duration_ns)?
+            {
+                output.push(closed);
+            }
+        }
+        emitted_rows = emitted_rows.saturating_add(
+            send_kline_chunk(
+                &context.event_sender,
+                plan,
+                duration_ns,
+                output,
+                &context.telemetry,
+                emitted_rows,
+            )
+            .await?,
+        );
+        Ok(())
+    }
+    .await;
+    result
+        .map(|()| emitted_rows)
+        .map_err(|error| ExecutionFailure {
+            error,
+            emitted_rows,
+        })
+}
+
 fn tick_rows_for_slice(
     message: StoreScanMessage,
     slice: &super::planner::PlannedSourceSlice,
@@ -1006,9 +1154,9 @@ fn tick_rows_for_slice(
                 rows.sort_by_key(|row| (row.datetime, slice.physical_rank, row.id));
                 Ok(rows)
             }
-            StoreRows::CanonicalMinutes(_) => Err(DataError::InvalidState(
-                "Tick cache reader returned a canonical-minute chunk",
-            )),
+            StoreRows::CanonicalMinutes(_) | StoreRows::CanonicalDaily(_) => Err(
+                DataError::InvalidState("Tick cache reader returned a canonical-minute chunk"),
+            ),
         },
     }
 }
@@ -1029,8 +1177,31 @@ fn minute_rows_for_slice(
                 rows.sort_by_key(|row| (row.datetime, row.id));
                 Ok(rows)
             }
-            StoreRows::Ticks(_) => Err(DataError::InvalidState(
+            StoreRows::Ticks(_) | StoreRows::CanonicalDaily(_) => Err(DataError::InvalidState(
                 "canonical-minute cache reader returned a Tick chunk",
+            )),
+        },
+    }
+}
+
+fn daily_rows_for_slice(
+    message: StoreScanMessage,
+    slice: &super::planner::PlannedSourceSlice,
+) -> Result<Vec<Kline>> {
+    match message {
+        StoreScanMessage::Failed(error) => Err(DataError::InvalidResponse(error)),
+        StoreScanMessage::Chunk(chunk) => match &chunk.rows {
+            StoreRows::CanonicalDaily(rows) => {
+                let mut rows = rows
+                    .iter()
+                    .filter(|row| row.datetime >= slice.range.0 && row.datetime < slice.range.1)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                rows.sort_by_key(|row| (row.datetime, row.id));
+                Ok(rows)
+            }
+            StoreRows::Ticks(_) | StoreRows::CanonicalMinutes(_) => Err(DataError::InvalidState(
+                "native daily cache reader returned wrong source rows",
             )),
         },
     }
@@ -1093,6 +1264,20 @@ async fn send_kline_chunk(
         message: "streamed locally aggregated Kline rows".to_string(),
     });
     Ok(count)
+}
+
+fn should_emit_daily_kline(
+    row: &Kline,
+    plan: &PlannedBacktestHistoryRequest,
+    duration_ns: i64,
+) -> Result<bool> {
+    let bar_end_ns = row
+        .datetime
+        .checked_add(duration_ns)
+        .ok_or_else(|| DataError::Validation("daily kline bar end overflow".to_string()))?;
+    Ok(row.datetime >= plan.requested_range.0
+        && row.datetime < plan.requested_range.1
+        && bar_end_ns <= plan.effective_end_ns)
 }
 
 fn should_emit_kline(
