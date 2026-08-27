@@ -5,6 +5,30 @@ on:
   pull_request:
 
 jobs:
+  daily-kline-golden:
+    name: Daily Kline official conformance
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: [self-hosted, linux, tqsdk-daily-golden]
+    env:
+      TQSDK_DAILY_KLINE_GOLDEN_PACKET: ${{ vars.TQSDK_DAILY_KLINE_GOLDEN_PACKET }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Verify immutable packet
+        run: |
+          test -n "$TQSDK_DAILY_KLINE_GOLDEN_PACKET"
+          test -d "$TQSDK_DAILY_KLINE_GOLDEN_PACKET"
+          test -f "$TQSDK_DAILY_KLINE_GOLDEN_PACKET/manifest.json"
+          test -f "$TQSDK_DAILY_KLINE_GOLDEN_PACKET/manifest.sha256"
+          cd "$TQSDK_DAILY_KLINE_GOLDEN_PACKET"
+          actual_paths="$(sed -E 's/^[[:xdigit:]]{64} [ *](.*)$/\1/' manifest.sha256 | LC_ALL=C sort)"
+          expected_paths="$(find . -type f ! -name manifest.sha256 -printf '%P\n' | LC_ALL=C sort)"
+          test "$actual_paths" = "$expected_paths"
+          sha256sum --strict --check manifest.sha256
+      - name: Compare native 1d and local 2d to 28d Klines
+        run: cargo test -p tqsdk-data --test daily_kline_golden -- --ignored
   rust:
     name: Rust SDK crates
     runs-on: ubuntu-latest
