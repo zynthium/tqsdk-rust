@@ -114,7 +114,7 @@ V1 是：
     minute bounded window 保持不变，但 clean terminal 后复用 lane/session，避免每段重复鉴权和建连。
     pool 饱和时 overflow 不在 series lease 内等待且不会回池；取消、协议/传输错误或 chart cleanup
     失败也会丢弃 lane。
-    minute cache 使用 v4 文件身份，只有远端 terminal 成功后才提交 final coverage；`KQ.m@...`
+minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 final coverage；`KQ.m@...`
     使用 data 持久化的 calendar/session/physical-segment metadata sidecar 解析为 dated
     concrete-contract tick ranges，因而与具体合约共用物理 cache、coverage 和远端补缺请求。
     `RemoteOnMiss` 只在 sidecar 缺失或不覆盖窗口时刷新；CacheOnly 必须已有 sidecar 且完全离线。
@@ -243,9 +243,10 @@ V1 是：
   - 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store
   - shared futures universe selector parser / resolver，relay 和 facade backtest 复用同一套语义
   - history page/series/download/export foundation
-  - `MinuteKlineCache` 是与 TQBN 并列的 canonical final-60s K 线 store：v4 格式按 logical
-  symbol × trading month 分区，目录名保持 `minute-kline-v3` 以诊断 legacy v3 文件；不存在
-  automatic retention/max-byte eviction 或后台清理
+- `MinuteKlineCache` 是与 TQBN 并列的 canonical final-60s K 线 store：v5 格式按 logical
+  symbol × trading month 分区，row payload 仅在 zstd 更小时无损压缩；目录名保持
+  `minute-kline-v3`。v4 只能经显式备份迁移，v3 保持 `LegacyUnsupported`；不存在 automatic
+  retention/max-byte eviction 或后台清理
   - `DailyKlineCache` 是 native final-1d K 线 store：v1 格式为 `daily-kline-v1/<escaped-symbol>.tqdk`，
   一个 logical symbol 一个原子替换文件、无时间分区。仅 official server-backtest terminal 1d rows 可写 final
   coverage；snapshot 变化只有 retained metadata sidecar 对既有 coverage 的 calendar/session/trading-day/

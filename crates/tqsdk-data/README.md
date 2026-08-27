@@ -59,7 +59,7 @@ server-history chart substrate，`tqsdk-task` 仅消费结果来安排 replay ev
 | --- | --- | --- |
 | Tick | CST trading-day TQBN v3 tick partition | 否 |
 | `15s` / 其他 `<60s` K | Tick partition | 否，按 session 临时聚合 |
-| `60s` K | final canonical-minute v4 `logical symbol × trading month` partition | 是 |
+| `60s` K | final canonical-minute v5 `logical symbol × trading month` partition | 是 |
 | `N × 60s`（`N > 1` 且 `<1d`） | canonical-minute partition | 否，按 closed minutes 在固定 CST `18:00` trading-day grid 临时聚合 |
 | `1d` K | final native-daily v1 `logical symbol` single file | 是，不按时间分区 |
 | `2d` 到 `28d` K | same native-daily file | 否，按 native 1d timestamp phase 临时聚合 |
@@ -164,8 +164,9 @@ chart cleanup 成功后，同一 session 可顺序服务后续 trading-day/minut
 - cache-backed facade backtest 的 durable K 线包括 `MinuteKlineCache` 的 final 60s series 和
   `DailyKlineCache` 的 native final 1d series。两者只接受官方 server-side backtest terminal 确认完成的
   range（合法的零行 range 也可以 final），不回退到 `DataClient` 历史下载路径。minute format id 是
-  `tqsdk.minute-kline.monthly.v4`，文件按 `logical symbol × trading month` 分区，路径仍为
-  `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk`。daily format id 是
+  `tqsdk.minute-kline.monthly.v5`，文件按 `logical symbol × trading month` 分区，路径仍为
+  `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk`。v5 的 row payload 仅在 zstd 更小时
+  无损压缩，保留所有 Kline row；旧 v4 只能显式迁移，普通 reader/fill 会 fail closed。daily format id 是
   `tqsdk.daily-kline.single-file.v1`，路径为 `daily-kline-v1/<escaped-symbol>.tqdk`；它按 logical
   symbol 单文件原子替换，不按时间分区。`BacktestHistoryClient` 的 `<60s` K 由 tick rows 按 session
   聚合，`N × 60s` K 由 closed canonical minutes 按固定 CST `18:00` trading-day grid 临时聚合，`2d` 至

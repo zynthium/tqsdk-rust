@@ -94,7 +94,7 @@ planner、official server-backtest cache fill、single-flight 协调、bounded c
 | --- | --- | --- |
 | Tick | CST trading-day TQBN v3 tick partition | 原样返回；不复制 |
 | `15s` 与其他 `<60s` K | 同一 Tick partition | 按 metadata session 聚合；仅内存中存在 |
-| `60s` K | `logical symbol × trading month` canonical-minute v4 partition | durable K 线 |
+| `60s` K | `logical symbol × trading month` canonical-minute v5 partition | durable K 线 |
 | `N × 60s`（`N > 1` 且 `<1d`） | 同一 canonical-minute partition | 只从 closed 60s rows 按固定 CST `18:00` trading-day grid 聚合；仅内存中存在 |
 | `1d` K | `daily-kline-v1/<escaped-logical-symbol>.tqdk` native-daily v1 file | durable K 线；单 logical symbol 文件、不按时间分区 |
 | `2d` 到 `28d` K | 同一 native-daily file | 只从 complete final 1d rows 按 native timestamp phase 聚合；仅内存中存在 |
@@ -402,7 +402,7 @@ tqsdk-wait        tqsdk-data
   原子 reheader；缺 sidecar、损坏或不一致直接 fail closed。row 只保存 Kline OHLC、volume、open/close OI，
   结算价与涨跌停价未支持
 - `MinuteKlineCache::fast_inventory()` 不解码月文件、也不创建缺失 root；`diagnose()` 以只读方式
-  深检每个月文件，区分 readable v4、legacy v3、unsupported version 和 corruption。这些是 data
+  深检每个月文件，区分 readable v5、legacy v4/v3、unsupported version 和 corruption。这些是 data
   layer 的 typed operator API，不会迁移、修复或删除缓存
 - `HistorySeriesCache` 公开 typed range writer / cache-only reader；generic segment writer、
   coverage commit 和 row reader 只作为 crate 内部 seam，避免 task/facade 直接绑定底层 store shape
@@ -455,16 +455,17 @@ tqsdk-wait        tqsdk-data
   `series/<YYYYMMDD>/kline/<duration_ns>/<escaped-symbol>.tqbn`。旧 `.tqseries`、旧单文件
   `.tqbn` layout 和旧 Python `DataSeries` binary/mmap 文件格式不再支持迁移、兼容读取或交替使用。同目录同时写仍是
   non-goal，因为 Python 官方实现自身也没有承诺同一合约周期多进程/线程/协程并发写
-- 回测 canonical-minute v4 是并列、独立的月分区格式：format id 为
-  `tqsdk.minute-kline.monthly.v4`，路径仍是
+- 回测 canonical-minute v5 是并列、独立的月分区格式：format id 为
+  `tqsdk.minute-kline.monthly.v5`，路径仍是
   `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk`。它仅接受 server-side backtest
   terminal 成功的 final 60s coverage，以 calendar/session snapshot hash fail closed；当前交易日
-  不能 claim final coverage。旧 v3 文件不会自动迁移或当作命中，`diagnose()` 会报告
-  `LegacyUnsupported`。它没有自动 retention 或 max-byte eviction；`Refresh`、`purge_range` /
-  `purge_symbol` 都是显式 destructive maintenance
+  不能 claim final coverage。row payload 仅在 zstd 更小时无损压缩，保留所有 Kline row。旧 v4
+  只能以 cache-root 外 hard-link backup 的显式 CLI migrate 升级，v3 不会自动迁移或当作命中，
+  `diagnose()` 会报告 `LegacyUnsupported`。它没有自动 retention 或 max-byte eviction；`Refresh`、
+  `purge_range` / `purge_symbol` 都是显式 destructive maintenance
 - 默认 feature `tqbn-zstd` 对 hot append 的 TQBN internal records block 使用 zstd level 1，
-  对 append-log compaction 重写的 records block 使用 zstd level 3；`--no-default-features`
-  可关闭该支持；不引入用户自选 store、manifest 或第二套 cache API
+  对 append-log compaction 重写的 records block 使用 zstd level 3；minute v5 row payload 也仅在
+  zstd 更小时使用它。`--no-default-features` 可关闭该支持；不引入用户自选 store、manifest 或第二套 cache API
 - market-data records block 使用 8 MiB 未压缩目标 payload 和 crate-internal `TQRI` 时间索引；
   range reader 只解压相交 block，旧文件或缺失/不匹配索引逐 block 回退，不扩大 public store API
 - 跨进程 cache 管理若后续需要，应作为用户 tooling 或独立 service 重新设计，

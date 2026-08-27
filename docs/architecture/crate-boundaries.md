@@ -331,12 +331,12 @@ sink、WAL、journal 或 cache writer。
   会执行 append-log compaction、合并重复 rows 并保留 last-write-wins 语义；history read/write
   不会自动调用它。
   旧 `.tqseries` 和旧单文件 `.tqbn` layout 不再作为默认 backend，且没有兼容读取或迁移 store
-- `MinuteKlineCache`：独立 v4 `logical symbol × trading month` `.tqmk` cache，只持久化由
+- `MinuteKlineCache`：独立 v5 `logical symbol × trading month` `.tqmk` cache，只持久化由
   official server-side backtest terminal 确认的 final 60s K；`<60s` query 从 Tick 按 session 聚合，
   `N × 60s` query 从 canonical minute 按固定 CST `18:00` trading-day grid 聚合，盘中 break 不重置
   bucket，二者都不落盘。task 只把这些 source/result 转成 replay events。文件 format id 是
-  `tqsdk.minute-kline.monthly.v4`，目录名继续为
-  `minute-kline-v3`，以便将旧 v3 文件诊断为 `LegacyUnsupported` 而不是静默迁移。它不做
+  `tqsdk.minute-kline.monthly.v5`，row payload 仅在 zstd 更小时无损压缩；目录名继续为
+  `minute-kline-v3`。旧 v4 只允许显式备份迁移，v3 诊断为 `LegacyUnsupported` 而不是静默迁移。它不做
 - `DailyKlineCache`：独立 v1 `logical symbol` `.tqdk` cache，只持久化由 official server-side backtest
   terminal 确认的 native 1d K；一个 logical symbol 一个 `daily-kline-v1/<escaped-symbol>.tqdk` 原子替换
   文件，不按时间分区。`2d` 至 `28d` query 仅从 final 1d rows 按其 native timestamp phase 临时聚合；没有

@@ -124,7 +124,7 @@
   - 默认 facade 的用户入口收敛为 `.backtest(start_ns, end_ns)` 和 `.replay_backtest(...)`：
     `.backtest(...)` 默认使用 `tqsdk-data` 共享 history cache root；配置 `cache_dir` /
     `market_cache` 可覆盖 root，显式 `.disabled_cache()` 使用官方服务端回测行情且不落盘；
-    持久 tick cache、canonical-minute v4 cache、远端补缺、`.warmup()` 由 `BacktestBuilder` 承接；
+    持久 tick cache、canonical-minute v5 cache、远端补缺、`.warmup()` 由 `BacktestBuilder` 承接；
     `.inspect_cache()` / `.purge_cache_symbols()` 保持 tick-only 兼容，
     `.inspect_history_cache()` / `.purge_history_cache()` 返回两类 typed report；任何 retention、
     后台 timer 或 cache daemon 都不进入 task/runtime。

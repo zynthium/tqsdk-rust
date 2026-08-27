@@ -80,7 +80,7 @@ forced refresh 只推进 pointer，而不重写历史 snapshot。reader 必须�
 覆盖，但新的 closed-day resolver 不读取它。report 只输出新 snapshot 的 source URL、fetch 时间、hash、
 支持年份和 holiday count，不输出完整 raw list。
 
-## Backtest Canonical-minute v4
+## Backtest Canonical-minute v5
 
 本地 facade 回测不再把任意周期的 K 线写入 TQBN history-series cache。它使用独立的
 `MinuteKlineCache` 与 `DailyKlineCache`。持久 K 线输入只接受官方 server-side backtest 确认 terminal
@@ -89,7 +89,7 @@ forced refresh 只推进 pointer，而不重写历史 snapshot。reader 必须�
 | 请求 | 历史来源 | 持久化 / 回放 |
 | --- | --- | --- |
 | tick、quote、`<60s` K | tick cache | 按 tick 本地合成 |
-| `60s` K | server-side backtest Kline stream | v4 monthly minute cache |
+| `60s` K | server-side backtest Kline stream | v5 monthly minute cache |
 | `N × 60s` K (`N > 1` 且 `<1d`) | 已关闭的 canonical 60s K | `tqsdk-data` 按固定 CST `18:00` trading-day grid 本地聚合；盘中 break 不重置 bucket |
 | `1d` K | server-side backtest native daily chart | v1 logical-symbol single file |
 | `2d` 到 `28d` K | 已关闭的 native 1d K | `tqsdk-data` 按 native timestamp phase 本地聚合 |
@@ -98,12 +98,12 @@ forced refresh 只推进 pointer，而不重写历史 snapshot。reader 必须�
 validation error。K-only `>=60s` 不会隐式请求 tick history；若仅需要 quote fallback，则隐式使用
 canonical 60s K，也不会回退到 tick。
 
-v4 文件身份如下：
+v5 文件身份如下：
 
 | 项 | 值 |
 | --- | --- |
-| format id | `tqsdk.minute-kline.monthly.v4` |
-| schema version | `4` |
+| format id | `tqsdk.minute-kline.monthly.v5` |
+| schema version | `5` |
 | file extension | `.tqmk` |
 | root layout | `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk` |
 | time basis | CST trading day，`18:00` 后归入下一交易日 |
@@ -114,6 +114,10 @@ range 内 schema、market、logical symbol、session、交易日和 physical map
 coverage。缺失 sidecar、语义不匹配、损坏或不完整覆盖一律 fail closed，不能降级为近似命中。完成的远端
 range（包括合法的零行 range）才可标记 final coverage；当前或未来交易日不得标记为 final。
 文件更新按单月原子重写，reader 以流式方式读取，不必把整月 materialize 到内存。
+每个文件的 metadata 与 coverage 保持原始二进制布局；row payload 仅在 zstd 压缩后更小时才以
+zstd frame 保存。压缩是无损的：它保留全部 Kline row 的 id、datetime、OHLC、volume、OI 和 epoch，
+不得因零成交或重复字段删除、合成或按固定频率填充 row。reader 流式解压并按未压缩 payload checksum
+验证所有 row。
 
 月文件绑定的是写入时的 immutable metadata snapshot，而不是将来某次 refresh 写入的 active pointer。
 因此 active pointer 后续移动不会单独使已完成分区失效。滚动 refresh 仅延长尾部日期时，读取方逐个已缓存
@@ -126,9 +130,12 @@ CST trading month，并保留更宽的 active pointer；若 retained snapshot �
 `tqsdk-cache --kind minute fill --repair-stale` 时，才会在 active snapshot 覆盖窗口时删除其冲突的整月分区，
 再由该次 remote fill 补齐；这不改变普通 reader 的 fail-closed 合同。
 
-目录名继续保留 `minute-kline-v3`，但它承载的是 v4 文件身份。这是刻意的诊断兼容策略：
-旧 v3 文件不会被静默忽略、迁移或覆盖；读取/coverage 会 fail closed，`diagnose()` 将其报告为
-`LegacyUnsupported`。如需移除旧文件，必须由操作者显式 purge。
+目录名继续保留 `minute-kline-v3`，但它承载的是 v5 文件身份。这是刻意的诊断兼容策略：
+旧 v4 文件不会被普通 reader/fill 静默读取、迁移或覆盖；读取/coverage 会 fail closed，`diagnose()`
+将其报告为 `LegacyUnsupported`。operator 如需升级，必须显式执行
+`tqsdk-cache --kind minute migrate --apply --backup-dir DIR`：该命令先深度校验全部 v4 input，
+将原 `.tqmk` 及其 `.tqmk.lock` 备份到 cache root 外的同一文件系统，再逐月原子重写为 v5 并 doctor
+复检。v3 及其他版本仍不可迁移；如需移除必须显式 purge。
 
 `fast_inventory()` 是只读的 filesystem inventory：它不解码月文件，也不创建缺失 root。
 `diagnose()` 是只读的深度检查，会逐文件报告 `Readable`、`LegacyUnsupported`、

@@ -219,6 +219,9 @@ tqsdk
 - `LiveTickCacheWriter` 只作为纯数据层 writer，接收已解码 tick rows 并写入共享回测缓存；
   它可以做有界行缓冲和显式 `flush()`，但 live 订阅、`wait_update()` 驱动、timer task 和后台进程
   不属于 `tqsdk-data`
+- canonical-minute 使用独立 v5 `.tqmk` 月文件；row payload 只在 zstd 更小时无损压缩，绝不删除
+  零成交或重复分钟。v4 只能由带 cache-root 外备份的显式 `tqsdk-cache --kind minute migrate` 升级，
+  v3 保持 fail-closed `LegacyUnsupported`
 - history page/series/download/export
 - Greeks、历史主连等研究派生能力
 - `BacktestHistoryClient`：持久 metadata sidecar、请求 planner、official server-backtest

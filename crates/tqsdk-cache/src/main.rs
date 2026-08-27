@@ -24,8 +24,8 @@ use tqsdk_data::{
     BacktestHistoryRequest, BacktestTickCache, BacktestTickCacheLockRepairMode,
     BacktestTickCacheLockRepairStatus, DailyKlineCache, DataClient, DataError,
     HISTORY_SERIES_CACHE_FORMAT_ID, HISTORY_SERIES_CACHE_SCHEMA_VERSION,
-    HistorySeriesCacheFileStatus, MinuteKlineCache, MinuteKlineCacheSnapshot,
-    backtest_tick_trading_day_for_timestamp_ns,
+    HistorySeriesCacheFileStatus, MINUTE_KLINE_CACHE_FORMAT_ID, MINUTE_KLINE_CACHE_SCHEMA_VERSION,
+    MinuteKlineCache, MinuteKlineCacheSnapshot, backtest_tick_trading_day_for_timestamp_ns,
 };
 use tqsdk_session::SessionClientBuilder;
 
@@ -130,7 +130,7 @@ enum Command {
     Doctor,
     /// Inspect or repair missing Tick TQBN companion locks.
     RepairLocks(RepairLocksArgs),
-    /// Re-encode legacy Tick TQBN partitions into current sparse-record schema.
+    /// Re-encode legacy Tick or canonical-minute cache partitions into their current schema.
     Migrate(MigrateArgs),
     /// Explicitly refresh one logical symbol's metadata sidecar from the official source.
     MetadataRefresh(MetadataRefreshArgs),
@@ -184,10 +184,10 @@ struct RepairLocksArgs {
 
 #[derive(Debug, Args)]
 struct MigrateArgs {
-    /// Rewrite legacy Tick TQBN partitions. Without this flag, only report the migration plan.
+    /// Rewrite legacy Tick TQBN or canonical-minute partitions. Without this flag, only report the migration plan.
     #[arg(long)]
     apply: bool,
-    /// New empty rollback directory. Required with --apply; each original .tqbn is hard-linked here before rewrite.
+    /// New empty rollback directory. Required with --apply; each original cache file is hard-linked here before rewrite.
     #[arg(long, value_name = "DIR", required_if_eq("apply", "true"))]
     backup_dir: Option<PathBuf>,
 }
@@ -1254,9 +1254,11 @@ fn validate_command_kind(command: &Command, kind: CacheKind) -> Result<(), CliEr
             "repair-locks currently supports only --kind tick".to_string(),
         ));
     }
-    if matches!(command, Command::Migrate(_)) && !matches!(kind, CacheKind::Tick) {
+    if matches!(command, Command::Migrate(_))
+        && !matches!(kind, CacheKind::Tick | CacheKind::Minute)
+    {
         return Err(CliError::Usage(
-            "migrate currently supports only --kind tick".to_string(),
+            "migrate supports only --kind tick or --kind minute".to_string(),
         ));
     }
     if matches!(command, Command::MetadataRefresh(_)) && !matches!(kind, CacheKind::Tick) {
@@ -2955,6 +2957,21 @@ fn repair_locks(
 }
 
 #[derive(Debug)]
+struct MinuteMigrationFile {
+    path: PathBuf,
+    size_bytes: u64,
+}
+
+#[derive(Debug)]
+struct MinuteMigrationPlan {
+    problem_files: usize,
+    legacy_files: usize,
+    source_bytes: u64,
+    symbols: Vec<String>,
+    files: Vec<MinuteMigrationFile>,
+}
+
+#[derive(Debug)]
 struct TickMigrationFile {
     path: PathBuf,
     size_bytes: u64,
@@ -2978,7 +2995,170 @@ struct MigrationOutcomeDetails {
     completed: bool,
 }
 
+fn migrate_minute(cache_dir: Option<&Path>, args: MigrateArgs) -> Result<CommandOutcome, CliError> {
+    if !args.apply && args.backup_dir.is_some() {
+        return Err(CliError::Usage("--backup-dir requires --apply".to_string()));
+    }
+
+    let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
+    let read_only_cache = MinuteKlineCache::open_read_only(&canonical_cache_dir);
+    let plan = minute_migration_plan(&read_only_cache)?;
+    if !args.apply {
+        return Ok(minute_migration_outcome(
+            canonical_cache_dir,
+            true,
+            &plan,
+            MigrationOutcomeDetails::default(),
+        ));
+    }
+    if plan.problem_files != 0 || plan.legacy_files == 0 {
+        return Ok(minute_migration_outcome(
+            canonical_cache_dir,
+            false,
+            &plan,
+            MigrationOutcomeDetails::default(),
+        ));
+    }
+
+    let backup_dir = args
+        .backup_dir
+        .ok_or_else(|| CliError::Usage("--backup-dir is required with --apply".to_string()))?;
+    let root_gate = BacktestTickCache::open(&canonical_cache_dir)?;
+    let _lock = root_gate.try_acquire_consistency_read_lock()?;
+    let cache = MinuteKlineCache::open(&canonical_cache_dir)?;
+    // The dry-run plan is intentionally obtained without the exclusive gate.
+    // Rebuild it under the gate so every rewritten v4 file is backed up first.
+    let plan = minute_migration_plan(&MinuteKlineCache::open_read_only(&canonical_cache_dir))?;
+    if plan.problem_files != 0 || plan.legacy_files == 0 {
+        return Ok(minute_migration_outcome(
+            canonical_cache_dir,
+            false,
+            &plan,
+            MigrationOutcomeDetails::default(),
+        ));
+    }
+    let backup_dir = prepare_migration_backup_dir(&canonical_cache_dir, &backup_dir)?;
+    let (backup_data_files, backup_lock_files) =
+        match backup_minute_migration_inputs(&canonical_cache_dir, &backup_dir, &plan) {
+            Ok(report) => report,
+            Err(error) => {
+                return Err(CliError::Migration(format!(
+                    "migration did not start; partial backup retained at {}: {error}",
+                    backup_dir.display()
+                )));
+            }
+        };
+    let report = cache.migrate_legacy_v4().map_err(|error| {
+        CliError::Migration(format!(
+            "migration rewrite failed; backup retained at {}: {error}",
+            backup_dir.display()
+        ))
+    })?;
+    let after = cache.diagnose().map_err(|error| {
+        CliError::Migration(format!(
+            "migration rewrite completed but validation failed; backup retained at {}: {error}",
+            backup_dir.display()
+        ))
+    })?;
+    let remaining_legacy = after
+        .files
+        .iter()
+        .filter(|file| file.schema_version != Some(MINUTE_KLINE_CACHE_SCHEMA_VERSION))
+        .count();
+    if after.problem_files != 0 || remaining_legacy != 0 {
+        return Err(CliError::Migration(format!(
+            "migration validation found {} problem files and {} non-v{} files; backup retained at {}",
+            after.problem_files,
+            remaining_legacy,
+            MINUTE_KLINE_CACHE_SCHEMA_VERSION,
+            backup_dir.display()
+        )));
+    }
+
+    Ok(minute_migration_outcome(
+        canonical_cache_dir,
+        false,
+        &plan,
+        MigrationOutcomeDetails {
+            backup_dir: Some(backup_dir),
+            backup_data_files,
+            backup_lock_files,
+            rewritten_bytes: Some(report.rewritten_bytes),
+            completed: report.rewritten_files == plan.legacy_files,
+        },
+    ))
+}
+
+fn minute_migration_plan(cache: &MinuteKlineCache) -> Result<MinuteMigrationPlan, CliError> {
+    let report = cache.diagnose()?;
+    let mut files = Vec::new();
+    let mut symbols = BTreeSet::new();
+    let mut problem_files = 0usize;
+    for file in report.files {
+        if file.schema_version == Some(4)
+            && file.status == tqsdk_data::MinuteKlineCacheDiagnosticStatus::LegacyUnsupported
+        {
+            files.push(MinuteMigrationFile {
+                path: file.path,
+                size_bytes: file.size_bytes,
+            });
+            symbols.insert(file.symbol);
+        } else if file.status != tqsdk_data::MinuteKlineCacheDiagnosticStatus::Readable {
+            problem_files = problem_files.saturating_add(1);
+        }
+    }
+    let source_bytes = files.iter().map(|file| file.size_bytes).sum();
+    Ok(MinuteMigrationPlan {
+        problem_files,
+        legacy_files: files.len(),
+        source_bytes,
+        symbols: symbols.into_iter().collect(),
+        files,
+    })
+}
+
+fn minute_migration_outcome(
+    cache_dir: PathBuf,
+    dry_run: bool,
+    plan: &MinuteMigrationPlan,
+    details: MigrationOutcomeDetails,
+) -> CommandOutcome {
+    CommandOutcome {
+        value: json!({
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "command": "migrate",
+            "cache_kind": "minute",
+            "cache_dir": cache_dir,
+            "dry_run": dry_run,
+            "completed": details.completed,
+            "format_id": MINUTE_KLINE_CACHE_FORMAT_ID,
+            "target_schema_version": MINUTE_KLINE_CACHE_SCHEMA_VERSION,
+            "symbols": plan.symbols,
+            "legacy_files": plan.legacy_files,
+            "problem_files": plan.problem_files,
+            "source_bytes": plan.source_bytes,
+            "backup_dir": details.backup_dir,
+            "backup_data_files": details.backup_data_files,
+            "backup_lock_files": details.backup_lock_files,
+            "rewritten_bytes": details.rewritten_bytes,
+        }),
+        exit_code: if plan.problem_files == 0 { 0 } else { 1 },
+    }
+}
+
 fn migrate(
+    cache_dir: Option<&Path>,
+    kind: CacheKind,
+    args: MigrateArgs,
+) -> Result<CommandOutcome, CliError> {
+    match kind {
+        CacheKind::Tick => migrate_tick(cache_dir, kind, args),
+        CacheKind::Minute => migrate_minute(cache_dir, args),
+        CacheKind::Daily | CacheKind::All => unreachable!("validated before migration dispatch"),
+    }
+}
+
+fn migrate_tick(
     cache_dir: Option<&Path>,
     kind: CacheKind,
     args: MigrateArgs,
@@ -3221,6 +3401,44 @@ fn backup_migration_inputs(
         })?;
         copy_migration_lock(&lock_path, &backup_dir.join(relative))?;
         backup_lock_files += 1;
+    }
+    Ok((backup_data_files, backup_lock_files))
+}
+
+fn backup_minute_migration_inputs(
+    cache_dir: &Path,
+    backup_dir: &Path,
+    plan: &MinuteMigrationPlan,
+) -> Result<(usize, usize), CliError> {
+    let mut backup_data_files = 0usize;
+    let mut lock_paths = BTreeSet::new();
+    for file in &plan.files {
+        let relative = file.path.strip_prefix(cache_dir).map_err(|_| {
+            CliError::Migration(format!(
+                "migration input {} is outside cache root {}",
+                file.path.display(),
+                cache_dir.display()
+            ))
+        })?;
+        hard_link_migration_file(&file.path, &backup_dir.join(relative))?;
+        backup_data_files = backup_data_files.saturating_add(1);
+        lock_paths.insert(file.path.with_extension("tqmk.lock"));
+    }
+
+    let mut backup_lock_files = 0usize;
+    for lock_path in lock_paths {
+        if !lock_path.exists() {
+            continue;
+        }
+        let relative = lock_path.strip_prefix(cache_dir).map_err(|_| {
+            CliError::Migration(format!(
+                "migration lock {} is outside cache root {}",
+                lock_path.display(),
+                cache_dir.display()
+            ))
+        })?;
+        copy_migration_lock(&lock_path, &backup_dir.join(relative))?;
+        backup_lock_files = backup_lock_files.saturating_add(1);
     }
     Ok((backup_data_files, backup_lock_files))
 }

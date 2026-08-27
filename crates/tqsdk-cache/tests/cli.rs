@@ -385,7 +385,7 @@ fn minute_inspect_keeps_using_a_cached_immutable_snapshot_after_active_metadata_
 }
 
 #[test]
-fn minute_doctor_reports_the_v4_month_file_without_touching_tick_cache() {
+fn minute_doctor_reports_the_v5_month_file_without_touching_tick_cache() {
     let cache_dir = temp_dir("minute-doctor");
     let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
     let cache = MinuteKlineCache::open(&cache_dir).unwrap();
@@ -413,9 +413,59 @@ fn minute_doctor_reports_the_v4_month_file_without_touching_tick_cache() {
     assert_eq!(result["cache_kind"], "minute");
     assert_eq!(result["problem_files"], 0);
     assert_eq!(result["files"][0]["status"], "readable");
-    assert_eq!(result["files"][0]["schema_version"], 4);
+    assert_eq!(result["files"][0]["schema_version"], 5);
 
     let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn minute_migrate_rewrites_v4_with_a_rollback_backup() {
+    let cache_dir = temp_dir("minute-migrate-v4");
+    let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    let cache = MinuteKlineCache::open(&cache_dir).unwrap();
+    cache
+        .store_final_range(
+            "KQ.i@SHFE.au",
+            range.start_ns,
+            range.end_ns,
+            &MinuteKlineCacheSnapshot::cst_v1(),
+            &[],
+        )
+        .unwrap();
+    let path = cache.month_file_path("KQ.i@SHFE.au", "202001");
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[4..6].copy_from_slice(&4_u16.to_le_bytes());
+    std::fs::write(&path, bytes).unwrap();
+    let backup_dir = cache_dir.with_file_name(format!(
+        "{}-backup",
+        cache_dir.file_name().unwrap().to_string_lossy()
+    ));
+
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "migrate",
+        "--apply",
+        "--backup-dir",
+        backup_dir.to_str().unwrap(),
+    ]);
+
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "migrate", "success", 0);
+    assert_eq!(result["cache_kind"], "minute");
+    assert_eq!(result["legacy_files"], 1);
+    assert_eq!(result["completed"], true);
+    assert_eq!(
+        std::fs::read(backup_dir.join(path.strip_prefix(&cache_dir).unwrap())).unwrap()[4..6],
+        4_u16.to_le_bytes()
+    );
+    assert_eq!(std::fs::read(&path).unwrap()[4..6], 5_u16.to_le_bytes());
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+    let _ = std::fs::remove_dir_all(backup_dir);
 }
 
 #[test]

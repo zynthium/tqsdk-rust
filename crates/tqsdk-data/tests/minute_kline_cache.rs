@@ -6,6 +6,7 @@ use tqsdk_core::Kline;
 use tqsdk_data::{MinuteKlineCache, MinuteKlineCacheSnapshot};
 
 const MINUTE_NS: i64 = 60_000_000_000;
+type KlineBits = (i64, i64, u64, u64, u64, u64, i64, i64, i64, Option<i64>);
 
 #[test]
 fn final_60s_rows_are_partitioned_by_trading_month_and_streamed() {
@@ -111,6 +112,36 @@ fn final_empty_range_records_coverage_without_inventing_rows() {
 }
 
 #[test]
+fn new_month_files_use_v5_compression_and_round_trip_every_kline_field() {
+    let root = temp_dir("v5-compression-round-trip");
+    let cache = MinuteKlineCache::open(&root).unwrap();
+    let snapshot = MinuteKlineCacheSnapshot::new(1, "calendar-v1", "session-v1").unwrap();
+    let start = utc_ns(2026, 1, 15, 2, 0);
+    let rows = (0_i64..1_024)
+        .map(|offset| kline(offset + 1, start + offset * MINUTE_NS, 10.0))
+        .collect::<Vec<_>>();
+    let end = start + i64::try_from(rows.len()).unwrap() * MINUTE_NS;
+
+    cache
+        .store_final_range("SHFE.rb2601", start, end, &snapshot, &rows)
+        .unwrap();
+
+    let path = cache.month_file_path("SHFE.rb2601", "202601");
+    let report = cache.diagnose().unwrap();
+    assert_eq!(report.problem_files, 0);
+    assert_eq!(report.files[0].schema_version, Some(5));
+    assert!(
+        std::fs::metadata(&path).unwrap().len() < 36 + 16 + 80 * u64::try_from(rows.len()).unwrap(),
+        "a repeated month should be smaller than v4's fixed 80-byte rows"
+    );
+
+    let actual = cache
+        .read_range("SHFE.rb2601", start, end, &snapshot)
+        .unwrap();
+    assert_eq!(kline_bits(&actual), kline_bits(&rows));
+}
+
+#[test]
 fn snapshot_mismatch_and_corrupt_month_file_fail_closed() {
     let root = temp_dir("fail-closed");
     let cache = MinuteKlineCache::open(&root).unwrap();
@@ -202,6 +233,25 @@ fn kline(id: i64, datetime: i64, close: f64) -> Kline {
         close_oi: id,
         ..Kline::default()
     }
+}
+
+fn kline_bits(rows: &[Kline]) -> Vec<KlineBits> {
+    rows.iter()
+        .map(|row| {
+            (
+                row.id,
+                row.datetime,
+                row.open.to_bits(),
+                row.high.to_bits(),
+                row.low.to_bits(),
+                row.close.to_bits(),
+                row.volume,
+                row.open_oi,
+                row.close_oi,
+                row.epoch,
+            )
+        })
+        .collect()
 }
 
 fn temp_dir(name: &str) -> PathBuf {

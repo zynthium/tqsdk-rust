@@ -1,12 +1,12 @@
 //! Canonical, monthly-partitioned 60-second Kline cache for local backtests.
 //!
 //! This cache deliberately does not reuse daily TQBN history-series files.  A
-//! 60-second Kline is the durable canonical Kline input for the v4 backtest
+//! 60-second Kline is the durable canonical Kline input for the local backtest
 //! path; higher periods are derived by `tqsdk-task` at replay time.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -22,17 +22,19 @@ use crate::{DataError, Result};
 /// The only durable Kline period accepted by [`MinuteKlineCache`].
 pub const MINUTE_KLINE_DURATION_NS: i64 = 60_000_000_000;
 
-/// Stable identity for the independent v4 monthly-minute cache format.
-pub const MINUTE_KLINE_CACHE_FORMAT_ID: &str = "tqsdk.minute-kline.monthly.v4";
+/// Stable identity for the independently compressed v5 monthly-minute cache format.
+pub const MINUTE_KLINE_CACHE_FORMAT_ID: &str = "tqsdk.minute-kline.monthly.v5";
 
 /// Public format version stored in every monthly-minute file.
-pub const MINUTE_KLINE_CACHE_SCHEMA_VERSION: u32 = 4;
+pub const MINUTE_KLINE_CACHE_SCHEMA_VERSION: u32 = 5;
 
 const ROOT_DIR_NAME: &str = "minute-kline-v3";
 const FILE_EXTENSION: &str = "tqmk";
 const FILE_MAGIC: [u8; 4] = *b"TQMK";
-const FILE_VERSION: u16 = 4;
+const FILE_VERSION: u16 = 5;
 const FILE_HEADER_BYTES: usize = 36;
+const FILE_FLAG_ZSTD_ROWS: u16 = 0x0001;
+const FILE_KNOWN_FLAGS: u16 = FILE_FLAG_ZSTD_ROWS;
 const COVERAGE_BYTES: usize = 16;
 const KLINE_ROW_BYTES: usize = 80;
 const MAX_METADATA_BYTES: usize = 32 * 1024;
@@ -177,7 +179,7 @@ pub(crate) struct MinuteKlineCacheSnapshotCompatibility {
     pub(crate) mismatched_ranges: Vec<(i64, i64)>,
 }
 
-/// Result of explicit v4 monthly-minute cache deletion.
+/// Result of explicit v5 monthly-minute cache deletion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MinuteKlineCachePurgeReport {
     pub cache_dir: PathBuf,
@@ -217,7 +219,7 @@ pub struct MinuteKlineCacheInventory {
 pub enum MinuteKlineCacheDiagnosticStatus {
     /// A current-format file decoded, validated, and passed its checksum.
     Readable,
-    /// A v3 file is deliberately not readable or writable by the v4 cache.
+    /// A legacy file is deliberately not readable or writable by the v5 cache.
     LegacyUnsupported,
     /// The header uses an unknown future or otherwise unsupported version.
     UnsupportedVersion,
@@ -258,7 +260,17 @@ pub struct MinuteKlineCacheDiagnosticReport {
     pub files: Vec<MinuteKlineCacheDiagnosticFile>,
 }
 
-/// Independent v4 store for canonical 60-second Kline history.
+/// Result of an explicit v4-to-v5 monthly-minute cache migration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MinuteKlineCacheMigrationReport {
+    pub cache_dir: PathBuf,
+    pub source_files: usize,
+    pub source_bytes: u64,
+    pub rewritten_files: usize,
+    pub rewritten_bytes: u64,
+}
+
+/// Independent v5 store for canonical 60-second Kline history.
 ///
 /// It has no automatic retention or max-byte eviction.  Callers may explicitly
 /// use [`Self::purge_range`] or [`Self::purge_symbol`] for destructive
@@ -371,6 +383,59 @@ impl MinuteKlineCache {
             total_bytes,
             problem_files,
             files,
+        })
+    }
+
+    /// Re-encode every v4 month into the current v5 format.
+    ///
+    /// Callers must arrange any desired rollback backup before invoking this
+    /// destructive operation. The method validates every v4 input before it
+    /// rewrites the first file and refuses unrelated legacy versions.
+    pub fn migrate_legacy_v4(&self) -> Result<MinuteKlineCacheMigrationReport> {
+        self.ensure_writable()?;
+        let mut entries = self.month_files()?;
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+
+        let mut legacy = Vec::new();
+        let mut source_bytes = 0_u64;
+        for entry in entries {
+            match read_month_file_version(entry.path.as_path())? {
+                FILE_VERSION => {}
+                4 => {
+                    validate_legacy_v4_month_file(entry.path.as_path(), &entry)?;
+                    source_bytes = source_bytes.saturating_add(fs::metadata(&entry.path)?.len());
+                    legacy.push(entry);
+                }
+                version => {
+                    return Err(format_error(
+                        entry.path.as_path(),
+                        format!(
+                            "cannot migrate minute kline cache schema v{version}; only v4 is supported"
+                        ),
+                    ));
+                }
+            }
+        }
+
+        let mut rewritten_bytes = 0_u64;
+        for entry in &legacy {
+            let _lock = MonthFileLock::acquire(entry.path.as_path(), self.root_dir.as_path())?;
+            let symbol = symbol_from_file_path(entry.path.as_path())?;
+            let month = load_legacy_v4_month_file(
+                entry.path.as_path(),
+                symbol.as_str(),
+                entry.trading_month.as_str(),
+            )?;
+            write_month_atomically(entry.path.as_path(), &month)?;
+            rewritten_bytes = rewritten_bytes.saturating_add(fs::metadata(&entry.path)?.len());
+        }
+
+        Ok(MinuteKlineCacheMigrationReport {
+            cache_dir: self.root_dir.clone(),
+            source_files: legacy.len(),
+            source_bytes,
+            rewritten_files: legacy.len(),
+            rewritten_bytes,
         })
     }
 
@@ -526,7 +591,7 @@ impl MinuteKlineCache {
 
     /// Store a server-confirmed final 60-second range.
     ///
-    /// A range touching the current CST trading day is rejected.  The v4 cache
+    /// A range touching the current CST trading day is rejected. The v5 cache
     /// intentionally has no provisional-minute coverage: a future fill must
     /// revisit that day after it closes before claiming a cache hit.
     pub fn store_final_range(
@@ -1037,15 +1102,32 @@ struct TradingMonthSlice {
 
 #[derive(Debug, Clone, Copy)]
 struct DiskHeader {
+    flags: u16,
     coverage_count: usize,
     row_count: usize,
     checksum: u64,
 }
 
+enum MonthRowsReader {
+    Raw(BufReader<File>),
+    #[cfg(feature = "tqbn-zstd")]
+    Zstd(zstd::stream::read::Decoder<'static, BufReader<File>>),
+}
+
+impl Read for MonthRowsReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Raw(reader) => reader.read(buffer),
+            #[cfg(feature = "tqbn-zstd")]
+            Self::Zstd(reader) => reader.read(buffer),
+        }
+    }
+}
+
 struct MonthRowReader {
     path: PathBuf,
     trading_month: String,
-    reader: BufReader<File>,
+    reader: MonthRowsReader,
     rows_remaining: usize,
     checksum: u64,
     expected_checksum: u64,
@@ -1063,7 +1145,7 @@ impl MonthRowReader {
     ) -> Result<Self> {
         let file_len = file.metadata()?.len();
         let mut reader = BufReader::new(file);
-        let (header, metadata_bytes) = read_file_prefix(&mut reader, path, file_len)?;
+        let (header, metadata_bytes) = read_file_prefix(&mut reader, path, file_len, FILE_VERSION)?;
         let metadata = decode_metadata(path, metadata_bytes.as_slice())?;
         let mut checksum = checksum_bytes(FNV_OFFSET_BASIS, metadata_bytes.as_slice());
         let mut coverage = Vec::with_capacity(header.coverage_count);
@@ -1084,6 +1166,7 @@ impl MonthRowReader {
             snapshot,
             comparison_ranges.as_slice(),
         )?;
+        let reader = open_month_rows_reader(reader, header.flags, path)?;
         Ok(Self {
             path: path.to_path_buf(),
             trading_month: trading_month.to_string(),
@@ -1096,6 +1179,7 @@ impl MonthRowReader {
 
     fn next_row(&mut self) -> Result<Option<Kline>> {
         if self.rows_remaining == 0 {
+            ensure_rows_terminated(&mut self.reader, self.path.as_path())?;
             if self.checksum != self.expected_checksum {
                 return Err(format_error(
                     self.path.as_path(),
@@ -1253,13 +1337,17 @@ fn scan_month_file(
 }
 
 fn scan_month_file_unchecked(path: &Path) -> Result<MonthScan> {
+    scan_month_file_with_version(path, FILE_VERSION)
+}
+
+fn scan_month_file_with_version(path: &Path, expected_version: u16) -> Result<MonthScan> {
     #[cfg(test)]
     TEST_MONTH_SCAN_COUNT.with(|count| count.set(count.get().saturating_add(1)));
 
     let file = File::open(path)?;
     let file_len = file.metadata()?.len();
     let mut reader = BufReader::new(file);
-    let (header, metadata_bytes) = read_file_prefix(&mut reader, path, file_len)?;
+    let (header, metadata_bytes) = read_file_prefix(&mut reader, path, file_len, expected_version)?;
     let metadata = decode_metadata(path, metadata_bytes.as_slice())?;
     let mut checksum = checksum_bytes(FNV_OFFSET_BASIS, metadata_bytes.as_slice());
     let mut coverage = Vec::with_capacity(header.coverage_count);
@@ -1270,13 +1358,15 @@ fn scan_month_file_unchecked(path: &Path) -> Result<MonthScan> {
         coverage.push(decode_coverage(bytes.as_slice()));
     }
     validate_stored_coverage(path, metadata.trading_month.as_str(), coverage.as_slice())?;
+    let mut rows_reader = open_month_rows_reader(reader, header.flags, path)?;
     for _ in 0..header.row_count {
         let mut bytes = [0_u8; KLINE_ROW_BYTES];
-        read_exact_format(&mut reader, &mut bytes, path, "Kline row")?;
+        read_exact_format(&mut rows_reader, &mut bytes, path, "Kline row")?;
         checksum = checksum_bytes(checksum, &bytes);
         let row = decode_kline(bytes.as_slice());
         validate_one_stored_row(path, metadata.trading_month.as_str(), &row)?;
     }
+    ensure_rows_terminated(&mut rows_reader, path)?;
     if checksum != header.checksum {
         return Err(format_error(path, "payload checksum mismatch"));
     }
@@ -1315,6 +1405,14 @@ fn diagnose_month_file(entry: MonthFilePath, size_bytes: u64) -> MinuteKlineCach
         file.status = MinuteKlineCacheDiagnosticStatus::LegacyUnsupported;
         file.error = Some(
             "minute kline cache schema v3 is legacy and is not migrated or overwritten automatically"
+                .to_string(),
+        );
+        return file;
+    }
+    if version == 4 {
+        file.status = MinuteKlineCacheDiagnosticStatus::LegacyUnsupported;
+        file.error = Some(
+            "minute kline cache schema v4 requires explicit `tqsdk-cache --kind minute migrate --apply`"
                 .to_string(),
         );
         return file;
@@ -1424,7 +1522,7 @@ fn load_month_file(
     let file = File::open(path)?;
     let file_len = file.metadata()?.len();
     let mut reader = BufReader::new(file);
-    let (header, metadata_bytes) = read_file_prefix(&mut reader, path, file_len)?;
+    let (header, metadata_bytes) = read_file_prefix(&mut reader, path, file_len, FILE_VERSION)?;
     let metadata = decode_metadata(path, metadata_bytes.as_slice())?;
     let mut checksum = checksum_bytes(FNV_OFFSET_BASIS, metadata_bytes.as_slice());
     let mut coverage = Vec::with_capacity(header.coverage_count);
@@ -1445,18 +1543,89 @@ fn load_month_file(
         snapshot,
         comparison_ranges.as_slice(),
     )?;
+    let mut rows_reader = open_month_rows_reader(reader, header.flags, path)?;
     let mut rows = Vec::with_capacity(header.row_count);
     for _ in 0..header.row_count {
         let mut bytes = [0_u8; KLINE_ROW_BYTES];
-        read_exact_format(&mut reader, &mut bytes, path, "Kline row")?;
+        read_exact_format(&mut rows_reader, &mut bytes, path, "Kline row")?;
         checksum = checksum_bytes(checksum, &bytes);
         let row = decode_kline(bytes.as_slice());
         validate_one_stored_row(path, trading_month, &row)?;
         rows.push(row);
     }
+    ensure_rows_terminated(&mut rows_reader, path)?;
     if checksum != header.checksum {
         return Err(format_error(path, "payload checksum mismatch"));
     }
+    Ok(MonthFile {
+        metadata,
+        coverage,
+        rows,
+    })
+}
+
+fn validate_legacy_v4_month_file(path: &Path, entry: &MonthFilePath) -> Result<()> {
+    let scan = scan_month_file_with_version(path, 4)?;
+    let symbol = symbol_from_file_path(path)?;
+    if scan.metadata.symbol != symbol {
+        return Err(format_error(
+            path,
+            "symbol metadata does not match monthly filename",
+        ));
+    }
+    if scan.metadata.trading_month != entry.trading_month {
+        return Err(format_error(
+            path,
+            "trading month metadata does not match parent directory",
+        ));
+    }
+    Ok(())
+}
+
+fn load_legacy_v4_month_file(path: &Path, symbol: &str, trading_month: &str) -> Result<MonthFile> {
+    let file = File::open(path)?;
+    let file_len = file.metadata()?.len();
+    let mut reader = BufReader::new(file);
+    let (header, metadata_bytes) = read_file_prefix(&mut reader, path, file_len, 4)?;
+    let metadata = decode_metadata(path, metadata_bytes.as_slice())?;
+    if metadata.symbol != symbol {
+        return Err(format_error(
+            path,
+            "symbol metadata does not match monthly filename",
+        ));
+    }
+    if metadata.trading_month != trading_month {
+        return Err(format_error(
+            path,
+            "trading month metadata does not match parent directory",
+        ));
+    }
+
+    let mut checksum = checksum_bytes(FNV_OFFSET_BASIS, metadata_bytes.as_slice());
+    let mut coverage = Vec::with_capacity(header.coverage_count);
+    for _ in 0..header.coverage_count {
+        let mut bytes = [0_u8; COVERAGE_BYTES];
+        read_exact_format(&mut reader, &mut bytes, path, "coverage")?;
+        checksum = checksum_bytes(checksum, &bytes);
+        coverage.push(decode_coverage(bytes.as_slice()));
+    }
+    validate_stored_coverage(path, trading_month, coverage.as_slice())?;
+
+    let mut rows_reader = open_month_rows_reader(reader, header.flags, path)?;
+    let mut rows = Vec::with_capacity(header.row_count);
+    for _ in 0..header.row_count {
+        let mut bytes = [0_u8; KLINE_ROW_BYTES];
+        read_exact_format(&mut rows_reader, &mut bytes, path, "Kline row")?;
+        checksum = checksum_bytes(checksum, &bytes);
+        let row = decode_kline(bytes.as_slice());
+        validate_one_stored_row(path, trading_month, &row)?;
+        rows.push(row);
+    }
+    ensure_rows_terminated(&mut rows_reader, path)?;
+    if checksum != header.checksum {
+        return Err(format_error(path, "payload checksum mismatch"));
+    }
+
     Ok(MonthFile {
         metadata,
         coverage,
@@ -1550,22 +1719,22 @@ fn encode_month_file(month: &MonthFile) -> Result<Vec<u8>> {
         .len()
         .checked_mul(KLINE_ROW_BYTES)
         .ok_or_else(|| DataError::InvalidResponse("minute kline row size overflow".to_string()))?;
-    let payload_len = metadata
-        .len()
-        .checked_add(coverage_len)
-        .and_then(|value| value.checked_add(row_len))
-        .ok_or_else(|| {
-            DataError::InvalidResponse("minute kline payload size overflow".to_string())
-        })?;
-    let mut payload = Vec::with_capacity(payload_len);
-    payload.extend_from_slice(metadata.as_slice());
+    let mut coverage_bytes = Vec::with_capacity(coverage_len);
     for range in &month.coverage {
-        encode_coverage(&mut payload, *range);
+        encode_coverage(&mut coverage_bytes, *range);
     }
+    let mut row_bytes = Vec::with_capacity(row_len);
     for row in &month.rows {
-        encode_kline(&mut payload, row);
+        encode_kline(&mut row_bytes, row);
     }
-    let checksum = checksum_bytes(FNV_OFFSET_BASIS, payload.as_slice());
+    let checksum = checksum_bytes(
+        checksum_bytes(
+            checksum_bytes(FNV_OFFSET_BASIS, metadata.as_slice()),
+            coverage_bytes.as_slice(),
+        ),
+        row_bytes.as_slice(),
+    );
+    let (flags, stored_rows) = compress_month_rows(row_bytes)?;
     let metadata_len = u32::try_from(metadata.len()).map_err(|_| {
         DataError::InvalidResponse("minute kline metadata is too large".to_string())
     })?;
@@ -1574,22 +1743,91 @@ fn encode_month_file(month: &MonthFile) -> Result<Vec<u8>> {
     })?;
     let row_count = u64::try_from(month.rows.len())
         .map_err(|_| DataError::InvalidResponse("minute kline row count overflow".to_string()))?;
-    let mut bytes = Vec::with_capacity(FILE_HEADER_BYTES + payload.len());
+    let capacity = FILE_HEADER_BYTES
+        .checked_add(metadata.len())
+        .and_then(|value| value.checked_add(coverage_bytes.len()))
+        .and_then(|value| value.checked_add(stored_rows.len()))
+        .ok_or_else(|| DataError::InvalidResponse("minute kline file size overflow".to_string()))?;
+    let mut bytes = Vec::with_capacity(capacity);
     bytes.extend_from_slice(&FILE_MAGIC);
     bytes.extend_from_slice(&FILE_VERSION.to_le_bytes());
-    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&flags.to_le_bytes());
     bytes.extend_from_slice(&metadata_len.to_le_bytes());
     bytes.extend_from_slice(&coverage_count.to_le_bytes());
     bytes.extend_from_slice(&row_count.to_le_bytes());
     bytes.extend_from_slice(&checksum.to_le_bytes());
-    bytes.extend_from_slice(payload.as_slice());
+    bytes.extend_from_slice(metadata.as_slice());
+    bytes.extend_from_slice(coverage_bytes.as_slice());
+    bytes.extend_from_slice(stored_rows.as_slice());
     Ok(bytes)
+}
+
+fn compress_month_rows(row_bytes: Vec<u8>) -> Result<(u16, Vec<u8>)> {
+    #[cfg(feature = "tqbn-zstd")]
+    if !row_bytes.is_empty() {
+        let compressed = zstd::bulk::compress(row_bytes.as_slice(), 3).map_err(|error| {
+            DataError::InvalidResponse(format!("minute kline zstd compression failed: {error}"))
+        })?;
+        if compressed.len() < row_bytes.len() {
+            return Ok((FILE_FLAG_ZSTD_ROWS, compressed));
+        }
+    }
+
+    Ok((0, row_bytes))
+}
+
+fn open_month_rows_reader(
+    reader: BufReader<File>,
+    flags: u16,
+    path: &Path,
+) -> Result<MonthRowsReader> {
+    if flags == 0 {
+        return Ok(MonthRowsReader::Raw(reader));
+    }
+    if flags != FILE_FLAG_ZSTD_ROWS {
+        return Err(format_error(
+            path,
+            "unknown minute kline row encoding flags",
+        ));
+    }
+
+    #[cfg(feature = "tqbn-zstd")]
+    {
+        let decoder = zstd::stream::read::Decoder::with_buffer(reader).map_err(|error| {
+            format_error(
+                path,
+                format!("minute kline zstd decoder initialization failed: {error}"),
+            )
+        })?;
+        Ok(MonthRowsReader::Zstd(decoder))
+    }
+
+    #[cfg(not(feature = "tqbn-zstd"))]
+    {
+        let _ = reader;
+        Err(format_error(
+            path,
+            "compressed minute kline cache requires the tqbn-zstd feature",
+        ))
+    }
+}
+
+fn ensure_rows_terminated(reader: &mut impl Read, path: &Path) -> Result<()> {
+    let mut trailing = [0_u8; 1];
+    if reader.read(&mut trailing)? != 0 {
+        return Err(format_error(
+            path,
+            "minute kline rows exceed header row count",
+        ));
+    }
+    Ok(())
 }
 
 fn read_file_prefix<R: Read>(
     reader: &mut R,
     path: &Path,
     file_len: u64,
+    expected_version: u16,
 ) -> Result<(DiskHeader, Vec<u8>)> {
     let mut bytes = [0_u8; FILE_HEADER_BYTES];
     read_exact_format(reader, &mut bytes, path, "file header")?;
@@ -1597,12 +1835,18 @@ fn read_file_prefix<R: Read>(
         return Err(format_error(path, "unexpected magic"));
     }
     let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    if version != FILE_VERSION {
+    if version != expected_version {
         return Err(format_error(path, "unsupported format version"));
     }
-    let reserved = u16::from_le_bytes([bytes[6], bytes[7]]);
-    if reserved != 0 {
+    let flags = u16::from_le_bytes([bytes[6], bytes[7]]);
+    if expected_version == FILE_VERSION && flags & !FILE_KNOWN_FLAGS != 0 {
         return Err(format_error(path, "unknown header flags"));
+    }
+    if expected_version != FILE_VERSION && flags != 0 {
+        return Err(format_error(
+            path,
+            "legacy file contains unsupported header flags",
+        ));
     }
     let metadata_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
     if metadata_len > MAX_METADATA_BYTES {
@@ -1639,19 +1883,34 @@ fn read_file_prefix<R: Read>(
                 .and_then(|rows| value.checked_add(rows))
         })
         .ok_or_else(|| format_error(path, "payload byte length overflow"))?;
-    let expected_file_len = u64::try_from(
+    let raw_file_len = u64::try_from(
         FILE_HEADER_BYTES
             .checked_add(expected_payload_len)
             .ok_or_else(|| format_error(path, "file length overflow"))?,
     )
     .map_err(|_| format_error(path, "file length does not fit u64"))?;
-    if file_len != expected_file_len {
+    let rows_start = u64::try_from(
+        FILE_HEADER_BYTES
+            .checked_add(metadata_len)
+            .and_then(|value| {
+                coverage_count
+                    .checked_mul(COVERAGE_BYTES)
+                    .and_then(|coverage_len| value.checked_add(coverage_len))
+            })
+            .ok_or_else(|| format_error(path, "file row offset overflow"))?,
+    )
+    .map_err(|_| format_error(path, "file row offset does not fit u64"))?;
+    if flags == 0 && file_len != raw_file_len {
         return Err(format_error(path, "file length does not match header"));
+    }
+    if flags & FILE_FLAG_ZSTD_ROWS != 0 && file_len <= rows_start {
+        return Err(format_error(path, "compressed rows payload is empty"));
     }
     let mut metadata = vec![0_u8; metadata_len];
     read_exact_format(reader, metadata.as_mut_slice(), path, "metadata")?;
     Ok((
         DiskHeader {
+            flags,
             coverage_count,
             row_count,
             checksum,

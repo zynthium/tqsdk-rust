@@ -155,9 +155,9 @@ pub use minute_kline_cache::{
     MINUTE_KLINE_CACHE_FORMAT_ID, MINUTE_KLINE_CACHE_SCHEMA_VERSION, MINUTE_KLINE_DURATION_NS,
     MinuteKlineCache, MinuteKlineCacheDiagnosticFile, MinuteKlineCacheDiagnosticReport,
     MinuteKlineCacheDiagnosticStatus, MinuteKlineCacheInventory, MinuteKlineCacheInventorySymbol,
-    MinuteKlineCacheMonthReport, MinuteKlineCachePurgeReport, MinuteKlineCacheSnapshot,
-    MinuteKlineCacheStatus, MinuteKlineCacheWriteReport, MinuteKlineCoverage, MinuteKlineReader,
-    trading_month_for_timestamp_ns,
+    MinuteKlineCacheMigrationReport, MinuteKlineCacheMonthReport, MinuteKlineCachePurgeReport,
+    MinuteKlineCacheSnapshot, MinuteKlineCacheStatus, MinuteKlineCacheWriteReport,
+    MinuteKlineCoverage, MinuteKlineReader, trading_month_for_timestamp_ns,
 };
 pub use universe::{
     DEFAULT_FUTURES_METADATA_BATCH_SIZE, FuturesContract, FuturesProductCode,

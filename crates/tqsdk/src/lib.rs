@@ -1182,7 +1182,7 @@ pub struct BacktestCacheWarmupReport {
     pub rows_written: usize,
     pub remote_used: bool,
     pub symbols: Vec<BacktestCacheWarmupSymbolReport>,
-    /// Independent v4 canonical-minute cache preparation results.
+    /// Independent v5 canonical-minute cache preparation results.
     pub minute_kline_symbols: Vec<BacktestMinuteKlineCacheWarmupSymbolReport>,
     pub minute_kline_rows_written: usize,
     pub remote_minute_kline_used: bool,

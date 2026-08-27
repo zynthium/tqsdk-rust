@@ -106,11 +106,13 @@ coverage。fill-only materialization 不再为了生成报告回读刚写入的 
 实际物理落盘 rows，同一 shared fill 被多个 logical request 复用时只计一次。完整 cache hit 合法返回
 `rows_written=0`。
 
-minute 缓存当前的 format id 是 `tqsdk.minute-kline.monthly.v4`，schema/file version 为 4，按
-`logical symbol × trading month` 分区。目录名有意保持 `minute-kline-v3`：旧 v3 文件不自动迁移、
-覆盖、删除或当作命中；coverage/read fail closed，deep doctor 将其分类为 `legacy_unsupported`。
+minute 缓存当前的 format id 是 `tqsdk.minute-kline.monthly.v5`，schema/file version 为 5，按
+`logical symbol × trading month` 分区。v5 row payload 仅在 zstd 更小时压缩，且保留所有 row；目录名
+有意保持 `minute-kline-v3`。旧 v4 文件不自动覆盖或当作命中；coverage/read fail closed，deep doctor
+将其分类为 `legacy_unsupported`。operator 可用
+`tqsdk-cache --kind minute migrate --apply --backup-dir DIR` 先备份再显式重写 v4；v3 不可迁移。
 
-每个 v4 月文件绑定写入时的 immutable metadata snapshot。active pointer 后续变化不会单独令历史
+每个 v5 月文件绑定写入时的 immutable metadata snapshot。active pointer 后续变化不会单独令历史
 月文件失效：minute `inspect`、`fill --dry-run`、`verify`、普通 `fill` 和 cache-backed reader 在 hash
 不同时加载月文件绑定的旧 sidecar 与目标 sidecar，只对实际 cached range 比较 schema、market、logical
 symbol、session、交易日和 physical mapping。语义相同的旧 coverage 继续命中，新增尾部日期仍是 miss；

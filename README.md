@@ -152,7 +152,7 @@ cargo run -p tqsdk-task --example api_contract_s32_python_backtest_sim
 `Tq::futures().backtest(start_ns, end_ns)` 是唯一推荐回测入口：默认使用
 `tqsdk-data` 共享 history cache root（`$HOME/.tqsdk/data_series_1`，可用
 `TQSDK_HISTORY_CACHE_DIR` 覆盖）。tick 使用 `BacktestTickCache`；持久 K 线输入包括独立
-`MinuteKlineCache` 的 canonical final-60s monthly files（v4，按 logical symbol × trading month
+`MinuteKlineCache` 的 canonical final-60s monthly files（v5，按 logical symbol × trading month
 分区）和 `DailyKlineCache` 的 native final-1d 单 logical-symbol 文件（v1，不按时间分区），再由本地
 `TqSim` 回放。两者缺口只通过官方 server-side backtest Kline stream 填补，并且仅在远端 terminal
 成功后标记 final coverage；不回退到专业历史下载路径。显式配置 `cache_dir(...)`、
@@ -176,7 +176,7 @@ validation error；K-only `>=60s` 不会隐式补 tick。分钟高周期的盘�
 | --- | --- | --- |
 | Tick | 按 CST trading day 的 TQBN v3 tick 分区 | 原样读取 |
 | `15s` 和其他 `<60s` K | 同一 tick 分区 | 按官方 session 从 tick 聚合 |
-| `60s` K | `logical symbol × trading month` 的 final canonical-minute v4 分区 | 原样读取 |
+| `60s` K | `logical symbol × trading month` 的 final canonical-minute v5 分区 | 原样读取 |
 | `N × 60s`（`N > 1` 且 `<1d`） | 同一 60s 分区 | 从 closed 60s K 按固定 CST `18:00` trading-day grid 聚合；盘中 break 不重置 bucket |
 | `1d` K | `daily-kline-v1/<escaped-logical-symbol>.tqdk` 的 native final-1d file | 原样读取 |
 | `2d` 到 `28d` K | 同一 native 1d file | 从 complete final 1d rows 本地聚合；不落盘 |
@@ -329,6 +329,10 @@ tick 路径形如 `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn`。默认 featur
 Tick v3 首 snapshot 是完整 keyframe，后续 snapshot 只写变化字段和 id/time delta；不会按固定 tick
 频率填充，也不会删除无成交或重复盘口 snapshot。旧 v2 cache 需先执行
 `tqsdk-cache migrate --apply --backup-dir DIR`；新 writer 拒绝向 v2 Tick 文件混写。
+canonical-minute v5 保留全部 60s Kline row，并仅在 zstd 更小时压缩 row payload；零成交或重复分钟
+不会被删除或合成。旧 minute v4 cache 需先执行
+`tqsdk-cache --kind minute migrate --apply --backup-dir DIR`，并由该命令把原文件硬链接备份到
+cache root 外；v3 minute 文件仍按 fail-closed 处理。
 当前日 checkpoint 使用独立的 non-final provisional record，不进入普通 coverage；同日 final
 coverage 成功后会覆盖并在 compaction 中淘汰它。
 market-data records block 以 8 MiB 未压缩 payload 为目标上限，并紧跟 crate-internal `TQRI`

@@ -42,12 +42,18 @@ cargo run -p tqsdk-cache -- \
   --end 2025-09-26T00:00:00+08:00
 ```
 
-minute 的 format id 为 `tqsdk.minute-kline.monthly.v4`，但 namespace 有意保持
+minute 的 format id 为 `tqsdk.minute-kline.monthly.v5`，但 namespace 有意保持
 `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk`。每个文件属于一个
-`logical symbol × trading month`；旧 v3 文件不会自动迁移、覆盖或删除，deep doctor 会将其标记为
-`legacy_unsupported`。
+`logical symbol × trading month`。v5 将完整 60s 行 payload 以 zstd 无损压缩（仅在更小
+时启用），仍保留每一行及其精确字段；reader 流式解压并校验原始 payload checksum。旧 v4
+文件不会被普通 read/fill 静默覆盖，必须先显式迁移；v3 仍不会自动迁移、覆盖或删除，deep doctor
+会将两者标记为 `legacy_unsupported`。
 
-每个 v4 月文件绑定写入时的 immutable metadata snapshot。active metadata pointer 随后前移不会单独
+```bash
+tqsdk-cache --cache-dir DIR --kind minute migrate --apply --backup-dir DIR-v5-backup
+```
+
+每个 v5 月文件绑定写入时的 immutable metadata snapshot。active metadata pointer 随后前移不会单独
 使已有分区失效：`inspect`、`fill --dry-run`、`verify` 和普通 `fill` 遇到滚动扩展的 active snapshot 时，
 会加载月文件绑定的旧 immutable sidecar，并只在实际 cached range 内比较 schema、market、logical symbol、
 session、交易日和 physical mapping。区间语义相同的旧 coverage 直接复用，新增日期保持为缺口；当前月写入

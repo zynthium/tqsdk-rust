@@ -780,7 +780,7 @@ mod tests {
             "command": "inventory",
             "cache_kind": "minute",
             "cache_dir": "/tmp/cache",
-            "backend_format": "tqsdk.minute-kline.monthly.v4",
+            "backend_format": "tqsdk.minute-kline.monthly.v5",
             "total_files": 2,
             "total_bytes": 1_536,
             "total_days": null,

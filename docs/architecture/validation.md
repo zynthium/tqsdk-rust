@@ -254,11 +254,12 @@ gate、exclusive maintenance 存在时返回 `CacheBusy`，以及 fill-only mate
 8192-row bounded tick append 与取消短尾不提交 coverage；facade 单元测试覆盖 shared fill 物理写入只计一次、
 final compaction day-range 去重与 provisional skip。
 
-`minute_kline_cache` 与 `minute_kline_cache_ops` 覆盖 v4 `logical symbol × trading month` `.tqmk`
+`minute_kline_cache` 与 `minute_kline_cache_ops` 覆盖 v5 zstd `logical symbol × trading month` `.tqmk`
 partition、snapshot hash fail-closed、current-day final-coverage guard、opened month snapshot 不阻塞并发
 atomic replacement、streaming reader、Refresh 只移除
-相交月文件、缺失 root 的 read-only fast inventory，以及 readable v4 / legacy v3
-`LegacyUnsupported` diagnosis。旧 v3 不得被自动迁移、覆盖或当作 cache hit。
+相交月文件、缺失 root 的 read-only fast inventory，以及 readable v5 / legacy v4-v3
+`LegacyUnsupported` diagnosis。测试还覆盖显式 v4 迁移的逐行等价性；旧 v3 不得被自动迁移、覆盖
+或当作 cache hit。
 `backtest_history_query`、`facade_contract` 与 `tqsdk-cache` CLI tests 还覆盖 active metadata pointer
 前移后，完整历史 minute 分区继续离线读取；滚动 snapshot 扩展必须复用语义相同的缓存前缀、只报告新增
 尾部缺口，并在追加 final minute 后原子迁移当前月 header。真实 physical mapping 冲突必须仍进入 stale
