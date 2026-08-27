@@ -7,7 +7,7 @@ use crate::backtest_tick_cache::{
 };
 use crate::minute_kline_cache::{MINUTE_KLINE_DURATION_NS, MinuteKlineCacheSnapshot};
 use crate::{
-    BacktestHistoryMetadataCache, BacktestHistoryTradingDay, DataError, Result,
+    BacktestHistoryTradingDay, DataError, Result, resolve_backtest_metadata_snapshot,
     resolve_minute_cache_metadata_snapshot,
 };
 
@@ -116,8 +116,12 @@ pub(crate) fn plan_request(
             request.start_ns,
             effective_end_ns,
         )?,
-        PlannedBaseSource::Tick => BacktestHistoryMetadataCache::open_read_only(cache_dir)
-            .load_active(request.symbol.as_str())?,
+        PlannedBaseSource::Tick => resolve_backtest_metadata_snapshot(
+            cache_dir,
+            request.symbol.as_str(),
+            request.start_ns,
+            effective_end_ns,
+        )?,
     };
     if request.symbol.starts_with("KQ.m@") && metadata.is_none() {
         return Err(DataError::InvalidState(
@@ -463,7 +467,7 @@ mod tests {
     use crate::backtest_history::request::BacktestHistoryRequest;
     use crate::{
         BACKTEST_HISTORY_METADATA_SCHEMA_VERSION, BacktestHistoryMarketKind,
-        BacktestHistoryMetadataSnapshot,
+        BacktestHistoryMetadataCache, BacktestHistoryMetadataSnapshot,
     };
 
     #[test]
@@ -607,6 +611,57 @@ mod tests {
         assert_eq!(plan.source_slices.len(), 1);
         assert_eq!(plan.source_slices[0].cache_symbol, physical_symbol);
         assert_eq!(plan.source_slices[0].range.0, requested_start_ns);
+    }
+
+    #[test]
+    fn tick_plan_uses_retained_metadata_when_active_snapshot_misses_range() {
+        let root = temp_dir("tick-retained-metadata");
+        let symbol = "CFFEX.T2609";
+        let requested_start_ns = utc_ns(2026, 8, 17, 1, 0, 0);
+        let requested_end_ns = requested_start_ns + 15 * 1_000_000_000;
+        let cache = BacktestHistoryMetadataCache::open(&root).unwrap();
+        cache
+            .store_snapshot(BacktestHistoryMetadataSnapshot {
+                schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+                market_kind: BacktestHistoryMarketKind::Futures,
+                logical_symbol: symbol.to_string(),
+                captured_at_ns: utc_ns(2026, 8, 1, 0, 0, 0),
+                trading_days: vec![trading_day("2026-08-01", true, utc_ns(2026, 8, 1, 0, 0, 0))],
+                session: KlineSessionTemplate::cst_trading_day(),
+                physical_segments: vec![BacktestHistoryPhysicalSegment {
+                    physical_symbol: symbol.to_string(),
+                    start_ns: utc_ns(2026, 7, 1, 0, 0, 0),
+                    end_ns: utc_ns(2026, 8, 14, 0, 0, 0),
+                }],
+                snapshot_hash: String::new(),
+            })
+            .unwrap();
+        let retained = cache
+            .store_snapshot_for_remote_miss(BacktestHistoryMetadataSnapshot {
+                schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+                market_kind: BacktestHistoryMarketKind::Futures,
+                logical_symbol: symbol.to_string(),
+                captured_at_ns: requested_start_ns,
+                trading_days: vec![trading_day("2026-08-17", true, requested_start_ns)],
+                session: KlineSessionTemplate::cst_trading_day(),
+                physical_segments: vec![BacktestHistoryPhysicalSegment {
+                    physical_symbol: symbol.to_string(),
+                    start_ns: requested_start_ns,
+                    end_ns: requested_end_ns,
+                }],
+                snapshot_hash: String::new(),
+            })
+            .unwrap();
+
+        let plan = plan_request(
+            &root,
+            BacktestHistoryRequest::tick(1, symbol, requested_start_ns, requested_end_ns)
+                .validate()
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(plan.snapshot_hash, retained.snapshot_hash);
     }
 
     #[test]
