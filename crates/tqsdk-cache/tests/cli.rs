@@ -8,9 +8,9 @@ use tqsdk_cache::{TradingCalendarHolidaysSnapshot, write_trading_calendar_holida
 use tqsdk_data::{
     BACKTEST_HISTORY_METADATA_SCHEMA_VERSION, BacktestHistoryMarketKind,
     BacktestHistoryMetadataCache, BacktestHistoryMetadataSnapshot, BacktestHistoryPhysicalSegment,
-    BacktestHistoryTradingDay, BacktestTickCache, KlineSessionTemplate, MinuteKlineCache,
-    MinuteKlineCacheSnapshot, TradingCalendarHolidays, backtest_tick_trading_day_for_timestamp_ns,
-    backtest_tick_trading_day_range,
+    BacktestHistoryTradingDay, BacktestTickCache, DailyKlineCache, KlineSessionTemplate,
+    MinuteKlineCache, MinuteKlineCacheSnapshot, TradingCalendarHolidays,
+    backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
 };
 
 fn v3_result<'a>(json: &'a Value, command: &str, status: &str, exit_code: i32) -> &'a Value {
@@ -468,6 +468,275 @@ fn minute_fill_dry_run_is_cache_only_and_does_not_create_the_root() {
     assert_eq!(result["report"]["cache_kind"], "minute");
     assert_eq!(result["report"]["remote_used"], false);
     assert_eq!(result["report"]["complete"], false);
+}
+
+#[test]
+fn daily_fill_dry_run_is_cache_only_and_does_not_create_the_root() {
+    let cache_dir = temp_dir("daily-fill-dry-run");
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "daily",
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-03",
+        "--dry-run",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!cache_dir.exists());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "fill", "incomplete", 1);
+    assert_eq!(result["cache_kind"], "daily");
+    assert_eq!(result["dry_run"], true);
+    assert_eq!(result["report_path"], Value::Null);
+    assert_eq!(result["symbols"][0]["symbol"], "SHFE.rb2601");
+    assert_eq!(result["symbols"][0]["complete"], false);
+}
+
+#[test]
+fn daily_fill_dry_run_has_a_human_readable_summary() {
+    let cache_dir = temp_dir("daily-fill-text");
+    let output = run([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "daily",
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-03",
+        "--dry-run",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Kind: daily"));
+    assert!(stdout.contains("Mode: dry run"));
+    assert!(stdout.contains("Coverage: incomplete | Remote: not used | Rows written: 0"));
+    assert!(stdout.contains("Symbols (1)"));
+    assert!(!cache_dir.exists());
+}
+
+#[test]
+fn daily_inspect_and_verify_read_final_coverage_without_remote_access() {
+    let cache_dir = temp_dir("daily-inspect-verify");
+    let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    DailyKlineCache::open(&cache_dir)
+        .unwrap()
+        .store_final_range(
+            "SHFE.rb2601",
+            range.start_ns,
+            range.end_ns,
+            &MinuteKlineCacheSnapshot::cst_v1(),
+            &[],
+        )
+        .unwrap();
+
+    let inspected = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "daily",
+        "inspect",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+    ]);
+    assert!(inspected.status.success());
+    let json: Value = serde_json::from_slice(&inspected.stdout).unwrap();
+    let result = v3_result(&json, "inspect", "success", 0);
+    assert_eq!(result["cache_kind"], "daily");
+    assert_eq!(result["statuses"][0]["complete"], true);
+
+    let verified = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "daily",
+        "verify",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--replay",
+        "--min-rows",
+        "0",
+    ]);
+    assert!(verified.status.success());
+    let json: Value = serde_json::from_slice(&verified.stdout).unwrap();
+    let result = v3_result(&json, "verify", "success", 0);
+    assert_eq!(result["cache_kind"], "daily");
+    assert_eq!(result["coverage_complete"], true);
+    assert_eq!(result["replay_rows"], 0);
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn daily_fill_writes_a_report_that_daily_verify_can_bind() {
+    let cache_dir = temp_dir("daily-fill-report");
+    let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    DailyKlineCache::open(&cache_dir)
+        .unwrap()
+        .store_final_range(
+            "SHFE.rb2601",
+            range.start_ns,
+            range.end_ns,
+            &MinuteKlineCacheSnapshot::cst_v1(),
+            &[],
+        )
+        .unwrap();
+    let report_path = cache_dir.join("daily-fill-report.json");
+
+    let filled = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "daily",
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--report",
+        report_path.to_str().unwrap(),
+    ]);
+    assert!(filled.status.success());
+    let json: Value = serde_json::from_slice(&filled.stdout).unwrap();
+    let result = v3_result(&json, "fill", "success", 0);
+    assert_eq!(result["cache_kind"], "daily");
+    assert_eq!(result["report"]["cache_kind"], "daily");
+    assert_eq!(result["report"]["complete"], true);
+    assert!(report_path.exists());
+
+    let verified = run_without_auth_json([
+        "--kind",
+        "daily",
+        "verify",
+        "--report",
+        report_path.to_str().unwrap(),
+    ]);
+    assert!(verified.status.success());
+    let json: Value = serde_json::from_slice(&verified.stdout).unwrap();
+    let result = v3_result(&json, "verify", "success", 0);
+    assert_eq!(result["cache_kind"], "daily");
+    assert_eq!(result["source_report"], "bound");
+    assert_eq!(result["coverage_complete"], true);
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn daily_purge_is_whole_symbol_only_and_requires_confirmation() {
+    let cache_dir = temp_dir("daily-purge");
+    let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    let cache = DailyKlineCache::open(&cache_dir).unwrap();
+    cache
+        .store_final_range(
+            "SHFE.rb2601",
+            range.start_ns,
+            range.end_ns,
+            &MinuteKlineCacheSnapshot::cst_v1(),
+            &[],
+        )
+        .unwrap();
+    let path = cache.symbol_file_path("SHFE.rb2601");
+    assert!(path.exists());
+
+    let dry_run = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "daily",
+        "purge",
+        "--symbol",
+        "SHFE.rb2601",
+        "--dry-run",
+    ]);
+    assert!(dry_run.status.success());
+    let json: Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    let result = v3_result(&json, "purge", "success", 0);
+    assert_eq!(result["cache_kind"], "daily");
+    assert_eq!(result["would_remove_files"].as_array().unwrap().len(), 1);
+    assert!(path.exists());
+
+    let not_confirmed = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "daily",
+        "purge",
+        "--symbol",
+        "SHFE.rb2601",
+    ]);
+    assert_eq!(not_confirmed.status.code(), Some(2));
+    assert!(path.exists());
+
+    let date_scoped = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "daily",
+        "purge",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--yes",
+    ]);
+    assert_eq!(date_scoped.status.code(), Some(2));
+    assert!(path.exists());
+
+    let root_gate = BacktestTickCache::open(&cache_dir).unwrap();
+    let shared_lock = root_gate.try_acquire_remote_fill_shared_lock().unwrap();
+    let busy = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "daily",
+        "purge",
+        "--symbol",
+        "SHFE.rb2601",
+        "--yes",
+    ]);
+    assert_eq!(busy.status.code(), Some(75));
+    assert!(path.exists());
+    drop(shared_lock);
+
+    let purged = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "daily",
+        "purge",
+        "--symbol",
+        "SHFE.rb2601",
+        "--yes",
+    ]);
+    assert!(purged.status.success());
+    let json: Value = serde_json::from_slice(&purged.stdout).unwrap();
+    let result = v3_result(&json, "purge", "success", 0);
+    assert_eq!(result["cache_kind"], "daily");
+    assert_eq!(result["removed_files"], 1);
+    assert!(!path.exists());
+
+    let _ = std::fs::remove_dir_all(cache_dir);
 }
 
 #[test]

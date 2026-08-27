@@ -1,9 +1,9 @@
 # `tqsdk-cache`
 
 `tqsdk-cache` 是 `tqsdk-rust` 的可选 cache operator CLI。它管理同一 history root 中的
-daily TQBN tick cache 和 canonical final-60s Kline cache，也可通过同一份回测历史查询合同导出
-时间区间；它是 workspace member，但不属于 Cargo default-members，也不会进入普通策略、回测或
-live 行情的 hot path。
+daily TQBN tick cache、canonical final-60s Kline cache 和 native final-1d Kline cache，也可通过
+同一份回测历史查询合同导出时间区间；它是 workspace member，但不属于 Cargo default-members，也不会
+进入普通策略、回测或 live 行情的 hot path。
 
 ```bash
 cargo run -p tqsdk-cache -- --help
@@ -21,9 +21,13 @@ session owner、后台守护进程、relay 或监控服务。完整合同见
 | --- | --- | --- |
 | `tick` | `series/<YYYYMMDD>/tick/<symbol>.tqbn` | `inventory`、`inspect`、`fill`、`verify`、`doctor`、`repair-locks` |
 | `minute` | canonical final-60s `.tqmk` | `inventory`、`inspect`、`fill`、`verify`、`doctor`、`purge` |
-| `all` | 两类 cache 的汇总 | 仅 `inventory`、`doctor` |
+| `daily` | `daily-kline-v1/<logical-symbol>.tqdk` native final-1d single file | `inspect`、`fill`、`verify`、`purge` |
+| `all` | tick 与 minute cache 的汇总 | 仅 `inventory`、`doctor` |
 
-`metadata-refresh` 不属于 tick/minute family；保留默认 `--kind tick`，只支持 `--market futures`。
+daily 的 `inspect` / `verify` 都针对显式 logical symbol 和 closed-day window；它们严格离线、
+不补数、不写 cache。`verify --report` 只接受 native-daily fill report。daily 不支持 `inventory` 或
+`doctor`，因为单文件 layout 目前没有可靠的全量 logical-symbol 枚举；`--kind all` 也不包含 daily。
+`metadata-refresh` 不属于 cache family；保留默认 `--kind tick`，只支持 `--market futures`。
 它显式调用官方 metadata source，在 exclusive root remote-fill lock 内保存 immutable sidecar；不会改写
 `.tqbn` 或 minute 文件。新 snapshot 覆盖请求窗口即可供 `CacheOnly` 解析；若已有更宽、兼容的 active
 snapshot，显式维护仍原子推进 active pointer；旧 snapshot 按 content hash 保留，可供已绑定旧 cache
@@ -59,10 +63,13 @@ pointer，后续查询会优先复用覆盖其范围的 retained snapshot。
 
 `--market futures|stock` 只影响 `--kind minute fill` 的 server-side backtest endpoint：
 futures 是默认值，允许 `--universe`；stock 必须提供一个或多个显式 `--symbol`，不支持 futures
-universe selector。tick fill 不支持 stock market；`--kind tick --market stock` 是 usage error。
+universe selector。tick 与 daily fill 不支持 stock market；`--kind tick|daily --market stock` 是 usage error。
+daily fill 同样支持 futures `--symbol` / `--universe`，但它只请求 server-side native `1d` chart；当前或
+未来交易日、`--include-open-day`、`--repair-stale`、`--daily-slices` 与无法映射到 history client 的
+remote-scheduler 参数都会直接以 usage error 拒绝，绝不降级成 tick/minute 聚合。
 
-tick 与 minute cache 都没有自动 retention、max-byte eviction 或后台清理。读写、普通回测和
-普通 `--kind minute fill` 都不会删除已有数据；`--repair-stale` 是唯一用于混合 snapshot 的显式、
+tick、minute 与 daily cache 都没有自动 retention、max-byte eviction 或后台清理。读写、普通回测和
+普通 `--kind minute|daily fill` 都不会删除已有数据；`--repair-stale` 是唯一用于混合 snapshot 的显式、
 受控删除例外。
 
 ### Tick companion lock repair
@@ -124,6 +131,15 @@ cargo run -p tqsdk-cache -- \
   --start-day 2026-06-01 --end-day 2026-06-30 \
   --symbol-concurrency 2
 
+# final-only native daily fill：远端只请求官方 1d chart，不从 60s/tick 聚合。
+TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history --kind daily fill \
+  --symbol KQ.i@SHFE.au \
+  --start-day 2026-06-01 --end-day 2026-06-30 \
+  --symbol-concurrency 2 \
+  --report /var/lib/tqsdk/history/reports/daily/june.json
+
 # 仅在已确认 mixed snapshot 时显式修复冲突整月分区，再由同一次 fill 补齐。
 TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
 cargo run -p tqsdk-cache -- \
@@ -141,10 +157,10 @@ cargo run -p tqsdk-cache -- \
 ```
 
 完整 static cache 命中时 fill 不创建远端 session，也不需要 `TQ_AUTH_USER` /
-`TQ_AUTH_PASS`。发生缺口时，tick 和 minute 都只通过官方 server-side backtest stream 补齐，
-不使用 `tq_dl` 或专业历史下载权限。minute 只请求 60-second Kline stream；每个 batch 必须收到
-远端 terminal 成功才写 final coverage，合法的零行窗口也可成为 final。取消、超时或失败 batch
-不会标记其未完成范围。
+`TQ_AUTH_PASS`。发生缺口时，tick、minute 与 daily 都只通过官方 server-side backtest stream 补齐，
+不使用 `tq_dl` 或专业历史下载权限。minute 只请求 60-second Kline stream；daily 只请求 native 1d
+chart；每个 batch 必须收到远端 terminal 成功才写 final coverage，合法的零行窗口也可成为 final。取消、
+超时或失败 batch 不会标记其未完成范围。
 
 tick fill 按 trading day 顺序执行，以 8192 rows 缓冲追加；取消会 flush 已接受短尾，但不推进未 terminal
 范围的 final/provisional coverage。fill-only 不回读刚写入 rows；`rows_written` 只统计实际物理落盘，
@@ -156,7 +172,7 @@ tick fill 按 trading day 顺序执行，以 8192 rows 缓冲追加；取消会 
 `query` 直接复用 `tqsdk-data::BacktestHistoryClient`，不解析 `.tqbn` 文件，也不增加另一份
 history store。它接受 RFC 3339 的半开区间 `[start, end)`，支持 Tick、任意合法 Kline 周期，以及
 主连所需的 logical → physical segment 投影。当前 cache-backed query 只支持 futures。
-行类型由 `--series tick|kline` 选择；query 保留默认 `--kind tick`，而 `--kind minute|all` 和
+行类型由 `--series tick|kline` 选择；query 保留默认 `--kind tick`，而 `--kind minute|daily|all` 和
 `--market stock` 都是 usage error，避免把 cache 运维选择器误当成 row shape 或另一条数据源。
 
 默认 `--policy remote-on-miss`：先检查本地 durable coverage，只有缺口才懒加载
@@ -254,13 +270,13 @@ cargo run -p tqsdk-cache -- \
 
 ## Inspect、verify 与 doctor
 
-| 命令 | tick | minute |
-| --- | --- | --- |
-| `inventory` | 快速枚举日分区和文件问题，不解码 records | 快速枚举月文件，不解码文件内容 |
-| `repair-locks` | 默认 DryRun 检查每个 legacy 分区 lock 并逐文件检查 sidecar；`--apply` 只补既有 `.tqbn` 缺失的 lock | 不支持 |
-| `inspect` | 显式 physical cache symbol 的 coverage | 显式 logical cache symbol 的 final-60s coverage |
-| `verify` | CacheOnly coverage，选配完整本地 tick replay | CacheOnly final coverage，选配流式读取 minute rows |
-| `doctor` | 深度解码 TQBN tick partitions | 深度解码 monthly minute files，并报告 `readable`、`legacy_unsupported`、`unsupported_version` 或 `corrupt` |
+| 命令 | tick | minute | daily |
+| --- | --- | --- | --- |
+| `inventory` | 快速枚举日分区和文件问题，不解码 records | 快速枚举月文件，不解码文件内容 | 不支持：不能可靠枚举 logical symbol |
+| `repair-locks` | 默认 DryRun 检查每个 legacy 分区 lock 并逐文件检查 sidecar；`--apply` 只补既有 `.tqbn` 缺失的 lock | 不支持 | 不支持 |
+| `inspect` | 显式 physical cache symbol 的 coverage | 显式 logical cache symbol 的 final-60s coverage | 显式 logical cache symbol 的 native-1d final coverage |
+| `verify` | CacheOnly coverage，选配完整本地 tick replay | CacheOnly final coverage，选配流式读取 minute rows | CacheOnly final coverage，选配读取 native-1d rows |
+| `doctor` | 深度解码 TQBN tick partitions | 深度解码 monthly minute files，并报告 `readable`、`legacy_unsupported`、`unsupported_version` 或 `corrupt` | 不支持：不枚举 symbol 文件 |
 
 `verify` 从不远端补数或写 cache。可以给出显式 closed-day window，也可以使用匹配的 fill report：
 
@@ -276,6 +292,12 @@ cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history --kind minute verify \
   --symbol KQ.i@SHFE.au \
   --start-day 2026-06-01 --end-day 2026-06-30
+
+# 复用 daily report 的 root、window 和 logical symbols；可选重放本地 1d rows。
+cargo run -p tqsdk-cache -- \
+  --kind daily verify \
+  --report /var/lib/tqsdk/history/reports/daily/june.json \
+  --replay --min-rows 1
 ```
 
 tick `fill` 保留 CST `18:00` TQBN partition、当前交易日 provisional checkpoint 与
@@ -289,10 +311,10 @@ root advisory gate 的规则固定如下：
 
 | 操作 | root gate |
 | --- | --- |
-| 普通 tick/minute fill、`query --policy remote-on-miss` | shared |
+| 普通 tick/minute/daily fill、`query --policy remote-on-miss` | shared |
 | tick `repair-locks`（含 DryRun） | exclusive |
-| cache refresh、`fill --repair-stale`、tick/minute verify、doctor、真实 minute purge | exclusive |
-| inventory、fill dry-run、minute purge dry-run | none |
+| cache refresh、`fill --repair-stale`、tick/minute/daily verify、tick/minute doctor、真实 minute/daily purge | exclusive |
+| inventory、fill dry-run、minute/daily purge dry-run | none |
 
 shared gate 允许不同 series 并发，同时阻止 destructive/stable-view maintenance 穿插。每个实际补洞再取
 `cache family × cache symbol` 的跨进程 lease；等待者重查 coverage 后复用已有结果，不重复发远端请求。
@@ -335,9 +357,13 @@ minute fill 使用独立的 `cache_kind=minute` report（当前 schema v1），�
 logical cache symbols；`--kind minute verify --report` 只接受此类 report，且以 report 记录的
 canonical root、range 和 symbols 为准。
 
-进度总是写 stderr。`--progress jsonl` 对两类 fill 都输出 schema-v2
-`tqsdk-cache.progress` JSONL，并带 `cache_kind: "tick" | "minute"`；不要再按旧 schema-v1
-解析。tick 的 progress 以 physical cache symbol 展示，minute 则以 logical minute symbol 展示。
+daily fill 使用独立的 `cache_kind=daily` report（当前 schema v1），默认写入
+`<cache-root>/reports/daily/tqsdk-cache-daily-fill-<utc>-<pid>.json`。它绑定 logical symbol、
+closed-day window 和 canonical root；`--kind daily verify --report` 只接受此类 report。
+
+进度总是写 stderr。`--progress jsonl` 对 tick、minute 与 daily fill 都输出 schema-v2
+`tqsdk-cache.progress` JSONL，并带 `cache_kind: "tick" | "minute" | "daily"`；不要再按旧 schema-v1
+解析。tick 的 progress 以 physical cache symbol 展示，minute 与 daily 则以 logical symbol 展示。
 
 ## 显式破坏性维护
 
@@ -361,8 +387,25 @@ cargo run -p tqsdk-cache -- \
   --start-day 2026-06-01 --end-day 2026-06-30 --yes
 ```
 
+daily purge 同样必须恰好一个 `--symbol` 和 `--yes`，但**不接受** `--start-day` / `--end-day`：
+native 1d cache 的一个 logical symbol 就是一整个 `.tqdk` 文件。`--dry-run` 只列出该文件和大小；
+真实 purge 在稳定视图锁内删除整个文件。
+
+```bash
+# 先确认会删除的整只 logical symbol 文件。
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history --kind daily purge \
+  --symbol KQ.i@SHFE.au --dry-run
+
+# 明确确认后删除该 .tqdk 文件。
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history --kind daily purge \
+  --symbol KQ.i@SHFE.au --yes
+```
+
 tick 的 refresh / purge / compact 仍是显式 SDK API，不由 CLI 自动执行。真实 minute purge 在 exclusive
-root gate 内再取每月文件锁；dry-run 故意不取稳定视图 gate，应先核对范围。无论哪一类 cache，都不会自行清理。
+root gate 内再取每月文件锁；daily purge 在同一 root gate 内再取 symbol file lock。两种 dry-run 都
+故意不取稳定视图 gate，应先核对范围。无论哪一类 cache，都不会自行清理。
 
 ## 验证
 

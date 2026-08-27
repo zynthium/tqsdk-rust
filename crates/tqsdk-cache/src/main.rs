@@ -10,19 +10,22 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tqsdk::{BacktestRemoteFillCancellation, BacktestRemoteFillConfig, RemoteFillPlan, Tq};
 use tqsdk_cache::{
-    FillReport, FillReportCalendar, FillReportSymbolDayStats, FillSelectorReport,
+    DailyFillReport, FillReport, FillReportCalendar, FillReportSymbolDayStats, FillSelectorReport,
     MINUTE_FILL_REPORT_SCHEMA_VERSION, MinuteCacheCoverageSnapshot, MinuteFillReport,
     MinuteFillReportSymbol, PersistedFillReport, REPORT_SCHEMA_VERSION,
-    TradingCalendarHolidaysSnapshot, TradingDayWindow, default_fill_report_path,
-    default_minute_fill_report_path, open_cache, open_read_only_cache, read_fill_report,
-    read_persisted_fill_report, read_trading_calendar_holidays_snapshot, write_fill_report,
-    write_minute_fill_report, write_trading_calendar_holidays_snapshot,
+    TradingCalendarHolidaysSnapshot, TradingDayWindow, default_daily_fill_report_path,
+    default_fill_report_path, default_minute_fill_report_path, open_cache, open_read_only_cache,
+    read_fill_report, read_persisted_fill_report, read_trading_calendar_holidays_snapshot,
+    write_daily_fill_report, write_fill_report, write_minute_fill_report,
+    write_trading_calendar_holidays_snapshot,
 };
 use tqsdk_data::{
-    BacktestHistoryMaintenanceClient, BacktestTickCache, BacktestTickCacheLockRepairMode,
-    BacktestTickCacheLockRepairStatus, DataClient, DataError, HISTORY_SERIES_CACHE_FORMAT_ID,
-    HISTORY_SERIES_CACHE_SCHEMA_VERSION, HistorySeriesCacheFileStatus, MinuteKlineCache,
-    MinuteKlineCacheSnapshot, backtest_tick_trading_day_for_timestamp_ns,
+    BacktestHistoryClient, BacktestHistoryMaintenanceClient, BacktestHistoryPolicy,
+    BacktestHistoryRequest, BacktestTickCache, BacktestTickCacheLockRepairMode,
+    BacktestTickCacheLockRepairStatus, DailyKlineCache, DataClient, DataError,
+    HISTORY_SERIES_CACHE_FORMAT_ID, HISTORY_SERIES_CACHE_SCHEMA_VERSION,
+    HistorySeriesCacheFileStatus, MinuteKlineCache, MinuteKlineCacheSnapshot,
+    backtest_tick_trading_day_for_timestamp_ns,
 };
 use tqsdk_session::SessionClientBuilder;
 
@@ -40,7 +43,7 @@ use terminal::{write_error as write_terminal_error, write_result as write_termin
 #[command(
     name = "tqsdk-cache",
     version,
-    about = "Manage canonical tick and 60-second minute backtest caches"
+    about = "Manage canonical tick, 60-second minute, and native daily backtest caches"
 )]
 struct Cli {
     /// Canonical cache root. Defaults to TQSDK_HISTORY_CACHE_DIR or ~/.tqsdk/data_series_1.
@@ -55,7 +58,7 @@ struct Cli {
     /// JSON result contract. Requires --output-format json; V2 preserves the legacy shape.
     #[arg(long, global = true, value_enum)]
     output_schema: Option<OutputSchema>,
-    /// Cache family to manage. `minute` stores only final canonical 60-second Klines.
+    /// Cache family to manage. `minute` and `daily` store only final Klines.
     #[arg(long, global = true, value_enum, default_value_t = CacheKind::Tick)]
     kind: CacheKind,
     /// Backtest market used for remote minute fills. Futures is the default.
@@ -83,6 +86,7 @@ enum OutputFormat {
 enum CacheKind {
     Tick,
     Minute,
+    Daily,
     All,
 }
 
@@ -91,6 +95,7 @@ impl CacheKind {
         match self {
             Self::Tick => "tick",
             Self::Minute => "minute",
+            Self::Daily => "daily",
             Self::All => "all",
         }
     }
@@ -332,8 +337,8 @@ struct PurgeArgs {
     #[command(flatten)]
     symbols: SymbolsArgs,
     #[command(flatten)]
-    days: DaysArgs,
-    /// List the exact monthly files that would be removed without writing.
+    days: OptionalDaysArgs,
+    /// List the exact cache files that would be removed without writing.
     #[arg(long)]
     dry_run: bool,
     /// Confirm destructive deletion. Required unless --dry-run is used.
@@ -1228,9 +1233,20 @@ fn validate_command_kind(command: &Command, kind: CacheKind) -> Result<(), CliEr
             "--kind all is only supported by inventory and doctor".to_string(),
         ));
     }
-    if matches!(command, Command::Purge(_)) && !matches!(kind, CacheKind::Minute) {
+    if matches!(kind, CacheKind::Daily)
+        && !matches!(
+            command,
+            Command::Inspect(_) | Command::Fill(_) | Command::Verify(_) | Command::Purge(_)
+        )
+    {
         return Err(CliError::Usage(
-            "purge currently supports only --kind minute".to_string(),
+            "--kind daily supports inspect, fill, verify, and purge".to_string(),
+        ));
+    }
+    if matches!(command, Command::Purge(_)) && !matches!(kind, CacheKind::Minute | CacheKind::Daily)
+    {
+        return Err(CliError::Usage(
+            "purge supports only --kind minute or --kind daily".to_string(),
         ));
     }
     if matches!(command, Command::RepairLocks(_)) && !matches!(kind, CacheKind::Tick) {
@@ -1349,6 +1365,7 @@ fn inventory(cache_dir: Option<&Path>, kind: CacheKind) -> Result<CommandOutcome
     let result = match kind {
         CacheKind::Tick => tick_json(),
         CacheKind::Minute => minute_json(),
+        CacheKind::Daily => unreachable!("kind validation rejects daily for inventory"),
         CacheKind::All => json!({
             "cache_kind": kind.as_str(),
             "tick": tick_json(),
@@ -1402,6 +1419,23 @@ fn inspect(
                 })
                 .collect::<Result<Vec<_>, _>>()?
         }
+        CacheKind::Daily => {
+            let daily_cache = DailyKlineCache::open_read_only(&cache_dir);
+            symbols
+                .iter()
+                .map(|symbol| {
+                    let snapshot = minute_cache_snapshot_for_symbol(
+                        &cache_dir,
+                        symbol.as_str(),
+                        window.start_ns,
+                        window.end_ns,
+                    )?;
+                    daily_cache
+                        .inspect(symbol, window.start_ns, window.end_ns, &snapshot)
+                        .map(|status| daily_cache_status_json(&status))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
         CacheKind::All => unreachable!("kind validation rejects all for inspect"),
     };
     Ok(CommandOutcome {
@@ -1432,8 +1466,195 @@ async fn fill(
         )),
         CacheKind::Tick => fill_tick(cache_dir, args).await,
         CacheKind::Minute => fill_minute(cache_dir, market, args).await,
+        CacheKind::Daily => fill_daily(cache_dir, market, args).await,
         CacheKind::All => unreachable!("kind validation rejects all for fill"),
     }
+}
+
+async fn fill_daily(
+    cache_dir: Option<&Path>,
+    market: MarketKind,
+    args: FillArgs,
+) -> Result<CommandOutcome, CliError> {
+    if !matches!(market, MarketKind::Futures) {
+        return Err(CliError::Usage(
+            "--kind daily fill supports only --market futures".to_string(),
+        ));
+    }
+    if args.repair_stale {
+        return Err(CliError::Usage(
+            "--repair-stale is supported only for --kind minute fill".to_string(),
+        ));
+    }
+    if args.include_open_day {
+        return Err(CliError::Usage(
+            "--include-open-day is not supported for --kind daily; daily coverage is final-only"
+                .to_string(),
+        ));
+    }
+    if args.daily_slices {
+        return Err(CliError::Usage(
+            "--daily-slices is not supported for --kind daily; native daily fill requests the exact missing range"
+                .to_string(),
+        ));
+    }
+    if args.symbol_batch_size.is_some()
+        || args.idle_timeout_secs.is_some()
+        || args.batch_timeout_secs.is_some()
+        || args.lock_wait_secs.is_some()
+    {
+        return Err(CliError::Usage(
+            "--kind daily fill supports only --symbol-concurrency from the remote scheduler options"
+                .to_string(),
+        ));
+    }
+
+    let explicit_symbols = normalized_symbols_allow_empty(args.symbols.symbols)?;
+    let universe = normalized_universe(args.universe)?;
+    if explicit_symbols.is_empty() && universe.is_none() {
+        return Err(CliError::Usage(
+            "fill requires at least one --symbol or --universe expression".to_string(),
+        ));
+    }
+    let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
+    let mut resolved =
+        resolve_fill_window(&canonical_cache_dir, &args.days, args.dry_run, false).await?;
+    persist_calendar_if_needed(
+        canonical_cache_dir.as_path(),
+        &mut resolved.calendar,
+        args.dry_run,
+    )?;
+    debug_assert!(resolved.provisional.is_none());
+    let window = resolved.window;
+    let symbols = resolve_minute_fill_symbols(explicit_symbols, universe.as_deref()).await?;
+
+    if args.dry_run {
+        let before = daily_cache_statuses(&canonical_cache_dir, &symbols, &window)?;
+        let complete = before
+            .iter()
+            .all(tqsdk_data::DailyKlineCacheStatus::is_complete);
+        return Ok(CommandOutcome {
+            value: json!({
+                "schema_version": REPORT_SCHEMA_VERSION,
+                "command": "fill",
+                "cache_kind": "daily",
+                "market": market.as_str(),
+                "cache_dir": canonical_cache_dir,
+                "dry_run": true,
+                "report_path": Value::Null,
+                "requested_days": window,
+                "symbols": before.iter().map(daily_cache_status_json).collect::<Vec<_>>(),
+                "complete": complete,
+                "remote_used": false,
+                "rows_written": 0,
+            }),
+            exit_code: if complete { 0 } else { 1 },
+        });
+    }
+
+    let mut builder = BacktestHistoryClient::builder(canonical_cache_dir.clone())
+        .policy(BacktestHistoryPolicy::RemoteOnMiss)
+        .auth_env();
+    if let Some(symbol_concurrency) = args.symbol_concurrency {
+        builder = builder.logical_concurrency(symbol_concurrency);
+    }
+    let client = builder.build()?;
+    let progress_session = FillProgressSession::new(args.progress, args.progress_max_bars, "daily");
+    let reporter = progress_session.observer();
+    reporter.planning("materializing final native daily coverage");
+    let requests = symbols.iter().enumerate().map(|(index, symbol)| {
+        BacktestHistoryRequest::kline(
+            u64::try_from(index).expect("symbol count fits request identifier"),
+            symbol,
+            Duration::from_secs(24 * 60 * 60),
+            window.start_ns,
+            window.end_ns,
+        )
+    });
+    let report = match client.materialize_cache(requests).await {
+        Ok(report) => report,
+        Err(error) => {
+            progress_session.finish(
+                ProgressTerminalStatus::Failed,
+                "daily fill failed; final coverage was not committed for failed ranges",
+            );
+            return Err(error.into());
+        }
+    };
+    let after = daily_cache_statuses(&canonical_cache_dir, &symbols, &window)?;
+    let complete = after
+        .iter()
+        .all(tqsdk_data::DailyKlineCacheStatus::is_complete);
+    let rows_written = report
+        .completed
+        .iter()
+        .fold(0_usize, |total, item| total.saturating_add(item.rows));
+    let remote_used = report.completed.iter().any(|item| item.remote_used);
+    progress_session.finish(
+        if complete {
+            ProgressTerminalStatus::Complete
+        } else {
+            ProgressTerminalStatus::Failed
+        },
+        if complete {
+            "daily fill complete; final native daily coverage verified"
+        } else {
+            "daily fill completed with missing native daily coverage"
+        },
+    );
+    let daily_report = DailyFillReport::new(
+        &canonical_cache_dir,
+        window.clone(),
+        market.as_str(),
+        &after,
+        rows_written,
+        remote_used,
+        false,
+    );
+    let report_path = args
+        .report
+        .unwrap_or_else(|| default_daily_fill_report_path(&canonical_cache_dir));
+    write_daily_fill_report(&report_path, &daily_report)?;
+
+    Ok(CommandOutcome {
+        value: json!({
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "command": "fill",
+            "cache_kind": "daily",
+            "market": market.as_str(),
+            "cache_dir": canonical_cache_dir,
+            "dry_run": false,
+            "report_path": report_path,
+            "requested_days": window,
+            "symbols": after.iter().map(daily_cache_status_json).collect::<Vec<_>>(),
+            "complete": complete,
+            "remote_used": remote_used,
+            "rows_written": rows_written,
+            "report": daily_report,
+        }),
+        exit_code: if complete { 0 } else { 1 },
+    })
+}
+
+fn daily_cache_statuses(
+    cache_dir: &Path,
+    symbols: &[String],
+    window: &TradingDayWindow,
+) -> Result<Vec<tqsdk_data::DailyKlineCacheStatus>, CliError> {
+    let cache = DailyKlineCache::open_read_only(cache_dir);
+    symbols
+        .iter()
+        .map(|symbol| {
+            let snapshot = minute_cache_snapshot_for_symbol(
+                cache_dir,
+                symbol,
+                window.start_ns,
+                window.end_ns,
+            )?;
+            cache.inspect(symbol, window.start_ns, window.end_ns, &snapshot)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 async fn fill_minute(
@@ -2091,6 +2312,7 @@ async fn verify(
     match kind {
         CacheKind::Tick => verify_tick(cache_dir, args).await,
         CacheKind::Minute => verify_minute(cache_dir, args).await,
+        CacheKind::Daily => verify_daily(cache_dir, args).await,
         CacheKind::All => unreachable!("kind validation rejects all for verify"),
     }
 }
@@ -2302,12 +2524,142 @@ async fn verify_minute(
     })
 }
 
+async fn verify_daily(
+    cache_dir: Option<&Path>,
+    args: VerifyArgs,
+) -> Result<CommandOutcome, CliError> {
+    if args.min_rows.is_some() && !args.replay {
+        return Err(CliError::Usage("--min-rows requires --replay".to_string()));
+    }
+
+    let (canonical_cache_dir, window, symbols, source_report, report_market) = match args.report {
+        Some(report_path) => {
+            if !args.symbols.symbols.is_empty()
+                || args.days.start_day.is_some()
+                || args.days.end_day.is_some()
+            {
+                return Err(CliError::Usage(
+                    "--report cannot be combined with --symbol, --start-day, or --end-day"
+                        .to_string(),
+                ));
+            }
+            let PersistedFillReport::Daily(report) = read_persisted_fill_report(&report_path)?
+            else {
+                return Err(CliError::Usage(
+                    "--kind daily verify requires a native-daily fill report".to_string(),
+                ));
+            };
+            let report_root = PathBuf::from(&report.cache_dir);
+            let (_, canonical_cache_dir) = open_read_only_cache(Some(&report_root))?;
+            if let Some(requested_cache_dir) = cache_dir {
+                let (_, requested_canonical_dir) = open_read_only_cache(Some(requested_cache_dir))?;
+                if requested_canonical_dir != canonical_cache_dir {
+                    return Err(CliError::Usage(format!(
+                        "--cache-dir {} does not match report cache root {}",
+                        requested_canonical_dir.display(),
+                        canonical_cache_dir.display()
+                    )));
+                }
+            }
+            let symbols = report.symbols()?;
+            let requested_days = report.requested_days;
+            let report_market = report.market;
+            (
+                canonical_cache_dir,
+                requested_days,
+                symbols,
+                Some("bound"),
+                report_market,
+            )
+        }
+        None => {
+            let symbols = normalized_symbols(args.symbols.symbols)?;
+            let start_day = args.days.start_day.ok_or_else(|| {
+                CliError::Usage("verify requires --start-day without --report".to_string())
+            })?;
+            let end_day = args.days.end_day.ok_or_else(|| {
+                CliError::Usage("verify requires --end-day without --report".to_string())
+            })?;
+            let window = TradingDayWindow::closed_from_days(start_day, end_day)?;
+            let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
+            (
+                canonical_cache_dir,
+                window,
+                symbols,
+                None,
+                "futures".to_string(),
+            )
+        }
+    };
+
+    let root_gate = BacktestTickCache::open(&canonical_cache_dir)?;
+    let _lock = root_gate.try_acquire_consistency_read_lock()?;
+    let cache = DailyKlineCache::open_read_only(&canonical_cache_dir);
+    let snapshots = symbols
+        .iter()
+        .map(|symbol| {
+            minute_cache_snapshot_for_symbol(
+                &canonical_cache_dir,
+                symbol,
+                window.start_ns,
+                window.end_ns,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let statuses = symbols
+        .iter()
+        .zip(&snapshots)
+        .map(|(symbol, snapshot)| cache.inspect(symbol, window.start_ns, window.end_ns, snapshot))
+        .collect::<Result<Vec<_>, _>>()?;
+    let coverage_complete = statuses
+        .iter()
+        .all(tqsdk_data::DailyKlineCacheStatus::is_complete);
+    let replay_rows = if args.replay && coverage_complete {
+        let mut total = 0_u64;
+        for (symbol, snapshot) in symbols.iter().zip(&snapshots) {
+            let rows = cache.read_range(symbol, window.start_ns, window.end_ns, snapshot)?;
+            total = total.saturating_add(u64::try_from(rows.len()).unwrap_or(u64::MAX));
+        }
+        Some(total)
+    } else {
+        None
+    };
+    let replay_ok = args
+        .min_rows
+        .is_none_or(|minimum| replay_rows.is_some_and(|rows| rows >= minimum));
+
+    Ok(CommandOutcome {
+        value: json!({
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "command": "verify",
+            "cache_kind": "daily",
+            "market": report_market,
+            "cache_dir": canonical_cache_dir,
+            "requested_days": window,
+            "source_report": source_report,
+            "symbols": symbols,
+            "coverage_complete": coverage_complete,
+            "replay_rows": replay_rows,
+            "min_rows": args.min_rows,
+            "statuses": statuses.iter().map(daily_cache_status_json).collect::<Vec<_>>(),
+        }),
+        exit_code: if coverage_complete && replay_ok { 0 } else { 1 },
+    })
+}
+
 fn purge(
     cache_dir: Option<&Path>,
     kind: CacheKind,
     args: PurgeArgs,
 ) -> Result<CommandOutcome, CliError> {
-    debug_assert!(matches!(kind, CacheKind::Minute));
+    match kind {
+        CacheKind::Minute => purge_minute(cache_dir, args),
+        CacheKind::Daily => purge_daily(cache_dir, args),
+        CacheKind::Tick | CacheKind::All => unreachable!("kind validation rejects this purge kind"),
+    }
+}
+
+fn purge_minute(cache_dir: Option<&Path>, args: PurgeArgs) -> Result<CommandOutcome, CliError> {
     let symbols = normalized_symbols(args.symbols.symbols)?;
     if symbols.len() != 1 {
         return Err(CliError::Usage(
@@ -2320,7 +2672,15 @@ fn purge(
         ));
     }
     let symbol = symbols.into_iter().next().expect("one symbol was required");
-    let window = TradingDayWindow::from_days(args.days.start_day, args.days.end_day)?;
+    let start_day = args
+        .days
+        .start_day
+        .ok_or_else(|| CliError::Usage("--kind minute purge requires --start-day".to_string()))?;
+    let end_day = args
+        .days
+        .end_day
+        .ok_or_else(|| CliError::Usage("--kind minute purge requires --end-day".to_string()))?;
+    let window = TradingDayWindow::from_days(start_day, end_day)?;
     let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
     if args.dry_run {
         let cache = MinuteKlineCache::open_read_only(&canonical_cache_dir);
@@ -2385,6 +2745,80 @@ fn purge(
     })
 }
 
+fn purge_daily(cache_dir: Option<&Path>, args: PurgeArgs) -> Result<CommandOutcome, CliError> {
+    if args.days.start_day.is_some() || args.days.end_day.is_some() {
+        return Err(CliError::Usage(
+            "--kind daily purge removes one complete symbol file; do not pass --start-day or --end-day"
+                .to_string(),
+        ));
+    }
+    let symbols = normalized_symbols(args.symbols.symbols)?;
+    if symbols.len() != 1 {
+        return Err(CliError::Usage(
+            "--kind daily purge requires exactly one --symbol".to_string(),
+        ));
+    }
+    if !args.dry_run && !args.yes {
+        return Err(CliError::Usage(
+            "--kind daily purge is destructive; pass --yes or use --dry-run".to_string(),
+        ));
+    }
+    let symbol = symbols.into_iter().next().expect("one symbol was required");
+    let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
+
+    if args.dry_run {
+        let cache = DailyKlineCache::open_read_only(&canonical_cache_dir);
+        let path = cache.symbol_file_path(&symbol);
+        let would_remove_files = match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => vec![json!({
+                "path": path,
+                "size_bytes": metadata.len(),
+            })],
+            Ok(_) => {
+                return Err(CliError::Data(DataError::InvalidResponse(format!(
+                    "daily kline cache purge target {} is not a regular file",
+                    path.display()
+                ))));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        return Ok(CommandOutcome {
+            value: json!({
+                "schema_version": REPORT_SCHEMA_VERSION,
+                "command": "purge",
+                "cache_kind": "daily",
+                "cache_dir": canonical_cache_dir,
+                "symbol": symbol,
+                "requested_days": Value::Null,
+                "dry_run": true,
+                "would_remove_files": would_remove_files,
+            }),
+            exit_code: 0,
+        });
+    }
+
+    let root_gate = BacktestTickCache::open(&canonical_cache_dir)?;
+    let _lock = root_gate.try_acquire_consistency_read_lock()?;
+    let cache = DailyKlineCache::open(&canonical_cache_dir)?;
+    let report = cache.purge_symbol(&symbol)?;
+    Ok(CommandOutcome {
+        value: json!({
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "command": "purge",
+            "cache_kind": "daily",
+            "cache_dir": canonical_cache_dir,
+            "symbol": symbol,
+            "requested_days": Value::Null,
+            "dry_run": false,
+            "removed": report.removed,
+            "removed_files": usize::from(report.removed),
+            "removed_bytes": report.removed_bytes,
+        }),
+        exit_code: 0,
+    })
+}
+
 fn doctor(cache_dir: Option<&Path>, kind: CacheKind) -> Result<CommandOutcome, CliError> {
     let (read_only_tick_cache, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
     let _lock = read_only_tick_cache.try_acquire_consistency_read_lock()?;
@@ -2428,6 +2862,7 @@ fn doctor(cache_dir: Option<&Path>, kind: CacheKind) -> Result<CommandOutcome, C
     let mut value = match kind {
         CacheKind::Tick => tick_value()?,
         CacheKind::Minute => minute_value()?,
+        CacheKind::Daily => unreachable!("kind validation rejects daily for doctor"),
         CacheKind::All => {
             let tick = tick_value()?;
             let minute = minute_value()?;
@@ -2992,6 +3427,21 @@ fn minute_cache_status_json(status: &tqsdk_data::MinuteKlineCacheStatus) -> Valu
     })
 }
 
+fn daily_cache_status_json(status: &tqsdk_data::DailyKlineCacheStatus) -> Value {
+    json!({
+        "symbol": status.symbol,
+        "backend_format": status.format_id,
+        "namespace_dir": status.namespace_dir,
+        "path": status.path,
+        "range_start_ns": status.range_start_ns,
+        "range_end_ns": status.range_end_ns,
+        "rows": status.rows,
+        "cached_ranges": status.cached_ranges,
+        "missing_ranges": status.missing_ranges,
+        "complete": status.is_complete(),
+    })
+}
+
 fn fast_inventory_json(inventory: &tqsdk_data::BacktestTickCacheFastInventory) -> Value {
     json!({
         "total_files": inventory.total_files,
@@ -3103,6 +3553,9 @@ fn shutdown_cancellation_message(kind: CacheKind) -> &'static str {
         }
         CacheKind::Minute => {
             "tqsdk-cache: cancellation requested; incomplete minute ranges will remain uncommitted"
+        }
+        CacheKind::Daily => {
+            "tqsdk-cache: cancellation requested; incomplete daily ranges will remain uncommitted"
         }
         CacheKind::All => "tqsdk-cache: cancellation requested",
     }

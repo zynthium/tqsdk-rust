@@ -122,6 +122,38 @@ fn write_fill(output: &mut impl Write, value: &Value) -> io::Result<()> {
         return Ok(());
     }
 
+    if string(value, "cache_kind") == Some("daily") {
+        writeln!(
+            output,
+            "Mode: {}",
+            if boolean(value, "dry_run") {
+                "dry run"
+            } else {
+                "fill"
+            }
+        )?;
+        write_requested_days(output, value.get("requested_days"))?;
+        writeln!(
+            output,
+            "Coverage: {} | Remote: {} | Rows written: {}",
+            if boolean(value, "complete") {
+                "complete"
+            } else {
+                "incomplete"
+            },
+            if boolean(value, "remote_used") {
+                "used"
+            } else {
+                "not used"
+            },
+            number(value, "rows_written"),
+        )?;
+        if let Some(path) = string(value, "report_path") {
+            writeln!(output, "Report: {path}")?;
+        }
+        return write_coverage_statuses(output, value.get("symbols"));
+    }
+
     let Some(report) = value.get("report") else {
         return Ok(());
     };
@@ -484,16 +516,21 @@ fn write_metadata_refresh(output: &mut impl Write, value: &Value) -> io::Result<
 fn write_purge(output: &mut impl Write, value: &Value) -> io::Result<()> {
     write_cache_header(output, value)?;
     write_requested_days(output, value.get("requested_days"))?;
+    let target = if string(value, "cache_kind") == Some("daily") {
+        "symbol file(s)"
+    } else {
+        "monthly file(s)"
+    };
     if boolean(value, "dry_run") {
         writeln!(
             output,
-            "Dry run: {} monthly file(s) would be removed.",
-            array(value, "would_remove_files").len()
+            "Dry run: {} {target} would be removed.",
+            array(value, "would_remove_files").len(),
         )?;
     } else {
         writeln!(
             output,
-            "Removed: {} monthly file(s), {}.",
+            "Removed: {} {target}, {}.",
             number(value, "removed_files"),
             format_bytes(number(value, "removed_bytes"))
         )?;

@@ -1,6 +1,6 @@
 //! Shared contracts for the `tqsdk-cache` command-line tool.
 //!
-//! The crate intentionally manages only the canonical daily TQBN tick cache.
+//! The crate owns shared CLI contracts for Tick, canonical-minute, and native-daily caches.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Write};
@@ -15,13 +15,14 @@ use tqsdk::{
     BacktestMinuteKlineCacheWarmupSymbolReport, BacktestRemoteFillConfig, BacktestTickCacheStatus,
 };
 use tqsdk_data::{
-    BacktestTickCache, DataError, MinuteKlineCacheStatus, TradingCalendarHolidays,
-    TradingCalendarRow, backtest_tick_trading_day_for_timestamp_ns,
+    BacktestTickCache, DailyKlineCacheStatus, DataError, MinuteKlineCacheStatus,
+    TradingCalendarHolidays, TradingCalendarRow, backtest_tick_trading_day_for_timestamp_ns,
     backtest_tick_trading_day_range, default_history_cache_dir,
 };
 
 pub const REPORT_SCHEMA_VERSION: u32 = 2;
 pub const MINUTE_FILL_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const DAILY_FILL_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const TRADING_CALENDAR_SCHEMA_VERSION: u32 = 1;
 pub const TRADING_CALENDAR_HOLIDAYS_SCHEMA_VERSION: u32 = 1;
 
@@ -977,6 +978,106 @@ impl MinuteFillReport {
     }
 }
 
+/// Cache-only coverage snapshot for one logical native-daily symbol.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DailyCacheCoverageSnapshot {
+    pub namespace_dir: String,
+    pub path: String,
+    pub cached_ranges: Vec<(i64, i64)>,
+    pub missing_ranges: Vec<(i64, i64)>,
+    pub rows: usize,
+    pub complete: bool,
+}
+
+impl From<&DailyKlineCacheStatus> for DailyCacheCoverageSnapshot {
+    fn from(value: &DailyKlineCacheStatus) -> Self {
+        Self {
+            namespace_dir: value.namespace_dir.display().to_string(),
+            path: value.path.display().to_string(),
+            cached_ranges: value.cached_ranges.clone(),
+            missing_ranges: value.missing_ranges.clone(),
+            rows: value.rows,
+            complete: value.is_complete(),
+        }
+    }
+}
+
+/// One logical native-daily symbol recorded in a daily fill report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DailyFillReportSymbol {
+    pub symbol: String,
+    pub after: DailyCacheCoverageSnapshot,
+}
+
+/// Stable credential-free report for a native daily Kline fill.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DailyFillReport {
+    pub schema_version: u32,
+    pub cache_kind: String,
+    pub generated_at: String,
+    pub cache_dir: String,
+    pub requested_days: TradingDayWindow,
+    pub market: String,
+    pub symbols: Vec<DailyFillReportSymbol>,
+    pub remote_used: bool,
+    pub rows_written: usize,
+    pub complete: bool,
+    pub dry_run: bool,
+}
+
+impl DailyFillReport {
+    #[must_use]
+    pub fn new(
+        cache_dir: &Path,
+        requested_days: TradingDayWindow,
+        market: impl Into<String>,
+        statuses: &[DailyKlineCacheStatus],
+        rows_written: usize,
+        remote_used: bool,
+        dry_run: bool,
+    ) -> Self {
+        let symbols = statuses
+            .iter()
+            .map(|status| DailyFillReportSymbol {
+                symbol: status.symbol.clone(),
+                after: DailyCacheCoverageSnapshot::from(status),
+            })
+            .collect::<Vec<_>>();
+        let complete = !symbols.is_empty() && symbols.iter().all(|symbol| symbol.after.complete);
+        Self {
+            schema_version: DAILY_FILL_REPORT_SCHEMA_VERSION,
+            cache_kind: "daily".to_string(),
+            generated_at: Utc::now().to_rfc3339(),
+            cache_dir: cache_dir.display().to_string(),
+            requested_days,
+            market: market.into(),
+            symbols,
+            remote_used,
+            rows_written,
+            complete,
+            dry_run,
+        }
+    }
+
+    pub fn symbols(&self) -> Result<Vec<String>, DataError> {
+        let mut symbols = self
+            .symbols
+            .iter()
+            .map(|symbol| symbol.symbol.trim())
+            .filter(|symbol| !symbol.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        symbols.sort();
+        symbols.dedup();
+        if symbols.is_empty() {
+            return Err(DataError::Validation(
+                "daily fill report contains no logical cache symbols".to_string(),
+            ));
+        }
+        Ok(symbols)
+    }
+}
+
 fn minute_fill_report_symbol(
     symbol: &BacktestMinuteKlineCacheWarmupSymbolReport,
 ) -> MinuteFillReportSymbol {
@@ -994,6 +1095,7 @@ fn minute_fill_report_symbol(
 pub enum PersistedFillReport {
     Tick(Box<FillReport>),
     Minute(Box<MinuteFillReport>),
+    Daily(Box<DailyFillReport>),
 }
 
 fn default_coverage_state() -> String {
@@ -1050,6 +1152,16 @@ pub fn default_minute_fill_report_path(cache_dir: &Path) -> PathBuf {
     ))
 }
 
+/// Default report destination for a native-daily fill.
+#[must_use]
+pub fn default_daily_fill_report_path(cache_dir: &Path) -> PathBuf {
+    let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ");
+    cache_dir.join("reports").join("daily").join(format!(
+        "tqsdk-cache-daily-fill-{timestamp}-{}.json",
+        std::process::id()
+    ))
+}
+
 pub fn write_fill_report(path: &Path, report: &FillReport) -> Result<(), DataError> {
     write_json_atomically(path, report)
 }
@@ -1058,6 +1170,15 @@ pub fn write_minute_fill_report(path: &Path, report: &MinuteFillReport) -> Resul
     if report.schema_version != MINUTE_FILL_REPORT_SCHEMA_VERSION || report.cache_kind != "minute" {
         return Err(DataError::Validation(
             "minute fill report has an unsupported schema or cache kind".to_string(),
+        ));
+    }
+    write_json_atomically(path, report)
+}
+
+pub fn write_daily_fill_report(path: &Path, report: &DailyFillReport) -> Result<(), DataError> {
+    if report.schema_version != DAILY_FILL_REPORT_SCHEMA_VERSION || report.cache_kind != "daily" {
+        return Err(DataError::Validation(
+            "daily fill report has an unsupported schema or cache kind".to_string(),
         ));
     }
     write_json_atomically(path, report)
@@ -1090,6 +1211,17 @@ pub fn read_persisted_fill_report(path: &Path) -> Result<PersistedFillReport, Da
             )));
         }
         return Ok(PersistedFillReport::Minute(Box::new(report)));
+    }
+    if value.get("cache_kind").and_then(serde_json::Value::as_str) == Some("daily") {
+        let report: DailyFillReport = serde_json::from_value(value)
+            .map_err(|error| DataError::InvalidResponse(error.to_string()))?;
+        if report.schema_version != DAILY_FILL_REPORT_SCHEMA_VERSION {
+            return Err(DataError::Validation(format!(
+                "unsupported daily fill report schema {}; expected {DAILY_FILL_REPORT_SCHEMA_VERSION}",
+                report.schema_version
+            )));
+        }
+        return Ok(PersistedFillReport::Daily(Box::new(report)));
     }
     let report: FillReport = serde_json::from_value(value)
         .map_err(|error| DataError::InvalidResponse(error.to_string()))?;
