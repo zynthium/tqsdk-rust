@@ -13,6 +13,8 @@ use crate::{MarketChartLease, Result, SessionClient, SessionFacadeError};
 
 /// The only Kline duration persisted by the backtest cache hierarchy.
 pub const SERVER_BACKTEST_CANONICAL_MINUTE_NS: i64 = 60_000_000_000;
+/// Native daily server-backtest chart duration.
+pub const SERVER_BACKTEST_CANONICAL_DAILY_NS: i64 = 86_400_000_000_000;
 const SERVER_BACKTEST_HISTORY_PAGE_WIDTH: usize = 10_000;
 
 /// Market family selected for an official server-backtest history stream.
@@ -27,6 +29,7 @@ pub enum ServerBacktestMarketKind {
 pub enum ServerBacktestHistoryKind {
     Tick,
     CanonicalMinute,
+    CanonicalDaily,
 }
 
 /// One logical chart read by a [`ServerBacktestHistoryStream`].
@@ -55,6 +58,11 @@ pub enum ServerBacktestHistoryEvent {
         rows: Vec<Tick>,
     },
     CanonicalMinutes {
+        chart_id: String,
+        symbol: String,
+        rows: Vec<Kline>,
+    },
+    CanonicalDaily {
         chart_id: String,
         symbol: String,
         rows: Vec<Kline>,
@@ -110,6 +118,7 @@ impl HistoryChartState {
         match self.chart.kind {
             ServerBacktestHistoryKind::Tick => 0,
             ServerBacktestHistoryKind::CanonicalMinute => SERVER_BACKTEST_CANONICAL_MINUTE_NS,
+            ServerBacktestHistoryKind::CanonicalDaily => SERVER_BACKTEST_CANONICAL_DAILY_NS,
         }
     }
 
@@ -136,18 +145,27 @@ enum ReadyPage {
         terminal: bool,
         rows: Vec<Kline>,
     },
+    CanonicalDaily {
+        right_id: i64,
+        terminal: bool,
+        rows: Vec<Kline>,
+    },
 }
 
 impl ReadyPage {
     fn right_id(&self) -> i64 {
         match self {
-            Self::Ticks { right_id, .. } | Self::CanonicalMinutes { right_id, .. } => *right_id,
+            Self::Ticks { right_id, .. }
+            | Self::CanonicalMinutes { right_id, .. }
+            | Self::CanonicalDaily { right_id, .. } => *right_id,
         }
     }
 
     fn terminal(&self) -> bool {
         match self {
-            Self::Ticks { terminal, .. } | Self::CanonicalMinutes { terminal, .. } => *terminal,
+            Self::Ticks { terminal, .. }
+            | Self::CanonicalMinutes { terminal, .. }
+            | Self::CanonicalDaily { terminal, .. } => *terminal,
         }
     }
 }
@@ -387,6 +405,17 @@ impl ServerBacktestHistoryStream {
                     rows,
                 })
             }
+            ReadyPage::CanonicalDaily {
+                terminal: _, rows, ..
+            } => {
+                let (chart_id, symbol, rows) =
+                    self.take_new_minutes(chart_index, rows, &mut reached_requested_end);
+                (!rows.is_empty()).then_some(ServerBacktestHistoryEvent::CanonicalDaily {
+                    chart_id,
+                    symbol,
+                    rows,
+                })
+            }
         };
 
         let advanced = self.charts[chart_index]
@@ -531,6 +560,9 @@ impl ServerBacktestHistoryStream {
             ServerBacktestHistoryKind::CanonicalMinute => {
                 market.get_path(&["klines", state.chart.symbol.as_str(), "60000000000"])
             }
+            ServerBacktestHistoryKind::CanonicalDaily => {
+                market.get_path(&["klines", state.chart.symbol.as_str(), "86400000000000"])
+            }
         };
         let last_id = series
             .and_then(|value| value.get("last_id"))
@@ -546,6 +578,11 @@ impl ServerBacktestHistoryStream {
                         rows: Vec::new(),
                     },
                     ServerBacktestHistoryKind::CanonicalMinute => ReadyPage::CanonicalMinutes {
+                        right_id: -1,
+                        terminal: true,
+                        rows: Vec::new(),
+                    },
+                    ServerBacktestHistoryKind::CanonicalDaily => ReadyPage::CanonicalDaily {
                         right_id: -1,
                         terminal: true,
                         rows: Vec::new(),
@@ -589,6 +626,19 @@ impl ServerBacktestHistoryStream {
                     ));
                 }
                 Ok(Some(ReadyPage::CanonicalMinutes {
+                    right_id: effective_right_id,
+                    terminal,
+                    rows,
+                }))
+            }
+            ServerBacktestHistoryKind::CanonicalDaily => {
+                let rows = decode_page_rows::<Kline>(data, chart.left_id, effective_right_id)?;
+                if rows.is_empty() && !terminal {
+                    return Err(validation_error(
+                        "server-backtest canonical-daily chart was ready without page rows",
+                    ));
+                }
+                Ok(Some(ReadyPage::CanonicalDaily {
                     right_id: effective_right_id,
                     terminal,
                     rows,

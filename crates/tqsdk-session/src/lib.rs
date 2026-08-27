@@ -50,9 +50,9 @@ mod tq_auth;
 mod tqkq;
 
 pub use backtest_history::{
-    SERVER_BACKTEST_CANONICAL_MINUTE_NS, ServerBacktestHistoryChart, ServerBacktestHistoryEvent,
-    ServerBacktestHistoryKind, ServerBacktestHistoryRequest, ServerBacktestHistoryStream,
-    ServerBacktestMarketKind,
+    SERVER_BACKTEST_CANONICAL_DAILY_NS, SERVER_BACKTEST_CANONICAL_MINUTE_NS,
+    ServerBacktestHistoryChart, ServerBacktestHistoryEvent, ServerBacktestHistoryKind,
+    ServerBacktestHistoryRequest, ServerBacktestHistoryStream, ServerBacktestMarketKind,
 };
 pub use builder::SessionClientBuilder;
 pub use client::{

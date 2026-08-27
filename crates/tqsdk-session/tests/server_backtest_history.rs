@@ -7,9 +7,9 @@ use tqsdk_core::{
     OutboundRequest, ProtocolDomain, RuntimeHandle, RuntimeInput,
 };
 use tqsdk_session::{
-    ServerBacktestHistoryChart, ServerBacktestHistoryEvent, ServerBacktestHistoryKind,
-    ServerBacktestHistoryRequest, ServerBacktestHistoryStream, ServerBacktestMarketKind,
-    testing::ManualSession,
+    SERVER_BACKTEST_CANONICAL_DAILY_NS, ServerBacktestHistoryChart, ServerBacktestHistoryEvent,
+    ServerBacktestHistoryKind, ServerBacktestHistoryRequest, ServerBacktestHistoryStream,
+    ServerBacktestMarketKind, testing::ManualSession,
 };
 
 const MINUTE_NS: i64 = 60_000_000_000;
@@ -338,6 +338,86 @@ async fn canonical_minute_reads_only_the_60_second_kline_path() {
         .expect("canonical minute chart should emit its row");
     let ServerBacktestHistoryEvent::CanonicalMinutes { rows, .. } = event else {
         panic!("expected canonical-minute rows");
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, 1);
+    assert_eq!(rows[0].datetime, 1_000);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn canonical_daily_uses_native_one_day_chart_path_and_event() {
+    let session = manual_session();
+    let mut stream = ServerBacktestHistoryStream::open(
+        session.client_clone(),
+        request(vec![chart(
+            "daily-au",
+            "SHFE.au2608",
+            ServerBacktestHistoryKind::CanonicalDaily,
+        )]),
+    )
+    .await
+    .unwrap();
+
+    let bodies = transport_bodies(&session);
+    let body = bodies
+        .iter()
+        .find(|body| body.get("chart_id") == Some(&json!("daily-au")))
+        .expect("daily stream should submit a chart");
+    assert_eq!(
+        body.get("duration"),
+        Some(&json!(SERVER_BACKTEST_CANONICAL_DAILY_NS))
+    );
+
+    ingest(
+        &session,
+        json!({
+            "aid": "rtn_data",
+            "data": [{
+                "mdhis_more_data": false,
+                "charts": {
+                    "daily-au": {
+                        "state": {
+                            "aid": "set_chart",
+                            "chart_id": "daily-au",
+                            "ins_list": "SHFE.au2608",
+                            "duration": SERVER_BACKTEST_CANONICAL_DAILY_NS,
+                            "view_width": PAGE_WIDTH,
+                            "focus_datetime": 1_000,
+                            "focus_position": 0,
+                        },
+                        "left_id": 1,
+                        "right_id": 1,
+                        "ready": true,
+                        "more_data": false,
+                    }
+                },
+                "klines": {
+                    "SHFE.au2608": {
+                        (SERVER_BACKTEST_CANONICAL_DAILY_NS.to_string()): {
+                            "last_id": 1,
+                            "data": {
+                                "1": {
+                                    "id": 1,
+                                    "datetime": 1_000,
+                                    "open": 1.0,
+                                    "high": 2.0,
+                                    "low": 1.0,
+                                    "close": 2.0,
+                                }
+                            }
+                        }
+                    }
+                }
+            }]
+        }),
+    );
+    let event = stream
+        .next_event(Some(Instant::now() + Duration::from_millis(20)))
+        .await
+        .unwrap()
+        .expect("canonical daily chart should emit its row");
+    let ServerBacktestHistoryEvent::CanonicalDaily { rows, .. } = event else {
+        panic!("expected canonical-daily rows");
     };
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, 1);
