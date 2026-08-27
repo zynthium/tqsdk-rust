@@ -2260,6 +2260,39 @@ fn query_rejects_cache_management_kind_and_stock_market() {
     assert!(String::from_utf8_lossy(&market.stderr).contains("only --market futures"));
 }
 
+#[test]
+fn metadata_refresh_requires_auth_before_advancing_active_sidecar() {
+    let cache_dir = temp_dir("metadata-refresh-auth");
+    let output = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "metadata-refresh",
+        "--symbol",
+        "SHFE.op2601",
+        "--start",
+        "2025-09-25T00:00:00+08:00",
+        "--end",
+        "2025-09-26T00:00:00+08:00",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let _ = v3_result(&json, "metadata-refresh", "error", 1);
+    assert_eq!(json["error"]["code"], "data_error");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("TQ_AUTH_USER is required")
+    );
+    assert!(
+        !cache_dir
+            .join("backtest-history-metadata-v1/SHFE.op2601/active.json")
+            .exists()
+    );
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
 fn run_json<const N: usize>(args: [&str; N]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_tqsdk-cache"))
         .args(["--output-format", "json"])

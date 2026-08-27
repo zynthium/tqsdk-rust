@@ -23,6 +23,21 @@ session owner、后台守护进程、relay 或监控服务。完整合同见
 | `minute` | canonical final-60s `.tqmk` | `inventory`、`inspect`、`fill`、`verify`、`doctor`、`purge` |
 | `all` | 两类 cache 的汇总 | 仅 `inventory`、`doctor` |
 
+`metadata-refresh` 不属于 tick/minute family；保留默认 `--kind tick`，只支持 `--market futures`。
+它显式调用官方 metadata source，在 exclusive root remote-fill lock 内保存 immutable sidecar；不会改写
+`.tqbn` 或 minute 文件。新 snapshot 覆盖请求窗口即可供 `CacheOnly` 解析；若已有更宽、兼容的 active
+snapshot，显式维护仍原子推进 active pointer；旧 snapshot 按 content hash 保留，可供已绑定旧 cache
+partition 的 reader 使用。
+
+```bash
+TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history metadata-refresh \
+  --symbol SHFE.op2601 \
+  --start 2025-09-25T00:00:00+08:00 \
+  --end 2025-09-26T00:00:00+08:00
+```
+
 minute 的 format id 为 `tqsdk.minute-kline.monthly.v4`，但 namespace 有意保持
 `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk`。每个文件属于一个
 `logical symbol × trading month`；旧 v3 文件不会自动迁移、覆盖或删除，deep doctor 会将其标记为

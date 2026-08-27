@@ -18,6 +18,12 @@ const FILE_PREFIX_HEADER_LEN: usize = TQBN_MAGIC.len() + 1 + 4 + 4 + 8;
 const MAX_FILE_PREFIX_METADATA_LEN: usize = 64 * 1024;
 const BLOCK_HEADER_LEN: usize = TQBN_BLOCK_MAGIC.len() + 1 + 3 + 8 + 8;
 pub(super) const TQBN_BLOCK_FLAG_ZSTD: u8 = 0x01;
+pub(super) const TQBN_TICK_DELTA_MAGIC: [u8; 4] = *b"TQTD";
+const TQBN_TICK_DELTA_VERSION: u8 = 1;
+pub(super) const TQBN_TICK_DELTA_MAX_ROWS: usize = 8_192;
+const TICK_DELTA_HEADER_LEN: usize = 12;
+const TICK1_FIELD_COUNT: usize = 12;
+const TICK5_FIELD_COUNT: usize = 28;
 #[cfg(feature = "tqbn-zstd")]
 const TQBN_ZSTD_LEVEL: i32 = 1;
 #[cfg(feature = "tqbn-zstd")]
@@ -552,6 +558,333 @@ pub(super) fn decode_tick5_record(record: &TqbnTick5RecordV1) -> Result<Tick> {
     })
 }
 
+pub(super) fn is_tick_delta_block(bytes: &[u8]) -> bool {
+    bytes.starts_with(&TQBN_TICK_DELTA_MAGIC)
+}
+
+pub(super) fn encode_tick_delta_block(rows: &[Tick], five_level: bool) -> Result<Vec<u8>> {
+    if rows.is_empty() {
+        return Err(DataError::InvalidResponse(
+            "TQBN TickDelta block requires at least one row".to_string(),
+        ));
+    }
+    if rows.len() > TQBN_TICK_DELTA_MAX_ROWS {
+        return Err(DataError::InvalidResponse(format!(
+            "TQBN TickDelta block rows {} exceed max {TQBN_TICK_DELTA_MAX_ROWS}",
+            rows.len()
+        )));
+    }
+
+    let depth = tick_delta_depth(five_level);
+    let field_count = tick_delta_field_count(five_level);
+    let mut output = Vec::with_capacity(rows.len() * (field_count / 2 + 8));
+    output.extend_from_slice(&TQBN_TICK_DELTA_MAGIC);
+    output.push(TQBN_TICK_DELTA_VERSION);
+    output.push(depth);
+    output.extend_from_slice(&[0, 0]);
+    output.extend_from_slice(
+        &u32::try_from(rows.len())
+            .expect("TickDelta row count is bounded")
+            .to_le_bytes(),
+    );
+
+    let first = &rows[0];
+    let mut previous_id = first.id;
+    let mut previous_datetime = encode_ts_event("tick delta", first.datetime)?;
+    let mut previous_values = tick_delta_values(first, five_level)?;
+    output.extend_from_slice(&first.id.to_le_bytes());
+    output.extend_from_slice(&previous_datetime.to_le_bytes());
+    for value in &previous_values {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+
+    for row in &rows[1..] {
+        let datetime = encode_ts_event("tick delta", row.datetime)?;
+        let id_delta = row.id.checked_sub(previous_id).ok_or_else(|| {
+            DataError::InvalidResponse("TQBN TickDelta row id delta overflow".to_string())
+        })?;
+        let datetime_delta = i64::try_from(datetime)
+            .ok()
+            .and_then(|datetime| {
+                i64::try_from(previous_datetime)
+                    .ok()
+                    .and_then(|previous| datetime.checked_sub(previous))
+            })
+            .ok_or_else(|| {
+                DataError::InvalidResponse("TQBN TickDelta timestamp delta overflow".to_string())
+            })?;
+        let values = tick_delta_values(row, five_level)?;
+        debug_assert_eq!(values.len(), field_count);
+
+        write_signed_varint(&mut output, id_delta);
+        write_signed_varint(&mut output, datetime_delta);
+        let mut changed = 0_u64;
+        for (index, (current, previous)) in values.iter().zip(&previous_values).enumerate() {
+            if current != previous {
+                changed |= 1_u64 << index;
+            }
+        }
+        write_unsigned_varint(&mut output, changed);
+        for (index, value) in values.iter().enumerate() {
+            if changed & (1_u64 << index) != 0 {
+                write_signed_varint(&mut output, *value);
+            }
+        }
+
+        previous_id = row.id;
+        previous_datetime = datetime;
+        previous_values = values;
+    }
+    Ok(output)
+}
+
+pub(super) fn decode_tick_delta_block(bytes: &[u8]) -> Result<Vec<Tick>> {
+    if bytes.len() < TICK_DELTA_HEADER_LEN || !is_tick_delta_block(bytes) {
+        return Err(DataError::InvalidResponse(
+            "TQBN TickDelta block magic is invalid or truncated".to_string(),
+        ));
+    }
+    if bytes[4] != TQBN_TICK_DELTA_VERSION {
+        return Err(DataError::InvalidResponse(format!(
+            "TQBN TickDelta version {} is unsupported",
+            bytes[4]
+        )));
+    }
+    let five_level = match bytes[5] {
+        1 => false,
+        5 => true,
+        value => {
+            return Err(DataError::InvalidResponse(format!(
+                "TQBN TickDelta depth {value} is unsupported"
+            )));
+        }
+    };
+    if bytes[6..8] != [0, 0] {
+        return Err(DataError::InvalidResponse(
+            "TQBN TickDelta reserved header bytes are non-zero".to_string(),
+        ));
+    }
+    let row_count = usize::try_from(u32::from_le_bytes([
+        bytes[8], bytes[9], bytes[10], bytes[11],
+    ]))
+    .expect("u32 row count fits usize");
+    if row_count == 0 || row_count > TQBN_TICK_DELTA_MAX_ROWS {
+        return Err(DataError::InvalidResponse(format!(
+            "TQBN TickDelta row count {row_count} is invalid"
+        )));
+    }
+
+    let field_count = tick_delta_field_count(five_level);
+    let mut offset = TICK_DELTA_HEADER_LEN;
+    let mut previous_id = read_i64_at(bytes, &mut offset, "TQBN TickDelta first row id")?;
+    let mut previous_datetime = read_u64_at(bytes, &mut offset, "TQBN TickDelta first timestamp")?;
+    let mut previous_values = Vec::with_capacity(field_count);
+    for _ in 0..field_count {
+        previous_values.push(read_i64_at(
+            bytes,
+            &mut offset,
+            "TQBN TickDelta first row field",
+        )?);
+    }
+    let mut rows = Vec::with_capacity(row_count);
+    rows.push(tick_from_delta_values(
+        previous_id,
+        decode_datetime("tick delta", previous_datetime)?,
+        &previous_values,
+        five_level,
+    )?);
+
+    for _ in 1..row_count {
+        let id_delta = read_signed_varint(bytes, &mut offset, "TQBN TickDelta row id delta")?;
+        let datetime_delta =
+            read_signed_varint(bytes, &mut offset, "TQBN TickDelta timestamp delta")?;
+        previous_id = previous_id.checked_add(id_delta).ok_or_else(|| {
+            DataError::InvalidResponse("TQBN TickDelta row id overflows i64".to_string())
+        })?;
+        let datetime = i64::try_from(previous_datetime)
+            .ok()
+            .and_then(|previous| previous.checked_add(datetime_delta))
+            .ok_or_else(|| {
+                DataError::InvalidResponse("TQBN TickDelta timestamp overflows i64".to_string())
+            })?;
+        previous_datetime = u64::try_from(datetime).map_err(|_| {
+            DataError::InvalidResponse("TQBN TickDelta timestamp is negative".to_string())
+        })?;
+
+        let changed = read_unsigned_varint(bytes, &mut offset, "TQBN TickDelta change mask")?;
+        if changed >> field_count != 0 {
+            return Err(DataError::InvalidResponse(
+                "TQBN TickDelta change mask has unknown fields".to_string(),
+            ));
+        }
+        for (index, value) in previous_values.iter_mut().enumerate() {
+            if changed & (1_u64 << index) != 0 {
+                *value = read_signed_varint(bytes, &mut offset, "TQBN TickDelta field value")?;
+            }
+        }
+        rows.push(tick_from_delta_values(
+            previous_id,
+            datetime,
+            &previous_values,
+            five_level,
+        )?);
+    }
+    if offset != bytes.len() {
+        return Err(DataError::InvalidResponse(
+            "TQBN TickDelta block has trailing bytes".to_string(),
+        ));
+    }
+    Ok(rows)
+}
+
+const fn tick_delta_depth(five_level: bool) -> u8 {
+    if five_level { 5 } else { 1 }
+}
+
+const fn tick_delta_field_count(five_level: bool) -> usize {
+    if five_level {
+        TICK5_FIELD_COUNT
+    } else {
+        TICK1_FIELD_COUNT
+    }
+}
+
+fn tick_delta_values(row: &Tick, five_level: bool) -> Result<Vec<i64>> {
+    let mut values = vec![
+        encode_price(row.last_price)?,
+        encode_price(row.average)?,
+        encode_price(row.highest)?,
+        encode_price(row.lowest)?,
+        encode_price(row.ask_price1)?,
+        row.ask_volume1,
+        encode_price(row.bid_price1)?,
+        row.bid_volume1,
+    ];
+    if five_level {
+        values.extend([
+            encode_price(row.ask_price2)?,
+            row.ask_volume2,
+            encode_price(row.bid_price2)?,
+            row.bid_volume2,
+            encode_price(row.ask_price3)?,
+            row.ask_volume3,
+            encode_price(row.bid_price3)?,
+            row.bid_volume3,
+            encode_price(row.ask_price4)?,
+            row.ask_volume4,
+            encode_price(row.bid_price4)?,
+            row.bid_volume4,
+            encode_price(row.ask_price5)?,
+            row.ask_volume5,
+            encode_price(row.bid_price5)?,
+            row.bid_volume5,
+        ]);
+    }
+    values.extend([
+        row.volume,
+        encode_amount(row.amount)?,
+        row.open_interest,
+        encode_epoch(row.epoch, "tick delta")?,
+    ]);
+    Ok(values)
+}
+
+fn tick_from_delta_values(
+    id: i64,
+    datetime: i64,
+    values: &[i64],
+    five_level: bool,
+) -> Result<Tick> {
+    if values.len() != tick_delta_field_count(five_level) {
+        return Err(DataError::InvalidResponse(
+            "TQBN TickDelta field count does not match depth".to_string(),
+        ));
+    }
+    let mut index = 0;
+    let mut next = || {
+        let value = values[index];
+        index += 1;
+        value
+    };
+    let mut tick = Tick {
+        id,
+        datetime,
+        last_price: decode_price(next()),
+        average: decode_price(next()),
+        highest: decode_price(next()),
+        lowest: decode_price(next()),
+        ask_price1: decode_price(next()),
+        ask_volume1: next(),
+        bid_price1: decode_price(next()),
+        bid_volume1: next(),
+        ..Default::default()
+    };
+    if five_level {
+        tick.ask_price2 = decode_price(next());
+        tick.ask_volume2 = next();
+        tick.bid_price2 = decode_price(next());
+        tick.bid_volume2 = next();
+        tick.ask_price3 = decode_price(next());
+        tick.ask_volume3 = next();
+        tick.bid_price3 = decode_price(next());
+        tick.bid_volume3 = next();
+        tick.ask_price4 = decode_price(next());
+        tick.ask_volume4 = next();
+        tick.bid_price4 = decode_price(next());
+        tick.bid_volume4 = next();
+        tick.ask_price5 = decode_price(next());
+        tick.ask_volume5 = next();
+        tick.bid_price5 = decode_price(next());
+        tick.bid_volume5 = next();
+    }
+    tick.volume = next();
+    tick.amount = decode_amount(next());
+    tick.open_interest = next();
+    tick.epoch = decode_epoch(next());
+    Ok(tick)
+}
+
+fn write_unsigned_varint(output: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        output.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    output.push(value as u8);
+}
+
+fn write_signed_varint(output: &mut Vec<u8>, value: i64) {
+    let encoded = ((value as u64) << 1) ^ ((value >> 63) as u64);
+    write_unsigned_varint(output, encoded);
+}
+
+fn read_unsigned_varint(bytes: &[u8], offset: &mut usize, field_name: &'static str) -> Result<u64> {
+    let mut value = 0_u64;
+    for shift in (0..64).step_by(7) {
+        let byte = *bytes
+            .get(*offset)
+            .ok_or_else(|| DataError::InvalidResponse(format!("{field_name} is truncated")))?;
+        *offset += 1;
+        let chunk = u64::from(byte & 0x7f);
+        if shift == 63 && chunk > 1 {
+            return Err(DataError::InvalidResponse(format!(
+                "{field_name} overflows u64"
+            )));
+        }
+        value |= chunk << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    Err(DataError::InvalidResponse(format!(
+        "{field_name} exceeds varint length"
+    )))
+}
+
+fn read_signed_varint(bytes: &[u8], offset: &mut usize, field_name: &'static str) -> Result<i64> {
+    let value = read_unsigned_varint(bytes, offset, field_name)?;
+    Ok(((value >> 1) as i64) ^ -((value & 1) as i64))
+}
+
 fn decode_record_header(bytes: &[u8]) -> Result<TqbnRecordHeader> {
     if bytes.len() < size_of::<TqbnRecordHeader>() {
         return Err(DataError::InvalidResponse(format!(
@@ -596,6 +929,12 @@ fn read_u64_at(bytes: &[u8], offset: &mut usize, field_name: &'static str) -> Re
     array.copy_from_slice(slice);
     *offset = end;
     Ok(u64::from_le_bytes(array))
+}
+
+fn read_i64_at(bytes: &[u8], offset: &mut usize, field_name: &'static str) -> Result<i64> {
+    Ok(i64::from_le_bytes(
+        read_u64_at(bytes, offset, field_name)?.to_le_bytes(),
+    ))
 }
 
 pub(super) fn checksum64_fnv1a(bytes: &[u8]) -> u64 {

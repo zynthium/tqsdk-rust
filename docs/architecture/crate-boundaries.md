@@ -321,7 +321,7 @@ sink、WAL、journal 或 cache writer。
 
 - history page / series / download / export substrate
 - `HistorySeriesCache` public facade 和 crate 内部 store adapter seam
-- `HistorySeriesCache::open(root_dir)` 使用 canonical TQBN daily v2 history cache format；
+- `HistorySeriesCache::open(root_dir)` 使用 canonical TQBN daily v3 history cache format；
   TQBN 是 tqsdk-specific DBN-like binary format，使用 fixed-width records、fixed-point
   price storage、self-describing metadata、explicit final coverage records、non-final
   provisional checkpoint records 和 forward-compatible record lengths；8 MiB 目标 records
@@ -530,7 +530,7 @@ sink、WAL、journal 或 cache writer。
 
 - 批量历史数据拉取
 - 历史数据质量报告 / integrity report
-- TQBN daily v2 (`.tqbn`) 当前默认和 canonical 格式，按交易日分区存储
+- TQBN daily v3 (`.tqbn`) 当前默认和 canonical 格式，按交易日分区存储
 - 默认 `tqbn-zstd` feature 对 hot append 的 TQBN internal records block 使用 zstd level 1，
   对 append-log compaction 重写的 records block 使用 zstd level 3；`tqsdk-data` 是实现点，
   `tqsdk-task` / `tqsdk` 仅做同名 feature 转发，`--no-default-features` 可关闭

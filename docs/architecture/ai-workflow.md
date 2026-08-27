@@ -207,7 +207,7 @@ tqsdk
 - research/offline data crate
 - history page/series/download
 - CSV export
-- TQBN daily v2 (`.tqbn`) 当前默认和 canonical 格式，按交易日分区存储
+- TQBN daily v3 (`.tqbn`) 当前默认和 canonical 格式，按交易日分区存储
 - TQBN market-data block 的 crate-internal 时间索引与范围读取；旧/不匹配索引必须逐 block 回退
 - TQBN final coverage 与 open-day provisional checkpoint；后者只用于增量恢复，不得进入普通
   coverage/cache-hit，物理淘汰仅由显式 maintenance/compaction 触发

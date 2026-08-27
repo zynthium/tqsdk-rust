@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use chrono::{NaiveDate, SecondsFormat, Utc};
+use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -19,8 +19,9 @@ use tqsdk_cache::{
     write_minute_fill_report, write_trading_calendar_holidays_snapshot,
 };
 use tqsdk_data::{
-    BacktestTickCache, BacktestTickCacheLockRepairMode, BacktestTickCacheLockRepairStatus,
-    DataClient, DataError, HistorySeriesCacheFileStatus, MinuteKlineCache,
+    BacktestHistoryMaintenanceClient, BacktestTickCache, BacktestTickCacheLockRepairMode,
+    BacktestTickCacheLockRepairStatus, DataClient, DataError, HISTORY_SERIES_CACHE_FORMAT_ID,
+    HISTORY_SERIES_CACHE_SCHEMA_VERSION, HistorySeriesCacheFileStatus, MinuteKlineCache,
     MinuteKlineCacheSnapshot, backtest_tick_trading_day_for_timestamp_ns,
 };
 use tqsdk_session::SessionClientBuilder;
@@ -124,6 +125,10 @@ enum Command {
     Doctor,
     /// Inspect or repair missing Tick TQBN companion locks.
     RepairLocks(RepairLocksArgs),
+    /// Re-encode legacy Tick TQBN partitions into current sparse-record schema.
+    Migrate(MigrateArgs),
+    /// Explicitly refresh one logical symbol's metadata sidecar from the official source.
+    MetadataRefresh(MetadataRefreshArgs),
     /// Explicitly remove canonical-minute month partitions.
     Purge(PurgeArgs),
     /// Query cache-backed history and emit raw JSONL or token-aware LLM CSV context.
@@ -139,6 +144,8 @@ impl Command {
             Self::Verify(_) => "verify",
             Self::Doctor => "doctor",
             Self::RepairLocks(_) => "repair-locks",
+            Self::Migrate(_) => "migrate",
+            Self::MetadataRefresh(_) => "metadata-refresh",
             Self::Purge(_) => "purge",
             Self::Query(_) => "query",
         }
@@ -168,6 +175,29 @@ struct RepairLocksArgs {
     /// Create each missing legacy partition or per-file companion lock. Without this flag, only report the repair plan.
     #[arg(long)]
     apply: bool,
+}
+
+#[derive(Debug, Args)]
+struct MigrateArgs {
+    /// Rewrite legacy Tick TQBN partitions. Without this flag, only report the migration plan.
+    #[arg(long)]
+    apply: bool,
+    /// New empty rollback directory. Required with --apply; each original .tqbn is hard-linked here before rewrite.
+    #[arg(long, value_name = "DIR", required_if_eq("apply", "true"))]
+    backup_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct MetadataRefreshArgs {
+    /// Logical cache symbol whose metadata sidecar should be refreshed.
+    #[arg(long, value_name = "SYMBOL")]
+    symbol: String,
+    /// Inclusive RFC 3339 start timestamp; metadata windows are [start, end).
+    #[arg(long, value_name = "RFC3339")]
+    start: String,
+    /// Exclusive RFC 3339 end timestamp; metadata windows are [start, end).
+    #[arg(long, value_name = "RFC3339")]
+    end: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -314,6 +344,7 @@ struct PurgeArgs {
 #[derive(Debug)]
 enum CliError {
     Usage(String),
+    Migration(String),
     Data(DataError),
     Sdk(tqsdk::Error),
     Io(io::Error),
@@ -324,6 +355,7 @@ impl CliError {
     fn exit_code(&self) -> i32 {
         match self {
             Self::Usage(_) => 2,
+            Self::Migration(_) => 1,
             Self::Data(DataError::CacheBusy { .. }) => 75,
             Self::Sdk(tqsdk::Error::Data(data))
                 if matches!(&**data, DataError::CacheBusy { .. }) =>
@@ -340,6 +372,7 @@ impl CliError {
         } else {
             match self {
                 Self::Usage(_) => "usage",
+                Self::Migration(_) => "migration_failed",
                 Self::Data(_) => "data_error",
                 Self::Sdk(_) => "sdk_error",
                 Self::Io(_) => "io_error",
@@ -374,7 +407,7 @@ impl CliError {
 impl std::fmt::Display for CliError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Usage(message) => write!(formatter, "{message}"),
+            Self::Usage(message) | Self::Migration(message) => write!(formatter, "{message}"),
             Self::Data(error) => write!(formatter, "{error}"),
             Self::Sdk(error) => write!(formatter, "{error}"),
             Self::Io(error) => write!(formatter, "{error}"),
@@ -1180,6 +1213,10 @@ async fn run(cli: Cli) -> Result<CommandOutcome, CliError> {
         Command::Verify(args) => verify(cli.cache_dir.as_deref(), cli.kind, args).await,
         Command::Doctor => doctor(cli.cache_dir.as_deref(), cli.kind),
         Command::RepairLocks(args) => repair_locks(cli.cache_dir.as_deref(), cli.kind, args),
+        Command::Migrate(args) => migrate(cli.cache_dir.as_deref(), cli.kind, args),
+        Command::MetadataRefresh(args) => {
+            metadata_refresh(cli.cache_dir.as_deref(), cli.kind, cli.market, args).await
+        }
         Command::Purge(args) => purge(cli.cache_dir.as_deref(), cli.kind, args),
         Command::Query(_) => unreachable!("main dispatches query output separately"),
     }
@@ -1201,7 +1238,77 @@ fn validate_command_kind(command: &Command, kind: CacheKind) -> Result<(), CliEr
             "repair-locks currently supports only --kind tick".to_string(),
         ));
     }
+    if matches!(command, Command::Migrate(_)) && !matches!(kind, CacheKind::Tick) {
+        return Err(CliError::Usage(
+            "migrate currently supports only --kind tick".to_string(),
+        ));
+    }
+    if matches!(command, Command::MetadataRefresh(_)) && !matches!(kind, CacheKind::Tick) {
+        return Err(CliError::Usage(
+            "metadata-refresh does not use --kind; leave the default tick kind".to_string(),
+        ));
+    }
     Ok(())
+}
+
+async fn metadata_refresh(
+    cache_dir: Option<&Path>,
+    kind: CacheKind,
+    market: MarketKind,
+    args: MetadataRefreshArgs,
+) -> Result<CommandOutcome, CliError> {
+    debug_assert!(matches!(kind, CacheKind::Tick));
+    if !matches!(market, MarketKind::Futures) {
+        return Err(CliError::Usage(
+            "metadata-refresh supports only --market futures".to_string(),
+        ));
+    }
+    let start_ns = parse_metadata_refresh_timestamp(args.start.as_str(), "--start")?;
+    let end_ns = parse_metadata_refresh_timestamp(args.end.as_str(), "--end")?;
+    if start_ns >= end_ns {
+        return Err(CliError::Usage(
+            "metadata-refresh range must satisfy start < end".to_string(),
+        ));
+    }
+
+    let (cache, canonical_cache_dir) = open_cache(cache_dir)?;
+    let _lock = cache.try_acquire_remote_fill_lock()?;
+    let snapshot = BacktestHistoryMaintenanceClient::builder(&canonical_cache_dir)
+        .auth_env()
+        .build()?
+        .refresh_metadata(args.symbol.as_str(), start_ns, end_ns)
+        .await?;
+
+    Ok(CommandOutcome {
+        value: json!({
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "command": "metadata-refresh",
+            "cache_dir": canonical_cache_dir,
+            "symbol": args.symbol,
+            "requested_range": {
+                "start": args.start,
+                "end": args.end,
+                "start_ns": start_ns,
+                "end_ns": end_ns,
+            },
+            "snapshot": {
+                "schema_version": snapshot.schema_version,
+                "snapshot_hash": snapshot.snapshot_hash,
+                "captured_at_ns": snapshot.captured_at_ns,
+                "trading_days": snapshot.trading_days.len(),
+                "physical_segments": snapshot.physical_segments.len(),
+                "session_hash": snapshot.session.snapshot_hash(),
+            },
+        }),
+        exit_code: 0,
+    })
+}
+
+fn parse_metadata_refresh_timestamp(value: &str, flag: &str) -> Result<i64, CliError> {
+    DateTime::parse_from_rfc3339(value)
+        .map_err(|error| CliError::Usage(format!("{flag} must be RFC 3339: {error}")))?
+        .timestamp_nanos_opt()
+        .ok_or_else(|| CliError::Usage(format!("{flag} is outside the i64 nanosecond range")))
 }
 
 fn inventory(cache_dir: Option<&Path>, kind: CacheKind) -> Result<CommandOutcome, CliError> {
@@ -2412,6 +2519,315 @@ fn repair_locks(
     })
 }
 
+#[derive(Debug)]
+struct TickMigrationFile {
+    path: PathBuf,
+    size_bytes: u64,
+}
+
+#[derive(Debug)]
+struct TickMigrationPlan {
+    problem_files: usize,
+    legacy_files: usize,
+    source_bytes: u64,
+    symbols: Vec<String>,
+    files: Vec<TickMigrationFile>,
+}
+
+#[derive(Debug, Default)]
+struct MigrationOutcomeDetails {
+    backup_dir: Option<PathBuf>,
+    backup_data_files: usize,
+    backup_lock_files: usize,
+    rewritten_bytes: Option<u64>,
+    completed: bool,
+}
+
+fn migrate(
+    cache_dir: Option<&Path>,
+    kind: CacheKind,
+    args: MigrateArgs,
+) -> Result<CommandOutcome, CliError> {
+    debug_assert!(matches!(kind, CacheKind::Tick));
+    if !args.apply && args.backup_dir.is_some() {
+        return Err(CliError::Usage("--backup-dir requires --apply".to_string()));
+    }
+
+    let (read_only_cache, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
+    let plan = tick_migration_plan(&read_only_cache)?;
+    if !args.apply {
+        return Ok(migration_outcome(
+            canonical_cache_dir,
+            true,
+            &plan,
+            MigrationOutcomeDetails::default(),
+        ));
+    }
+    if plan.problem_files != 0 || plan.legacy_files == 0 {
+        return Ok(migration_outcome(
+            canonical_cache_dir,
+            false,
+            &plan,
+            MigrationOutcomeDetails::default(),
+        ));
+    }
+
+    let backup_dir = args
+        .backup_dir
+        .as_deref()
+        .expect("clap requires --backup-dir with --apply");
+    let (cache, canonical_cache_dir) = open_cache(Some(canonical_cache_dir.as_path()))?;
+    let _lock = cache.try_acquire_consistency_read_lock()?;
+    let plan = tick_migration_plan(&cache)?;
+    if plan.problem_files != 0 || plan.legacy_files == 0 {
+        return Ok(migration_outcome(
+            canonical_cache_dir,
+            false,
+            &plan,
+            MigrationOutcomeDetails::default(),
+        ));
+    }
+
+    let backup_dir = prepare_migration_backup_dir(&canonical_cache_dir, backup_dir)?;
+    let (backup_data_files, backup_lock_files) =
+        match backup_migration_inputs(&canonical_cache_dir, &backup_dir, &plan) {
+            Ok(report) => report,
+            Err(error) => {
+                return Err(CliError::Migration(format!(
+                    "migration did not start; partial backup retained at {}: {error}",
+                    backup_dir.display()
+                )));
+            }
+        };
+
+    for symbol in &plan.symbols {
+        if let Err(error) = cache.compact_symbol_ticks(symbol) {
+            return Err(CliError::Migration(format!(
+                "migration stopped while rewriting {symbol}; backup retained at {}: {error}",
+                backup_dir.display()
+            )));
+        }
+    }
+
+    let after = cache.diagnose().map_err(|error| {
+        CliError::Migration(format!(
+            "migration rewrite completed but validation failed; backup retained at {}: {error}",
+            backup_dir.display()
+        ))
+    })?;
+    let remaining_legacy = after
+        .files
+        .iter()
+        .filter(|file| file.schema_version != Some(HISTORY_SERIES_CACHE_SCHEMA_VERSION))
+        .count();
+    if after.problem_files != 0 || remaining_legacy != 0 {
+        return Err(CliError::Migration(format!(
+            "migration validation found {} problem files and {} non-v{} files; backup retained at {}",
+            after.problem_files,
+            remaining_legacy,
+            HISTORY_SERIES_CACHE_SCHEMA_VERSION,
+            backup_dir.display()
+        )));
+    }
+    let target_symbols = plan.symbols.iter().collect::<BTreeSet<_>>();
+    let after_bytes = after
+        .files
+        .iter()
+        .filter(|file| target_symbols.contains(&file.symbol))
+        .map(|file| file.size_bytes)
+        .sum();
+
+    Ok(migration_outcome(
+        canonical_cache_dir,
+        false,
+        &plan,
+        MigrationOutcomeDetails {
+            backup_dir: Some(backup_dir),
+            backup_data_files,
+            backup_lock_files,
+            rewritten_bytes: Some(after_bytes),
+            completed: true,
+        },
+    ))
+}
+
+fn tick_migration_plan(cache: &BacktestTickCache) -> Result<TickMigrationPlan, CliError> {
+    let report = cache.diagnose()?;
+    let legacy_files = report
+        .files
+        .iter()
+        .filter(|file| file.schema_version != Some(HISTORY_SERIES_CACHE_SCHEMA_VERSION))
+        .count();
+    let legacy_symbols = report
+        .files
+        .iter()
+        .filter(|file| file.schema_version != Some(HISTORY_SERIES_CACHE_SCHEMA_VERSION))
+        .map(|file| file.symbol.clone())
+        .collect::<BTreeSet<_>>();
+    let files = report
+        .files
+        .iter()
+        .filter(|file| legacy_symbols.contains(&file.symbol))
+        .map(|file| TickMigrationFile {
+            path: file.path.clone(),
+            size_bytes: file.size_bytes,
+        })
+        .collect::<Vec<_>>();
+    let source_bytes = files.iter().map(|file| file.size_bytes).sum();
+
+    Ok(TickMigrationPlan {
+        problem_files: report.problem_files,
+        legacy_files,
+        source_bytes,
+        symbols: legacy_symbols.into_iter().collect(),
+        files,
+    })
+}
+
+fn migration_outcome(
+    cache_dir: PathBuf,
+    dry_run: bool,
+    plan: &TickMigrationPlan,
+    details: MigrationOutcomeDetails,
+) -> CommandOutcome {
+    CommandOutcome {
+        value: json!({
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "command": "migrate",
+            "cache_kind": "tick",
+            "cache_dir": cache_dir,
+            "dry_run": dry_run,
+            "preflight_ok": plan.problem_files == 0,
+            "completed": details.completed,
+            "target_format": HISTORY_SERIES_CACHE_FORMAT_ID,
+            "target_schema_version": HISTORY_SERIES_CACHE_SCHEMA_VERSION,
+            "legacy_symbols": plan.symbols,
+            "legacy_files": plan.legacy_files,
+            "problem_files": plan.problem_files,
+            "source_bytes": plan.source_bytes,
+            "backup_dir": details.backup_dir,
+            "backup_data_files": details.backup_data_files,
+            "backup_lock_files": details.backup_lock_files,
+            "rewritten_bytes": details.rewritten_bytes,
+        }),
+        exit_code: if plan.problem_files == 0 { 0 } else { 1 },
+    }
+}
+
+fn prepare_migration_backup_dir(cache_dir: &Path, requested: &Path) -> Result<PathBuf, CliError> {
+    let name = requested
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| CliError::Usage("--backup-dir must name a new directory".to_string()))?;
+    let parent = requested
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = fs::canonicalize(parent)?;
+    if !fs::metadata(&parent)?.is_dir() {
+        return Err(CliError::Usage(
+            "--backup-dir parent must be a directory".to_string(),
+        ));
+    }
+    let backup_dir = parent.join(name);
+    if backup_dir.exists() {
+        return Err(CliError::Usage(
+            "--backup-dir must not already exist".to_string(),
+        ));
+    }
+    if backup_dir.starts_with(cache_dir) {
+        return Err(CliError::Usage(
+            "--backup-dir must be outside cache root".to_string(),
+        ));
+    }
+    fs::create_dir(&backup_dir)?;
+    Ok(backup_dir)
+}
+
+fn backup_migration_inputs(
+    cache_dir: &Path,
+    backup_dir: &Path,
+    plan: &TickMigrationPlan,
+) -> Result<(usize, usize), CliError> {
+    let mut backup_data_files = 0;
+    let mut lock_paths = BTreeSet::new();
+    for file in &plan.files {
+        let relative = file.path.strip_prefix(cache_dir).map_err(|_| {
+            CliError::Migration(format!(
+                "migration input {} is outside cache root {}",
+                file.path.display(),
+                cache_dir.display()
+            ))
+        })?;
+        let target = backup_dir.join(relative);
+        hard_link_migration_file(&file.path, &target)?;
+        backup_data_files += 1;
+        lock_paths.insert(file.path.with_extension("tqbn.lock"));
+        let partition_lock = file.path.parent().ok_or_else(|| {
+            CliError::Migration(format!(
+                "migration input {} has no parent directory",
+                file.path.display()
+            ))
+        })?;
+        lock_paths.insert(partition_lock.join(".tqbn.lock"));
+    }
+
+    let mut backup_lock_files = 0;
+    for lock_path in lock_paths {
+        if !lock_path.exists() {
+            continue;
+        }
+        let relative = lock_path.strip_prefix(cache_dir).map_err(|_| {
+            CliError::Migration(format!(
+                "lock {} is outside cache root {}",
+                lock_path.display(),
+                cache_dir.display()
+            ))
+        })?;
+        copy_migration_lock(&lock_path, &backup_dir.join(relative))?;
+        backup_lock_files += 1;
+    }
+    Ok((backup_data_files, backup_lock_files))
+}
+
+fn hard_link_migration_file(source: &Path, target: &Path) -> Result<(), CliError> {
+    let metadata = fs::symlink_metadata(source)?;
+    if !metadata.file_type().is_file() {
+        return Err(CliError::Migration(format!(
+            "migration source {} is not a regular file",
+            source.display()
+        )));
+    }
+    let parent = target.parent().ok_or_else(|| {
+        CliError::Migration(format!("backup target {} has no parent", target.display()))
+    })?;
+    fs::create_dir_all(parent)?;
+    fs::hard_link(source, target).map_err(|error| {
+        CliError::Migration(format!(
+            "cannot hard-link {} to {}; --backup-dir must share cache filesystem: {error}",
+            source.display(),
+            target.display()
+        ))
+    })
+}
+
+fn copy_migration_lock(source: &Path, target: &Path) -> Result<(), CliError> {
+    let metadata = fs::symlink_metadata(source)?;
+    if !metadata.file_type().is_file() {
+        return Err(CliError::Migration(format!(
+            "migration lock {} is not a regular file",
+            source.display()
+        )));
+    }
+    let parent = target.parent().ok_or_else(|| {
+        CliError::Migration(format!("backup target {} has no parent", target.display()))
+    })?;
+    fs::create_dir_all(parent)?;
+    fs::copy(source, target)?;
+    fs::set_permissions(target, metadata.permissions())?;
+    Ok(())
+}
+
 fn fill_config(args: &FillArgs) -> BacktestRemoteFillConfig {
     let mut config = BacktestRemoteFillConfig::from_environment();
     if let Some(value) = args.symbol_batch_size {
@@ -2711,17 +3127,19 @@ fn write_output(value: &Value, pretty: bool) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CalendarMode, Cli, Command, FillDaysArgs, ProgressMode, current_open_trading_day,
-        fill_was_interrupted, persist_calendar_if_needed, resolve_fill_window,
+        CacheKind, CalendarMode, Cli, Command, FillDaysArgs, MigrateArgs, ProgressMode,
+        current_open_trading_day, fill_was_interrupted, migrate, persist_calendar_if_needed,
+        resolve_fill_window,
     };
     use chrono::NaiveDate;
     use clap::Parser;
+    use tqsdk::advanced::core::Tick;
     use tqsdk_cache::{
         TradingCalendarHolidaysSnapshot, TradingCalendarSnapshot,
         read_trading_calendar_holidays_snapshot, write_trading_calendar_holidays_snapshot,
         write_trading_calendar_snapshot,
     };
-    use tqsdk_data::{TradingCalendarHolidays, TradingCalendarRow};
+    use tqsdk_data::{BacktestTickCache, TradingCalendarHolidays, TradingCalendarRow};
 
     #[test]
     fn successful_warmup_wins_a_late_shutdown_signal_race() {
@@ -3003,6 +3421,73 @@ mod tests {
             panic!("expected fill command");
         };
         assert!(args.days.refresh_calendar);
+    }
+
+    #[test]
+    fn migrate_apply_requires_an_explicit_backup_directory() {
+        let error = Cli::try_parse_from(["tqsdk-cache", "migrate", "--apply"]).unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn migrate_apply_hard_links_legacy_input_and_rewrites_to_v3() {
+        let parent = std::env::temp_dir().join(format!(
+            "tqsdk-cache-migrate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cache_dir = parent.join("cache");
+        let backup_dir = parent.join("backup");
+        let cache = BacktestTickCache::open(&cache_dir).unwrap();
+        cache
+            .store_ticks(
+                "SHFE.op2701",
+                1_000,
+                2_000,
+                [Tick {
+                    id: 1,
+                    datetime: 1_000,
+                    ..Tick::default()
+                }],
+            )
+            .unwrap();
+        let source_path = cache.diagnose().unwrap().files[0].path.clone();
+        let mut bytes = std::fs::read(&source_path).unwrap();
+        bytes[5..9].copy_from_slice(&2_u32.to_le_bytes());
+        std::fs::write(&source_path, bytes).unwrap();
+
+        let outcome = migrate(
+            Some(&cache_dir),
+            CacheKind::Tick,
+            MigrateArgs {
+                apply: true,
+                backup_dir: Some(backup_dir.clone()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.value["completed"], true);
+        let backup_path = backup_dir.join(source_path.strip_prefix(&cache_dir).unwrap());
+        let backup_bytes = std::fs::read(backup_path).unwrap();
+        assert_eq!(&backup_bytes[5..9], &2_u32.to_le_bytes());
+        let files = BacktestTickCache::open_read_only(&cache_dir)
+            .diagnose()
+            .unwrap()
+            .files;
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].schema_version, Some(3));
+        assert!(
+            backup_dir
+                .join("series/19700101/tick/SHFE.op2701.tqbn.lock")
+                .is_file()
+        );
     }
 
     #[test]

@@ -22,6 +22,8 @@ pub(crate) fn write_result(
         "verify" => write_verify(&mut output, value)?,
         "doctor" => write_doctor(&mut output, value)?,
         "repair-locks" => write_repair_locks(&mut output, value)?,
+        "migrate" => write_migrate(&mut output, value)?,
+        "metadata-refresh" => write_metadata_refresh(&mut output, value)?,
         "purge" => write_purge(&mut output, value)?,
         "query" => write_query(&mut output, value)?,
         _ => writeln!(output, "No terminal summary is available for this command.")?,
@@ -412,6 +414,73 @@ fn write_repair_locks(output: &mut impl Write, value: &Value) -> io::Result<()> 
     Ok(())
 }
 
+fn write_migrate(output: &mut impl Write, value: &Value) -> io::Result<()> {
+    write_cache_header(output, value)?;
+    writeln!(
+        output,
+        "Target: {} schema {}",
+        string(value, "target_format").unwrap_or("-"),
+        number(value, "target_schema_version"),
+    )?;
+    writeln!(
+        output,
+        "Legacy: {} files | {} symbols | {}",
+        number(value, "legacy_files"),
+        array(value, "legacy_symbols").len(),
+        format_bytes(number(value, "source_bytes")),
+    )?;
+    if boolean(value, "dry_run") {
+        writeln!(
+            output,
+            "Mode: dry run; pass --apply --backup-dir DIR to migrate."
+        )?;
+        return Ok(());
+    }
+    if boolean(value, "completed") {
+        writeln!(output, "Mode: applied; deep validation passed.")?;
+    } else {
+        writeln!(
+            output,
+            "Mode: not applied; no eligible legacy files or preflight failed."
+        )?;
+    }
+    if let Some(backup_dir) = string(value, "backup_dir") {
+        writeln!(
+            output,
+            "Backup: {backup_dir} | {} data links | {} lock copies",
+            number(value, "backup_data_files"),
+            number(value, "backup_lock_files"),
+        )?;
+    }
+    if let Some(rewritten_bytes) = value.get("rewritten_bytes").and_then(Value::as_u64) {
+        writeln!(output, "Rewritten size: {}", format_bytes(rewritten_bytes))?;
+    }
+    Ok(())
+}
+
+fn write_metadata_refresh(output: &mut impl Write, value: &Value) -> io::Result<()> {
+    write_cache_header(output, value)?;
+    writeln!(output, "Symbol: {}", string(value, "symbol").unwrap_or("-"))?;
+    if let Some(range) = value.get("requested_range") {
+        writeln!(
+            output,
+            "Range: {} to {}",
+            string(range, "start").unwrap_or("-"),
+            string(range, "end").unwrap_or("-"),
+        )?;
+    }
+    if let Some(snapshot) = value.get("snapshot") {
+        writeln!(
+            output,
+            "Snapshot: {} | trading days {} | physical segments {}",
+            string(snapshot, "snapshot_hash").unwrap_or("-"),
+            number(snapshot, "trading_days"),
+            number(snapshot, "physical_segments"),
+        )?;
+    }
+    Ok(())
+}
+
 fn write_purge(output: &mut impl Write, value: &Value) -> io::Result<()> {
     write_cache_header(output, value)?;
     write_requested_days(output, value.get("requested_days"))?;
@@ -651,7 +720,7 @@ mod tests {
         let value = json!({
             "command": "inventory",
             "cache_dir": "/tmp/cache",
-            "backend_format": "tqsdk.tqbn.daily.v2",
+            "backend_format": "tqsdk.tqbn.daily.v3",
             "total_files": 2,
             "total_bytes": 1_536,
             "total_days": 1,
@@ -900,7 +969,7 @@ mod tests {
             json!({
                 "command": "doctor",
                 "cache_dir": "/tmp/cache",
-                "backend_format": "tqsdk.tqbn.daily.v2",
+                "backend_format": "tqsdk.tqbn.daily.v3",
                 "problem_files": 1,
                 "files": [{
                     "path": "/tmp/cache/series/20260721/tick/SHFE.au2608.tqbn",
@@ -923,5 +992,32 @@ mod tests {
         write_error(&mut error, "fill", "cache is busy", 75, true).unwrap();
         let error = String::from_utf8(error).unwrap();
         assert!(error.contains("Retry: yes"));
+    }
+
+    #[test]
+    fn migrate_summary_reports_plan_and_backup() {
+        let value = json!({
+            "command": "migrate",
+            "cache_dir": "/tmp/cache",
+            "target_format": "tqsdk.tqbn.daily.v3",
+            "target_schema_version": 3,
+            "dry_run": false,
+            "completed": true,
+            "legacy_files": 2,
+            "legacy_symbols": ["SHFE.op2701"],
+            "source_bytes": 4096,
+            "rewritten_bytes": 1024,
+            "backup_dir": "/tmp/backup",
+            "backup_data_files": 2,
+            "backup_lock_files": 3,
+        });
+        let mut output = Vec::new();
+
+        write_result(&mut output, &value, "success", 0, 12).unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Mode: applied"));
+        assert!(output.contains("Backup: /tmp/backup"));
+        assert!(!output.contains("No terminal summary is available"));
     }
 }

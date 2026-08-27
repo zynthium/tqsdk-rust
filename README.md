@@ -31,7 +31,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-session`](crates/tqsdk-session) | 共享 session、lazy connection、命令推进、one-shot direct query、metadata、schema 和 service query |
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
 | [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、task-owned replay source、streaming local backtest execution、Python-compatible local backtest sim、kline default price tick、cash/equity drawdown summary、低延迟 trading desk profile |
-| [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、`BacktestHistoryClient` 异步缓存查询、TQBN daily v2 (`.tqbn`) tick cache、canonical final-60s K cache、tick companion-lock repair API 和共享 universe selector |
+| [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、`BacktestHistoryClient` 异步缓存查询、TQBN daily v3 (`.tqbn`) tick cache、canonical final-60s K cache、tick companion-lock repair API 和共享 universe selector |
 | [`tqsdk-cache`](crates/tqsdk-cache) | 可选 tick / canonical-minute cache 运维与区间查询 CLI：默认文本摘要、按需 versioned JSON、lossless JSONL / token-aware LLM CSV、inventory、coverage inspect、closed-day fill、tick 的显式当前日 provisional fill、tick companion-lock dry-run/repair、selectable stderr progress、CacheOnly verify、deep doctor 与受控 minute purge；不进入默认策略 hot path |
 | [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端的 quote / tick / K 线请求；未配置 relay 时 SDK 仍直连天勤 |
 
@@ -173,7 +173,7 @@ metadata；可在 backtest builder 上用 `.price_tick(...)`、`.instrument_spec
 
 | 请求 | durable source | 本地处理 |
 | --- | --- | --- |
-| Tick | 按 CST trading day 的 TQBN v2 tick 分区 | 原样读取 |
+| Tick | 按 CST trading day 的 TQBN v3 tick 分区 | 原样读取 |
 | `15s` 和其他 `<60s` K | 同一 tick 分区 | 按官方 session 从 tick 聚合 |
 | `60s` K | `logical symbol × trading month` 的 final canonical-minute v4 分区 | 原样读取 |
 | `N × 60s`（`N > 1`） | 同一 60s 分区 | 从 closed 60s K 按固定 CST `18:00` trading-day grid 聚合；盘中 break 不重置 bucket |
@@ -318,10 +318,13 @@ date -> underlying 映射和 contiguous segment 压缩可用
 `query_trading_calendar(...)` / `query_trading_days(...)` /
 `tqsdk-data::DataClient::query_his_cont_underlyings(...)` /
 `query_his_cont_underlying_segments(...)`。
-历史序列和回测 tick cache 默认写按交易日分区的 TQBN daily v2 (`.tqbn`)；
+历史序列和回测 tick cache 默认写按交易日分区的 TQBN daily v3 (`.tqbn`)；
 tick 路径形如 `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn`。默认 features 启用
 `tqbn-zstd`，hot append 的 TQBN records block 使用 zstd level 1，append-log compaction
 重写 records block 时使用 zstd level 3；两者都只在压缩后更小时写入压缩 block。
+Tick v3 首 snapshot 是完整 keyframe，后续 snapshot 只写变化字段和 id/time delta；不会按固定 tick
+频率填充，也不会删除无成交或重复盘口 snapshot。旧 v2 cache 需先执行
+`tqsdk-cache migrate --apply --backup-dir DIR`；新 writer 拒绝向 v2 Tick 文件混写。
 当前日 checkpoint 使用独立的 non-final provisional record，不进入普通 coverage；同日 final
 coverage 成功后会覆盖并在 compaction 中淘汰它。
 market-data records block 以 8 MiB 未压缩 payload 为目标上限，并紧跟 crate-internal `TQRI`

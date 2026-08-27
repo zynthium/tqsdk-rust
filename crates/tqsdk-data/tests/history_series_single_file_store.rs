@@ -162,7 +162,7 @@ fn history_cache_store_scan_reports_tqbn_rows() {
     assert_eq!(file.duration_ns, Some(0));
     assert_eq!(file.id_range, Some((1, 3)));
     assert_eq!(file.rows, 2);
-    assert_eq!(file.schema_version, Some(2));
+    assert_eq!(file.schema_version, Some(3));
     assert!(file.error.is_none());
 }
 

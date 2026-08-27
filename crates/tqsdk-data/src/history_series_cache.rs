@@ -30,7 +30,7 @@ pub(crate) use store::{
 
 const DEFAULT_CACHE_DIR_ENV: &str = "TQSDK_HISTORY_CACHE_DIR";
 const DEFAULT_CACHE_DIR: &str = ".tqsdk/data_series_1";
-pub const HISTORY_SERIES_CACHE_SCHEMA_VERSION: u32 = 2;
+pub const HISTORY_SERIES_CACHE_SCHEMA_VERSION: u32 = 3;
 const KLINE_DATA_COLS: usize = 7;
 const TICK_1_LEVEL_DATA_COLS: usize = 11;
 const TICK_5_LEVEL_DATA_COLS: usize = 27;

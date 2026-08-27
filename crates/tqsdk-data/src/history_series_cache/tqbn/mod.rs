@@ -31,10 +31,11 @@ use tqsdk_core::{Kline, Tick};
 use codec::{
     DecodedTqbnRecord, EncodedTickRecord, TqbnBlockType, checksum64_fnv1a, decode_block_payload,
     decode_block_payload_into, decode_file_prefix, decode_kline_record, decode_one_record,
-    decode_tick1_record, decode_tick5_record, encode_block, encode_compacted_records_block,
-    encode_file_prefix, encode_kline_record, encode_records_block, encode_tick_record,
-    validate_block_flags,
+    decode_tick_delta_block, decode_tick1_record, decode_tick5_record, encode_block,
+    encode_compacted_records_block, encode_file_prefix, encode_kline_record, encode_records_block,
+    encode_tick_delta_block, encode_tick_record, is_tick_delta_block, validate_block_flags,
 };
+
 use format::{
     FIXED_AMOUNT_SCALE, FIXED_PRICE_SCALE, TqbnCoverageRecordV1, TqbnKlineRecordV1,
     TqbnProvisionalCoverageRecordV1, TqbnRType, TqbnRecordHeader, TqbnTick1RecordV1,
@@ -43,6 +44,8 @@ use format::{
 use metadata::{TqbnMetadata, TqbnSchema, decode_metadata, encode_metadata};
 
 pub(super) use format::{TQBN_FORMAT_ID, TQBN_SCHEMA_VERSION};
+
+const TQBN_LEGACY_SCHEMA_VERSION: u32 = format::TQBN_LEGACY_SCHEMA_VERSION;
 
 const ROOT_DIR_NAME: &str = "series";
 const TICK_DIR_NAME: &str = "tick";
@@ -1406,7 +1409,7 @@ fn append_segment_to_file(
     segment: &HistorySeriesWriteSegment<'_>,
 ) -> Result<HistorySeriesSegmentReport> {
     let (mut file, first_block_offset) =
-        open_tqbn_file_for_append(path, segment.symbol, segment.kind)?;
+        open_tqbn_file_for_append(path, segment.symbol, segment.kind, false)?;
     let mut coverage_index_offset =
         repair_truncated_tqbn_tail(&mut file, path, first_block_offset)?;
     if coverage_index_offset.is_none() {
@@ -1441,7 +1444,7 @@ fn append_segment_and_coverage_to_file(
     coverage: &[HistorySeriesCoverageCommit],
 ) -> Result<HistorySeriesSegmentReport> {
     let (mut file, first_block_offset) =
-        open_tqbn_file_for_append(path, segment.symbol, segment.kind)?;
+        open_tqbn_file_for_append(path, segment.symbol, segment.kind, false)?;
     let mut coverage_index_offset =
         repair_truncated_tqbn_tail(&mut file, path, first_block_offset)?;
     if coverage_index_offset.is_none() {
@@ -1478,7 +1481,7 @@ fn append_segment_and_coverage_to_file(
 
 fn append_coverage_to_file(path: &Path, commit: &HistorySeriesCoverageCommit) -> Result<()> {
     let (mut file, first_block_offset) =
-        open_tqbn_file_for_append(path, commit.symbol.as_str(), commit.kind)?;
+        open_tqbn_file_for_append(path, commit.symbol.as_str(), commit.kind, true)?;
     let mut coverage_index_offset =
         repair_truncated_tqbn_tail(&mut file, path, first_block_offset)?;
     if coverage_index_offset.is_none() {
@@ -1503,7 +1506,7 @@ fn append_provisional_to_file(
     commit: &HistorySeriesProvisionalCoverage,
 ) -> Result<()> {
     let (mut file, first_block_offset) =
-        open_tqbn_file_for_append(path, commit.symbol.as_str(), commit.kind)?;
+        open_tqbn_file_for_append(path, commit.symbol.as_str(), commit.kind, true)?;
     let mut coverage_index_offset =
         repair_truncated_tqbn_tail(&mut file, path, first_block_offset)?;
     if coverage_index_offset.is_none() {
@@ -1520,6 +1523,7 @@ fn open_tqbn_file_for_append(
     path: &Path,
     symbol: &str,
     kind: HistorySeriesKind,
+    allow_legacy: bool,
 ) -> Result<(File, u64)> {
     match fs::metadata(path) {
         Ok(metadata) if metadata.len() == 0 => {
@@ -1535,7 +1539,12 @@ fn open_tqbn_file_for_append(
 
     let mut file = OpenOptions::new().read(true).append(true).open(path)?;
     file.seek(SeekFrom::Start(0))?;
-    let (_, first_block_offset) = read_and_validate_tqbn_prefix(&mut file, symbol, kind)?;
+    let (prefix, first_block_offset) = read_and_validate_tqbn_prefix(&mut file, symbol, kind)?;
+    if prefix.schema_version != TQBN_SCHEMA_VERSION && !allow_legacy {
+        return Err(DataError::InvalidState(
+            "legacy TQBN is read-only; run tqsdk-cache migrate --apply --backup-dir <DIR> before appending",
+        ));
+    }
     file.seek(SeekFrom::End(0))?;
     Ok((file, first_block_offset as u64))
 }
@@ -1904,25 +1913,7 @@ fn append_rows_block_with_encoder(
         }
         (HistorySeriesKind::Tick, HistorySeriesWriteRows::Ticks(rows)) => {
             let five_level = tick_rows_use_five_levels(segment.symbol);
-            for row in *rows {
-                record.clear();
-                match encode_tick_record(row, five_level)? {
-                    EncodedTickRecord::Tick1(encoded) => {
-                        write_tick1_record_bytes(&mut record, &encoded)?;
-                    }
-                    EncodedTickRecord::Tick5(encoded) => {
-                        write_tick5_record_bytes(&mut record, &encoded)?;
-                    }
-                }
-                append_indexed_record_to_blocks(
-                    file,
-                    &mut block,
-                    &record,
-                    row.datetime,
-                    encode_records,
-                )?;
-            }
-            flush_indexed_records_block(file, &mut block, encode_records)?;
+            append_tick_delta_blocks(file, rows, five_level, encode_records)?;
             Ok((
                 rows.len(),
                 id_range(rows.iter().map(|row| row.id))?,
@@ -1936,6 +1927,60 @@ fn append_rows_block_with_encoder(
             "history TQBN write row kind does not match segment kind",
         )),
     }
+}
+
+fn append_tick_delta_blocks(
+    file: &mut File,
+    rows: &[Tick],
+    five_level: bool,
+    encode_records: TqbnRecordsBlockEncoder,
+) -> Result<()> {
+    for chunk in rows.chunks(codec::TQBN_TICK_DELTA_MAX_ROWS) {
+        let delta_payload = encode_tick_delta_block(chunk, five_level)?;
+        let fixed_payload = encode_fixed_tick_records(chunk, five_level)?;
+        let delta_block = encode_records(&delta_payload)?;
+        let fixed_block = encode_records(&fixed_payload)?;
+        let encoded = if delta_block.len() < fixed_block.len() {
+            delta_block
+        } else {
+            fixed_block
+        };
+        let range_start_ns = chunk
+            .iter()
+            .map(|row| row.datetime)
+            .min()
+            .ok_or(DataError::InvalidState("TQBN TickDelta chunk is empty"))?;
+        let range_end_ns = chunk
+            .iter()
+            .map(|row| row.datetime)
+            .max()
+            .and_then(|datetime| datetime.checked_add(1))
+            .ok_or_else(|| {
+                DataError::InvalidResponse("TQBN records index datetime overflow".to_string())
+            })?;
+        let records_block_offset = file.seek(SeekFrom::End(0))?;
+        file.write_all(&encoded)?;
+        append_tqbn_records_index(
+            file,
+            TqbnRecordsIndexV1 {
+                records_block_offset,
+                range_start_ns,
+                range_end_ns,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn encode_fixed_tick_records(rows: &[Tick], five_level: bool) -> Result<Vec<u8>> {
+    let mut records = Vec::new();
+    for row in rows {
+        match encode_tick_record(row, five_level)? {
+            EncodedTickRecord::Tick1(encoded) => write_tick1_record_bytes(&mut records, &encoded)?,
+            EncodedTickRecord::Tick5(encoded) => write_tick5_record_bytes(&mut records, &encoded)?,
+        }
+    }
+    Ok(records)
 }
 
 fn append_indexed_record_to_blocks(
@@ -2393,6 +2438,9 @@ fn scan_tqbn_streaming_block(
     range_start_ns: i64,
     range_end_ns: i64,
 ) -> Result<TqbnStreamingBlockScan> {
+    if is_tick_delta_block(records) {
+        return Ok(TqbnStreamingBlockScan::NonIncreasing);
+    }
     let mut first_id = None;
     let mut previous_id = None;
     let mut first_tick_datetime_ns = None;
@@ -2519,7 +2567,11 @@ fn parse_tqbn_checkpoint_file(
     file.seek(SeekFrom::Start(offset as u64))?;
     let mut indexed = TqbnIndexedCoverage::default();
     decode_blocks_streaming_with_snapshot(&mut file, snapshot_len, |records| {
-        decode_checkpoint_records_block(records, &mut indexed)
+        if is_tick_delta_block(records) {
+            Ok(())
+        } else {
+            decode_checkpoint_records_block(records, &mut indexed)
+        }
     })?;
     Ok(indexed)
 }
@@ -2812,9 +2864,12 @@ fn validate_tqbn_prefix(
     symbol: &str,
     kind: HistorySeriesKind,
 ) -> Result<()> {
-    if prefix.schema_version != TQBN_SCHEMA_VERSION {
+    if !matches!(
+        prefix.schema_version,
+        TQBN_LEGACY_SCHEMA_VERSION | TQBN_SCHEMA_VERSION
+    ) {
         return Err(DataError::InvalidResponse(format!(
-            "TQBN file schema version {} is unsupported; expected {TQBN_SCHEMA_VERSION}",
+            "TQBN file schema version {} is unsupported; expected {TQBN_LEGACY_SCHEMA_VERSION} or {TQBN_SCHEMA_VERSION}",
             prefix.schema_version
         )));
     }
@@ -2923,7 +2978,7 @@ fn decode_blocks_streaming(
     kind: HistorySeriesKind,
     state: &mut TqbnSeriesState,
 ) -> Result<()> {
-    decode_blocks_streaming_with(file, |records| decode_records_block(records, kind, state))
+    decode_blocks_streaming_with(file, |records| decode_records_payload(records, kind, state))
 }
 
 fn decode_blocks_streaming_for_range(
@@ -2944,7 +2999,7 @@ fn decode_blocks_streaming_for_range(
     )? {
         let records = read_decoded_tqbn_block_payload(file, descriptor)?;
         let mut block_state = TqbnSeriesState::default();
-        decode_records_block(&records, kind, &mut block_state)?;
+        decode_records_payload(&records, kind, &mut block_state)?;
         state.rows.extend(block_state.rows);
         state.coverage.extend(block_state.coverage);
         state.provisional.extend(block_state.provisional);
@@ -3326,6 +3381,27 @@ fn decode_history_row_record(
         | DecodedTqbnRecord::Unknown { record_size, .. } => (None, record_size),
     };
     Ok((row, record_size))
+}
+
+fn decode_records_payload(
+    bytes: &[u8],
+    kind: HistorySeriesKind,
+    state: &mut TqbnSeriesState,
+) -> Result<()> {
+    if is_tick_delta_block(bytes) {
+        if kind != HistorySeriesKind::Tick {
+            return Err(DataError::InvalidResponse(
+                "TQBN TickDelta records block appears in a Kline series".to_string(),
+            ));
+        }
+        state.rows.extend(
+            decode_tick_delta_block(bytes)?
+                .into_iter()
+                .map(HistorySeriesRow::Tick),
+        );
+        return Ok(());
+    }
+    decode_records_block(bytes, kind, state)
 }
 
 fn decode_records_block(
@@ -3952,23 +4028,26 @@ fn scan_tqbn_tree_file(root_dir: &Path, path: PathBuf) -> Result<HistorySeriesCa
     }
 
     match parse_tqbn_series_file(&path, symbol.as_str(), kind) {
-        Ok(parsed) => Ok(HistorySeriesCacheFileReport {
-            id_range: rows_id_range(&parsed.state.rows)?,
-            row_width: row_width(kind),
-            rows: parsed.state.rows.len(),
-            status: if parsed.error.is_some() {
-                HistorySeriesCacheFileStatus::IncompleteWrite
-            } else {
-                HistorySeriesCacheFileStatus::Readable
-            },
-            schema_version: Some(TQBN_SCHEMA_VERSION),
-            error: parsed.error,
-            path,
-            file_name,
-            symbol: Some(symbol),
-            duration_ns: Some(kind.duration_ns()),
-            size_bytes,
-        }),
+        Ok(parsed) => {
+            let schema_version = parsed.prefix.as_ref().map(|prefix| prefix.schema_version);
+            Ok(HistorySeriesCacheFileReport {
+                id_range: rows_id_range(&parsed.state.rows)?,
+                row_width: row_width(kind),
+                rows: parsed.state.rows.len(),
+                status: if parsed.error.is_some() {
+                    HistorySeriesCacheFileStatus::IncompleteWrite
+                } else {
+                    HistorySeriesCacheFileStatus::Readable
+                },
+                schema_version,
+                error: parsed.error,
+                path,
+                file_name,
+                symbol: Some(symbol),
+                duration_ns: Some(kind.duration_ns()),
+                size_bytes,
+            })
+        }
         Err(error) => Ok(HistorySeriesCacheFileReport {
             path,
             file_name,
@@ -4171,6 +4250,7 @@ fn compact_tqbn_file_locked(path: &Path, symbol: &str, kind: HistorySeriesKind) 
     let prefix = parsed.prefix.ok_or_else(|| {
         DataError::InvalidResponse("TQBN compaction requires file prefix".to_string())
     })?;
+    let prefix = encode_file_prefix(&prefix.metadata);
     let rows = compact_rows(parsed.state.rows, kind);
     let coverage = super::merge_datetime_ranges(parsed.state.coverage);
     let provisional = compact_provisional_coverage(parsed.state.provisional, &coverage);
@@ -5072,7 +5152,9 @@ mod tests {
         HistorySeriesWriteSegment,
     };
 
-    use super::codec::{TqbnBlockType, decode_blocks, encode_block, encode_file_prefix};
+    use super::codec::{
+        TqbnBlockType, decode_blocks, decode_file_prefix, encode_block, encode_file_prefix,
+    };
     use super::{
         TQBN_BLOCK_HEADER_LEN, TQBN_COVERAGE_INDEX_PAYLOAD_LEN, TqbnHistoryStore, TqbnMetadata,
         TqbnReader, coverage_record, encode_metadata, history_row_id,
@@ -5163,6 +5245,73 @@ mod tests {
             .unwrap();
         assert_eq!(series.rows()[0].last_price, 618.5);
         assert_eq!(series.rows()[0].ask_price5, 623.5);
+    }
+
+    #[test]
+    fn tqbn_sparse_tick_block_round_trips_every_snapshot() {
+        let cache = tqbn_cache("sparse_tick_block");
+        let mut rows = Vec::new();
+        let mut current = tick5(1, 1_000, f64::NAN, 623.5);
+        current.volume = 0;
+        current.amount = f64::NAN;
+        current.epoch = None;
+
+        for index in 0_i64..512 {
+            let mut row = current.clone();
+            row.id = index + 1;
+            row.datetime = 1_000 + index * 500_000_000;
+            if index % 32 == 0 {
+                row.bid_volume1 += index / 32;
+            }
+            current = row.clone();
+            rows.push(row);
+        }
+
+        cache
+            .write_tick_range(SYMBOL, 1_000, 1_000 + 512 * 500_000_000, &rows)
+            .unwrap();
+
+        let path = cache
+            .root_dir()
+            .join("series")
+            .join("19700101")
+            .join("tick")
+            .join("SHFE.rb2601.tqbn");
+        let bytes = std::fs::read(path).unwrap();
+        let (_, first_block_offset) = decode_file_prefix(&bytes).unwrap();
+        let blocks = decode_blocks(&bytes[first_block_offset..]).unwrap();
+        assert!(
+            blocks.iter().any(|block| {
+                block.block_type == TqbnBlockType::Records
+                    && block
+                        .records
+                        .starts_with(&super::codec::TQBN_TICK_DELTA_MAGIC)
+            }),
+            "sparse Tick block must use TickDelta encoding"
+        );
+
+        let actual = cache
+            .read_tick_data_series(TickDataSeriesRequest::new(
+                SYMBOL,
+                1_000,
+                1_000 + 512 * 500_000_000,
+            ))
+            .unwrap();
+        assert_eq!(actual.rows().len(), rows.len());
+        for (expected, actual) in rows.iter().zip(actual.rows()) {
+            assert_eq!(actual.id, expected.id);
+            assert_eq!(actual.datetime, expected.datetime);
+            assert_eq!(actual.last_price.to_bits(), expected.last_price.to_bits());
+            assert_eq!(actual.ask_price1.to_bits(), expected.ask_price1.to_bits());
+            assert_eq!(actual.bid_price1.to_bits(), expected.bid_price1.to_bits());
+            assert_eq!(actual.ask_price5.to_bits(), expected.ask_price5.to_bits());
+            assert_eq!(actual.bid_price5.to_bits(), expected.bid_price5.to_bits());
+            assert_eq!(actual.bid_volume1, expected.bid_volume1);
+            assert_eq!(actual.volume, expected.volume);
+            assert_eq!(actual.amount.to_bits(), expected.amount.to_bits());
+            assert_eq!(actual.open_interest, expected.open_interest);
+            assert_eq!(actual.epoch, expected.epoch);
+        }
     }
 
     #[test]
@@ -5503,6 +5652,75 @@ mod tests {
             Some(compacted_len),
             "compaction must refresh the append checkpoint for the replacement inode",
         );
+    }
+
+    #[test]
+    fn tqbn_compaction_migrates_legacy_tick_records_to_delta_schema() {
+        let store = tqbn_store("migrate_legacy_tick_delta");
+        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let rows = vec![tick5(1, 1_000, 618.5, 623.5), tick5(2, 1_500, 618.5, 623.5)];
+        let records = super::encode_fixed_tick_records(&rows, true).unwrap();
+        let mut bytes = legacy_tick_prefix().bytes;
+        bytes.extend_from_slice(&encode_block(TqbnBlockType::Records, &records));
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            store.scan().unwrap().files[0].schema_version,
+            Some(super::TQBN_LEGACY_SCHEMA_VERSION)
+        );
+        store
+            .append_coverage(HistorySeriesCoverageCommit {
+                symbol: SYMBOL.to_string(),
+                kind: HistorySeriesKind::Tick,
+                range_start_ns: 1_000,
+                range_end_ns: 2_000,
+                rows: rows.len(),
+                id_range: Some((1, 3)),
+            })
+            .unwrap();
+
+        store
+            .compact_series(SYMBOL, HistorySeriesKind::Tick)
+            .unwrap();
+
+        let bytes = std::fs::read(path).unwrap();
+        let (prefix, _) = decode_file_prefix(&bytes).unwrap();
+        assert_eq!(prefix.schema_version, super::TQBN_SCHEMA_VERSION);
+        assert!(
+            prefix.schema_version > super::TQBN_LEGACY_SCHEMA_VERSION,
+            "compaction must replace the legacy format identity"
+        );
+        let cache = HistorySeriesCache::from_store(Arc::new(store));
+        let actual = cache
+            .read_tick_data_series(TickDataSeriesRequest::new(SYMBOL, 1_000, 2_000))
+            .unwrap();
+        assert_eq!(actual.rows().len(), rows.len());
+        assert_eq!(actual.rows()[0].id, rows[0].id);
+        assert_eq!(actual.rows()[1].id, rows[1].id);
+    }
+
+    #[test]
+    fn tqbn_legacy_tick_file_rejects_append_until_migrated() {
+        let cache = tqbn_cache("legacy_tick_append_rejected");
+        let path = cache
+            .root_dir()
+            .join("series")
+            .join("19700101")
+            .join("tick")
+            .join("SHFE.rb2601.tqbn");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let rows = vec![tick5(1, 1_000, 618.5, 623.5)];
+        let records = super::encode_fixed_tick_records(&rows, true).unwrap();
+        let mut bytes = legacy_tick_prefix().bytes;
+        bytes.extend_from_slice(&encode_block(TqbnBlockType::Records, &records));
+        std::fs::write(path, bytes).unwrap();
+
+        let error = cache
+            .write_tick_range(SYMBOL, 2_000, 3_000, &[tick5(2, 2_000, 618.5, 623.5)])
+            .unwrap_err();
+
+        assert!(matches!(error, DataError::InvalidState(_)));
+        assert!(error.to_string().contains("run tqsdk-cache migrate"));
     }
 
     #[test]
@@ -7247,6 +7465,13 @@ mod tests {
         let metadata =
             TqbnMetadata::single_series_tick(SYMBOL.to_string(), tick_level_depth(SYMBOL));
         encode_file_prefix(&encode_metadata(&metadata).unwrap())
+    }
+
+    fn legacy_tick_prefix() -> super::codec::TqbnFilePrefix {
+        let mut prefix = valid_tick_prefix();
+        prefix.bytes[5..9].copy_from_slice(&super::TQBN_LEGACY_SCHEMA_VERSION.to_le_bytes());
+        prefix.schema_version = super::TQBN_LEGACY_SCHEMA_VERSION;
+        prefix
     }
 
     fn kline(id: i64, datetime: i64, open: f64, close: f64) -> Kline {

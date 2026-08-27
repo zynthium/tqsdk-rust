@@ -2,7 +2,7 @@
 
 ## 文档定位
 
-本文档定义 `tqsdk-data` 历史序列缓存当前默认的 TQBN daily v2 (`.tqbn`) 格式。
+本文档定义 `tqsdk-data` 历史序列缓存当前默认的 TQBN daily v3 (`.tqbn`) 格式。
 它只约束本仓库 Rust cache 的默认持久化合同，不扩大 public API，也不承诺兼容旧 Python
 `DataSeries` binary/mmap cache、旧 `.tqseries` cache 或旧单文件 `.tqbn` layout。
 
@@ -16,9 +16,9 @@
 
 ## Current Decision
 
-TQBN daily v2 是 `tqsdk-rust` history cache 当前默认和 canonical 格式。
+TQBN daily v3 是 `tqsdk-rust` history cache 当前默认和 canonical 格式。
 
-TQBN daily v2 是一个 DBN-like 的内部二进制记录流格式，由 `tqsdk-data` 的
+TQBN daily v3 是一个 DBN-like 的内部二进制记录流格式，由 `tqsdk-data` 的
 crate-internal codec 和 store adapter 实现。每个交易日分区文件仍是 append-only TQBN
 record stream；store layout 按交易日拆分，避免扩展回填区间时重写单个大型 series 文件。
 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认格式，不作为新增缓存文件目标，
@@ -26,7 +26,8 @@ record stream；store layout 按交易日拆分，避免扩展回填区间时重
 
 默认构建启用 Cargo feature `tqbn-zstd`。hot append writer 对 records block 使用 zstd level 1；
 append-log compaction 重写 records block 时使用 zstd level 3。两种路径都只有压缩后 payload
-更小时才写入压缩 block；metadata prefix、file identity、schema version 和 public facade 均不改变。
+更小时才写入压缩 block；同一 v3 文件内的 zstd 选择不改变 metadata prefix、file identity、schema
+version 或 public facade。
 `--no-default-features` 可关闭该支持，此时 writer 写未压缩 blocks。
 market-data records block 的未压缩 payload 目标上限为 8 MiB。该粒度避免日分区只形成一个超大
 zstd frame，同时把 frame/header 开销和压缩率损失控制在小范围；它不是新的 public tuning knob。
@@ -138,12 +139,12 @@ minute cache 没有 retention、max-byte eviction 或后台清理。`Refresh` �
 `fill --repair-stale` 也是显式确认的窄范围维护操作，而非自动 reader recovery。
 `CacheOnly` inspection 使用 read-only open，不创建 namespace、目录或文件。
 
-## TQBN daily v2 File Identity
+## TQBN daily v3 File Identity
 
 | 项 | 值 |
 | --- | --- |
-| format id | `tqsdk.tqbn.daily.v2` |
-| schema version | `2` |
+| format id | `tqsdk.tqbn.daily.v3` |
+| schema version | `3` |
 | file extension | `.tqbn` |
 | root layout | `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn` 和 `series/<YYYYMMDD>/kline/<duration_ns>/<escaped-symbol>.tqbn` |
 
@@ -201,18 +202,33 @@ TQBN 文件是按记录顺序解码的二进制 record stream。
 record stream 可以包含 metadata、coverage 和 data rows 等内部 record。record type 的枚举值、
 metadata layout 和 codec helper 不进入 public API。
 
-每个 block 使用 `TQBB` block header 包裹 record payload。block header 中的 flags byte 当前只定义
+每个 block 使用 `TQBB` block header 包裹 payload。block header 中的 flags byte 当前只定义
 `0x01 = zstd records payload`。checksum 始终覆盖实际落盘 payload：未压缩 block 校验原始 records，
 zstd block 校验压缩后的 bytes；reader 校验 checksum 后再按 flags 解码 records。未启用
 `tqbn-zstd` 的 reader 遇到 zstd block 必须返回明确的格式错误，不能静默返回坏数据。
+
+### TickDelta sparse payload
+
+v3 的 Tick `Records` block 可使用 `TQTD` payload：首行是完整 keyframe；后续每一行保存 id/time 的
+zigzag-varint delta、changed-field bitmask 与每个变化字段的值。depth、row count、保留字节和全部变长字段
+均严格校验。字段使用既有 fixed-point / NaN sentinel / epoch 编码，因此可逐 bit 还原 Tick 的 id、时间、
+成交字段与五档盘口。
+
+这不是按 500ms 或任意 tick 频率补齐：每个收到的 snapshot 都保留，`last_price=null`、未成交或连续相同
+盘口也不删除。每个 block 最多 8192 行；若 delta payload 加上可选 zstd 后不小于既有固定 record payload，
+writer 回退固定 records。稀疏合约由 field-delta 获益，随机变化合约不会被更差编码强制放大。
+
+v2 只保留为受控迁移读取路径，不是持续兼容合同。新 writer 不会向 v2 文件追加 Tick rows，避免产生
+v2 prefix 与 v3 `TQTD` 混写；应先执行 `tqsdk-cache migrate --apply --backup-dir DIR`。旧 binary 不能读取
+v3 `TQTD`，所有长期访问同一 cache root 的进程必须同时升级。
 
 ### Records Range Index
 
 新写入和 append-log compaction 会在每个 market-data records block 后紧跟一个 crate-internal
 `TQRI` `Index` block。entry 记录前一个 records block 的 offset 和其行时间范围 `[start, end)`；
-records block 先写、index 后写，异常中断最多留下无索引 block。旧 reader 会忽略 `Index` block，
-新 reader 遇到旧文件、缺失索引、offset/range 不合法或不认识的 index 时，对该 records block
-回退完整解码，因此 format id 和 schema version 保持不变。
+records block 先写、index 后写，异常中断最多留下无索引 block。v3 reader 遇到缺失索引、
+offset/range 不合法或不认识的 index 时，对该 records block 回退完整解码；这类索引演进不改变 v3
+file identity 或 schema version。
 
 范围 reader 顺序读取小型 block header/index，只读取、校验并解压与请求范围相交的 market-data
 payload。metadata、coverage 和 index 自身仍校验；未知 flags 仍必须拒绝。`scan()`、`diagnose()`、
@@ -260,9 +276,8 @@ provisional checkpoint 的合同是：
   才执行 compaction，以合并碎片、提高压缩率并清理失效 checkpoint。
 - 一旦 final coverage 完整覆盖 checkpoint，读取端立即忽略它；后续 compaction 会物理淘汰
   已被 final coverage 取代的 checkpoint，并只保留每个起点最新的有效 checkpoint。
-- 旧 reader 不认识 rtype `19` 时按 `length_words` 跳过 record；不认识 `0x02` 索引 flag 时
-  回退扫描 record stream。因此 schema version 保持 `2`，旧 reader 最多失去续填加速，
-  不能把 provisional 错判为 final。
+- 同一 v3 reader 不认识 rtype `19` 时按 `length_words` 跳过 record；不认识 `0x02` 索引 flag 时
+  回退扫描 record stream。它不能把 provisional 错判为 final；这不构成对 v2/v3 binary 长期混跑的承诺。
 
 ## Price Encoding
 

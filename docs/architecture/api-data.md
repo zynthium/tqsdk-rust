@@ -92,7 +92,7 @@ planner、official server-backtest cache fill、single-flight 协调、bounded c
 
 | 用户请求 | durable source | 派生和持久化 |
 | --- | --- | --- |
-| Tick | CST trading-day TQBN v2 tick partition | 原样返回；不复制 |
+| Tick | CST trading-day TQBN v3 tick partition | 原样返回；不复制 |
 | `15s` 与其他 `<60s` K | 同一 Tick partition | 按 metadata session 聚合；仅内存中存在 |
 | `60s` K | `logical symbol × trading month` canonical-minute v4 partition | 唯一 durable K 线 |
 | `N × 60s`（`N > 1`） | 同一 canonical-minute partition | 只从 closed 60s rows 按固定 CST `18:00` trading-day grid 聚合；仅内存中存在 |
@@ -137,6 +137,10 @@ presentation contract：默认以 `Asia/Shanghai` 的显式 `+08:00` 紧凑 ISO�
 不会在 `tqsdk-data` 中引入模型依赖或 prompt API。
 CLI 只会把通过 `Final` 与完整 coverage 校验的 terminal report materialize 为 block；它不把
 `BacktestHistoryRun` 的 provisional `Chunk` 扩展成另一种 streaming query contract。
+
+`tqsdk-cache metadata-refresh` 是 `BacktestHistoryMaintenanceClient::refresh_metadata(...)` 的显式 operator
+adapter，不属于 query/read path：它在 exclusive root remote-fill gate 内从官方 source 保存 immutable sidecar，
+不改写 Tick 或 minute cache，也不使 `CacheOnly` 联网或接受未覆盖的 metadata。
 
 每个 canonical-minute 月文件绑定写入时的 immutable metadata snapshot。active pointer 变更不单独使
 旧分区不可读：当且仅当保留 snapshot 覆盖整个请求窗口、schema/session identity 与 active snapshot
@@ -291,7 +295,7 @@ materialize/fill-only run 在 coverage 提交后直接返回物理写入计数�
      typed cache miss，以及最薄的容量/保留期清理策略；旧 Python `DataSeries`
      binary/mmap cache 不再作为 public surface 暴露，也不自动迁移
    - `HistorySeriesCache` 是 public facade，底层 store adapter 只保留为 crate
-     内部 seam；`HistorySeriesCache::open(root_dir)` 使用 canonical TQBN daily v2 history cache
+     内部 seam；`HistorySeriesCache::open(root_dir)` 使用 canonical TQBN daily v3 history cache
      format，格式合同见 [history-cache-format.md](history-cache-format.md)。TQBN 是
      tqsdk-specific DBN-like binary format，使用 fixed-width records、fixed-point price
      storage、self-describing metadata、explicit coverage records 和 forward-compatible
@@ -354,7 +358,7 @@ tqsdk-wait        tqsdk-data
 - `get_kline_data_series` 已经落在 `tqsdk-data`
 - `get_tick_data_series` 也已经落在 `tqsdk-data`
 - `DataClientBuilder` / `HistorySeriesCache` 提供显式 opt-in 的历史序列持久化缓存；
-  TQBN daily v2 (`.tqbn`) 是当前默认和 canonical 格式，使用交易日分区 layout；
+  TQBN daily v3 (`.tqbn`) 是当前默认和 canonical 格式，使用交易日分区 layout；
   旧 `.tqseries` 和旧单文件 `.tqbn` layout 不再作为默认格式，不提供兼容读取或迁移 store。
   旧 Python 兼容 mmap backend 已废弃，也已经落在
   `tqsdk-data`
@@ -433,7 +437,7 @@ tqsdk-wait        tqsdk-data
 - `query_option_greeks` 对 live quote price 会做 best-effort canonicalization：优先 `last_price`，缺失时回退到盘口中间价 / 单边盘口 / `pre_close`
 - `collect_remaining` 是建立在 `data_download` 之上的最薄 owned Vec materialization helper，只收集尚未消费的剩余页，不新增后台任务或缓存语义
 - `export_*_csv` 是建立在 `data_download` 之上的纯 async materialization helper，本身不拥有路径、缓存或后台线程语义
-- TQBN daily v2 (`.tqbn`) 是当前 Rust history cache 默认和 canonical 格式，路径形如
+- TQBN daily v3 (`.tqbn`) 是当前 Rust history cache 默认和 canonical 格式，路径形如
   `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn` 和
   `series/<YYYYMMDD>/kline/<duration_ns>/<escaped-symbol>.tqbn`。旧 `.tqseries`、旧单文件
   `.tqbn` layout 和旧 Python `DataSeries` binary/mmap 文件格式不再支持迁移、兼容读取或交替使用。同目录同时写仍是

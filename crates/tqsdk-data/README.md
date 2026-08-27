@@ -57,7 +57,7 @@ server-history chart substrate，`tqsdk-task` 仅消费结果来安排 replay ev
 
 | 请求 | durable source | 是否新建 K 线文件 |
 | --- | --- | --- |
-| Tick | CST trading-day TQBN v2 tick partition | 否 |
+| Tick | CST trading-day TQBN v3 tick partition | 否 |
 | `15s` / 其他 `<60s` K | Tick partition | 否，按 session 临时聚合 |
 | `60s` K | final canonical-minute v4 `logical symbol × trading month` partition | 是，唯一 durable K |
 | `N × 60s` | canonical-minute partition | 否，按 closed minutes 在固定 CST `18:00` trading-day grid 临时聚合 |
@@ -113,7 +113,10 @@ chart cleanup 成功后，同一 session 可顺序服务后续 trading-day/minut
   `DataClient::run_configured_history_cache_maintenance()` 的容量/保留期策略；history
   reads/writes 不会自动清理 tick 或 K 线数据
 - `HistorySeriesCache` 是稳定 facade，底层 store adapter 是 crate 内部实现细节；
-  `HistorySeriesCache::open(root_dir)` 使用 canonical TQBN daily v2 history cache format。
+ `HistorySeriesCache::open(root_dir)` 使用 canonical TQBN daily v3 history cache format。Tick v3
+ 首 snapshot 完整持久化，后续 snapshot 只写变化字段与 id/time delta；每条接收的 snapshot 都保留，
+ 不按 tick 频率填充，也不删除无成交或重复盘口。v2 文件写入前须执行
+ `tqsdk-cache migrate --apply --backup-dir DIR`。
   TQBN 是 tqsdk-specific DBN-like binary format，使用 fixed-width records、fixed-point
   price storage、self-describing metadata、explicit final coverage records、non-final
   provisional checkpoint records 和 forward-compatible record lengths；market-data records
@@ -365,7 +368,7 @@ owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Par
 - `resolve_futures_universe_symbols(...)`
 
 但它仍然只负责把下载结果收敛到调用方可接管的 `Vec`、写入调用方给定的
-`AsyncWrite`，或在 `get_*_data_series` 上复用 `HistorySeriesCache`；TQBN daily v2
+`AsyncWrite`，或在 `get_*_data_series` 上复用 `HistorySeriesCache`；TQBN daily v3
 (`.tqbn`) 是该缓存的当前默认和 canonical 格式，旧 `.tqseries` 和旧单文件 `.tqbn`
 layout 不提供兼容读取或迁移 store；
 不负责 live session ownership、后台 downloader、GUI viewport 状态、旧 binary/mmap cache
@@ -438,7 +441,7 @@ S30 contract
 [examples/api_contract_s30_history_series_cache.rs](examples/api_contract_s30_history_series_cache.rs)
 覆盖看盘软件 / 交易终端的历史序列持久化缓存。该能力只在 builder 显式开启后
 影响 `get_kline_data_series` / `get_tick_data_series`；默认 `DataClient::from_session`
-仍保持无缓存行为。TQBN daily v2 (`.tqbn`) 是当前默认和 canonical 格式，使用
+仍保持无缓存行为。TQBN daily v3 (`.tqbn`) 是当前默认和 canonical 格式，使用
 `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn` 和
 `series/<YYYYMMDD>/kline/<duration_ns>/<escaped-symbol>.tqbn` 日分区布局。旧 `.tqseries`
 和旧单文件 `.tqbn` layout 直接废弃为默认缓存格式，不提供兼容读取或迁移 store；旧 Python 兼容 binary/mmap cache

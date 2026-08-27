@@ -301,4 +301,4 @@ E2E_OK remote_rows=2691170 remote_missing=0 cache_only_missing=0 replay_ticks=39
 
 - [持久缓存预热 contract example](../../crates/tqsdk/examples/api_contract_s45_facade_backtest_cache_warmup.rs)
 - [`tqsdk` facade cache 语义](../../crates/tqsdk/README.md)
-- [TQBN daily v2 格式合同](history-cache-format.md)
+- [TQBN daily v3 格式合同](history-cache-format.md)

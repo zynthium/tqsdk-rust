@@ -230,7 +230,7 @@ V1 是：
   - `TradingCalendarRow`
   - history page/series/download and CSV export substrate
   - history integrity report for owned kline/tick series
-- TQBN daily v2 (`.tqbn`) 当前默认和 canonical 格式，按交易日分区存储
+- TQBN daily v3 (`.tqbn`) 当前默认和 canonical 格式，按交易日分区存储
   - `HistorySeriesCache` public facade、crate 内部 store adapter、embedded final coverage commit、
     open-day provisional checkpoint、tick-only `BacktestTickCache` 和纯数据层
     `LiveTickCacheWriter`

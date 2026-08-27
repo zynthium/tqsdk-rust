@@ -3,7 +3,8 @@
 use super::super::store::HISTORY_SERIES_CACHE_FORMAT_ID;
 
 pub(in crate::history_series_cache) const TQBN_FORMAT_ID: &str = HISTORY_SERIES_CACHE_FORMAT_ID;
-pub(in crate::history_series_cache) const TQBN_SCHEMA_VERSION: u32 = 2;
+pub(in crate::history_series_cache) const TQBN_SCHEMA_VERSION: u32 = 3;
+pub(super) const TQBN_LEGACY_SCHEMA_VERSION: u32 = 2;
 pub(super) const TQBN_MAGIC: [u8; 4] = *b"TQBN";
 pub(super) const TQBN_BLOCK_MAGIC: [u8; 4] = *b"TQBB";
 pub(super) const TQBN_VERSION: u8 = 1;

@@ -1326,6 +1326,13 @@ fn validate_metadata_refresh_request(symbol: &str, start_ns: i64, end_ns: i64) -
     Ok(())
 }
 
+fn store_explicit_metadata_refresh_snapshot(
+    cache: &BacktestHistoryMetadataCache,
+    snapshot: BacktestHistoryMetadataSnapshot,
+) -> Result<BacktestHistoryMetadataSnapshot> {
+    cache.store_snapshot(snapshot)
+}
+
 /// Explicit-only metadata maintenance entry point.
 ///
 /// Query APIs do not expose refresh or purge operations. The server resolver is
@@ -1399,7 +1406,10 @@ impl BacktestHistoryMaintenanceClient {
         let credentials = provider.load().await?;
         #[cfg(all(feature = "live", feature = "services"))]
         {
-            refresh_metadata_from_official(&self.cache, credentials, symbol, start_ns, end_ns).await
+            let snapshot =
+                refresh_metadata_from_official(&self.cache, credentials, symbol, start_ns, end_ns)
+                    .await?;
+            store_explicit_metadata_refresh_snapshot(&self.cache, snapshot)
         }
         #[cfg(not(all(feature = "live", feature = "services")))]
         {
@@ -1798,6 +1808,26 @@ mod snapshot_store_tests {
                 .unwrap()
                 .snapshot_hash,
             broad.snapshot_hash
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_refresh_snapshot_replaces_a_broader_active_snapshot() {
+        let root = test_root("metadata-explicit-refresh-promotes-active");
+        let cache = BacktestHistoryMetadataCache::open(&root).unwrap();
+        let broad = cache.store_snapshot(snapshot(1_000, 10_000, 1)).unwrap();
+        let refreshed =
+            store_explicit_metadata_refresh_snapshot(&cache, snapshot(20_000, 21_000, 2)).unwrap();
+
+        assert_ne!(broad.snapshot_hash, refreshed.snapshot_hash);
+        assert_eq!(
+            cache
+                .load_active("KQ.m@SHFE.au")
+                .unwrap()
+                .unwrap()
+                .snapshot_hash,
+            refreshed.snapshot_hash
         );
         std::fs::remove_dir_all(root).unwrap();
     }

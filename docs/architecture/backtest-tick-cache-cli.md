@@ -10,7 +10,7 @@ backtest/warmup 与 `tqsdk-data` 的 cache API，适合 cron、CI 或人工检�
 路径，也不拥有 session、状态树、remote protocol client、live recording loop、store adapter、relay 或
 daemon。
 
-它不是新的 cache format 定义者：tick 的持久化合同属于 `BacktestTickCache` / TQBN daily v2，minute
+它不是新的 cache format 定义者：tick 的持久化合同属于 `BacktestTickCache` / TQBN daily v3，minute
 的持久化合同属于 `MinuteKlineCache`。格式细节见
 [history-cache-format.md](history-cache-format.md)。
 
@@ -20,14 +20,20 @@ daemon。
 
 | kind | 物理分区 | symbol 语义 | 命令 |
 | --- | --- | --- | --- |
-| `tick` | `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn` | physical cache symbol | `inventory`、`inspect`、`fill`、`verify`、`doctor`、`repair-locks` |
+| `tick` | `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn` | physical cache symbol | `inventory`、`inspect`、`fill`、`verify`、`doctor`、`repair-locks`、`migrate` |
 | `minute` | `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk` | logical cache symbol | `inventory`、`inspect`、`fill`、`verify`、`doctor`、`purge` |
 | `all` | 上述两类汇总 | 不接受 symbol/range 操作 | 仅 `inventory`、`doctor` |
 
 `--kind all` 与 `inspect`、`fill`、`verify`、`purge` 组合是 usage error。`purge` 当前只支持
 `--kind minute`。
 
-`repair-locks` 当前只支持 `--kind tick`；`--kind minute|all repair-locks` 是 usage error。
+`repair-locks` 与 `migrate` 当前只支持 `--kind tick`；`--kind minute|all` 组合是 usage error。
+
+`metadata-refresh` 不使用 cache family，保留默认 `--kind tick` 且只支持 `--market futures`。它接受一个
+logical symbol 和 RFC 3339 半开窗口，显式以 `BacktestHistoryMaintenanceClient` 调用官方 metadata source。
+CLI 在 exclusive root remote-fill gate 内写入 immutable snapshot；它不写 Tick/Minute rows，也不放宽
+`CacheOnly` 的 metadata coverage 校验。显式维护成功后原子推进 active pointer；旧 immutable snapshot
+继续按 content hash 保留，供已绑定旧 cache partition 的 reader 使用。
 
 `query` 不使用 `--kind`：它以 `--series tick|kline` 表达所需 rows，并可同时读取 Tick 与
 canonical-minute durable sources；`--kind minute|all query` 是 usage error，避免把运维 cache family
@@ -57,6 +63,17 @@ exclusive TQBN/file lock。
 `BacktestTickCache::repair_tick_locks(BacktestTickCacheLockRepairMode::{DryRun, Apply})` 提供。
 `DryRun` 可使用 `open_read_only(...)`；`Apply` 必须使用 writable cache。直接调用 API 的 owner 必须先持有
 `try_acquire_consistency_read_lock()`，而不能把该调用当作 fill、`enforce_limits(...)` 或 compaction 的替代。
+
+## Tick v2 to v3 migration
+
+`migrate` 默认只深度诊断并报告 legacy v2 计划，不创建 root、lock、backup 或数据文件。`--apply` 必须同时
+给出一个尚不存在的 `--backup-dir`；该目录必须位于 cache root 外且与 cache 同文件系统。CLI 取得 exclusive
+root stable-view gate 后再次深度诊断，对将被重写的每个 `.tqbn` 建立 hard-link backup，并实体复制现有
+`<file>.tqbn.lock` 与 `<partition>/.tqbn.lock`，之后才按 symbol compaction 重写为 v3 sparse TickDelta。
+
+任一 backup、rewrite 或深度验证失败都会停止，保留 backup，绝不自动删除或回滚部分迁移。成功条件是所有
+Tick 文件可深度解码且 schema 均为 3；结果会报告旧/新字节数和 backup 路径。migration 不访问 remote、auth
+或 minute cache。
 
 ## 数据来源与 finality
 
@@ -244,6 +261,7 @@ payload，但 stdout 本身没有 atomic-write 保证；`--output PATH` 仅用�
 | --- | --- | --- |
 | 普通 tick/minute `fill` | shared | 多个互不冲突 series 可并发；阻止 refresh/repair/verify/doctor/purge 穿插 |
 | `query --policy remote-on-miss` | shared | coverage inspection、远端补洞和 cache materialization 处于同一普通操作窗口 |
+| `metadata-refresh` | exclusive | 官方 metadata sidecar refresh 与普通 fill/read plan 互斥 |
 | tick `repair-locks`（含 DryRun） | exclusive | 枚举、创建 legacy/逐文件 lock 到完成期间取得 root-wide stable view，不与协作式 reader/writer/fill 交错 |
 | cache refresh、`fill --repair-stale` | exclusive | 删除/重建与普通 fill/read plan 互斥 |
 | tick/minute `verify`、`doctor` | exclusive | coverage/replay/深度诊断获得 root-wide stable view |
