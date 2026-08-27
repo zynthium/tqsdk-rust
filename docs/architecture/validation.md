@@ -269,14 +269,20 @@ repair 或 fail closed；`RemoteOnMiss` 完整命中不得读取 auth。`verify`
 所有分区；tick 与 `--dry-run` 必须拒绝该 destructive flag。
 metadata tests 还覆盖 remote-on-miss 的短 snapshot 不会降级更宽 active pointer、更宽 snapshot 会升级 active
 pointer、以及 partial range 的 metadata refresh 扩展到完整 CST trading month。
-`minute_kline_aggregate` 和 `history_backtest_replay` 覆盖 60s open/final、`N × 60s` 固定 CST `18:00`
+`daily_kline_cache` 覆盖 v1 单 logical-symbol `.tqdk` 的 atomic replace（rename 后 parent directory fsync）、
+final coverage、retained-sidecar 对既有 coverage 的 compatible reheader、mapping 变化时 fail-closed 且文件 bytes
+不变、checksum corruption diagnosis、显式 `purge_symbol()` 与当前/未来 CST trading day final-coverage rejection。
+`server_backtest_history` 覆盖 native daily 的 `set_chart.duration=86400000000000`、
+`klines/<symbol>/86400000000000` 与 `CanonicalDaily` event。`minute_kline_aggregate` 和 `history_backtest_replay` 覆盖 60s open/final、`N × 60s` 固定 CST `18:00`
 trading-day grid 聚合（盘中 break 不重置 bucket）、same-timestamp batch、以及主连 minute cache 保持 logical key 而 replay 保留 dated
-`underlying_symbol`。`tqsdk-cache` tests 还覆盖 minute/tick/all kind routing、minute logical-symbol
-inspect、stock minute fill 拒绝 futures universe、tick fill 拒绝 stock market、CacheOnly minute dry-run、
-minute report-bound verify、safe purge 与 schema-v2 `cache_kind` JSONL progress。facade contract 还覆盖
+`underlying_symbol`。`tqsdk-cache` tests 还覆盖 minute/tick/daily/all kind routing、minute 与 daily logical-symbol
+inspect、stock minute fill 拒绝 futures universe、tick fill 拒绝 stock market、native daily CacheOnly dry-run
+不创建 root、CacheOnly minute dry-run、minute/daily report-bound verify、daily local-1d replay、minute range purge
+与 daily whole-symbol purge（含 `--yes`、日期参数拒绝与 root lock busy）以及 schema-v2 `cache_kind`
+JSONL progress。facade contract 还覆盖
 61s/90s rejection、K-only minute path 不请求 tick、CacheOnly 不创建 minute namespace、typed history
 inspect/purge、stock backtest builder selection，以及 `DataClient` 的 retention/max-byte 配置只在显式
-`run_configured_history_cache_maintenance()` 时执行；任何 tick/minute history read/write 都不能自动删除数据。
+`run_configured_history_cache_maintenance()` 时执行；任何 tick/minute/daily history read/write 都不能自动删除数据。
 
 `tqsdk-cache query` 的离线 CLI tests 必须在移除 `TQ_AUTH_*` 后覆盖同一
 `BacktestHistoryClient` 路径的 CacheOnly Tick 与 canonical-minute Kline：`tqsdk-history-jsonl/1` 的
@@ -362,6 +368,16 @@ rtk cargo test -p tqsdk --features live,services --test backtest_history_live kq
 OHLC/volume/open-interest 差异都应阻止发布。
 对 remote minute fill 的回归还必须确认：只有 terminal-success batch 才提交 final coverage；合法空
 range 可以提交 coverage；取消、超时和失败 batch 留下缺口，不能污染 final coverage。
+
+daily native source 的发布门禁不连接普通 CI 的实时账号：tag workflow 只能在 self-hosted
+`tqsdk-daily-golden` runner 上读取 `TQSDK_DAILY_KLINE_GOLDEN_PACKET` 指向的外置 immutable packet，先要求
+`manifest.sha256` 精确覆盖 packet 内除自身外的全部常规文件并以 strict SHA-256 校验，再运行 ignored
+`daily_kline_golden`。schema v2 必须 pin official `tqsdk-python` commit/version，并为 source、expected、metadata
+每个 artifact 声明并在反序列化前复核 SHA-256；`main_roll` 必须是有 manifest-declared、请求区间内 underlying
+transition 的 `KQ.m@` metadata case（声明逐字段匹配 metadata），`index` 必须是 `KQ.i@`，physical case 必须声明
+并由 source rows 证明夜盘/假期边界。每类包含
+`1d`、`2d`、`5d`、`28d` 的 expected rows；缺 packet、manifest、hash 或对齐任一失败都使 tag CI 失败。
+这项门禁是 native 1d phase/高周期聚合的 official conformance 要求；当前普通 unit test 不声称已通过真实远端验证。
 
 ## 场景驱动 public API 契约
 

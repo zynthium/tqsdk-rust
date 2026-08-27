@@ -222,7 +222,7 @@ tqsdk
 - history page/series/download/export
 - Greeks、历史主连等研究派生能力
 - `BacktestHistoryClient`：持久 metadata sidecar、请求 planner、official server-backtest
-  fill/single-flight、bounded async cache scan 与 Tick/60s 派生 K 线查询。它是回测数据路径的
+  fill/single-flight、bounded async cache scan 与 Tick/60s/1d 派生 K 线查询。它是回测数据路径的
   唯一 cache/fill owner；`tqsdk-wait` 不参与 data fill，`tqsdk-task` 不拥有 durable partition
 - `RemoteOnMiss` 在单个 client 内最多保留 `logical_concurrency` 个 clean server-backtest source lanes；
   同一 lane 可顺序服务多个 Tick 交易日或 minute window，但只有显式 terminal 且 chart lease 清理成功
@@ -233,8 +233,9 @@ tqsdk
   重叠 fill；refresh、stale repair、verify、doctor 和真实 purge 使用 exclusive gate。不要绕过该门禁
   增加另一条远端 fill 路径，也不要承诺不理解该协议的旧进程可与新进程长期混跑
 - durable source 固定为 Tick daily TQBN、`<60s` 从 Tick 按 session 临时聚合、canonical 60s monthly、
-  `N × 60s` 从 canonical minutes 按固定 CST `18:00` trading-day grid 临时聚合。盘中 break 不重置
-  高周期 bucket；Tick/60s 分区没有自动清理，派生 K 不落盘
+  `N × 60s`（`<1d`）从 canonical minutes 按固定 CST `18:00` trading-day grid 临时聚合、native final-1d
+  logical-symbol single-file cache，以及 `2d` 至 `28d` 从 complete 1d rows 临时聚合。分钟盘中 break 不重置
+  高周期 bucket；Tick/60s/1d cache 没有自动清理，派生 K 不落盘。daily row 不支持结算价或涨跌停价
 - canonical-minute 月分区绑定写入时的 immutable metadata snapshot。active metadata pointer 前移不单独
   使旧分区失效。snapshot hash 不同时，必须加载月文件绑定的旧 sidecar 与目标 sidecar，并仅对实际读取的
   cached range 比较 schema、market、logical symbol、session、交易日和 physical mapping；全部相同才可
@@ -258,7 +259,7 @@ tqsdk
 
 职责：
 
-- 可选 canonical daily TQBN tick cache operator CLI
+- 可选 TQBN tick、canonical-minute 与 native-daily cache operator CLI
 - 默认 human summary / opt-in JSON stdout contract，stderr progress，closed-day fill、显式日期
   current-day 自动 provisional fill、`--require-final` 严格保护、report-bound CacheOnly verify、
   fast inventory 与 deep doctor

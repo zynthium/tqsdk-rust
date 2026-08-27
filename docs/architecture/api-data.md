@@ -94,12 +94,14 @@ planner、official server-backtest cache fill、single-flight 协调、bounded c
 | --- | --- | --- |
 | Tick | CST trading-day TQBN v3 tick partition | 原样返回；不复制 |
 | `15s` 与其他 `<60s` K | 同一 Tick partition | 按 metadata session 聚合；仅内存中存在 |
-| `60s` K | `logical symbol × trading month` canonical-minute v4 partition | 唯一 durable K 线 |
-| `N × 60s`（`N > 1`） | 同一 canonical-minute partition | 只从 closed 60s rows 按固定 CST `18:00` trading-day grid 聚合；仅内存中存在 |
+| `60s` K | `logical symbol × trading month` canonical-minute v4 partition | durable K 线 |
+| `N × 60s`（`N > 1` 且 `<1d`） | 同一 canonical-minute partition | 只从 closed 60s rows 按固定 CST `18:00` trading-day grid 聚合；仅内存中存在 |
+| `1d` K | `daily-kline-v1/<escaped-logical-symbol>.tqdk` native-daily v1 file | durable K 线；单 logical symbol 文件、不按时间分区 |
+| `2d` 到 `28d` K | 同一 native-daily file | 只从 complete final 1d rows 按 native timestamp phase 聚合；仅内存中存在 |
 
-`61s`、`90s` 等既非 sub-minute、也非 60s 整数倍的周期会被拒绝。Tick 与 canonical-minute
-partition 都没有 automatic retention、max-byte eviction 或后台清理；refresh/purge 是显式 destructive
-operation，派生 K 从不落盘。
+`61s`、`90s` 等既非 sub-minute、也非 60s 整数倍的周期会被拒绝；非整数日和大于 `28d` 的日周期同样
+直接 validation error。Tick、canonical-minute 与 native-daily cache 都没有 automatic retention、max-byte
+eviction 或后台清理；refresh/purge 是显式 destructive operation，2d 至 28d 派生 K 从不落盘。
 
 `<60s` K 仍以 metadata trading-session window 划 bucket，不能跨 break；`N × 60s`（`N > 1`）
 则以官方固定 CST `18:00` trading-day grid 划 bucket。后者的盘中 break 只造成 source 60s row
@@ -212,6 +214,12 @@ materialize/fill-only run 在 coverage 提交后直接返回物理写入计数�
 - `MinuteKlineCacheDiagnosticReport`
 - `MinuteKlineCacheDiagnosticFile`
 - `MinuteKlineCacheDiagnosticStatus`
+- `DailyKlineCache`
+- `DailyKlineCacheSnapshot`
+- `DailyKlineCacheStatus`
+- `DailyKlineCacheDiagnosticReport`
+- `DailyKlineCacheDiagnosticStatus`
+- `DailyKlineCachePurgeReport`
 - `HistorySeriesCache`
 - `HistorySeriesCacheReport`
 - `HistorySeriesCacheMiss`
@@ -376,18 +384,23 @@ tqsdk-wait        tqsdk-data
   提供 schema/损坏报告与容量/保留期维护，也已经落在 `tqsdk-data`
 - `history_cache_max_bytes(...)` 与 `history_cache_retention_days(...)` 只配置显式
   `DataClient::run_configured_history_cache_maintenance()`；普通 history read/write 不会自动清理。
-  尤其回测 `BacktestTickCache` 与 `MinuteKlineCache` 没有自动 retention、max-byte eviction 或后台清理
+  尤其回测 `BacktestTickCache`、`MinuteKlineCache` 与 `DailyKlineCache` 没有自动 retention、max-byte eviction
+  或后台清理
 - `HistorySeriesCache` 的底层存储通过 crate 内部 store adapter 隔离；`BacktestTickCache`
   复用这套内部实现承接回测 tick 缓存，不再维护独立 tick replay cache 实现
-- facade cache-backed backtest 读取同一 cache root：tick 输入经 `BacktestTickCache`；唯一持久
-  K 线输入是独立 `MinuteKlineCache` 的 canonical final `60s` files。minute fill 只使用官方
-  server-side backtest Kline stream，并且只在该 stream terminal 成功后写 final coverage。
-  `<60s` K 从 tick 按 session 本地合成，`>60s` 仅允许 `N × 60s`，由 `tqsdk-data` 从已关闭分钟线
-  按固定 CST `18:00` trading-day grid 聚合；盘中 break 不重置 bucket。`61s` / `90s` 会拒绝，
-  facade 不读取或写入 native higher-period `HistorySeriesCache` K 线
+- facade cache-backed backtest 读取同一 cache root：tick 输入经 `BacktestTickCache`；持久 K 线输入是独立
+  `MinuteKlineCache` 的 canonical final `60s` files 和 `DailyKlineCache` 的 native final `1d` single file。
+  minute/daily fill 都只使用官方 server-side backtest Kline stream，并且只在该 stream terminal 成功后写
+  final coverage。`<60s` K 从 tick 按 session 本地合成，`60s` 至 `<1d` 的整数分钟从 closed minutes 按
+  固定 CST `18:00` trading-day grid 聚合，`2d` 至 `28d` 从 final native 1d rows 按 native timestamp phase
+  聚合。`61s` / `90s`、非整数日和大于 `28d` 的日周期会拒绝，facade 不读取或写入 native higher-period
+  `HistorySeriesCache` K 线
 - facade 对 `KQ.m@...` 的 tick 使用 data-owned persisted metadata sidecar 把 physical tick cache
-  映射到 dated underlying；CacheOnly 读取 sidecar，不访问网络。minute cache 始终以 logical symbol
-  为 key，不复制 physical minute files
+  映射到 dated underlying；CacheOnly 读取 sidecar，不访问网络。minute/daily cache 始终以 logical symbol
+  为 key，不复制 physical files；daily snapshot mismatch 只有 retained sidecar 对每个已有 coverage 严格证明
+  历史 schema/market/symbol/session/trading-day/physical mapping 一致时才能复用，new-gap write 在 symbol lock 内
+  原子 reheader；缺 sidecar、损坏或不一致直接 fail closed。row 只保存 Kline OHLC、volume、open/close OI，
+  结算价与涨跌停价未支持
 - `MinuteKlineCache::fast_inventory()` 不解码月文件、也不创建缺失 root；`diagnose()` 以只读方式
   深检每个月文件，区分 readable v4、legacy v3、unsupported version 和 corruption。这些是 data
   layer 的 typed operator API，不会迁移、修复或删除缓存

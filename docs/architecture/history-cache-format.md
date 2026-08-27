@@ -40,6 +40,7 @@ public cache interface 保持为：
 - `BacktestTickCache`
 - `LiveTickCacheWriter`
 - `MinuteKlineCache`
+- `DailyKlineCache`
 
 TQBN 的 record struct、metadata struct 和 codec helper 都是 `tqsdk-data` 的
 crate-internal 实现细节。调用方不直接构造、匹配或持有 TQBN record；对外只暴露 typed
@@ -82,17 +83,20 @@ forced refresh 只推进 pointer，而不重写历史 snapshot。reader 必须�
 ## Backtest Canonical-minute v4
 
 本地 facade 回测不再把任意周期的 K 线写入 TQBN history-series cache。它使用独立的
-`MinuteKlineCache`。其唯一持久 K 线输入是官方 server-side backtest 确认 terminal 完成的
-`60s` bar；不回退到 `DataClient` 历史下载路径，也不持久化原生高周期 K 线：
+`MinuteKlineCache` 与 `DailyKlineCache`。持久 K 线输入只接受官方 server-side backtest 确认 terminal
+完成的 `60s` 或 native `1d` bar；不回退到 `DataClient` 历史下载路径：
 
 | 请求 | 历史来源 | 持久化 / 回放 |
 | --- | --- | --- |
 | tick、quote、`<60s` K | tick cache | 按 tick 本地合成 |
 | `60s` K | server-side backtest Kline stream | v4 monthly minute cache |
-| `N × 60s` K (`N > 1`) | 已关闭的 canonical 60s K | `tqsdk-data` 按固定 CST `18:00` trading-day grid 本地聚合；盘中 break 不重置 bucket |
+| `N × 60s` K (`N > 1` 且 `<1d`) | 已关闭的 canonical 60s K | `tqsdk-data` 按固定 CST `18:00` trading-day grid 本地聚合；盘中 break 不重置 bucket |
+| `1d` K | server-side backtest native daily chart | v1 logical-symbol single file |
+| `2d` 到 `28d` K | 已关闭的 native 1d K | `tqsdk-data` 按 native timestamp phase 本地聚合 |
 
-`61s`、`90s` 等不是整数分钟的周期会在 facade 规划阶段拒绝。K-only `>=60s` 不会隐式请求
-tick history；若仅需要 quote fallback，则隐式使用 canonical 60s K，也不会回退到 tick。
+`61s`、`90s` 等不是整数分钟的周期、非整数日和大于 `28d` 的日周期会在 facade 规划阶段直接
+validation error。K-only `>=60s` 不会隐式请求 tick history；若仅需要 quote fallback，则隐式使用
+canonical 60s K，也不会回退到 tick。
 
 v4 文件身份如下：
 
@@ -138,6 +142,40 @@ minute cache 没有 retention、max-byte eviction 或后台清理。`Refresh` �
 仅删除与请求窗口相交的 monthly files；显式 `purge_range` / `purge_symbol` 才可删除数据。CLI 的
 `fill --repair-stale` 也是显式确认的窄范围维护操作，而非自动 reader recovery。
 `CacheOnly` inspection 使用 read-only open，不创建 namespace、目录或文件。
+
+## Backtest Native-daily v1
+
+native daily cache 与 minute cache 独立；它只保存 official server-backtest `set_chart` 的
+`duration=86400000000000` terminal stream，而不是从 minute/tick 合成的日线。文件身份如下：
+
+| 项 | 值 |
+| --- | --- |
+| format id | `tqsdk.daily-kline.single-file.v1` |
+| schema version | `1` |
+| file extension | `.tqdk` |
+| root layout | `daily-kline-v1/<escaped-logical-symbol>.tqdk` |
+| file granularity | 一个 logical futures symbol 的所有 final 1d coverage；不按时间分区 |
+
+每次 remote fill 只请求和写入实际 missing `[start, end)` 区间；只有 stream terminal、chart cleanup
+成功且 range 在当前 CST trading day 之前，才可原子替换整个文件并提交 final coverage。合法零行 range
+同样可以 final。取消、超时、协议错误、当前/未来交易日都不能提交 coverage。
+
+文件同时保存 immutable metadata snapshot、coverage、Kline rows 和 checksum。snapshot identity 不同时，reader
+只能从 content-addressed retained metadata sidecar 加载两端 snapshot，并对每个已有 coverage range 严格比较
+schema、market、logical symbol、session、交易日和 physical mapping；任何 sidecar 缺失/损坏或比较失败均 fail
+closed，绝不降级为 cache miss。若比较全部通过，旧 coverage 可以读取；下一次写入新缺口必须在 per-symbol lock
+内原子 reheader 到新 snapshot。checksum 错、未知 schema version、损坏或 symbol 不一致同样 fail closed，不能自动
+修复或拼接。`inspect()` / `diagnose()` 只读；唯一 destructive recovery 是显式 `purge_symbol()` 删除整个
+logical-symbol 文件。每次 atomic replace 都 fsync file 后 rename，再 fsync parent directory。该 cache 没有
+retention、TTL、max-byte eviction、后台 refresh 或自动 cleanup。
+
+`KQ.m@...` 仍以 logical symbol 为文件 key，metadata sidecar 负责验证请求窗口的 calendar/session/
+mapping identity；不会按 dated physical symbol 复制文件。native 1d row 只保存 Kline 的 OHLC、volume、
+open/close OI。结算价、涨跌停价目前不在 Kline 或 daily cache schema 中，未支持。
+
+`2d` 至 `28d` K 只从完整 final 1d rows 按第一个 native timestamp 的稳定 phase 在内存中聚合，不创建新
+cache 文件。此 phase 与 official high-period chart 的实际一致性不由固定 CST 假设推断；tag CI 必须以外置、
+哈希验证的 official `tqsdk-python` golden packet 验证物理夜盘/假日、`KQ.m` roll、`KQ.i` 的 1d/2d/5d/28d。
 
 ## TQBN daily v3 File Identity
 

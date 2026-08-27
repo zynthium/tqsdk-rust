@@ -289,7 +289,7 @@ cached tick replay 由 `HistoryTickReplayStream` 对 owned `TickDataSeries` 做�
 持久 tick 覆盖检查和文件格式归 `tqsdk-data::BacktestTickCache` / `HistorySeriesCache`，strategy
 execution 与本地撮合归 `tqsdk-task`。
 cache-backed history 的 metadata、缺口规划、官方 fill、区间扫描和 K 线聚合归 `tqsdk-data`；
-`tqsdk-task` 只消费已经选定的 Tick/60s source 并定义 replay event 的顺序、open/final 时机和
+`tqsdk-task` 只消费已经选定的 Tick/60s/1d source 并定义 replay event 的顺序、open/final 时机和
 `TqSim` 语义，不能重新实现远端回填或创建派生 K 的 durable cache。
 这是上层集成路径，不代表 strategy execution 进入 data，也不代表 task 拥有 durable history
 cache 文件格式。
@@ -337,6 +337,11 @@ sink、WAL、journal 或 cache writer。
   bucket，二者都不落盘。task 只把这些 source/result 转成 replay events。文件 format id 是
   `tqsdk.minute-kline.monthly.v4`，目录名继续为
   `minute-kline-v3`，以便将旧 v3 文件诊断为 `LegacyUnsupported` 而不是静默迁移。它不做
+- `DailyKlineCache`：独立 v1 `logical symbol` `.tqdk` cache，只持久化由 official server-side backtest
+  terminal 确认的 native 1d K；一个 logical symbol 一个 `daily-kline-v1/<escaped-symbol>.tqdk` 原子替换
+  文件，不按时间分区。`2d` 至 `28d` query 仅从 final 1d rows 按其 native timestamp phase 临时聚合；没有
+  automatic retention 或自动修复。snapshot/checksum/schema 错误都 fail closed；只有显式 `purge_symbol()`
+  可以删除整个文件，结算价和涨跌停价未支持
   automatic retention/max-byte eviction 或后台清理，Refresh/purge 都是显式破坏性操作；
   `fast_inventory()` 是不解码、不建 root 的只读盘点，`diagnose()` 是逐月深检并区分
   readable / legacy / unsupported / corrupt

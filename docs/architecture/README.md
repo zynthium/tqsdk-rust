@@ -106,9 +106,9 @@ V1 是：
   - `prelude`、`Tq` / `TqBuilder`、轻量 `TargetPos` wrapper
   - 本地回测默认模拟账户 id `LOCAL_BACKTEST_ACCOUNT_ID`
   - Python-style `.backtest(start_ns, end_ns)` 统一回测入口：默认使用 `tqsdk-data`
-    共享 history cache root（`$HOME/.tqsdk/data_series_1`，可用
-    `TQSDK_HISTORY_CACHE_DIR` 覆盖）；默认 `RemoteOnMiss` 先复用本地 TQBN daily
-    tick cache 与独立 canonical final-60s monthly cache，缺失时由 `tqsdk-data`
+  共享 history cache root（`$HOME/.tqsdk/data_series_1`，可用
+  `TQSDK_HISTORY_CACHE_DIR` 覆盖）；默认 `RemoteOnMiss` 先复用本地 TQBN daily
+  tick cache、独立 canonical final-60s monthly cache 与 native final-1d single-file cache，缺失时由 `tqsdk-data`
     `BacktestHistoryClient` 通过官方 server-side backtest stream 填充对应输入并驱动本地 `TqSim`。
     一个 client 最多保留 logical concurrency 个 clean source lanes；Tick 每日 coverage checkpoint 与
     minute bounded window 保持不变，但 clean terminal 后复用 lane/session，避免每段重复鉴权和建连。
@@ -129,9 +129,10 @@ V1 是：
     提交 non-final checkpoint；普通 coverage/cache-hit 仍视为缺口，TQBN 18:00 分区结束后必须
     走普通 final warmup 全日重对账
   - cache-backed backtest 的显式 `.tick(...)` / `.kline(...)` serial 声明使用同一套
-    本地 replay runtime：`<60s` 的 K 线从 tick cache 本地合成，`60s` 从 canonical minute
-    cache 读取，`>60s` 仅允许 `N × 60s` 并由 data 查询按固定 CST `18:00` trading-day grid 聚合、
-    task 回放已关闭分钟事件；盘中 break 不重置高周期 bucket。`61s` / `90s` 拒绝，且 K-only
+  本地 replay runtime：`<60s` 的 K 线从 tick cache 本地合成，`60s` 至 `<1d` 的整数分钟从 canonical
+  minute cache 读取/聚合，`1d` 读取 native daily cache，`2d` 至 `28d` 由 data 查询从 final 1d rows 聚合；
+  task 回放已关闭分钟/日线事件。分钟盘中 break 不重置高周期 bucket。`61s` / `90s`、非整数日和大于 `28d`
+  的日周期拒绝，且 K-only
     `>=60s` 不请求 tick。K 线 quote synthesis 的 price tick / instrument
     spec 由 facade 显式 builder metadata 转发，不自动联网查询
   - `.universe(...)`、`quotes_universe(...)` 和 `MarketCachePolicy::record_universe(...)`
@@ -144,12 +145,12 @@ V1 是：
   - local backtest history `_as` helper 可把 underlying series/request 以主连等 caller-provided replay symbol 回放
   - cache-backed facade backtest / warmup 可自动查询 `KQ.m@...` 主连 underlying segment、按
     CST 交易日窗口裁剪并以具体合约缓存；同一物理 range 会合并，避免主连与具体合约重复回填
-  - 主连 minute cache 以逻辑 symbol 为 key；dated physical mapping 仅进入 replay
-    `underlying_symbol` metadata。`60s` 与整数分钟高周期均支持，不复制 physical minute files
+  - 主连 minute/daily cache 以逻辑 symbol 为 key；dated physical mapping 仅进入 replay
+    `underlying_symbol` metadata。`60s`、整数分钟高周期、native `1d` 与 `2d` 至 `28d` 均支持，不复制 physical files
   - cache-backed local backtest 暂限 futures；股票 server-backtest 保留 `.disabled_cache()` 的官方
     直连路径，不能误用 futures-only durable fill source
-  - tick 和 canonical 60s 分区没有自动 retention、max-byte eviction 或后台清理；派生 K 不落盘，
-    destructive refresh/purge 必须显式调用
+  - tick、canonical 60s 与 native 1d cache 没有自动 retention、max-byte eviction 或后台清理；2d 至 28d
+    派生 K 不落盘。daily 是不分区的单 logical-symbol 文件，destructive refresh/purge 必须显式调用
   - 本地 `TqSim` 可基于 replay quote 的 `underlying_symbol` 将主连等 replay symbol 订单映射到 actual underlying symbol 执行，并把持仓镜像回 replay symbol
   - `advanced::*` 作为 curated escape hatch 下钻到 core/session/wait/task/data
   - 不改变能力归属，不拥有第二套 runtime、状态树或 query/task/data 实现
@@ -216,7 +217,7 @@ V1 是：
   - research/offline data crate
   - `DataClient`
   - `BacktestHistoryClient`：metadata sidecar、source planner、single-flight official fill、
-    bounded async scan、Tick/60s aggregation 与 query terminal report 的唯一 owner；公开
+    bounded async scan、Tick/60s/1d aggregation 与 query terminal report 的唯一 owner；公开
     `RemoteOnMiss` run 自动持有 shared cache-root gate，facade 已持锁时传递同一守卫，避免嵌套自锁
   - `query_his_cont_quotes`
   - `query_his_cont_underlyings`
@@ -243,15 +244,21 @@ V1 是：
   - shared futures universe selector parser / resolver，relay 和 facade backtest 复用同一套语义
   - history page/series/download/export foundation
   - `MinuteKlineCache` 是与 TQBN 并列的 canonical final-60s K 线 store：v4 格式按 logical
-    symbol × trading month 分区，目录名保持 `minute-kline-v3` 以诊断 legacy v3 文件；不存在
-    automatic retention/max-byte eviction 或后台清理
+  symbol × trading month 分区，目录名保持 `minute-kline-v3` 以诊断 legacy v3 文件；不存在
+  automatic retention/max-byte eviction 或后台清理
+  - `DailyKlineCache` 是 native final-1d K 线 store：v1 格式为 `daily-kline-v1/<escaped-symbol>.tqdk`，
+  一个 logical symbol 一个原子替换文件、无时间分区。仅 official server-backtest terminal 1d rows 可写 final
+  coverage；snapshot 变化只有 retained metadata sidecar 对既有 coverage 的 calendar/session/trading-day/
+  physical mapping 全部证明一致时才能读旧行，并在 new-gap write 的 symbol lock 内原子 reheader；缺 sidecar、
+  checksum/schema/snapshot 错误都 fail closed，结算价与涨跌停价未支持
 - `tqsdk-cache`
-  - 可选 operator CLI；以 `--kind tick|minute|all`（默认 tick）管理 canonical daily TQBN
-    tick cache 与 canonical final-60s minute cache。`all` 只允许 inventory / doctor；minute fill
-    只接受 closed day，支持 futures / stock（stock 必须显式 symbol），minute purge 是单 symbol、
-    明确日期范围、`--yes` 才执行的 destructive operation
+  - 可选 operator CLI；以 `--kind tick|minute|daily|all`（默认 tick）管理 canonical daily TQBN
+    tick cache、canonical final-60s minute cache 与 native final-1d single-file cache。`all` 只允许
+    inventory / doctor；daily 目前只开放 futures closed-day `fill`，它以官方 native `1d` chart 补洞，
+    不从 tick/minute 聚合；minute fill 支持 futures / stock（stock 必须显式 symbol），minute purge 是
+    单 symbol、明确日期范围、`--yes` 才执行的 destructive operation
   - tick 保留 remote-on-miss / current-day provisional / `--require-final`、calendar-aware
-    `--last-trading-days` 等合同；两类 fill 都有 selectable stderr progress（plain/TTY/JSONL），
+    `--last-trading-days` 等合同；三类 fill 都有 selectable stderr progress（plain/TTY/JSONL），
     JSONL progress 为 schema v2 并携带 `cache_kind`。tick report 保持 schema v2（兼容 v1），
     minute report 写入 `reports/minute/` 并可由 minute `verify --report` 复用
   - 普通 fill/query 取得 shared root gate；refresh、stale repair、verify、doctor 和真实 purge 取得
