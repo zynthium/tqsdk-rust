@@ -69,6 +69,9 @@ fn orchestration_progress_and_terminal_report_are_cache_family_neutral() {
         family: BacktestHistoryFillFamily::Daily,
         batch_number: 1,
         total_batches: 1,
+        requested_range: (1, 2),
+        pending_batches: 0,
+        active_batches: 1,
         symbols: vec!["KQ.i@SHFE.au".to_string()],
     };
     assert!(matches!(
@@ -87,6 +90,7 @@ fn orchestration_progress_and_terminal_report_are_cache_family_neutral() {
         status: BacktestHistoryFillSymbolStatus::Complete,
         rows_written: 1,
         remote_used: true,
+        remote_filled_ranges: vec![(1, 2)],
         error: None,
     };
     let failed = BacktestHistoryFillSymbolResult {
@@ -97,6 +101,7 @@ fn orchestration_progress_and_terminal_report_are_cache_family_neutral() {
         status: BacktestHistoryFillSymbolStatus::Failed,
         rows_written: 0,
         remote_used: false,
+        remote_filled_ranges: Vec::new(),
         error: Some("fixture failure".to_string()),
     };
     let interrupted = BacktestHistoryFillSymbolResult {
@@ -107,6 +112,7 @@ fn orchestration_progress_and_terminal_report_are_cache_family_neutral() {
         status: BacktestHistoryFillSymbolStatus::Interrupted,
         rows_written: 0,
         remote_used: false,
+        remote_filled_ranges: Vec::new(),
         error: Some("cancelled".to_string()),
     };
     let report =

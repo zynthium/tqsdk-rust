@@ -214,23 +214,32 @@ pub enum BacktestHistoryFillProgress {
         family: BacktestHistoryFillFamily,
         batch_number: usize,
         total_batches: usize,
+        requested_range: (i64, i64),
+        pending_batches: usize,
+        active_batches: usize,
         symbols: Vec<String>,
     },
     Telemetry {
         family: BacktestHistoryFillFamily,
+        batch_number: usize,
+        total_batches: usize,
+        requested_range: (i64, i64),
         event: BacktestHistoryTelemetryEvent,
     },
     BatchFinished {
         family: BacktestHistoryFillFamily,
         batch_number: usize,
         total_batches: usize,
+        requested_range: (i64, i64),
         symbols: Vec<String>,
         rows_written: usize,
+        elapsed: Duration,
     },
     BatchFailed {
         family: BacktestHistoryFillFamily,
         batch_number: usize,
         total_batches: usize,
+        requested_range: (i64, i64),
         symbols: Vec<String>,
         error: String,
     },
@@ -269,6 +278,7 @@ pub struct BacktestHistoryFillSymbolResult {
     pub status: BacktestHistoryFillSymbolStatus,
     pub rows_written: usize,
     pub remote_used: bool,
+    pub remote_filled_ranges: Vec<(i64, i64)>,
     pub error: Option<String>,
 }
 
@@ -362,8 +372,18 @@ struct FillBatch {
     number: usize,
     total: usize,
     family: BacktestHistoryFillFamily,
+    requested_range: (i64, i64),
+    pending_batches: usize,
+    active_batches: usize,
     requests: Vec<ValidatedBacktestHistoryRequest>,
     meta: Vec<FillRequestMeta>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct FillBatchKey {
+    family: BacktestHistoryFillFamily,
+    requested_range: (i64, i64),
+    provisional_as_of_ns: Option<i64>,
 }
 
 struct FillBatchOutcome {
@@ -419,23 +439,28 @@ impl BacktestHistoryClient {
         observer: Arc<dyn Fn(BacktestHistoryFillProgress) + Send + Sync>,
     ) -> Result<BacktestHistoryFillTerminalReport> {
         let validated = super::validate_requests(requests)?;
-        let mut grouped =
-            BTreeMap::<BacktestHistoryFillFamily, Vec<ValidatedBacktestHistoryRequest>>::new();
+        let mut grouped = BTreeMap::<FillBatchKey, Vec<ValidatedBacktestHistoryRequest>>::new();
         for request in validated {
-            grouped
-                .entry(fill_family(&request))
-                .or_default()
-                .push(request);
+            let key = FillBatchKey {
+                family: fill_family(&request),
+                requested_range: (request.start_ns, request.end_ns),
+                provisional_as_of_ns: request.provisional_as_of_ns,
+            };
+            grouped.entry(key).or_default().push(request);
         }
 
         let total_batches = grouped
             .values()
             .map(|requests| requests.len().div_ceil(config.symbol_batch_size))
             .sum::<usize>();
-        for (family, requests) in &grouped {
+        let mut requested_by_family = BTreeMap::<BacktestHistoryFillFamily, usize>::new();
+        for (key, requests) in &grouped {
+            *requested_by_family.entry(key.family).or_default() += requests.len();
+        }
+        for (family, requested_symbols) in requested_by_family {
             observer(BacktestHistoryFillProgress::Planning {
-                family: *family,
-                requested_symbols: requests.len(),
+                family,
+                requested_symbols,
                 total_batches,
                 symbol_batch_size: config.symbol_batch_size,
                 symbol_concurrency: config.symbol_concurrency,
@@ -444,10 +469,10 @@ impl BacktestHistoryClient {
 
         let all_meta = grouped
             .iter()
-            .flat_map(|(family, requests)| {
+            .flat_map(|(key, requests)| {
                 requests
                     .iter()
-                    .map(|request| request_meta(request, *family))
+                    .map(|request| request_meta(request, key.family))
             })
             .collect::<Vec<_>>();
         if cancellation.is_cancelled() {
@@ -466,17 +491,20 @@ impl BacktestHistoryClient {
         }
 
         let mut batches = VecDeque::new();
-        for (family, requests) in grouped {
+        for (key, requests) in grouped {
             for chunk in requests.chunks(config.symbol_batch_size) {
                 let requests = chunk.to_vec();
                 let meta = requests
                     .iter()
-                    .map(|request| request_meta(request, family))
+                    .map(|request| request_meta(request, key.family))
                     .collect();
                 batches.push_back(FillBatch {
                     number: 0,
                     total: total_batches,
-                    family,
+                    family: key.family,
+                    requested_range: key.requested_range,
+                    pending_batches: 0,
+                    active_batches: 0,
                     requests,
                     meta,
                 });
@@ -493,7 +521,9 @@ impl BacktestHistoryClient {
                 && !batches.is_empty()
                 && !cancellation.is_cancelled()
             {
-                let batch = batches.pop_front().expect("checked non-empty fill queue");
+                let mut batch = batches.pop_front().expect("checked non-empty fill queue");
+                batch.pending_batches = batches.len();
+                batch.active_batches = tasks.len().saturating_add(1);
                 let client = self.clone();
                 let cancellation = cancellation.clone();
                 let observer = Arc::clone(&observer);
@@ -586,6 +616,7 @@ async fn execute_fill_batch(
     root_gate: Option<Arc<BacktestTickCacheOperationLock>>,
     observer: Arc<dyn Fn(BacktestHistoryFillProgress) + Send + Sync>,
 ) -> Result<FillBatchOutcome> {
+    let started = Instant::now();
     let symbols = batch
         .meta
         .iter()
@@ -595,6 +626,9 @@ async fn execute_fill_batch(
         family: batch.family,
         batch_number: batch.number,
         total_batches: batch.total,
+        requested_range: batch.requested_range,
+        pending_batches: batch.pending_batches,
+        active_batches: batch.active_batches,
         symbols: symbols.clone(),
     });
 
@@ -640,6 +674,9 @@ async fn execute_fill_batch(
                         idle_deadline = Instant::now() + config.idle_timeout;
                         observer(BacktestHistoryFillProgress::Telemetry {
                             family: batch.family,
+                            batch_number: batch.number,
+                            total_batches: batch.total,
+                            requested_range: batch.requested_range,
                             event,
                         });
                     }
@@ -665,8 +702,10 @@ async fn execute_fill_batch(
                 family: batch.family,
                 batch_number: batch.number,
                 total_batches: batch.total,
+                requested_range: batch.requested_range,
                 symbols,
                 rows_written,
+                elapsed: started.elapsed(),
             });
         }
         stop => {
@@ -680,6 +719,7 @@ async fn execute_fill_batch(
                 family: batch.family,
                 batch_number: batch.number,
                 total_batches: batch.total,
+                requested_range: batch.requested_range,
                 symbols,
                 error: error.clone(),
             });
@@ -786,6 +826,7 @@ fn symbol_results(
                     status: BacktestHistoryFillSymbolStatus::Complete,
                     rows_written: report.rows,
                     remote_used: report.remote_used,
+                    remote_filled_ranges: report.coverage.remote_filled_ranges,
                     error: None,
                 };
             }
@@ -808,6 +849,7 @@ fn symbol_results(
                     status,
                     rows_written: report.emitted_rows,
                     remote_used: false,
+                    remote_filled_ranges: Vec::new(),
                     error: Some(error),
                 };
             }
@@ -832,6 +874,7 @@ fn symbol_results(
                 status,
                 rows_written: 0,
                 remote_used: false,
+                remote_filled_ranges: Vec::new(),
                 error: Some(error),
             }
         })

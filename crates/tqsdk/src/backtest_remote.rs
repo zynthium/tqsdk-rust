@@ -8,18 +8,22 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::NaiveDate;
 use tokio::task::JoinSet;
 use tqsdk_data::{
-    BacktestHistoryAuthProvider, BacktestHistoryBatchReport, BacktestHistoryClient,
-    BacktestHistoryCredentials, BacktestHistoryEvent, BacktestHistoryPhase, BacktestHistoryPolicy,
-    BacktestHistoryRequest, BacktestHistoryRows, BacktestHistoryTelemetryEvent, BacktestTickCache,
-    BacktestTickCacheOperationLock, DataError, MinuteKlineCache,
+    BacktestHistoryAuthProvider, BacktestHistoryClient, BacktestHistoryCredentials,
+    BacktestHistoryFillCancellation, BacktestHistoryFillProgress, BacktestHistoryFillSymbolStatus,
+    BacktestHistoryPhase, BacktestHistoryPolicy, BacktestHistoryRequest,
+    BacktestHistoryTelemetryEvent, BacktestTickCache, BacktestTickCacheOperationLock, DataError,
+    MinuteKlineCache,
 };
+
+#[cfg(test)]
+use tqsdk_data::{BacktestHistoryBatchReport, BacktestHistoryEvent, BacktestHistoryRows};
 
 use crate::{Auth, Result, data_validation};
 
@@ -152,6 +156,16 @@ impl BacktestRemoteFillConfig {
             .and_then(|slice| i64::try_from(slice.as_nanos()).ok())
             .filter(|slice| *slice > 0)
     }
+}
+
+fn data_fill_config(
+    config: BacktestRemoteFillConfig,
+) -> tqsdk_data::Result<tqsdk_data::BacktestHistoryFillConfig> {
+    tqsdk_data::BacktestHistoryFillConfig::default()
+        .with_symbol_batch_size(config.symbol_batch_size)?
+        .with_symbol_concurrency(config.symbol_concurrency)?
+        .with_idle_timeout(config.idle_timeout)?
+        .with_batch_timeout(config.batch_timeout)
 }
 
 /// Low-frequency lifecycle updates emitted by a configured remote cache fill.
@@ -683,6 +697,7 @@ struct RemoteFillBatch {
     commit_mode: RemoteCacheCommitMode,
 }
 
+#[cfg(test)]
 struct RemoteFillBatchTaskReport {
     batch_index: usize,
     start_ns: i64,
@@ -693,6 +708,7 @@ struct RemoteFillBatchTaskReport {
     filled_ranges_by_symbol: BTreeMap<String, Vec<(i64, i64)>>,
 }
 
+#[cfg(test)]
 struct RemoteFillBatchTask {
     batch_index: usize,
     total_batches: usize,
@@ -878,6 +894,319 @@ fn metadata_covers_range(
 }
 
 async fn fill_backtest_history_cache(
+    auth: FacadeBacktestHistoryAuthProvider,
+    cache_dir: &std::path::Path,
+    requests: Vec<RemoteBacktestCacheFillRequest>,
+    kind: FacadeHistoryFillKind,
+    root_gate: Arc<BacktestTickCacheOperationLock>,
+    runtime: RemoteBacktestFillRuntime,
+) -> Result<BTreeMap<String, usize>> {
+    if requests.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    if runtime.is_cancelled() {
+        return Err(remote_fill_cancelled_error());
+    }
+
+    let facade_config = runtime.config();
+    let data_config = data_fill_config(facade_config)?;
+    let all_requests_provisional = requests.iter().all(|request| {
+        matches!(
+            request.commit_mode,
+            RemoteCacheCommitMode::Provisional { .. }
+        )
+    });
+    let data_requests = requests
+        .iter()
+        .enumerate()
+        .map(|(index, request)| {
+            kind.request(
+                u64::try_from(index).unwrap_or(u64::MAX),
+                request.symbol.clone(),
+                request.start_ns,
+                request.end_ns,
+                request.commit_mode,
+            )
+        })
+        .collect::<Vec<_>>();
+    let client = BacktestHistoryClient::builder(cache_dir.to_path_buf())
+        .policy(BacktestHistoryPolicy::RemoteOnMiss)
+        .logical_concurrency(
+            data_config
+                .symbol_batch_size()
+                .saturating_mul(data_config.symbol_concurrency())
+                .max(1),
+        )
+        .auth_provider(auth)
+        .build()?;
+
+    let data_cancellation = BacktestHistoryFillCancellation::new();
+    let cancellation_bridge = runtime.cancellation.clone().map(|facade_cancellation| {
+        let data_cancellation = data_cancellation.clone();
+        tokio::spawn(async move {
+            loop {
+                if facade_cancellation.is_cancelled() {
+                    data_cancellation.cancel();
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+    });
+    let progress = Arc::new(Mutex::new(FacadeOrchestrationProgress::new(
+        runtime.clone(),
+    )));
+    let observed = Arc::clone(&progress);
+    let report = client
+        .orchestrate_fill_with_root_gate(
+            data_requests,
+            data_config,
+            data_cancellation,
+            root_gate,
+            move |event| {
+                observed
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .observe(event);
+            },
+        )
+        .await;
+    if let Some(bridge) = cancellation_bridge {
+        bridge.abort();
+        let _ = bridge.await;
+    }
+    let report = report?;
+
+    let mut rows_by_symbol = BTreeMap::new();
+    let mut filled_ranges_by_symbol = BTreeMap::<String, Vec<(i64, i64)>>::new();
+    for symbol in report.symbols() {
+        match symbol.status {
+            BacktestHistoryFillSymbolStatus::Complete => {
+                *rows_by_symbol.entry(symbol.symbol.clone()).or_insert(0) += symbol.rows_written;
+                if symbol.remote_used && !symbol.remote_filled_ranges.is_empty() {
+                    filled_ranges_by_symbol
+                        .entry(symbol.symbol.clone())
+                        .or_default()
+                        .extend(symbol.remote_filled_ranges.iter().copied());
+                }
+            }
+            BacktestHistoryFillSymbolStatus::Failed => {
+                return Err(DataError::RequestFailed {
+                    request_id: symbol.request_id,
+                    message: symbol
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "backtest history fill failed".to_string()),
+                    emitted_rows: symbol.rows_written,
+                }
+                .into());
+            }
+            BacktestHistoryFillSymbolStatus::Interrupted => {
+                return Err(remote_fill_cancelled_error());
+            }
+        }
+    }
+
+    let requested_symbols = requests
+        .iter()
+        .map(|request| request.symbol.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    if should_reject_empty_remote_tick_fill(
+        kind,
+        rows_by_symbol.values().copied().sum(),
+        all_requests_provisional,
+        facade_config.allow_empty_idle,
+        true,
+    ) {
+        return Err(data_validation(format!(
+            "remote backtest cache fill completed without accepted ticks for {requested_symbols} symbols; refusing to mark complete empty coverage"
+        )));
+    }
+
+    let compaction_ranges = final_tick_compaction_ranges(kind, &filled_ranges_by_symbol)?;
+    if !compaction_ranges.is_empty() {
+        let compaction_cache_dir = cache_dir.to_path_buf();
+        let compaction_runtime = runtime.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let cache = BacktestTickCache::open(compaction_cache_dir)?;
+            for (symbol, ranges) in compaction_ranges {
+                for (start_ns, end_ns) in ranges {
+                    if compaction_runtime.is_cancelled() {
+                        return Err(remote_fill_cancelled_error());
+                    }
+                    cache.compact_symbol_ticks_in_range(&symbol, start_ns, end_ns)?;
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| {
+            data_validation(format!(
+                "remote backtest cache compaction task failed: {error}"
+            ))
+        })??;
+    }
+    if runtime.is_cancelled() {
+        return Err(remote_fill_cancelled_error());
+    }
+    Ok(rows_by_symbol)
+}
+
+struct FacadeOrchestrationProgress {
+    runtime: RemoteBacktestFillRuntime,
+    fill_started: bool,
+    completed_batches: usize,
+    materialized_by_batch: BTreeMap<usize, MaterializedHistoryProgress>,
+}
+
+impl FacadeOrchestrationProgress {
+    fn new(runtime: RemoteBacktestFillRuntime) -> Self {
+        Self {
+            runtime,
+            fill_started: false,
+            completed_batches: 0,
+            materialized_by_batch: BTreeMap::new(),
+        }
+    }
+
+    fn observe(&mut self, event: BacktestHistoryFillProgress) {
+        match event {
+            BacktestHistoryFillProgress::Planning {
+                requested_symbols,
+                total_batches,
+                symbol_batch_size,
+                symbol_concurrency,
+                ..
+            } if !self.fill_started => {
+                self.fill_started = true;
+                self.runtime.emit(BacktestRemoteFillProgress::FillStarted {
+                    requested_symbols,
+                    total_batches,
+                    symbol_batch_size,
+                    symbol_concurrency,
+                    batch_timeout: self.runtime.config().batch_timeout,
+                });
+            }
+            BacktestHistoryFillProgress::Planning { .. } => {}
+            BacktestHistoryFillProgress::BatchStarted {
+                batch_number,
+                total_batches,
+                requested_range,
+                pending_batches,
+                active_batches,
+                symbols,
+                ..
+            } => {
+                self.runtime.emit(BacktestRemoteFillProgress::BatchStarted {
+                    batch_number,
+                    total_batches,
+                    pending_batches,
+                    active_batches,
+                    requested_range,
+                    symbols: symbols.clone(),
+                });
+                emit_batch_telemetry(
+                    &self.runtime,
+                    batch_number,
+                    BacktestRemoteFillPhase::Started,
+                    &progress_batch(requested_range, symbols),
+                    0,
+                    None,
+                );
+            }
+            BacktestHistoryFillProgress::Telemetry {
+                batch_number,
+                requested_range,
+                event,
+                ..
+            } => {
+                let symbols = vec![event.symbol.clone()];
+                observe_materialized_telemetry(
+                    &self.runtime,
+                    batch_number.saturating_sub(1),
+                    &progress_batch(requested_range, symbols),
+                    self.materialized_by_batch.entry(batch_number).or_default(),
+                    event,
+                    Duration::ZERO,
+                );
+            }
+            BacktestHistoryFillProgress::BatchFinished {
+                batch_number,
+                total_batches,
+                requested_range,
+                symbols,
+                rows_written,
+                elapsed,
+                ..
+            } => {
+                self.completed_batches = self.completed_batches.saturating_add(1);
+                self.runtime
+                    .emit(BacktestRemoteFillProgress::BatchFinished {
+                        batch_number,
+                        total_batches,
+                        completed_batches: self.completed_batches,
+                        requested_range,
+                        symbols: symbols.clone(),
+                        elapsed,
+                        rows: rows_written,
+                    });
+                emit_batch_telemetry(
+                    &self.runtime,
+                    batch_number,
+                    BacktestRemoteFillPhase::Finished,
+                    &progress_batch(requested_range, symbols),
+                    rows_written,
+                    None,
+                );
+            }
+            BacktestHistoryFillProgress::BatchFailed {
+                batch_number,
+                total_batches,
+                requested_range,
+                symbols,
+                error,
+                ..
+            } => {
+                self.runtime.emit(BacktestRemoteFillProgress::BatchFailed {
+                    batch_number,
+                    total_batches,
+                    requested_range,
+                    symbols: symbols.clone(),
+                    error: error.clone(),
+                });
+                emit_batch_telemetry(
+                    &self.runtime,
+                    batch_number,
+                    if self.runtime.is_cancelled() {
+                        BacktestRemoteFillPhase::Cancelled
+                    } else {
+                        BacktestRemoteFillPhase::Failed
+                    },
+                    &progress_batch(requested_range, symbols),
+                    0,
+                    Some(error),
+                );
+            }
+            BacktestHistoryFillProgress::Finished { .. } => {}
+        }
+    }
+}
+
+fn progress_batch(requested_range: (i64, i64), symbols: Vec<String>) -> RemoteFillBatch {
+    let batch = RemoteFillBatch {
+        start_ns: requested_range.0,
+        end_ns: requested_range.1,
+        symbols,
+        commit_mode: RemoteCacheCommitMode::Final,
+    };
+    debug_assert!(matches!(batch.commit_mode, RemoteCacheCommitMode::Final));
+    batch
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+async fn fill_backtest_history_cache_legacy(
     auth: FacadeBacktestHistoryAuthProvider,
     cache_dir: &std::path::Path,
     requests: Vec<RemoteBacktestCacheFillRequest>,
@@ -1096,6 +1425,7 @@ fn should_reject_empty_remote_tick_fill(
         && !terminal_confirmed
 }
 
+#[cfg(test)]
 async fn fill_backtest_history_batch(
     task: RemoteFillBatchTask,
     auth: FacadeBacktestHistoryAuthProvider,
@@ -1201,6 +1531,7 @@ async fn fill_backtest_history_batch(
     })
 }
 
+#[cfg(test)]
 async fn materialize_cache_with_runtime(
     client: BacktestHistoryClient,
     requests: Vec<BacktestHistoryRequest>,
@@ -1391,6 +1722,7 @@ impl MaterializedHistoryProgress {
     }
 }
 
+#[cfg(test)]
 fn observe_materialized_chunk(
     runtime: &RemoteBacktestFillRuntime,
     logical_batch_id: usize,
@@ -1658,7 +1990,7 @@ mod tests {
 
     use super::{
         BacktestRemoteFillConfig, FacadeHistoryFillKind, MaterializedHistoryProgress,
-        RemoteBacktestCacheFillRequest, RemoteCacheCommitMode,
+        RemoteBacktestCacheFillRequest, RemoteCacheCommitMode, data_fill_config,
         ensure_remote_main_contract_metadata, final_tick_compaction_ranges,
         parse_remote_fill_allow_empty_idle, parse_remote_fill_batch_timeout,
         parse_remote_fill_idle_timeout, parse_remote_fill_slice_ns,
@@ -1703,6 +2035,23 @@ mod tests {
         assert_eq!(parse_remote_fill_batch_timeout(Some("0")), Duration::ZERO);
         assert_eq!(parse_remote_fill_slice_ns(Some("60")), Some(60_000_000_000));
         assert!(parse_remote_fill_allow_empty_idle(Some("yes")));
+    }
+
+    #[test]
+    fn data_fill_config_rejects_invalid_raw_facade_values() {
+        let error = data_fill_config(BacktestRemoteFillConfig {
+            symbol_batch_size: 0,
+            ..BacktestRemoteFillConfig::default()
+        })
+        .unwrap_err();
+        assert!(matches!(error, tqsdk_data::DataError::Validation(_)));
+
+        let error = data_fill_config(BacktestRemoteFillConfig {
+            symbol_concurrency: 5,
+            ..BacktestRemoteFillConfig::default()
+        })
+        .unwrap_err();
+        assert!(matches!(error, tqsdk_data::DataError::Validation(_)));
     }
 
     #[test]
