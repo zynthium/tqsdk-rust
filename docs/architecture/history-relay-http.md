@@ -183,7 +183,7 @@ status 与 code：
 | HTTP | code |
 | ---: | --- |
 | 400 | `invalid_request`, `missing_identity` |
-| 404 | `symbol_not_found` |
+| 404 | `route_not_found`, `symbol_not_found` |
 | 409 | `coverage_incomplete`, `provisional_data`, `metadata_incomplete` |
 | 413 | `row_limit_exceeded`, `response_too_large` |
 | 429 | `history_overloaded` |
@@ -193,6 +193,7 @@ status 与 code：
 
 只有 manifest 明确声明 complete authoritative catalog，且 data strict inspection 也确认 symbol 不存在时
 才能返回 404。普通 cache miss、metadata 缺失或无法证明 catalog 完整时返回 409/503，不得猜测 404。
+`route_not_found` 只表示 URL path 不属于上述三个 endpoint，不表示 symbol 或 cache 状态。
 
 active generation 首次检测到运行时损坏并赢得 relay-local atomic `healthy -> unhealthy` 转换的
 请求返回 500 `snapshot_corrupt`；同 generation 的其他并发和后续请求返回 503

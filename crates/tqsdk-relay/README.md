@@ -198,6 +198,26 @@ cargo run -p tqsdk-relay
 如果没有设置 `TQSDK_RELAY_FUTURES_UNIVERSE`，relay 只会启动下游服务，不连接上游。
 这个模式适合做本地协议冒烟测试，但不会产生实时行情数据。
 
+### CacheOnly history listener
+
+默认 feature 包含 `history`；它只启用 `tqsdk-data/tqbn-zstd` 与专属 multi-thread Tokio
+runtime，不改变 SDK 默认直连路径。history listener 默认关闭，只有下面三个环境变量同时存在时才启动：
+
+- `TQSDK_RELAY_HISTORY_LISTEN`：独立 HTTP/1 socket address；
+- `TQSDK_RELAY_HISTORY_ROOT`：已存在、非 symlink 的 absolute published history root；
+- `TQSDK_RELAY_HISTORY_IDENTITY_HEADER`：受控网关注入的 trusted identity header 名。
+
+部分配置、非法 root/header 或 listener/runtime 启动失败都会让进程 fail fast。history 使用 binary-private
+模块、独立 OS thread 和独立 Tokio worker，不接收 `RelayEngine`、`RelayServer` 或 market mutex。
+当前最小启动 slice 提供 `GET /v1/history/schema`；已知但尚未挂载 snapshot runtime 的 query/coverage
+请求在通过 grammar 校验后返回 typed `503 history_unavailable`。默认不发送 CORS header。
+
+关闭默认 feature 时不编译 history multi-thread runtime；reader-only 构建可用：
+
+```bash
+cargo check -p tqsdk-relay --no-default-features --features history
+```
+
 ## 配置
 
 二进制程序读取以下环境变量：

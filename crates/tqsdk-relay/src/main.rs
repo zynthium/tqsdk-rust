@@ -10,6 +10,9 @@ use tqsdk_relay::{
 #[cfg(feature = "server")]
 use tqsdk_relay::{resolve_configured_upstream_tick_charts, spawn_configured_upstream_pump};
 
+#[cfg(feature = "history")]
+mod history;
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     if let Err(err) = run().await {
@@ -20,6 +23,8 @@ async fn main() {
 
 async fn run() -> Result<(), RelayError> {
     let config = RelayConfig::from_env()?;
+    #[cfg(feature = "history")]
+    let history_config = history::HistoryConfig::from_env()?;
 
     if config.dry_run {
         #[cfg(feature = "server")]
@@ -58,6 +63,8 @@ async fn run() -> Result<(), RelayError> {
     let metrics_listener = TcpListener::bind(&config.metrics_listen)
         .await
         .map_err(|err| RelayError::Transport(format!("metrics bind failed: {err}")))?;
+    #[cfg(feature = "history")]
+    let history_service = history_config.map(history::spawn).transpose()?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (metrics_shutdown_tx, metrics_shutdown_rx) = oneshot::channel();
     #[cfg(feature = "server")]
@@ -90,5 +97,10 @@ async fn run() -> Result<(), RelayError> {
         "tqsdk-relay listening: downstream={} metrics={}",
         config.downstream_listen, config.metrics_listen
     );
-    server.serve_until(listener, shutdown_rx).await
+    let result = server.serve_until(listener, shutdown_rx).await;
+    #[cfg(feature = "history")]
+    if let Some(history_service) = history_service {
+        history_service.shutdown()?;
+    }
+    result
 }
