@@ -18,8 +18,8 @@ use tqsdk_data::{
     BacktestHistoryAuthProvider, BacktestHistoryClient, BacktestHistoryCredentials,
     BacktestHistoryFillCancellation, BacktestHistoryFillProgress, BacktestHistoryFillSymbolStatus,
     BacktestHistoryPhase, BacktestHistoryPolicy, BacktestHistoryRequest,
-    BacktestHistoryTelemetryEvent, BacktestTickCache, BacktestTickCacheOperationLock, DataError,
-    MinuteKlineCache,
+    BacktestHistoryTelemetryEvent, BacktestTickCache, BacktestTickCacheOperationLock,
+    DailyKlineCache, DataError, MinuteKlineCache,
 };
 
 #[cfg(test)]
@@ -689,6 +689,27 @@ pub(crate) struct BacktestMinuteKlineFillReport {
     pub(crate) rows_by_symbol: BTreeMap<String, usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BacktestDailyKlineFillRequest {
+    pub(crate) symbol: String,
+    pub(crate) start_ns: i64,
+    pub(crate) end_ns: i64,
+}
+
+impl BacktestDailyKlineFillRequest {
+    pub(crate) fn new(symbol: impl Into<String>, start_ns: i64, end_ns: i64) -> Self {
+        Self {
+            symbol: symbol.into(),
+            start_ns,
+            end_ns,
+        }
+    }
+}
+
+pub(crate) struct BacktestDailyKlineFillReport {
+    pub(crate) rows_by_symbol: BTreeMap<String, usize>,
+}
+
 #[derive(Debug, Clone)]
 struct RemoteFillBatch {
     start_ns: i64,
@@ -720,6 +741,7 @@ struct RemoteFillBatchTask {
 enum FacadeHistoryFillKind {
     Tick,
     CanonicalMinute,
+    NativeDaily,
 }
 
 impl FacadeHistoryFillKind {
@@ -745,6 +767,13 @@ impl FacadeHistoryFillKind {
                 request_id,
                 symbol,
                 Duration::from_secs(60),
+                start_ns,
+                end_ns,
+            ),
+            Self::NativeDaily => BacktestHistoryRequest::kline(
+                request_id,
+                symbol,
+                Duration::from_secs(86_400),
                 start_ns,
                 end_ns,
             ),
@@ -803,6 +832,34 @@ pub(crate) async fn fill_backtest_minute_kline_cache(
     )
     .await?;
     Ok(BacktestMinuteKlineFillReport {
+        rows_by_symbol: report,
+    })
+}
+
+/// Fill native-daily cache through the shared data-layer pipeline.
+pub(crate) async fn fill_backtest_daily_kline_cache(
+    auth: &Auth,
+    cache: &DailyKlineCache,
+    requests: Vec<BacktestDailyKlineFillRequest>,
+    root_gate: Arc<BacktestTickCacheOperationLock>,
+    runtime: RemoteBacktestFillRuntime,
+) -> Result<BacktestDailyKlineFillReport> {
+    let requests = requests
+        .into_iter()
+        .map(|request| {
+            RemoteBacktestCacheFillRequest::new(request.symbol, request.start_ns, request.end_ns)
+        })
+        .collect();
+    let report = fill_backtest_history_cache(
+        FacadeBacktestHistoryAuthProvider::new(auth.user.clone(), auth.pass.clone()),
+        cache.root_dir(),
+        requests,
+        FacadeHistoryFillKind::NativeDaily,
+        root_gate,
+        runtime,
+    )
+    .await?;
+    Ok(BacktestDailyKlineFillReport {
         rows_by_symbol: report,
     })
 }

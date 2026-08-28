@@ -86,6 +86,18 @@ pub struct HistoryBacktestMinuteKlineSource {
     pub underlying_segments: Vec<HistoryBacktestMinuteKlineUnderlyingSegment>,
 }
 
+/// One already materialized native-Kline stream owned by the caller.
+///
+/// The data layer remains responsible for reading and aggregating durable
+/// history. The task layer only merges these final rows into replay order.
+#[derive(Debug, Clone)]
+pub struct HistoryBacktestNativeKlineSource {
+    pub replay_symbol: String,
+    pub duration_ns: i64,
+    pub rows: Vec<Kline>,
+    pub underlying_segments: Vec<HistoryBacktestMinuteKlineUnderlyingSegment>,
+}
+
 /// Replay request with explicit logical-to-physical tick projections.
 pub struct HistoryBacktestProjectedReplayRequest {
     pub cache: HistorySeriesCache,
@@ -299,12 +311,22 @@ impl HistoryBacktestReplayStream {
         request: HistoryBacktestProjectedReplayRequest,
         sessions_by_symbol: BTreeMap<String, KlineSessionTemplate>,
     ) -> Result<Self> {
-        Self::new_projected_inner(request, &sessions_by_symbol)
+        Self::new_projected_with_sessions_and_native_klines(request, sessions_by_symbol, Vec::new())
+    }
+
+    /// Builds projected replay plus caller-owned final Kline rows.
+    pub fn new_projected_with_sessions_and_native_klines(
+        request: HistoryBacktestProjectedReplayRequest,
+        sessions_by_symbol: BTreeMap<String, KlineSessionTemplate>,
+        native_kline_sources: Vec<HistoryBacktestNativeKlineSource>,
+    ) -> Result<Self> {
+        Self::new_projected_inner(request, &sessions_by_symbol, native_kline_sources)
     }
 
     fn new_projected_inner(
         request: HistoryBacktestProjectedReplayRequest,
         sessions_by_symbol: &BTreeMap<String, KlineSessionTemplate>,
+        native_kline_sources: Vec<HistoryBacktestNativeKlineSource>,
     ) -> Result<Self> {
         validate_request_range(request.start_ns, request.end_ns)?;
         let mut cursors = Vec::new();
@@ -402,6 +424,32 @@ impl HistoryBacktestReplayStream {
             cursors.push(HistoryCursor {
                 symbol: spec.symbol,
                 underlying_projection: UnderlyingProjection::None,
+                symbol_rank: 0,
+                producer: CursorProducer::NativeKline { events },
+                next: None,
+            });
+        }
+
+        for source in native_kline_sources {
+            validate_kline_request(&HistoryBacktestKlineRequest {
+                symbol: source.replay_symbol.clone(),
+                duration_ns: source.duration_ns,
+            })?;
+            let events = native_kline_events(
+                &source.replay_symbol,
+                source.duration_ns,
+                request.start_ns,
+                request.end_ns,
+                source.rows,
+            )?;
+            let underlying_projection = if source.underlying_segments.is_empty() {
+                UnderlyingProjection::None
+            } else {
+                UnderlyingProjection::Segments(source.underlying_segments)
+            };
+            cursors.push(HistoryCursor {
+                symbol: source.replay_symbol,
+                underlying_projection,
                 symbol_rank: 0,
                 producer: CursorProducer::NativeKline { events },
                 next: None,

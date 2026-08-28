@@ -89,9 +89,9 @@ pub use environment::{
 pub use error::{Result, TaskError, TaskKind};
 pub use history_backtest_replay::{
     HistoryBacktestKlineRequest, HistoryBacktestMinuteKlineSource,
-    HistoryBacktestMinuteKlineUnderlyingSegment, HistoryBacktestProjectedReplayRequest,
-    HistoryBacktestReplayRequest, HistoryBacktestReplayStream, HistoryBacktestSyntheticKlineSource,
-    HistoryBacktestTickSource,
+    HistoryBacktestMinuteKlineUnderlyingSegment, HistoryBacktestNativeKlineSource,
+    HistoryBacktestProjectedReplayRequest, HistoryBacktestReplayRequest,
+    HistoryBacktestReplayStream, HistoryBacktestSyntheticKlineSource, HistoryBacktestTickSource,
 };
 pub use history_tick_replay::HistoryTickReplayStream;
 pub use host::TaskHost;

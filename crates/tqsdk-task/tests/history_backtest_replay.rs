@@ -4,14 +4,103 @@ use tqsdk_data::{
 };
 use tqsdk_task::{
     BacktestMarketStream, HistoryBacktestKlineRequest, HistoryBacktestMinuteKlineSource,
-    HistoryBacktestMinuteKlineUnderlyingSegment, HistoryBacktestProjectedReplayRequest,
-    HistoryBacktestReplayRequest, HistoryBacktestReplayStream, HistoryBacktestSyntheticKlineSource,
-    HistoryBacktestTickSource, HistoryTickReplayStream, MinuteKlineSessionTemplate,
-    ReplayMarketPayload,
+    HistoryBacktestMinuteKlineUnderlyingSegment, HistoryBacktestNativeKlineSource,
+    HistoryBacktestProjectedReplayRequest, HistoryBacktestReplayRequest,
+    HistoryBacktestReplayStream, HistoryBacktestSyntheticKlineSource, HistoryBacktestTickSource,
+    HistoryTickReplayStream, MinuteKlineSessionTemplate, ReplayMarketPayload,
 };
 
 const MINUTE_NS: i64 = 60_000_000_000;
 const SUB_MINUTE_NS: i64 = 15_000_000_000;
+
+#[tokio::test]
+async fn daily_owned_rows_replay_without_a_second_cache_reader() {
+    let rows = vec![kline(7, 0, 100.0, 105.0, 99.0, 104.0)];
+    let mut stream = HistoryBacktestReplayStream::new_projected_with_sessions_and_native_klines(
+        HistoryBacktestProjectedReplayRequest {
+            cache: HistorySeriesCache::open(temp_dir("owned-daily")).unwrap(),
+            start_ns: 0,
+            end_ns: 2 * 86_400_000_000_000 + 1,
+            tick_sources: Vec::new(),
+            native_klines: Vec::new(),
+            synthetic_kline_sources: Vec::new(),
+            minute_kline_sources: Vec::new(),
+        },
+        Default::default(),
+        vec![HistoryBacktestNativeKlineSource {
+            replay_symbol: "SHFE.rb2601".to_string(),
+            duration_ns: 2 * 86_400_000_000_000,
+            rows,
+            underlying_segments: Vec::new(),
+        }],
+    )
+    .unwrap();
+
+    let open = stream.next_event().await.unwrap().unwrap();
+    let close = stream.next_event().await.unwrap().unwrap();
+    assert_eq!(open.source(), "history-cache-native-kline-open");
+    assert_eq!(close.source(), "history-cache-native-kline-close");
+    assert_eq!(close.event_time_ns(), 2 * 86_400_000_000_000);
+    assert!(matches!(
+        close.payload(),
+        ReplayMarketPayload::Kline { duration_ns, row, .. }
+            if *duration_ns == 2 * 86_400_000_000_000 && row.close == 104.0
+    ));
+    assert!(stream.next_event().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn daily_owned_rows_project_underlying_at_segment_boundaries() {
+    const DAY_NS: i64 = 86_400_000_000_000;
+    let mut stream = HistoryBacktestReplayStream::new_projected_with_sessions_and_native_klines(
+        HistoryBacktestProjectedReplayRequest {
+            cache: HistorySeriesCache::open(temp_dir("owned-daily-main")).unwrap(),
+            start_ns: 0,
+            end_ns: 2 * DAY_NS + 1,
+            tick_sources: Vec::new(),
+            native_klines: Vec::new(),
+            synthetic_kline_sources: Vec::new(),
+            minute_kline_sources: Vec::new(),
+        },
+        Default::default(),
+        vec![HistoryBacktestNativeKlineSource {
+            replay_symbol: "KQ.m@SHFE.au".to_string(),
+            duration_ns: DAY_NS,
+            rows: vec![
+                kline(1, 0, 100.0, 105.0, 99.0, 104.0),
+                kline(2, DAY_NS, 105.0, 108.0, 103.0, 107.0),
+            ],
+            underlying_segments: vec![
+                HistoryBacktestMinuteKlineUnderlyingSegment {
+                    start_ns: 0,
+                    end_ns: DAY_NS,
+                    underlying_symbol: "SHFE.au2608".to_string(),
+                },
+                HistoryBacktestMinuteKlineUnderlyingSegment {
+                    start_ns: DAY_NS,
+                    end_ns: 2 * DAY_NS + 1,
+                    underlying_symbol: "SHFE.au2610".to_string(),
+                },
+            ],
+        }],
+    )
+    .unwrap();
+
+    let events = [
+        stream.next_event().await.unwrap().unwrap(),
+        stream.next_event().await.unwrap().unwrap(),
+        stream.next_event().await.unwrap().unwrap(),
+        stream.next_event().await.unwrap().unwrap(),
+    ];
+    assert_eq!(events[0].source(), "history-cache-native-kline-open");
+    assert_eq!(events[0].underlying_symbol(), Some("SHFE.au2608"));
+    assert_eq!(events[1].source(), "history-cache-native-kline-open");
+    assert_eq!(events[1].underlying_symbol(), Some("SHFE.au2610"));
+    assert_eq!(events[2].source(), "history-cache-native-kline-close");
+    assert_eq!(events[2].underlying_symbol(), Some("SHFE.au2608"));
+    assert_eq!(events[3].source(), "history-cache-native-kline-close");
+    assert_eq!(events[3].underlying_symbol(), Some("SHFE.au2610"));
+}
 
 #[tokio::test]
 async fn history_backtest_replay_tick_only_matches_tick_stream_order() {

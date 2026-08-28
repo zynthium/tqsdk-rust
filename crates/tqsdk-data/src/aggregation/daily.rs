@@ -11,7 +11,7 @@ use crate::{DataError, Result};
 #[derive(Debug, Clone)]
 pub struct DailyKlineAggregator {
     duration_ns: i64,
-    timestamp_phase_ns: Option<i64>,
+    bucket_origin_ns: Option<i64>,
     current: Option<Kline>,
 }
 
@@ -26,7 +26,7 @@ impl DailyKlineAggregator {
         }
         Ok(Self {
             duration_ns,
-            timestamp_phase_ns: None,
+            bucket_origin_ns: None,
             current: None,
         })
     }
@@ -34,22 +34,25 @@ impl DailyKlineAggregator {
     /// Incorporates one final native daily row and returns a completed prior
     /// bar when this row starts a new `N × 1d` bucket.
     pub fn update(&mut self, daily: &Kline) -> Result<Option<Kline>> {
-        let phase = daily.datetime.rem_euclid(DAILY_KLINE_DURATION_NS);
-        match self.timestamp_phase_ns {
-            Some(expected) if expected != phase => {
+        let day_phase = daily.datetime.rem_euclid(DAILY_KLINE_DURATION_NS);
+        let bucket_origin_ns = match self.bucket_origin_ns {
+            Some(origin) if origin.rem_euclid(DAILY_KLINE_DURATION_NS) != day_phase => {
                 return Err(DataError::InvalidResponse(
                     "native daily kline timestamps changed day-boundary phase".to_string(),
                 ));
             }
-            Some(_) => {}
-            None => self.timestamp_phase_ns = Some(phase),
-        }
+            Some(origin) => origin,
+            None => {
+                self.bucket_origin_ns = Some(daily.datetime);
+                daily.datetime
+            }
+        };
         let bucket_start = daily
             .datetime
-            .checked_sub(phase)
+            .checked_sub(bucket_origin_ns)
             .and_then(|value| value.checked_div_euclid(self.duration_ns))
             .and_then(|value| value.checked_mul(self.duration_ns))
-            .and_then(|value| value.checked_add(phase))
+            .and_then(|value| value.checked_add(bucket_origin_ns))
             .ok_or_else(|| DataError::Validation("daily kline bucket overflow".to_string()))?;
         let starts_new = self
             .current
@@ -90,5 +93,43 @@ impl DailyKlineAggregator {
             .checked_add(self.duration_ns)
             .ok_or_else(|| DataError::Validation("daily kline bar end overflow".to_string()))?;
         Ok((bar_end <= end_ns).then(|| self.current.take()).flatten())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multi_day_buckets_start_at_the_first_native_daily_timestamp() {
+        let day = DAILY_KLINE_DURATION_NS;
+        let phase = 8 * 60 * 60 * 1_000_000_000;
+        let first = kline(day + phase, 101.0);
+        let second = kline(2 * day + phase, 102.0);
+        let third = kline(3 * day + phase, 103.0);
+        let mut aggregator = DailyKlineAggregator::new(2 * day).unwrap();
+
+        assert!(aggregator.update(&first).unwrap().is_none());
+        assert!(aggregator.update(&second).unwrap().is_none());
+        let closed = aggregator.update(&third).unwrap().unwrap();
+
+        assert_eq!(closed.datetime, first.datetime);
+        assert_eq!(closed.open, 101.0);
+        assert_eq!(closed.close, 102.0);
+    }
+
+    fn kline(datetime: i64, close: f64) -> Kline {
+        Kline {
+            id: datetime,
+            datetime,
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 1,
+            open_oi: 1,
+            close_oi: 1,
+            epoch: None,
+        }
     }
 }

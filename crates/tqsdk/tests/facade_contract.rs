@@ -104,6 +104,79 @@ async fn facade_backtest_cache_only_missing_canonical_minute_is_read_only() {
 }
 
 #[tokio::test]
+async fn facade_backtest_cache_only_missing_native_daily_is_read_only() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let result = Tq::futures()
+        .backtest(0, 2 * 86_400_000_000_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .cache_only()
+        .kline(symbol, std::time::Duration::from_secs(86_400), 2)
+        .unwrap()
+        .prepare()
+        .await;
+
+    let err = match result {
+        Ok(_) => panic!("missing native daily cache unexpectedly prepared"),
+        Err(error) => error,
+    };
+    assert!(
+        err.to_string()
+            .contains("native daily Kline cache coverage is incomplete"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        !cache_dir.join("minute-kline-v3").exists(),
+        "daily cache-only inspection must not create the minute-K namespace"
+    );
+    assert!(
+        !cache_dir.join("daily-kline-v1").exists(),
+        "daily cache-only inspection must not create the daily-K namespace"
+    );
+}
+
+#[tokio::test]
+async fn facade_backtest_cache_only_corrupt_native_daily_fails_closed() {
+    const DAY_NS: i64 = 86_400_000_000_000;
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let cache = tqsdk_data::DailyKlineCache::open(&cache_dir).unwrap();
+    let snapshot = tqsdk_data::DailyKlineCacheSnapshot::cst_v1();
+    cache
+        .store_final_range(symbol, 0, DAY_NS, &snapshot, &[minute_kline(1, 0, 100.0)])
+        .unwrap();
+    std::fs::write(cache.symbol_file_path(symbol), b"corrupt-daily-cache").unwrap();
+
+    let result = Tq::futures()
+        .backtest(0, DAY_NS)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .cache_only()
+        .kline(symbol, std::time::Duration::from_secs(86_400), 2)
+        .unwrap()
+        .prepare()
+        .await;
+
+    assert!(
+        result.is_err(),
+        "corrupt native daily cache must fail closed"
+    );
+    assert!(
+        !cache_dir.join("minute-kline-v3").exists(),
+        "corrupt daily cache must not trigger a minute-K fallback"
+    );
+}
+
+#[test]
+fn advanced_data_exposes_history_fill_orchestration_without_prelude_pollution() {
+    let _: Option<tqsdk::advanced::data::BacktestHistoryFillConfig> = None;
+    let _: Option<tqsdk::advanced::data::BacktestHistoryFillCancellation> = None;
+    let _: Option<tqsdk::advanced::data::BacktestHistoryFillProgress> = None;
+    let _: Option<tqsdk::advanced::data::BacktestHistoryFillTerminalReport> = None;
+}
+
+#[tokio::test]
 async fn facade_cache_only_reuses_immutable_minute_metadata_after_active_pointer_moves() {
     let symbol = "KQ.i@SHFE.au";
     let cache_dir = temp_cache_dir();
