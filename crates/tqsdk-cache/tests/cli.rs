@@ -1,8 +1,9 @@
 use std::fs;
-use std::process::Command;
+use std::io::{BufRead, BufReader, Read};
+use std::process::{Command, Stdio};
 
 use chrono::{NaiveDate, TimeZone, Utc};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tqsdk::advanced::core::{Kline, Tick};
 use tqsdk_cache::{TradingCalendarHolidaysSnapshot, write_trading_calendar_holidays_snapshot};
 use tqsdk_data::{
@@ -550,6 +551,303 @@ fn daily_fill_dry_run_is_cache_only_and_does_not_create_the_root() {
 }
 
 #[test]
+fn daily_fill_accepts_the_same_scheduler_flags_as_tick_and_minute() {
+    let cache_dir = temp_dir("daily-fill-shared-flags");
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "daily",
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-03",
+        "--symbol-batch-size",
+        "1",
+        "--symbol-concurrency",
+        "2",
+        "--idle-timeout-secs",
+        "60",
+        "--batch-timeout-secs",
+        "0",
+        "--lock-wait-secs",
+        "300",
+        "--dry-run",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "fill", "incomplete", 1);
+    assert_eq!(result["cache_kind"], "daily");
+    assert!(!cache_dir.exists());
+}
+
+#[test]
+fn daily_fill_rejects_scheduler_values_outside_the_shared_bounds() {
+    let output = run_json([
+        "--kind",
+        "daily",
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-03",
+        "--symbol-concurrency",
+        "5",
+        "--dry-run",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let _ = v3_result(&json, "fill", "error", 1);
+    assert_eq!(json["error"]["code"], "data_error");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("between 1 and 4")
+    );
+}
+
+#[test]
+fn daily_fill_jsonl_progress_and_report_use_the_shared_terminal_contract() {
+    let cache_dir = temp_dir("daily-fill-progress-v3");
+    let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    DailyKlineCache::open(&cache_dir)
+        .unwrap()
+        .store_final_range(
+            "SHFE.rb2601",
+            range.start_ns,
+            range.end_ns,
+            &MinuteKlineCacheSnapshot::cst_v1(),
+            &[],
+        )
+        .unwrap();
+    let report_path = cache_dir.join("daily-v3-report.json");
+    let output = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "daily",
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--progress",
+        "jsonl",
+        "--report",
+        report_path.to_str().unwrap(),
+    ]);
+
+    assert!(output.status.success());
+    let records = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(records.iter().any(|record| record["event"] == "planning"));
+    assert!(records.iter().any(|record| record["event"] == "batch"));
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record["event"] == "complete")
+            .count(),
+        1
+    );
+    assert!(records.iter().all(|record| record["cache_kind"] == "daily"));
+
+    let report: Value = serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["cache_kind"], "daily");
+    assert_eq!(report["status"], "complete");
+    assert_eq!(report["interrupted"], false);
+    assert_eq!(report["error"], Value::Null);
+    assert_eq!(
+        report["requested_range"],
+        json!([range.start_ns, range.end_ns])
+    );
+    assert_eq!(report["symbols"][0]["symbol"], "SHFE.rb2601");
+    assert_eq!(report["symbols"][0]["status"], "complete");
+    assert_eq!(
+        report["symbols"][0]["requested_ranges"],
+        json!([[range.start_ns, range.end_ns]])
+    );
+    assert_eq!(report["symbols"][0]["rows_written"], 0);
+    assert_eq!(report["symbols"][0]["interrupted"], false);
+    assert_eq!(report["symbols"][0]["error"], Value::Null);
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn daily_fill_sigint_persists_one_interrupted_terminal_report() {
+    let cache_dir = temp_dir("daily-fill-sigint-v3");
+    let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    DailyKlineCache::open(&cache_dir)
+        .unwrap()
+        .store_final_range(
+            "SHFE.rb2601",
+            range.start_ns,
+            range.end_ns,
+            &MinuteKlineCacheSnapshot::cst_v1(),
+            &[],
+        )
+        .unwrap();
+    let root_gate = BacktestTickCache::open(&cache_dir).unwrap();
+    let _exclusive = root_gate.try_acquire_remote_fill_lock().unwrap();
+    let report_path = cache_dir.join("daily-interrupted-v3.json");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tqsdk-cache"))
+        .env_remove("TQ_AUTH_USER")
+        .env_remove("TQ_AUTH_PASS")
+        .args(["--output-format", "json"])
+        .args([
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--kind",
+            "daily",
+            "fill",
+            "--symbol",
+            "SHFE.rb2601",
+            "--start-day",
+            "2020-01-02",
+            "--end-day",
+            "2020-01-02",
+            "--lock-wait-secs",
+            "30",
+            "--progress",
+            "jsonl",
+            "--report",
+            report_path.to_str().unwrap(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut progress_lines = Vec::new();
+    loop {
+        let mut line = String::new();
+        assert!(stderr.read_line(&mut line).unwrap() > 0);
+        let record: Value = serde_json::from_str(line.trim()).unwrap();
+        let reached_lock_wait = record["sequence"].as_u64().is_some_and(|value| value >= 2)
+            && record["batch"]["total"] == 1;
+        progress_lines.push(record);
+        if reached_lock_wait {
+            break;
+        }
+    }
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let status = child.wait().unwrap();
+    let mut remaining_stderr = String::new();
+    stderr.read_to_string(&mut remaining_stderr).unwrap();
+    progress_lines.extend(
+        remaining_stderr
+            .lines()
+            .filter(|line| line.trim_start().starts_with('{'))
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()),
+    );
+    let mut stdout = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+
+    assert_eq!(status.code(), Some(130), "stdout={stdout}");
+    assert_eq!(
+        progress_lines
+            .iter()
+            .filter(|record| record["event"] == "complete")
+            .count(),
+        1
+    );
+    let report: Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["cache_kind"], "daily");
+    assert_eq!(report["status"], "interrupted");
+    assert_eq!(report["interrupted"], true);
+    assert_eq!(report["symbols"][0]["interrupted"], true);
+
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn daily_fill_failure_persists_one_failed_terminal_report() {
+    let cache_dir = temp_dir("daily-fill-failed-v3");
+    let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    DailyKlineCache::open(&cache_dir)
+        .unwrap()
+        .store_final_range(
+            "SHFE.rb2601",
+            range.start_ns,
+            range.end_ns,
+            &MinuteKlineCacheSnapshot::cst_v1(),
+            &[],
+        )
+        .unwrap();
+    let root_gate = BacktestTickCache::open(&cache_dir).unwrap();
+    let _exclusive = root_gate.try_acquire_remote_fill_lock().unwrap();
+    let report_path = cache_dir.join("daily-failed-v3.json");
+    let output = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "daily",
+        "fill",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--lock-wait-secs",
+        "1",
+        "--progress",
+        "jsonl",
+        "--report",
+        report_path.to_str().unwrap(),
+    ]);
+
+    assert!(!output.status.success());
+    let records = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter(|line| line.trim_start().starts_with('{'))
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record["event"] == "complete")
+            .count(),
+        1
+    );
+    let report: Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["cache_kind"], "daily");
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["interrupted"], false);
+    assert!(report["error"].is_string());
+    assert_eq!(report["symbols"][0]["status"], "failed");
+
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
 fn daily_fill_dry_run_has_a_human_readable_summary() {
     let cache_dir = temp_dir("daily-fill-text");
     let output = run([
@@ -1059,8 +1357,46 @@ fn minute_fill_reuses_complete_coverage_without_auth_and_writes_a_minute_report(
     assert_eq!(result["report"]["complete"], true);
     assert_eq!(result["report"]["symbols"][0]["symbol"], "SHFE.rb2601");
     assert!(report_path.exists());
+    let persisted: Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    assert_eq!(persisted["schema_version"], 3);
+    assert_eq!(persisted["cache_kind"], "minute");
 
     let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn tick_and_minute_auth_failures_after_planning_persist_v3_reports() {
+    for kind in ["tick", "minute"] {
+        let cache_dir = temp_dir(&format!("{kind}-failed-report-v3"));
+        BacktestTickCache::open(&cache_dir).unwrap();
+        let report_path = cache_dir.join(format!("{kind}-failed-v3.json"));
+        let output = run_without_auth_json([
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--kind",
+            kind,
+            "fill",
+            "--symbol",
+            "SHFE.rb2601",
+            "--start-day",
+            "2020-01-02",
+            "--end-day",
+            "2020-01-02",
+            "--report",
+            report_path.to_str().unwrap(),
+        ]);
+
+        assert!(!output.status.success(), "kind={kind}");
+        let report: Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+        assert_eq!(report["schema_version"], 3, "kind={kind}");
+        assert_eq!(report["cache_kind"], kind);
+        assert_eq!(report["status"], "failed");
+        assert_eq!(report["interrupted"], false);
+        assert!(report["error"].is_string());
+        assert_eq!(report["symbols"][0]["status"], "failed");
+
+        let _ = fs::remove_dir_all(cache_dir);
+    }
 }
 
 #[test]
@@ -1521,6 +1857,9 @@ fn fill_reuses_complete_cache_without_auth_and_report_binds_its_root() {
         0
     );
     assert!(report_path.exists());
+    let persisted: Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    assert_eq!(persisted["schema_version"], 3);
+    assert_eq!(persisted["cache_kind"], "tick");
 
     let verified = run_without_auth_json(["verify", "--report", report_path.to_str().unwrap()]);
     assert!(verified.status.success());

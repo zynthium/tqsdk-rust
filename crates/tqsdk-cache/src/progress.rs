@@ -13,7 +13,10 @@ use tqsdk::{
     RemoteFillPlan,
 };
 use tqsdk_cache::{FillReport, FillReportSymbolDayStats};
-use tqsdk_data::{backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range};
+use tqsdk_data::{
+    BacktestHistoryFillProgress, BacktestHistoryPhase, backtest_tick_trading_day_for_timestamp_ns,
+    backtest_tick_trading_day_range,
+};
 
 const RENDER_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -116,6 +119,10 @@ impl FillProgress {
         self.with_state(|state| state.apply_progress(event));
     }
 
+    pub(crate) fn observe_history_progress(&self, event: &BacktestHistoryFillProgress) {
+        self.with_state(|state| state.apply_history_progress(event));
+    }
+
     pub(crate) fn observe_telemetry(&self, event: &BacktestRemoteFillTelemetry) {
         self.with_state(|state| state.apply_telemetry(event));
     }
@@ -207,6 +214,8 @@ struct ProgressState {
     symbols: BTreeMap<String, SymbolProgress>,
     completed_batches: BTreeSet<usize>,
     total_batches: usize,
+    history_fill: bool,
+    history_batch_started: bool,
     failed: bool,
     revision: u64,
     finished: Option<ProgressCompletion>,
@@ -269,6 +278,8 @@ impl ProgressState {
             symbols: BTreeMap::new(),
             completed_batches: BTreeSet::new(),
             total_batches: 0,
+            history_fill: false,
+            history_batch_started: false,
             failed: false,
             revision: 0,
             finished: None,
@@ -287,6 +298,89 @@ impl ProgressState {
             BacktestRemoteFillProgress::BatchFailed { .. } => self.failed = true,
             BacktestRemoteFillProgress::BatchStarted { .. }
             | BacktestRemoteFillProgress::TickObserved { .. } => {}
+        }
+    }
+
+    fn apply_history_progress(&mut self, event: &BacktestHistoryFillProgress) {
+        self.history_fill = true;
+        match event {
+            BacktestHistoryFillProgress::Planning { total_batches, .. } => {
+                self.total_batches = *total_batches;
+            }
+            BacktestHistoryFillProgress::BatchStarted {
+                batch_number,
+                total_batches,
+                requested_range,
+                symbols,
+                ..
+            } => {
+                self.history_batch_started = true;
+                self.total_batches = *total_batches;
+                for symbol in symbols {
+                    let entry = self.symbols.entry(symbol.clone()).or_default();
+                    if !entry.requested_ranges.contains(requested_range) {
+                        entry.requested_ranges.push(*requested_range);
+                    }
+                    if !entry.missing_ranges.contains(requested_range) {
+                        entry.missing_ranges.push(*requested_range);
+                    }
+                    entry.active = true;
+                    entry.phase = Some(BacktestRemoteFillPhase::Started);
+                    entry.last_event_sequence = self.revision;
+                    entry
+                        .rows_by_stream
+                        .entry((*batch_number, 0, requested_range.0, requested_range.1))
+                        .or_default();
+                }
+                self.recalculate_days();
+            }
+            BacktestHistoryFillProgress::Telemetry {
+                batch_number,
+                requested_range,
+                event,
+                ..
+            } => {
+                self.history_batch_started = true;
+                let entry = self.symbols.entry(event.symbol.clone()).or_default();
+                entry.active = true;
+                entry.phase = Some(history_phase(event.phase));
+                entry.last_event_sequence = self.revision;
+                entry.rows_by_stream.insert(
+                    (*batch_number, 0, requested_range.0, requested_range.1),
+                    event.completed_rows,
+                );
+                if matches!(event.phase, BacktestHistoryPhase::Retry) {
+                    entry.retries = entry.retries.saturating_add(1);
+                }
+            }
+            BacktestHistoryFillProgress::BatchFinished {
+                batch_number,
+                symbols,
+                ..
+            } => {
+                self.history_batch_started = true;
+                self.completed_batches.insert(*batch_number);
+                for symbol in symbols {
+                    if let Some(entry) = self.symbols.get_mut(symbol) {
+                        entry.active = false;
+                        entry.phase = Some(BacktestRemoteFillPhase::Finished);
+                        entry
+                            .received_days
+                            .extend(entry.missing_days.iter().copied());
+                    }
+                }
+            }
+            BacktestHistoryFillProgress::BatchFailed { symbols, .. } => {
+                self.history_batch_started = true;
+                self.failed = true;
+                for symbol in symbols {
+                    if let Some(entry) = self.symbols.get_mut(symbol) {
+                        entry.active = false;
+                        entry.phase = Some(BacktestRemoteFillPhase::Failed);
+                    }
+                }
+            }
+            BacktestHistoryFillProgress::Finished { .. } => {}
         }
     }
 
@@ -492,6 +586,11 @@ impl ProgressState {
                 if self.failed { "failed" } else { "running" },
                 None,
             ),
+            None if self.history_fill && self.history_batch_started => (
+                "batch",
+                if self.failed { "failed" } else { "running" },
+                None,
+            ),
             None => (
                 "planning",
                 if self.failed { "failed" } else { "running" },
@@ -658,7 +757,7 @@ fn render_plain(shared: Arc<Mutex<ProgressState>>) {
                     inspection.requested_range.0,
                     inspection.requested_range.1,
                 );
-            } else if snapshot.plan.is_none() {
+            } else if snapshot.plan.is_none() && !snapshot.history_fill {
                 eprintln!("tqsdk-cache: phase=planning message={}", snapshot.planning);
             } else {
                 eprintln!(
@@ -754,7 +853,7 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
                         inspection_state.physical_symbol,
                     ));
                 }
-            } else if snapshot.plan.is_none() {
+            } else if snapshot.plan.is_none() && !snapshot.history_fill {
                 planning.set_message(snapshot.planning.clone());
             } else {
                 if let Some(inspection) = inspection.take() {
@@ -875,6 +974,17 @@ fn phase_name(phase: BacktestRemoteFillPhase) -> &'static str {
         BacktestRemoteFillPhase::Failed => "failed",
         BacktestRemoteFillPhase::Cancelled => "cancelled",
         _ => "unknown",
+    }
+}
+
+fn history_phase(phase: BacktestHistoryPhase) -> BacktestRemoteFillPhase {
+    match phase {
+        BacktestHistoryPhase::Inspect => BacktestRemoteFillPhase::Inspecting,
+        BacktestHistoryPhase::WaitForFill => BacktestRemoteFillPhase::PlanReady,
+        BacktestHistoryPhase::Fill
+        | BacktestHistoryPhase::Read
+        | BacktestHistoryPhase::Aggregate => BacktestRemoteFillPhase::Streaming,
+        BacktestHistoryPhase::Retry => BacktestRemoteFillPhase::Retrying,
     }
 }
 

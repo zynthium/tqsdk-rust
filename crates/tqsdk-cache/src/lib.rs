@@ -2,6 +2,7 @@
 //!
 //! The crate owns shared CLI contracts for Tick, canonical-minute, and native-daily caches.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -15,14 +16,17 @@ use tqsdk::{
     BacktestMinuteKlineCacheWarmupSymbolReport, BacktestRemoteFillConfig, BacktestTickCacheStatus,
 };
 use tqsdk_data::{
-    BacktestTickCache, DailyKlineCacheStatus, DataError, MinuteKlineCacheStatus,
-    TradingCalendarHolidays, TradingCalendarRow, backtest_tick_trading_day_for_timestamp_ns,
-    backtest_tick_trading_day_range, default_history_cache_dir,
+    BacktestHistoryFillSymbolStatus, BacktestHistoryFillTerminalReport,
+    BacktestHistoryFillTerminalStatus, BacktestTickCache, DailyKlineCacheStatus, DataError,
+    MinuteKlineCacheStatus, TradingCalendarHolidays, TradingCalendarRow,
+    backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
+    default_history_cache_dir,
 };
 
 pub const REPORT_SCHEMA_VERSION: u32 = 2;
 pub const MINUTE_FILL_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const DAILY_FILL_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const UNIFIED_FILL_REPORT_SCHEMA_VERSION: u32 = 3;
 pub const TRADING_CALENDAR_SCHEMA_VERSION: u32 = 1;
 pub const TRADING_CALENDAR_HOLIDAYS_SCHEMA_VERSION: u32 = 1;
 
@@ -1078,6 +1082,271 @@ impl DailyFillReport {
     }
 }
 
+/// Normalized terminal state persisted by all new cache-fill reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnifiedFillReportStatus {
+    Complete,
+    Failed,
+    Interrupted,
+}
+
+/// One logical cache symbol in a schema-v3 fill report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnifiedFillReportSymbol {
+    pub symbol: String,
+    pub status: UnifiedFillReportStatus,
+    pub requested_ranges: Vec<(i64, i64)>,
+    pub rows_written: usize,
+    pub interrupted: bool,
+    pub error: Option<String>,
+}
+
+/// Family-neutral, credential-free fill report written after planning begins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnifiedFillReport {
+    pub schema_version: u32,
+    pub cache_kind: String,
+    pub generated_at: String,
+    pub cache_dir: String,
+    pub requested_days: TradingDayWindow,
+    pub requested_range: (i64, i64),
+    pub market: String,
+    pub status: UnifiedFillReportStatus,
+    pub interrupted: bool,
+    pub error: Option<String>,
+    pub symbols: Vec<UnifiedFillReportSymbol>,
+    pub remote_used: bool,
+    pub rows_written: usize,
+    pub complete: bool,
+}
+
+impl UnifiedFillReport {
+    #[must_use]
+    pub fn from_tick_fill(report: &FillReport) -> Self {
+        let status = if report.complete {
+            UnifiedFillReportStatus::Complete
+        } else {
+            UnifiedFillReportStatus::Failed
+        };
+        let symbols = report
+            .physical_symbols
+            .iter()
+            .map(|symbol| UnifiedFillReportSymbol {
+                symbol: symbol.symbol.clone(),
+                status: if symbol.after.complete {
+                    UnifiedFillReportStatus::Complete
+                } else {
+                    UnifiedFillReportStatus::Failed
+                },
+                requested_ranges: vec![report.requested_range],
+                rows_written: symbol.rows_written,
+                interrupted: false,
+                error: None,
+            })
+            .collect();
+        Self {
+            schema_version: UNIFIED_FILL_REPORT_SCHEMA_VERSION,
+            cache_kind: "tick".to_string(),
+            generated_at: Utc::now().to_rfc3339(),
+            cache_dir: report.cache_dir.clone(),
+            requested_days: report.requested_days.clone(),
+            requested_range: report.requested_range,
+            market: "futures".to_string(),
+            status,
+            interrupted: false,
+            error: None,
+            symbols,
+            remote_used: report.remote_used,
+            rows_written: report.rows_written,
+            complete: report.complete,
+        }
+    }
+
+    #[must_use]
+    pub fn from_minute_fill(report: &MinuteFillReport) -> Self {
+        let status = if report.complete {
+            UnifiedFillReportStatus::Complete
+        } else {
+            UnifiedFillReportStatus::Failed
+        };
+        let symbols = report
+            .symbols
+            .iter()
+            .map(|symbol| UnifiedFillReportSymbol {
+                symbol: symbol.symbol.clone(),
+                status: if symbol.after.complete {
+                    UnifiedFillReportStatus::Complete
+                } else {
+                    UnifiedFillReportStatus::Failed
+                },
+                requested_ranges: vec![report.requested_range],
+                rows_written: symbol.rows_written,
+                interrupted: false,
+                error: None,
+            })
+            .collect();
+        Self {
+            schema_version: UNIFIED_FILL_REPORT_SCHEMA_VERSION,
+            cache_kind: "minute".to_string(),
+            generated_at: Utc::now().to_rfc3339(),
+            cache_dir: report.cache_dir.clone(),
+            requested_days: report.requested_days.clone(),
+            requested_range: report.requested_range,
+            market: report.market.clone(),
+            status,
+            interrupted: false,
+            error: None,
+            symbols,
+            remote_used: report.remote_used,
+            rows_written: report.rows_written,
+            complete: report.complete,
+        }
+    }
+
+    #[must_use]
+    pub fn from_planned_terminal(
+        cache_kind: impl Into<String>,
+        cache_dir: &Path,
+        requested_days: TradingDayWindow,
+        market: impl Into<String>,
+        symbols: &[String],
+        status: UnifiedFillReportStatus,
+        error: Option<String>,
+    ) -> Self {
+        let requested_range = (requested_days.start_ns, requested_days.end_ns);
+        let interrupted = matches!(status, UnifiedFillReportStatus::Interrupted);
+        Self {
+            schema_version: UNIFIED_FILL_REPORT_SCHEMA_VERSION,
+            cache_kind: cache_kind.into(),
+            generated_at: Utc::now().to_rfc3339(),
+            cache_dir: cache_dir.display().to_string(),
+            requested_days,
+            requested_range,
+            market: market.into(),
+            status,
+            interrupted,
+            error: error.clone(),
+            symbols: symbols
+                .iter()
+                .map(|symbol| UnifiedFillReportSymbol {
+                    symbol: symbol.clone(),
+                    status,
+                    requested_ranges: vec![requested_range],
+                    rows_written: 0,
+                    interrupted,
+                    error: error.clone(),
+                })
+                .collect(),
+            remote_used: false,
+            rows_written: 0,
+            complete: matches!(status, UnifiedFillReportStatus::Complete),
+        }
+    }
+
+    #[must_use]
+    pub fn from_history_fill(
+        cache_kind: impl Into<String>,
+        cache_dir: &Path,
+        requested_days: TradingDayWindow,
+        market: impl Into<String>,
+        report: &BacktestHistoryFillTerminalReport,
+    ) -> Self {
+        let mut symbols = BTreeMap::<String, UnifiedFillReportSymbol>::new();
+        for result in report.symbols() {
+            let status = unified_symbol_status(result.status);
+            let entry =
+                symbols
+                    .entry(result.symbol.clone())
+                    .or_insert_with(|| UnifiedFillReportSymbol {
+                        symbol: result.symbol.clone(),
+                        status,
+                        requested_ranges: Vec::new(),
+                        rows_written: 0,
+                        interrupted: false,
+                        error: None,
+                    });
+            entry.status = merge_unified_status(entry.status, status);
+            if !entry.requested_ranges.contains(&result.requested_range) {
+                entry.requested_ranges.push(result.requested_range);
+            }
+            entry.rows_written = entry.rows_written.saturating_add(result.rows_written);
+            entry.interrupted |= matches!(status, UnifiedFillReportStatus::Interrupted);
+            if entry.error.is_none() {
+                entry.error.clone_from(&result.error);
+            }
+        }
+        let symbols = symbols.into_values().collect::<Vec<_>>();
+        let status = unified_terminal_status(report.status());
+        let error = symbols.iter().find_map(|symbol| symbol.error.clone());
+        Self {
+            schema_version: UNIFIED_FILL_REPORT_SCHEMA_VERSION,
+            cache_kind: cache_kind.into(),
+            generated_at: Utc::now().to_rfc3339(),
+            cache_dir: cache_dir.display().to_string(),
+            requested_range: (requested_days.start_ns, requested_days.end_ns),
+            requested_days,
+            market: market.into(),
+            status,
+            interrupted: matches!(status, UnifiedFillReportStatus::Interrupted),
+            error,
+            symbols,
+            remote_used: report.symbols().iter().any(|symbol| symbol.remote_used),
+            rows_written: report.rows_written(),
+            complete: matches!(status, UnifiedFillReportStatus::Complete),
+        }
+    }
+
+    pub fn symbols(&self) -> Result<Vec<String>, DataError> {
+        let mut symbols = self
+            .symbols
+            .iter()
+            .map(|symbol| symbol.symbol.trim())
+            .filter(|symbol| !symbol.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        symbols.sort();
+        symbols.dedup();
+        if symbols.is_empty() {
+            return Err(DataError::Validation(
+                "schema-v3 fill report contains no logical cache symbols".to_string(),
+            ));
+        }
+        Ok(symbols)
+    }
+}
+
+fn unified_symbol_status(status: BacktestHistoryFillSymbolStatus) -> UnifiedFillReportStatus {
+    match status {
+        BacktestHistoryFillSymbolStatus::Complete => UnifiedFillReportStatus::Complete,
+        BacktestHistoryFillSymbolStatus::Failed => UnifiedFillReportStatus::Failed,
+        BacktestHistoryFillSymbolStatus::Interrupted => UnifiedFillReportStatus::Interrupted,
+    }
+}
+
+fn unified_terminal_status(status: BacktestHistoryFillTerminalStatus) -> UnifiedFillReportStatus {
+    match status {
+        BacktestHistoryFillTerminalStatus::Complete => UnifiedFillReportStatus::Complete,
+        BacktestHistoryFillTerminalStatus::Failed => UnifiedFillReportStatus::Failed,
+        BacktestHistoryFillTerminalStatus::Interrupted => UnifiedFillReportStatus::Interrupted,
+    }
+}
+
+fn merge_unified_status(
+    left: UnifiedFillReportStatus,
+    right: UnifiedFillReportStatus,
+) -> UnifiedFillReportStatus {
+    match (left, right) {
+        (UnifiedFillReportStatus::Failed, _) | (_, UnifiedFillReportStatus::Failed) => {
+            UnifiedFillReportStatus::Failed
+        }
+        (UnifiedFillReportStatus::Interrupted, _) | (_, UnifiedFillReportStatus::Interrupted) => {
+            UnifiedFillReportStatus::Interrupted
+        }
+        _ => UnifiedFillReportStatus::Complete,
+    }
+}
+
 fn minute_fill_report_symbol(
     symbol: &BacktestMinuteKlineCacheWarmupSymbolReport,
 ) -> MinuteFillReportSymbol {
@@ -1096,6 +1365,7 @@ pub enum PersistedFillReport {
     Tick(Box<FillReport>),
     Minute(Box<MinuteFillReport>),
     Daily(Box<DailyFillReport>),
+    Unified(Box<UnifiedFillReport>),
 }
 
 fn default_coverage_state() -> String {
@@ -1137,7 +1407,7 @@ pub fn open_read_only_cache(
 
 pub fn default_fill_report_path(cache_dir: &Path) -> PathBuf {
     let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ");
-    cache_dir.join("reports").join(format!(
+    cache_dir.join("reports").join("tick").join(format!(
         "tqsdk-cache-fill-{timestamp}-{}.json",
         std::process::id()
     ))
@@ -1184,6 +1454,17 @@ pub fn write_daily_fill_report(path: &Path, report: &DailyFillReport) -> Result<
     write_json_atomically(path, report)
 }
 
+pub fn write_unified_fill_report(path: &Path, report: &UnifiedFillReport) -> Result<(), DataError> {
+    if report.schema_version != UNIFIED_FILL_REPORT_SCHEMA_VERSION
+        || !matches!(report.cache_kind.as_str(), "tick" | "minute" | "daily")
+    {
+        return Err(DataError::Validation(
+            "unified fill report has an unsupported schema or cache kind".to_string(),
+        ));
+    }
+    write_json_atomically(path, report)
+}
+
 pub fn read_fill_report(path: &Path) -> Result<FillReport, DataError> {
     let file = File::open(path)?;
     let report: FillReport = serde_json::from_reader(BufReader::new(file))
@@ -1201,6 +1482,21 @@ pub fn read_persisted_fill_report(path: &Path) -> Result<PersistedFillReport, Da
     let file = File::open(path)?;
     let value: serde_json::Value = serde_json::from_reader(BufReader::new(file))
         .map_err(|error| DataError::InvalidResponse(error.to_string()))?;
+    if value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        == Some(u64::from(UNIFIED_FILL_REPORT_SCHEMA_VERSION))
+    {
+        let report: UnifiedFillReport = serde_json::from_value(value)
+            .map_err(|error| DataError::InvalidResponse(error.to_string()))?;
+        if !matches!(report.cache_kind.as_str(), "tick" | "minute" | "daily") {
+            return Err(DataError::Validation(format!(
+                "unsupported schema-v3 fill report cache kind {:?}",
+                report.cache_kind
+            )));
+        }
+        return Ok(PersistedFillReport::Unified(Box::new(report)));
+    }
     if value.get("cache_kind").and_then(serde_json::Value::as_str) == Some("minute") {
         let report: MinuteFillReport = serde_json::from_value(value)
             .map_err(|error| DataError::InvalidResponse(error.to_string()))?;
@@ -1325,10 +1621,11 @@ mod tests {
 
     use super::{
         CacheCoverageSnapshot, FillConfigReport, FillReport, FillReportSymbol,
-        FillReportSymbolDayStats, FillSelectorReport, REPORT_SCHEMA_VERSION,
+        FillReportSymbolDayStats, FillSelectorReport, PersistedFillReport, REPORT_SCHEMA_VERSION,
         TradingCalendarHolidaysSnapshot, TradingCalendarSnapshot, TradingDayWindow,
-        read_fill_report, read_trading_calendar_holidays_snapshot, read_trading_calendar_snapshot,
-        write_trading_calendar_holidays_snapshot, write_trading_calendar_snapshot,
+        read_fill_report, read_persisted_fill_report, read_trading_calendar_holidays_snapshot,
+        read_trading_calendar_snapshot, write_trading_calendar_holidays_snapshot,
+        write_trading_calendar_snapshot,
     };
     use tqsdk_data::{TradingCalendarHolidays, TradingCalendarRow};
 
@@ -1520,7 +1817,153 @@ mod tests {
         assert_eq!(report.coverage_state, "final");
         assert!(report.complete_through_ns.is_none());
         assert!(report.day_complete);
+        assert!(matches!(
+            read_persisted_fill_report(&path).unwrap(),
+            PersistedFillReport::Tick(_)
+        ));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persisted_report_reader_accepts_legacy_minute_and_daily_v1() {
+        let root = std::env::temp_dir().join(format!(
+            "tqsdk-cache-legacy-family-reports-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let window = serde_json::json!({
+            "start_day": "2020-01-02",
+            "end_day": "2020-01-02",
+            "start_ns": 1,
+            "end_ns": 2
+        });
+        let coverage = serde_json::json!({
+            "namespace_dir": "/tmp/cache/minute-kline-v3",
+            "cached_ranges": [[1, 2]],
+            "missing_ranges": [],
+            "complete": true
+        });
+        let minute_path = root.join("minute-v1.json");
+        fs::write(
+            &minute_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "cache_kind": "minute",
+                "generated_at": "2026-08-28T00:00:00Z",
+                "cache_dir": "/tmp/cache",
+                "requested_days": window,
+                "requested_range": [1, 2],
+                "market": "futures",
+                "logical_symbols": ["SHFE.rb2601"],
+                "symbols": [{
+                    "symbol": "SHFE.rb2601",
+                    "action": "skipped_complete",
+                    "before": coverage,
+                    "after": coverage,
+                    "rows_written": 0
+                }],
+                "remote_used": false,
+                "rows_written": 0,
+                "complete": true,
+                "dry_run": false
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            read_persisted_fill_report(&minute_path).unwrap(),
+            PersistedFillReport::Minute(_)
+        ));
+
+        let daily_path = root.join("daily-v1.json");
+        fs::write(
+            &daily_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "cache_kind": "daily",
+                "generated_at": "2026-08-28T00:00:00Z",
+                "cache_dir": "/tmp/cache",
+                "requested_days": window,
+                "market": "futures",
+                "symbols": [{
+                    "symbol": "SHFE.rb2601",
+                    "after": {
+                        "namespace_dir": "/tmp/cache/daily-kline-v1",
+                        "path": "/tmp/cache/daily-kline-v1/SHFE.rb2601.tqdk",
+                        "cached_ranges": [[1, 2]],
+                        "missing_ranges": [],
+                        "rows": 0,
+                        "complete": true
+                    }
+                }],
+                "remote_used": false,
+                "rows_written": 0,
+                "complete": true,
+                "dry_run": false
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            read_persisted_fill_report(&daily_path).unwrap(),
+            PersistedFillReport::Daily(_)
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persisted_report_reader_accepts_unified_v3() {
+        let root = std::env::temp_dir().join(format!(
+            "tqsdk-cache-unified-v3-report-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("daily-v3.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 3,
+                "cache_kind": "daily",
+                "generated_at": "2026-08-28T00:00:00Z",
+                "cache_dir": "/tmp/cache",
+                "requested_days": {
+                    "start_day": "2020-01-02",
+                    "end_day": "2020-01-02",
+                    "start_ns": 1,
+                    "end_ns": 2
+                },
+                "requested_range": [1, 2],
+                "market": "futures",
+                "status": "complete",
+                "interrupted": false,
+                "error": null,
+                "symbols": [{
+                    "symbol": "SHFE.rb2601",
+                    "status": "complete",
+                    "requested_ranges": [[1, 2]],
+                    "rows_written": 0,
+                    "interrupted": false,
+                    "error": null
+                }],
+                "remote_used": false,
+                "rows_written": 0,
+                "complete": true
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(read_persisted_fill_report(&path).is_ok());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1619,6 +2062,22 @@ mod tests {
                 .planned_days,
             2
         );
+
+        let root = std::env::temp_dir().join(format!(
+            "tqsdk-cache-v2-report-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = root.join("tick-v2.json");
+        super::write_fill_report(&path, &report).unwrap();
+        assert!(matches!(
+            read_persisted_fill_report(&path).unwrap(),
+            PersistedFillReport::Tick(_)
+        ));
+        let _ = fs::remove_dir_all(root);
     }
 
     fn cst_ns(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> i64 {

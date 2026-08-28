@@ -10,17 +10,18 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tqsdk::{BacktestRemoteFillCancellation, BacktestRemoteFillConfig, RemoteFillPlan, Tq};
 use tqsdk_cache::{
-    DailyFillReport, FillReport, FillReportCalendar, FillReportSymbolDayStats, FillSelectorReport,
+    FillReport, FillReportCalendar, FillReportSymbolDayStats, FillSelectorReport,
     MINUTE_FILL_REPORT_SCHEMA_VERSION, MinuteCacheCoverageSnapshot, MinuteFillReport,
     MinuteFillReportSymbol, PersistedFillReport, REPORT_SCHEMA_VERSION,
-    TradingCalendarHolidaysSnapshot, TradingDayWindow, default_daily_fill_report_path,
-    default_fill_report_path, default_minute_fill_report_path, open_cache, open_read_only_cache,
-    read_fill_report, read_persisted_fill_report, read_trading_calendar_holidays_snapshot,
-    write_daily_fill_report, write_fill_report, write_minute_fill_report,
-    write_trading_calendar_holidays_snapshot,
+    TradingCalendarHolidaysSnapshot, TradingDayWindow, UnifiedFillReport, UnifiedFillReportStatus,
+    default_daily_fill_report_path, default_fill_report_path, default_minute_fill_report_path,
+    open_cache, open_read_only_cache, read_persisted_fill_report,
+    read_trading_calendar_holidays_snapshot, write_trading_calendar_holidays_snapshot,
+    write_unified_fill_report,
 };
 use tqsdk_data::{
-    BacktestHistoryClient, BacktestHistoryMaintenanceClient, BacktestHistoryPolicy,
+    BacktestHistoryClient, BacktestHistoryFillCancellation, BacktestHistoryFillConfig,
+    BacktestHistoryFillTerminalStatus, BacktestHistoryMaintenanceClient, BacktestHistoryPolicy,
     BacktestHistoryRequest, BacktestTickCache, BacktestTickCacheLockRepairMode,
     BacktestTickCacheLockRepairStatus, DailyKlineCache, DataClient, DataError,
     HISTORY_SERIES_CACHE_FORMAT_ID, HISTORY_SERIES_CACHE_SCHEMA_VERSION,
@@ -1478,6 +1479,7 @@ async fn fill_daily(
     market: MarketKind,
     args: FillArgs,
 ) -> Result<CommandOutcome, CliError> {
+    let fill_config = history_fill_config(&args)?;
     if !matches!(market, MarketKind::Futures) {
         return Err(CliError::Usage(
             "--kind daily fill supports only --market futures".to_string(),
@@ -1500,17 +1502,6 @@ async fn fill_daily(
                 .to_string(),
         ));
     }
-    if args.symbol_batch_size.is_some()
-        || args.idle_timeout_secs.is_some()
-        || args.batch_timeout_secs.is_some()
-        || args.lock_wait_secs.is_some()
-    {
-        return Err(CliError::Usage(
-            "--kind daily fill supports only --symbol-concurrency from the remote scheduler options"
-                .to_string(),
-        ));
-    }
-
     let explicit_symbols = normalized_symbols_allow_empty(args.symbols.symbols)?;
     let universe = normalized_universe(args.universe)?;
     if explicit_symbols.is_empty() && universe.is_none() {
@@ -1554,28 +1545,54 @@ async fn fill_daily(
         });
     }
 
-    let mut builder = BacktestHistoryClient::builder(canonical_cache_dir.clone())
+    let builder = BacktestHistoryClient::builder(canonical_cache_dir.clone())
         .policy(BacktestHistoryPolicy::RemoteOnMiss)
         .auth_env();
-    if let Some(symbol_concurrency) = args.symbol_concurrency {
-        builder = builder.logical_concurrency(symbol_concurrency);
-    }
     let client = builder.build()?;
     let progress_session = FillProgressSession::new(args.progress, args.progress_max_bars, "daily");
     let reporter = progress_session.observer();
     reporter.planning("materializing final native daily coverage");
-    let requests = symbols.iter().enumerate().map(|(index, symbol)| {
-        BacktestHistoryRequest::kline(
-            u64::try_from(index).expect("symbol count fits request identifier"),
-            symbol,
-            Duration::from_secs(24 * 60 * 60),
-            window.start_ns,
-            window.end_ns,
-        )
-    });
-    let report = match client.materialize_cache(requests).await {
+    let report_path = args
+        .report
+        .clone()
+        .unwrap_or_else(|| default_daily_fill_report_path(&canonical_cache_dir));
+    let requests = symbols
+        .iter()
+        .enumerate()
+        .map(|(index, symbol)| {
+            BacktestHistoryRequest::kline(
+                u64::try_from(index).expect("symbol count fits request identifier"),
+                symbol,
+                Duration::from_secs(24 * 60 * 60),
+                window.start_ns,
+                window.end_ns,
+            )
+        })
+        .collect::<Vec<_>>();
+    let cancellation = BacktestHistoryFillCancellation::new();
+    let signal_cancellation = cancellation.clone();
+    let signal_task = spawn_shutdown_signal_handler(signal_cancellation, CacheKind::Daily)?;
+    let progress_callback = reporter.clone();
+    let report = match client
+        .orchestrate_fill(requests, fill_config, cancellation.clone(), move |event| {
+            progress_callback.observe_history_progress(&event);
+        })
+        .await
+    {
         Ok(report) => report,
         Err(error) => {
+            signal_task.abort();
+            let _ = signal_task.await;
+            let failed_report = UnifiedFillReport::from_planned_terminal(
+                "daily",
+                &canonical_cache_dir,
+                window.clone(),
+                market.as_str(),
+                &symbols,
+                UnifiedFillReportStatus::Failed,
+                Some(error.to_string()),
+            );
+            write_unified_fill_report(&report_path, &failed_report)?;
             progress_session.finish(
                 ProgressTerminalStatus::Failed,
                 "daily fill failed; final coverage was not committed for failed ranges",
@@ -1583,40 +1600,45 @@ async fn fill_daily(
             return Err(error.into());
         }
     };
+    signal_task.abort();
+    let _ = signal_task.await;
     let after = daily_cache_statuses(&canonical_cache_dir, &symbols, &window)?;
-    let complete = after
+    let coverage_complete = after
         .iter()
         .all(tqsdk_data::DailyKlineCacheStatus::is_complete);
-    let rows_written = report
-        .completed
-        .iter()
-        .fold(0_usize, |total, item| total.saturating_add(item.rows));
-    let remote_used = report.completed.iter().any(|item| item.remote_used);
+    let rows_written = report.rows_written();
+    let remote_used = report.symbols().iter().any(|item| item.remote_used);
+    let interrupted = matches!(
+        report.status(),
+        BacktestHistoryFillTerminalStatus::Interrupted
+    );
+    let complete =
+        coverage_complete && matches!(report.status(), BacktestHistoryFillTerminalStatus::Complete);
     progress_session.finish(
-        if complete {
-            ProgressTerminalStatus::Complete
-        } else {
-            ProgressTerminalStatus::Failed
+        match report.status() {
+            BacktestHistoryFillTerminalStatus::Complete if complete => {
+                ProgressTerminalStatus::Complete
+            }
+            BacktestHistoryFillTerminalStatus::Interrupted => ProgressTerminalStatus::Interrupted,
+            BacktestHistoryFillTerminalStatus::Complete
+            | BacktestHistoryFillTerminalStatus::Failed => ProgressTerminalStatus::Failed,
         },
-        if complete {
+        if interrupted {
+            "daily fill interrupted; accepted rows were flushed without committing failed ranges"
+        } else if complete {
             "daily fill complete; final native daily coverage verified"
         } else {
             "daily fill completed with missing native daily coverage"
         },
     );
-    let daily_report = DailyFillReport::new(
+    let daily_report = UnifiedFillReport::from_history_fill(
+        "daily",
         &canonical_cache_dir,
         window.clone(),
         market.as_str(),
-        &after,
-        rows_written,
-        remote_used,
-        false,
+        &report,
     );
-    let report_path = args
-        .report
-        .unwrap_or_else(|| default_daily_fill_report_path(&canonical_cache_dir));
-    write_daily_fill_report(&report_path, &daily_report)?;
+    write_unified_fill_report(&report_path, &daily_report)?;
 
     Ok(CommandOutcome {
         value: json!({
@@ -1634,7 +1656,13 @@ async fn fill_daily(
             "rows_written": rows_written,
             "report": daily_report,
         }),
-        exit_code: if complete { 0 } else { 1 },
+        exit_code: if interrupted {
+            130
+        } else if complete {
+            0
+        } else {
+            1
+        },
     })
 }
 
@@ -1762,11 +1790,13 @@ async fn fill_minute(
             "checking explicitly requested stale canonical-minute partitions under remote-fill lock",
         );
     }
+    let report_path = args
+        .report
+        .clone()
+        .unwrap_or_else(|| default_minute_fill_report_path(&canonical_cache_dir));
     let cancellation = BacktestRemoteFillCancellation::new();
     let signal_cancellation = cancellation.clone();
-    let signal_task = tokio::spawn(async move {
-        wait_for_shutdown_signal(signal_cancellation, CacheKind::Minute).await;
-    });
+    let signal_task = spawn_shutdown_signal_handler(signal_cancellation, CacheKind::Minute)?;
     let progress_callback = reporter.clone();
     let telemetry_callback = reporter.clone();
     let mut builder = builder_with_market_environment_auth(market, false)?
@@ -1790,6 +1820,16 @@ async fn fill_minute(
     signal_task.abort();
     let _ = signal_task.await;
     if fill_was_interrupted(cancellation.is_cancelled(), warmup.is_ok()) {
+        let interrupted_report = UnifiedFillReport::from_planned_terminal(
+            "minute",
+            &canonical_cache_dir,
+            window.clone(),
+            market.as_str(),
+            &symbols,
+            UnifiedFillReportStatus::Interrupted,
+            Some("cancelled".to_string()),
+        );
+        write_unified_fill_report(&report_path, &interrupted_report)?;
         progress_session.finish(
             ProgressTerminalStatus::Interrupted,
             "interrupted; no incomplete minute range was marked final",
@@ -1811,6 +1851,16 @@ async fn fill_minute(
     let warmup = match warmup {
         Ok(warmup) => warmup,
         Err(error) => {
+            let failed_report = UnifiedFillReport::from_planned_terminal(
+                "minute",
+                &canonical_cache_dir,
+                window.clone(),
+                market.as_str(),
+                &symbols,
+                UnifiedFillReportStatus::Failed,
+                Some(error.to_string()),
+            );
+            write_unified_fill_report(&report_path, &failed_report)?;
             progress_session.finish(
                 ProgressTerminalStatus::Failed,
                 "minute fill failed; final coverage was not committed for failed ranges",
@@ -1841,10 +1891,8 @@ async fn fill_minute(
         },
         completion_summary,
     );
-    let report_path = args
-        .report
-        .unwrap_or_else(|| default_minute_fill_report_path(&canonical_cache_dir));
-    write_minute_fill_report(&report_path, &report)?;
+    let persisted_report = UnifiedFillReport::from_minute_fill(&report);
+    write_unified_fill_report(&report_path, &persisted_report)?;
     Ok(CommandOutcome {
         value: json!({
             "schema_version": REPORT_SCHEMA_VERSION,
@@ -2057,11 +2105,13 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
     if resolved.calendar.snapshot.is_some() {
         reporter.calendar_ready(resolved.calendar.progress_calendar(&window)?);
     }
+    let report_path = args
+        .report
+        .clone()
+        .unwrap_or_else(|| default_fill_report_path(&canonical_cache_dir));
     let cancellation = BacktestRemoteFillCancellation::new();
     let signal_cancellation = cancellation.clone();
-    let signal_task = tokio::spawn(async move {
-        wait_for_shutdown_signal(signal_cancellation, CacheKind::Tick).await;
-    });
+    let signal_task = spawn_shutdown_signal_handler(signal_cancellation, CacheKind::Tick)?;
     let (plan_tx, plan_rx) = mpsc::channel(1);
     let calendar_task = tokio::spawn(finish_calendar_after_plan(
         plan_rx,
@@ -2101,6 +2151,16 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
         calendar_task.abort();
         let _ = calendar_task.await;
         let summary = "interrupted; partial accepted rows were flushed without committing final or provisional coverage";
+        let interrupted_report = UnifiedFillReport::from_planned_terminal(
+            "tick",
+            &canonical_cache_dir,
+            window.clone(),
+            "futures",
+            &symbols,
+            UnifiedFillReportStatus::Interrupted,
+            Some("cancelled".to_string()),
+        );
+        write_unified_fill_report(&report_path, &interrupted_report)?;
         progress_session.finish(ProgressTerminalStatus::Interrupted, summary);
         let inventory = cache.fast_inventory()?;
         return Ok(CommandOutcome {
@@ -2122,6 +2182,16 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
     let calendar = match calendar_result {
         Ok(Ok(calendar)) => calendar,
         Ok(Err(error)) => {
+            let failed_report = UnifiedFillReport::from_planned_terminal(
+                "tick",
+                &canonical_cache_dir,
+                window.clone(),
+                "futures",
+                &symbols,
+                UnifiedFillReportStatus::Failed,
+                Some(error.to_string()),
+            );
+            write_unified_fill_report(&report_path, &failed_report)?;
             progress_session.finish(
                 ProgressTerminalStatus::Failed,
                 "fill failed; calendar preparation did not complete",
@@ -2129,6 +2199,16 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
             return Err(error);
         }
         Err(error) => {
+            let failed_report = UnifiedFillReport::from_planned_terminal(
+                "tick",
+                &canonical_cache_dir,
+                window.clone(),
+                "futures",
+                &symbols,
+                UnifiedFillReportStatus::Failed,
+                Some(error.to_string()),
+            );
+            write_unified_fill_report(&report_path, &failed_report)?;
             progress_session.finish(
                 ProgressTerminalStatus::Failed,
                 "fill failed; calendar planning task did not complete",
@@ -2142,6 +2222,16 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
     let warmup = match warmup {
         Ok(warmup) => warmup,
         Err(error) => {
+            let failed_report = UnifiedFillReport::from_planned_terminal(
+                "tick",
+                &canonical_cache_dir,
+                window.clone(),
+                "futures",
+                &symbols,
+                UnifiedFillReportStatus::Failed,
+                Some(error.to_string()),
+            );
+            write_unified_fill_report(&report_path, &failed_report)?;
             progress_session.finish(
                 ProgressTerminalStatus::Failed,
                 "fill failed; strict local coverage was not committed",
@@ -2168,10 +2258,8 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
         "fill complete; strict local coverage verified"
     };
     progress_session.finish(ProgressTerminalStatus::Complete, completion_summary);
-    let report_path = args
-        .report
-        .unwrap_or_else(|| default_fill_report_path(&canonical_cache_dir));
-    write_fill_report(&report_path, &report)?;
+    let persisted_report = UnifiedFillReport::from_tick_fill(&report);
+    write_unified_fill_report(&report_path, &persisted_report)?;
     let complete = fill_operation_complete(&report, resolved.provisional);
     Ok(CommandOutcome {
         value: json!({
@@ -2338,8 +2426,23 @@ async fn verify_tick(
                         .to_string(),
                 ));
             }
-            let report = read_fill_report(&report_path)?;
-            let report_root = PathBuf::from(&report.cache_dir);
+            let (report_root, window, symbols) = match read_persisted_fill_report(&report_path)? {
+                PersistedFillReport::Tick(report) => (
+                    PathBuf::from(&report.cache_dir),
+                    report.requested_days.clone(),
+                    report.physical_symbols()?,
+                ),
+                PersistedFillReport::Unified(report) if report.cache_kind == "tick" => (
+                    PathBuf::from(&report.cache_dir),
+                    report.requested_days.clone(),
+                    report.symbols()?,
+                ),
+                _ => {
+                    return Err(CliError::Usage(
+                        "--kind tick verify requires a tick fill report".to_string(),
+                    ));
+                }
+            };
             let (cache, canonical_cache_dir) = open_cache(Some(&report_root))?;
             if let Some(requested_cache_dir) = cache_dir {
                 let (_, requested_canonical_dir) = open_cache(Some(requested_cache_dir))?;
@@ -2351,14 +2454,7 @@ async fn verify_tick(
                     )));
                 }
             }
-            let symbols = report.physical_symbols()?;
-            (
-                cache,
-                canonical_cache_dir,
-                report.requested_days.clone(),
-                symbols,
-                Some(report),
-            )
+            (cache, canonical_cache_dir, window, symbols, Some("bound"))
         }
         None => {
             let symbols = normalized_symbols(args.symbols.symbols)?;
@@ -2395,7 +2491,7 @@ async fn verify_tick(
             "command": "verify",
             "cache_dir": canonical_cache_dir,
             "requested_days": window,
-            "source_report": source_report.as_ref().map(|_| "bound"),
+            "source_report": source_report,
             "symbols": symbols,
             "coverage_complete": coverage_complete,
             "replay_rows": replay_rows,
@@ -2424,13 +2520,27 @@ async fn verify_minute(
                         .to_string(),
                 ));
             }
-            let PersistedFillReport::Minute(report) = read_persisted_fill_report(&report_path)?
-            else {
-                return Err(CliError::Usage(
-                    "--kind minute verify requires a canonical-minute fill report".to_string(),
-                ));
-            };
-            let report_root = PathBuf::from(&report.cache_dir);
+            let (report_root, symbols, requested_days, report_market) =
+                match read_persisted_fill_report(&report_path)? {
+                    PersistedFillReport::Minute(report) => (
+                        PathBuf::from(&report.cache_dir),
+                        report.symbols()?,
+                        report.requested_days,
+                        report.market,
+                    ),
+                    PersistedFillReport::Unified(report) if report.cache_kind == "minute" => (
+                        PathBuf::from(&report.cache_dir),
+                        report.symbols()?,
+                        report.requested_days,
+                        report.market,
+                    ),
+                    _ => {
+                        return Err(CliError::Usage(
+                            "--kind minute verify requires a canonical-minute fill report"
+                                .to_string(),
+                        ));
+                    }
+                };
             let (_, canonical_cache_dir) = open_read_only_cache(Some(&report_root))?;
             if let Some(requested_cache_dir) = cache_dir {
                 let (_, requested_canonical_dir) = open_read_only_cache(Some(requested_cache_dir))?;
@@ -2442,13 +2552,12 @@ async fn verify_minute(
                     )));
                 }
             }
-            let symbols = report.symbols()?;
             (
                 canonical_cache_dir,
-                report.requested_days,
+                requested_days,
                 symbols,
                 Some("bound"),
-                report.market,
+                report_market,
             )
         }
         None => {
@@ -2545,13 +2654,26 @@ async fn verify_daily(
                         .to_string(),
                 ));
             }
-            let PersistedFillReport::Daily(report) = read_persisted_fill_report(&report_path)?
-            else {
-                return Err(CliError::Usage(
-                    "--kind daily verify requires a native-daily fill report".to_string(),
-                ));
-            };
-            let report_root = PathBuf::from(&report.cache_dir);
+            let (report_root, symbols, requested_days, report_market) =
+                match read_persisted_fill_report(&report_path)? {
+                    PersistedFillReport::Daily(report) => (
+                        PathBuf::from(&report.cache_dir),
+                        report.symbols()?,
+                        report.requested_days,
+                        report.market,
+                    ),
+                    PersistedFillReport::Unified(report) if report.cache_kind == "daily" => (
+                        PathBuf::from(&report.cache_dir),
+                        report.symbols()?,
+                        report.requested_days,
+                        report.market,
+                    ),
+                    _ => {
+                        return Err(CliError::Usage(
+                            "--kind daily verify requires a native-daily fill report".to_string(),
+                        ));
+                    }
+                };
             let (_, canonical_cache_dir) = open_read_only_cache(Some(&report_root))?;
             if let Some(requested_cache_dir) = cache_dir {
                 let (_, requested_canonical_dir) = open_read_only_cache(Some(requested_cache_dir))?;
@@ -2563,9 +2685,6 @@ async fn verify_daily(
                     )));
                 }
             }
-            let symbols = report.symbols()?;
-            let requested_days = report.requested_days;
-            let report_market = report.market;
             (
                 canonical_cache_dir,
                 requested_days,
@@ -3501,6 +3620,30 @@ fn fill_config(args: &FillArgs) -> BacktestRemoteFillConfig {
     config
 }
 
+fn history_fill_config(args: &FillArgs) -> Result<BacktestHistoryFillConfig, DataError> {
+    let mut config = BacktestHistoryFillConfig::default();
+    if let Some(value) = args.symbol_batch_size {
+        config = config.with_symbol_batch_size(value)?;
+    }
+    if let Some(value) = args.symbol_concurrency {
+        config = config.with_symbol_concurrency(value)?;
+    }
+    if let Some(value) = args.idle_timeout_secs {
+        config = config.with_idle_timeout(Duration::from_secs(value))?;
+    }
+    if let Some(value) = args.batch_timeout_secs {
+        config = if value == 0 {
+            config.without_batch_timeout()
+        } else {
+            config.with_batch_timeout(Some(Duration::from_secs(value)))?
+        };
+    }
+    if let Some(value) = args.lock_wait_secs {
+        config = config.with_lock_wait(Some(Duration::from_secs(value)))?;
+    }
+    Ok(config)
+}
+
 fn apply_fill_targets(
     mut builder: tqsdk::BacktestBuilder,
     symbols: &[String],
@@ -3720,48 +3863,96 @@ fn minute_diagnostic_status_name(
     }
 }
 
-async fn wait_for_shutdown_signal(cancellation: BacktestRemoteFillCancellation, kind: CacheKind) {
-    #[cfg(unix)]
-    {
-        let mut terminate =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(terminate) => Some(terminate),
-                Err(error) => {
-                    eprintln!(
-                        "tqsdk-cache: SIGTERM handler unavailable ({error}); waiting for Ctrl-C"
-                    );
-                    None
-                }
-            };
-        wait_for_one_shutdown_signal(terminate.as_mut()).await;
-        cancellation.cancel();
-        eprintln!("{}", shutdown_cancellation_message(kind));
-        wait_for_one_shutdown_signal(terminate.as_mut()).await;
+trait ShutdownCancellation {
+    fn cancel(&self);
+}
+
+impl ShutdownCancellation for BacktestRemoteFillCancellation {
+    fn cancel(&self) {
+        BacktestRemoteFillCancellation::cancel(self);
     }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-        cancellation.cancel();
-        eprintln!("{}", shutdown_cancellation_message(kind));
-        let _ = tokio::signal::ctrl_c().await;
+}
+
+impl ShutdownCancellation for BacktestHistoryFillCancellation {
+    fn cancel(&self) {
+        BacktestHistoryFillCancellation::cancel(self);
     }
+}
+
+#[cfg(unix)]
+fn spawn_shutdown_signal_handler(
+    cancellation: impl ShutdownCancellation + Send + Sync + 'static,
+    kind: CacheKind,
+) -> Result<tokio::task::JoinHandle<()>, CliError> {
+    let interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let terminate = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    {
+        Ok(terminate) => Some(terminate),
+        Err(error) => {
+            eprintln!("tqsdk-cache: SIGTERM handler unavailable ({error}); waiting for SIGINT");
+            None
+        }
+    };
+    Ok(tokio::spawn(wait_for_shutdown_signal(
+        cancellation,
+        kind,
+        interrupt,
+        terminate,
+    )))
+}
+
+#[cfg(not(unix))]
+fn spawn_shutdown_signal_handler(
+    cancellation: impl ShutdownCancellation + Send + Sync + 'static,
+    kind: CacheKind,
+) -> Result<tokio::task::JoinHandle<()>, CliError> {
+    Ok(tokio::spawn(wait_for_shutdown_signal(cancellation, kind)))
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal(
+    cancellation: impl ShutdownCancellation + Send + Sync + 'static,
+    kind: CacheKind,
+    mut interrupt: tokio::signal::unix::Signal,
+    mut terminate: Option<tokio::signal::unix::Signal>,
+) {
+    wait_for_one_shutdown_signal(&mut interrupt, terminate.as_mut()).await;
+    cancellation.cancel();
+    eprintln!("{}", shutdown_cancellation_message(kind));
+    wait_for_one_shutdown_signal(&mut interrupt, terminate.as_mut()).await;
     eprintln!("tqsdk-cache: second shutdown signal received; exiting immediately");
     std::process::exit(130);
 }
 
 #[cfg(unix)]
-async fn wait_for_one_shutdown_signal(terminate: Option<&mut tokio::signal::unix::Signal>) {
+async fn wait_for_one_shutdown_signal(
+    interrupt: &mut tokio::signal::unix::Signal,
+    terminate: Option<&mut tokio::signal::unix::Signal>,
+) {
     match terminate {
         Some(terminate) => {
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => {},
+                _ = interrupt.recv() => {},
                 _ = terminate.recv() => {},
             }
         }
         None => {
-            let _ = tokio::signal::ctrl_c().await;
+            let _ = interrupt.recv().await;
         }
     }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal(
+    cancellation: impl ShutdownCancellation + Send + Sync + 'static,
+    kind: CacheKind,
+) {
+    let _ = tokio::signal::ctrl_c().await;
+    cancellation.cancel();
+    eprintln!("{}", shutdown_cancellation_message(kind));
+    let _ = tokio::signal::ctrl_c().await;
+    eprintln!("tqsdk-cache: second shutdown signal received; exiting immediately");
+    std::process::exit(130);
 }
 
 fn shutdown_cancellation_message(kind: CacheKind) -> &'static str {
