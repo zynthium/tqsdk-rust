@@ -50,6 +50,10 @@
   per-symbol metadata identity；query lease 会保留到 detached blocking scan 完全退出）
 - `BacktestHistorySnapshotRun::next()` / `collect()` / `finish()`（terminal failure 保留
   `BacktestHistoryFailureReason`，不要求调用方解析 legacy error string）
+- publisher-facing manifest seam：`BacktestHistorySnapshotManifestBuilder`、
+  `classify_backtest_history_snapshot_cache_path(...)` 与
+  `BacktestHistorySnapshot::open_generation(...)`；canonical identity、file-role allowlist、staging/
+  retained validation 仍只在 data 实现，`tqsdk-cache` 不复制 manifest parser
 - `BacktestHistoryMetadataCache` / `BacktestHistoryMaintenanceClient`
 
 ## 回测历史查询

@@ -57,6 +57,11 @@ pub use snapshot::{
     BacktestHistoryInspection, BacktestHistorySnapshot, BacktestHistorySnapshotError,
     BacktestHistorySnapshotEvent, BacktestHistorySnapshotRun,
 };
+pub use snapshot_manifest::{
+    BacktestHistorySnapshotFileDisposition, BacktestHistorySnapshotFileRole,
+    BacktestHistorySnapshotManifestArtifact, BacktestHistorySnapshotManifestBuilder,
+    classify_backtest_history_snapshot_cache_path,
+};
 pub use telemetry::BacktestHistoryTelemetryStream;
 
 use executor::{BacktestHistoryExecutionMode, BacktestHistoryExecutionState};

@@ -123,7 +123,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | 验证面 | 主要验证文件 |
 | --- | --- |
 | data schema、typed failure、strict inspect、manifest、lease/pinning | `crates/tqsdk-data/tests/backtest_history_snapshot.rs` |
-| publisher clone/publish/recover/rollback/scrub/GC | `crates/tqsdk-cache/tests/snapshot_cli.rs` |
+| publisher role-aware clone/import、prewarm、strict inspect + real query smoke、publish crash/recover、rollback/scrub、tombstone/lease-aware GC | `crates/tqsdk-cache/tests/snapshot_cli.rs` |
 | HTTP grammar、JSON、error、ETag、gzip、limits/cancel | `crates/tqsdk-relay/tests/history_http.rs` |
 | dedicated runtime、market-lock isolation、reload、generation health | `crates/tqsdk-relay/tests/history_runtime.rs` |
 

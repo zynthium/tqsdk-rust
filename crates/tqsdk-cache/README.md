@@ -173,6 +173,51 @@ tick fill 按 trading day 顺序执行，以 8192 rows 缓冲追加；取消会 
 同一 shared fill 被多个 logical request 复用时只计一次，完整 cache hit 为 `0`。final fill 只按本轮
 实际远端回填的 `symbol × trading day` 去重 compact 相交分区；provisional fill 跳过 compaction。
 
+## Immutable history snapshot publisher
+
+`snapshot` 是独立的 publisher 命令树，必须显式传 `--history-root`；它不会重新解释现有
+`--cache-dir`。writable cache 先在 exclusive stable-view gate 内按 data-owned file-role
+allowlist clone/import 到 staging：`.tqbn` 与 pointer 只独立复制，`.tqmk` / `.tqdk` / immutable
+metadata 可 hardlink（失败时普通 copy），lock/sidecar 只重建、不进入 manifest。
+
+```bash
+# 完全只读；不会创建 history root、staging 或 operation lock。
+cargo run -p tqsdk-cache -- snapshot \
+  --history-root /var/lib/tqsdk/history-published dry-run \
+  --source-cache-dir /var/lib/tqsdk/history-writable
+
+# 生成 staging generation；import 强制独立 copy，clone 可共享安全 immutable inode。
+cargo run -p tqsdk-cache -- snapshot \
+  --history-root /var/lib/tqsdk/history-published clone \
+  --source-cache-dir /var/lib/tqsdk/history-writable \
+  --catalog-complete --catalog-symbol SHFE.au2612
+
+# 含数据文件的 generation 在 publish 前必须完成 strict inspect + 真实 CacheOnly query smoke。
+cargo run -p tqsdk-cache -- snapshot \
+  --history-root /var/lib/tqsdk/history-published verify \
+  --snapshot-id s-20260829-8d19c4af \
+  --request-file verify.json
+
+cargo run -p tqsdk-cache -- snapshot \
+  --history-root /var/lib/tqsdk/history-published publish \
+  --snapshot-id s-20260829-8d19c4af
+```
+
+verification request file 使用窄 JSON schema：`series` 是 `tick`、`minute` 或 `daily`；minute
+另带纳秒 `duration_ns`。每项都带 `request_id`、`symbol`、`start_ns`、`end_ns`。请求必须覆盖
+manifest 中每种实际数据 role；metadata-only generation 不需要伪造 query。
+
+```json
+{"requests":[{"series":"tick","request_id":1,"symbol":"SHFE.au2612","start_ns":1787932800000000000,"end_ns":1788019200000000000}]}
+```
+
+`prewarm` 只写隔离 staging 副本，并可能返回新的 `snapshot_id`。`publish` 固定执行 data/manifest
+sync、generation rename、`snapshots/` sync、CURRENT temp sync、CURRENT rename、history-root sync；
+CURRENT rename 后 root sync 失败属于 indeterminate，必须运行 `snapshot recover`。`rollback`、
+`recover`、`scrub`、`gc` 默认只读，只有 rollback/recover/gc 的 `--apply` 执行 mutation。GC 默认
+保留 CURRENT 加两个 previous compatible generation；它只在取得 exclusive generation lease 后把
+目标原子移到 staging tombstone，再删除并 fsync，shared lease 忙时跳过。relay/reader 永不执行 GC。
+
 ## 历史查询与 LLM 上下文
 
 `query` 直接复用 `tqsdk-data::BacktestHistoryClient`，不解析 `.tqbn` 文件，也不增加另一份

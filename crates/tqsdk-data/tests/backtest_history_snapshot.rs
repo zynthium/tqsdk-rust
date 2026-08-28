@@ -1,13 +1,15 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use chrono::Utc;
 use fs2::FileExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tqsdk_data::{
     BacktestHistoryFailureReason, BacktestHistoryFinality, BacktestHistoryMetadataCache,
-    BacktestHistoryRequest, BacktestHistorySnapshot, BacktestTickCache, MinuteKlineCache,
-    MinuteKlineCacheSnapshot,
+    BacktestHistoryRequest, BacktestHistorySnapshot, BacktestHistorySnapshotFileDisposition,
+    BacktestHistorySnapshotFileRole, BacktestHistorySnapshotManifestBuilder, BacktestTickCache,
+    MinuteKlineCache, MinuteKlineCacheSnapshot, classify_backtest_history_snapshot_cache_path,
 };
 
 #[path = "support/backtest_history.rs"]
@@ -206,6 +208,92 @@ fn collect_manifest_files(generation: &Path, directory: &Path, files: &mut Vec<V
             "sha256": format!("sha256:{:x}", Sha256::digest(&bytes))
         }));
     }
+}
+
+#[test]
+fn public_manifest_builder_owns_roles_identity_and_staging_validation() {
+    let root = temp_dir("public-manifest-builder");
+    let pending = root.join("staging/pending");
+    let cache = pending.join("cache");
+    std::fs::create_dir_all(cache.join("series/20260829/tick")).unwrap();
+    std::fs::create_dir_all(cache.join("minute-kline-v3")).unwrap();
+    std::fs::create_dir_all(cache.join("daily-kline-v1")).unwrap();
+    std::fs::create_dir_all(cache.join("backtest-metadata-v2/snapshots")).unwrap();
+    std::fs::write(cache.join("series/20260829/tick/SHFE.au2612.tqbn"), b"tick").unwrap();
+    std::fs::write(
+        cache.join("minute-kline-v3/SHFE.au2612-202608.tqmk"),
+        b"minute",
+    )
+    .unwrap();
+    std::fs::write(cache.join("daily-kline-v1/SHFE.au2612.tqdk"), b"daily").unwrap();
+    std::fs::write(
+        cache.join("backtest-metadata-v2/snapshots/content.json"),
+        b"{}",
+    )
+    .unwrap();
+    std::fs::write(cache.join("backtest-metadata-v2/active.json"), b"{}").unwrap();
+    std::fs::write(cache.join(".tqsdk-cache-operation.lock"), b"").unwrap();
+    std::fs::write(
+        cache.join("series/20260829/tick/SHFE.au2612.tqbn.lock"),
+        b"",
+    )
+    .unwrap();
+
+    let artifact =
+        BacktestHistorySnapshotManifestBuilder::new("2026-08-29T00:00:00Z".parse().unwrap())
+            .catalog(false, std::iter::empty::<&str>())
+            .build(&cache)
+            .unwrap();
+
+    assert!(artifact.snapshot_id().starts_with("s-20260829-"));
+    assert!(artifact.identity_sha256().starts_with("sha256:"));
+    assert!(artifact.metadata_snapshot_hash().starts_with("sha256:"));
+    let manifest: Value = serde_json::from_slice(artifact.manifest_bytes()).unwrap();
+    assert_eq!(manifest["files"].as_array().unwrap().len(), 5);
+    assert!(
+        manifest["files"]
+            .as_array()
+            .unwrap()
+            .windows(2)
+            .all(|pair| pair[0]["path"].as_str() < pair[1]["path"].as_str())
+    );
+
+    let generation = root.join("staging").join(artifact.snapshot_id());
+    std::fs::rename(&pending, &generation).unwrap();
+    std::fs::write(generation.join("lease.lock"), b"").unwrap();
+    std::fs::write(generation.join("manifest.json"), artifact.manifest_bytes()).unwrap();
+
+    let snapshot = BacktestHistorySnapshot::open_generation(&root, &generation).unwrap();
+    assert_eq!(snapshot.snapshot_id(), artifact.snapshot_id());
+    assert!(!root.join("CURRENT").exists());
+
+    let tqbn = classify_backtest_history_snapshot_cache_path(Path::new(
+        "series/20260829/tick/SHFE.au2612.tqbn",
+    ))
+    .unwrap();
+    assert_eq!(
+        tqbn,
+        BacktestHistorySnapshotFileDisposition::Include(
+            BacktestHistorySnapshotFileRole::TqbnMutableLayout
+        )
+    );
+    assert!(!BacktestHistorySnapshotFileRole::TqbnMutableLayout.allows_hardlink());
+    assert_eq!(
+        classify_backtest_history_snapshot_cache_path(Path::new(".metadata.lock")).unwrap(),
+        BacktestHistorySnapshotFileDisposition::Rebuild
+    );
+
+    let published_cache = generation.join("cache");
+    let unknown = published_cache.join("unknown.bin");
+    std::fs::write(&unknown, b"unknown").unwrap();
+    let error = BacktestHistorySnapshotManifestBuilder::new(Utc::now())
+        .catalog(false, std::iter::empty::<&str>())
+        .build(&published_cache)
+        .unwrap_err();
+    assert_eq!(
+        error.reason(),
+        &BacktestHistoryFailureReason::SnapshotIncompatible
+    );
 }
 
 #[test]

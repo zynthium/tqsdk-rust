@@ -8,11 +8,13 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use fs2::FileExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+
+use super::snapshot::{BacktestHistorySnapshotError, map_manifest_error};
 
 const MANIFEST_VERSION: u32 = 1;
 const SNAPSHOTS_DIR: &str = "snapshots";
@@ -20,6 +22,159 @@ const CURRENT_FILE: &str = "CURRENT";
 const MANIFEST_FILE: &str = "manifest.json";
 const LEASE_FILE: &str = "lease.lock";
 const MAX_CURRENT_RETRIES: usize = 8;
+
+/// Stable file role used by immutable history snapshot manifests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BacktestHistorySnapshotFileRole {
+    /// Append/recovery-capable Tick file; never safe to hardlink.
+    TqbnMutableLayout,
+    /// Atomically replaced immutable minute generation.
+    TqmkImmutableGeneration,
+    /// Atomically replaced immutable daily generation.
+    TqdkImmutableGeneration,
+    /// Content-addressed metadata snapshot.
+    MetadataContentAddressed,
+    /// Independently copied pointer such as `active.json`.
+    PointerCopy,
+}
+
+impl BacktestHistorySnapshotFileRole {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TqbnMutableLayout => "tqbn_mutable_layout",
+            Self::TqmkImmutableGeneration => "tqmk_immutable_generation",
+            Self::TqdkImmutableGeneration => "tqdk_immutable_generation",
+            Self::MetadataContentAddressed => "metadata_content_addressed",
+            Self::PointerCopy => "pointer_copy",
+        }
+    }
+
+    /// Whether the immutable snapshot contract permits hardlink cloning.
+    #[must_use]
+    pub const fn allows_hardlink(self) -> bool {
+        !matches!(self, Self::TqbnMutableLayout | Self::PointerCopy)
+    }
+}
+
+/// Publisher disposition for one cache-root relative path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BacktestHistorySnapshotFileDisposition {
+    /// Copy/clone the file and record this manifest role.
+    Include(BacktestHistorySnapshotFileRole),
+    /// Exclude and recreate the lock/sidecar in the staged generation.
+    Rebuild,
+}
+
+/// Classifies one cache-root relative file path using the data-owned allowlist.
+pub fn classify_backtest_history_snapshot_cache_path(
+    path: impl AsRef<Path>,
+) -> Result<BacktestHistorySnapshotFileDisposition, BacktestHistorySnapshotError> {
+    classify_cache_relative_path(path.as_ref()).map_err(map_manifest_error)
+}
+
+/// Deterministic manifest artifact produced from a stable staged cache view.
+#[derive(Debug, Clone)]
+pub struct BacktestHistorySnapshotManifestArtifact {
+    snapshot_id: String,
+    identity_sha256: String,
+    metadata_snapshot_hash: String,
+    manifest_bytes: Vec<u8>,
+}
+
+impl BacktestHistorySnapshotManifestArtifact {
+    #[must_use]
+    pub fn snapshot_id(&self) -> &str {
+        self.snapshot_id.as_str()
+    }
+
+    #[must_use]
+    pub fn identity_sha256(&self) -> &str {
+        self.identity_sha256.as_str()
+    }
+
+    #[must_use]
+    pub fn metadata_snapshot_hash(&self) -> &str {
+        self.metadata_snapshot_hash.as_str()
+    }
+
+    #[must_use]
+    pub fn manifest_bytes(&self) -> &[u8] {
+        self.manifest_bytes.as_slice()
+    }
+}
+
+/// Builds manifest v1 without duplicating canonical identity or role rules in publishers.
+#[derive(Debug, Clone)]
+pub struct BacktestHistorySnapshotManifestBuilder {
+    created_at: DateTime<Utc>,
+    required_features: Vec<String>,
+    catalog_complete: bool,
+    catalog_symbols: Vec<String>,
+}
+
+impl BacktestHistorySnapshotManifestBuilder {
+    #[must_use]
+    pub fn new(created_at: DateTime<Utc>) -> Self {
+        Self {
+            created_at,
+            required_features: Vec::new(),
+            catalog_complete: false,
+            catalog_symbols: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn required_features<I, S>(mut self, features: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.required_features = features.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
+    pub fn catalog<I, S>(mut self, complete: bool, symbols: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.catalog_complete = complete;
+        self.catalog_symbols = symbols.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn build(
+        mut self,
+        cache_dir: impl AsRef<Path>,
+    ) -> Result<BacktestHistorySnapshotManifestArtifact, BacktestHistorySnapshotError> {
+        self.required_features.sort();
+        self.required_features.dedup();
+        self.catalog_symbols.sort();
+        self.catalog_symbols.dedup();
+        build_manifest_artifact(
+            cache_dir.as_ref(),
+            self.created_at,
+            self.required_features,
+            self.catalog_complete,
+            self.catalog_symbols,
+        )
+        .map_err(map_manifest_error)
+    }
+
+    fn from_validated(manifest: &ValidatedSnapshotManifest) -> Self {
+        Self {
+            created_at: manifest
+                .created_at
+                .parse()
+                .expect("validated manifest created_at must remain RFC3339 UTC"),
+            required_features: manifest.required_features.clone(),
+            catalog_complete: manifest.catalog_complete,
+            catalog_symbols: manifest.catalog_symbols.clone(),
+        }
+    }
+}
 
 /// Coarse, machine-readable manifest validation disposition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,9 +246,12 @@ pub(crate) struct ValidatedSnapshotManifest {
     cache_dir: PathBuf,
     snapshot_id: String,
     identity_sha256: String,
+    created_at: String,
+    required_features: Vec<String>,
     metadata_snapshot_hash: String,
     catalog_complete: bool,
     catalog_symbols: Vec<String>,
+    file_roles: Vec<BacktestHistorySnapshotFileRole>,
     _lease: Arc<GenerationLease>,
 }
 
@@ -123,6 +281,10 @@ impl ValidatedSnapshotManifest {
         self.identity_sha256.as_str()
     }
 
+    pub(crate) fn created_at(&self) -> &str {
+        self.created_at.as_str()
+    }
+
     #[must_use]
     pub(crate) fn metadata_snapshot_hash(&self) -> &str {
         self.metadata_snapshot_hash.as_str()
@@ -144,12 +306,20 @@ impl ValidatedSnapshotManifest {
         self.catalog_symbols.as_slice()
     }
 
+    pub(crate) fn file_roles(&self) -> &[BacktestHistorySnapshotFileRole] {
+        self.file_roles.as_slice()
+    }
+
+    pub(crate) fn manifest_builder(&self) -> BacktestHistorySnapshotManifestBuilder {
+        BacktestHistorySnapshotManifestBuilder::from_validated(self)
+    }
+
     pub(crate) fn lifecycle_pin(&self) -> super::BacktestHistoryLifecyclePin {
         self._lease.clone()
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct SnapshotManifest {
     manifest_version: u32,
     snapshot_id: String,
@@ -161,23 +331,25 @@ struct SnapshotManifest {
     cache_formats: Vec<CacheFormat>,
     metadata_snapshot_hash: String,
     catalog: Catalog,
+    #[serde(default)]
+    coverage_summary: Vec<Value>,
     files: Vec<ManifestFile>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct CacheFormat {
     family: String,
     format_id: String,
     schema_version: u32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Catalog {
     complete: bool,
     symbols: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ManifestFile {
     path: String,
     role: String,
@@ -185,11 +357,292 @@ struct ManifestFile {
     sha256: String,
 }
 
+fn build_manifest_artifact(
+    cache_dir: &Path,
+    created_at: DateTime<Utc>,
+    required_features: Vec<String>,
+    catalog_complete: bool,
+    catalog_symbols: Vec<String>,
+) -> Result<BacktestHistorySnapshotManifestArtifact, SnapshotManifestError> {
+    reject_symlink_ancestors(cache_dir)?;
+    require_regular_directory(
+        cache_dir,
+        "snapshot cache directory",
+        SnapshotManifestErrorKind::Unavailable,
+    )?;
+
+    let mut files = Vec::new();
+    collect_manifest_input_files(cache_dir, cache_dir, &mut files)?;
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+
+    let metadata_snapshot_hash = metadata_snapshot_hash(files.as_slice())?;
+    let mut manifest = SnapshotManifest {
+        manifest_version: MANIFEST_VERSION,
+        snapshot_id: String::new(),
+        identity_sha256: String::new(),
+        created_at: created_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+        minimum_reader: env!("CARGO_PKG_VERSION").to_string(),
+        required_features,
+        cache_formats: vec![
+            CacheFormat {
+                family: "daily".to_string(),
+                format_id: "tqsdk.daily-kline.single-file.v1".to_string(),
+                schema_version: 1,
+            },
+            CacheFormat {
+                family: "minute".to_string(),
+                format_id: "tqsdk.minute-kline.monthly.v5".to_string(),
+                schema_version: 5,
+            },
+            CacheFormat {
+                family: "tick".to_string(),
+                format_id: "tqsdk.tqbn.daily.v3".to_string(),
+                schema_version: 3,
+            },
+        ],
+        metadata_snapshot_hash: metadata_snapshot_hash.clone(),
+        catalog: Catalog {
+            complete: catalog_complete,
+            symbols: catalog_symbols,
+        },
+        coverage_summary: Vec::new(),
+        files,
+    };
+
+    let mut value = serde_json::to_value(&manifest).map_err(|error| {
+        SnapshotManifestError::corrupt(format!("cannot encode snapshot manifest: {error}"))
+    })?;
+    let identity_sha256 = sha256_prefixed(canonical_identity_payload(&value)?.as_slice());
+    let snapshot_id = format!(
+        "s-{}-{}",
+        created_at.format("%Y%m%d"),
+        &identity_sha256[7..15]
+    );
+    manifest.snapshot_id.clone_from(&snapshot_id);
+    manifest.identity_sha256.clone_from(&identity_sha256);
+    value = serde_json::to_value(&manifest).map_err(|error| {
+        SnapshotManifestError::corrupt(format!("cannot encode snapshot manifest: {error}"))
+    })?;
+    validate_identity(&manifest, &value)?;
+    let manifest_bytes = serde_json::to_vec(&manifest).map_err(|error| {
+        SnapshotManifestError::corrupt(format!("cannot encode snapshot manifest: {error}"))
+    })?;
+
+    Ok(BacktestHistorySnapshotManifestArtifact {
+        snapshot_id,
+        identity_sha256,
+        metadata_snapshot_hash,
+        manifest_bytes,
+    })
+}
+
+fn collect_manifest_input_files(
+    cache_dir: &Path,
+    directory: &Path,
+    output: &mut Vec<ManifestFile>,
+) -> Result<(), SnapshotManifestError> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| {
+            SnapshotManifestError::unavailable(format!(
+                "snapshot cache directory {} cannot be enumerated: {error}",
+                directory.display()
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            SnapshotManifestError::unavailable(format!(
+                "snapshot cache directory {} cannot be enumerated: {error}",
+                directory.display()
+            ))
+        })?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+
+    for entry in entries {
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(path.as_path()).map_err(|error| {
+            SnapshotManifestError::unavailable(format!(
+                "snapshot cache entry {} unavailable: {error}",
+                path.display()
+            ))
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(SnapshotManifestError::corrupt(format!(
+                "snapshot cache entry {} is symlink",
+                path.display()
+            )));
+        }
+        if metadata.is_dir() {
+            collect_manifest_input_files(cache_dir, path.as_path(), output)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            return Err(SnapshotManifestError::corrupt(format!(
+                "snapshot cache entry {} is not regular file",
+                path.display()
+            )));
+        }
+
+        let relative = path.strip_prefix(cache_dir).map_err(|_| {
+            SnapshotManifestError::corrupt(format!(
+                "snapshot cache entry {} escapes cache root",
+                path.display()
+            ))
+        })?;
+        let disposition = classify_cache_relative_path(relative)?;
+        let BacktestHistorySnapshotFileDisposition::Include(role) = disposition else {
+            continue;
+        };
+        let bytes = fs::read(path.as_path()).map_err(|error| {
+            SnapshotManifestError::unavailable(format!(
+                "snapshot cache entry {} cannot be read: {error}",
+                path.display()
+            ))
+        })?;
+        let relative = relative
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        output.push(ManifestFile {
+            path: format!("cache/{relative}"),
+            role: role.as_str().to_string(),
+            size: metadata.len(),
+            sha256: sha256_prefixed(bytes.as_slice()),
+        });
+    }
+    Ok(())
+}
+
+fn classify_cache_relative_path(
+    path: &Path,
+) -> Result<BacktestHistorySnapshotFileDisposition, SnapshotManifestError> {
+    if path.is_absolute() || path.as_os_str().is_empty() {
+        return Err(SnapshotManifestError::corrupt(format!(
+            "snapshot cache path {:?} must be non-empty and relative",
+            path
+        )));
+    }
+    for component in path.components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err(SnapshotManifestError::corrupt(format!(
+                "snapshot cache path {:?} is not normalized",
+                path
+            )));
+        }
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| SnapshotManifestError::corrupt("snapshot cache path is not UTF-8"))?;
+    if is_rebuildable_cache_lock(file_name) {
+        return Ok(BacktestHistorySnapshotFileDisposition::Rebuild);
+    }
+
+    let value = path.to_string_lossy();
+    let role = if value.ends_with(".tqbn") {
+        BacktestHistorySnapshotFileRole::TqbnMutableLayout
+    } else if value.ends_with(".tqmk") {
+        BacktestHistorySnapshotFileRole::TqmkImmutableGeneration
+    } else if value.ends_with(".tqdk") {
+        BacktestHistorySnapshotFileRole::TqdkImmutableGeneration
+    } else if file_name == "active.json" {
+        BacktestHistorySnapshotFileRole::PointerCopy
+    } else if value.ends_with(".json")
+        && path
+            .components()
+            .any(|component| component.as_os_str() == "snapshots")
+    {
+        BacktestHistorySnapshotFileRole::MetadataContentAddressed
+    } else {
+        return Err(SnapshotManifestError::incompatible(format!(
+            "snapshot cache path {:?} has no known manifest role",
+            path
+        )));
+    };
+    Ok(BacktestHistorySnapshotFileDisposition::Include(role))
+}
+
 /// Opens and validates the generation selected by `CURRENT` without repairing it.
 pub(crate) fn open_current_manifest(
     history_root: &Path,
 ) -> Result<ValidatedSnapshotManifest, SnapshotManifestError> {
     open_current_manifest_with_retries(history_root, MAX_CURRENT_RETRIES)
+}
+
+pub(crate) fn open_generation_manifest(
+    history_root: &Path,
+    generation_dir: &Path,
+) -> Result<ValidatedSnapshotManifest, SnapshotManifestError> {
+    reject_symlink_ancestors(history_root)?;
+    require_regular_directory(
+        history_root,
+        "history root",
+        SnapshotManifestErrorKind::Unavailable,
+    )?;
+    let namespace = generation_dir.parent().ok_or_else(|| {
+        SnapshotManifestError::corrupt("generation must have a namespace directory")
+    })?;
+    if namespace.parent() != Some(history_root)
+        || !matches!(
+            namespace.file_name().and_then(|value| value.to_str()),
+            Some(SNAPSHOTS_DIR | "staging")
+        )
+    {
+        return Err(SnapshotManifestError::corrupt(
+            "generation must be a direct child of history-root snapshots/ or staging/",
+        ));
+    }
+    let snapshot_id = generation_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| SnapshotManifestError::corrupt("generation name must be UTF-8"))?;
+    if !is_safe_snapshot_id(snapshot_id) {
+        return Err(SnapshotManifestError::corrupt(
+            "generation name is not a safe snapshot id",
+        ));
+    }
+    require_regular_directory(
+        generation_dir,
+        "generation",
+        SnapshotManifestErrorKind::Unavailable,
+    )?;
+    let lease = acquire_generation_lease(generation_dir)?;
+    load_generation_manifest(history_root, generation_dir, snapshot_id, lease)
+}
+
+fn load_generation_manifest(
+    history_root: &Path,
+    generation_dir: &Path,
+    snapshot_id: &str,
+    lease: Arc<GenerationLease>,
+) -> Result<ValidatedSnapshotManifest, SnapshotManifestError> {
+    validate_generation_layout(generation_dir)?;
+    let manifest_path = generation_dir.join(MANIFEST_FILE);
+    let manifest_bytes = read_regular_file(
+        manifest_path.as_path(),
+        "manifest",
+        SnapshotManifestErrorKind::Corrupt,
+    )?;
+    let manifest_value: Value =
+        serde_json::from_slice(manifest_bytes.as_slice()).map_err(|error| {
+            SnapshotManifestError::corrupt(format!(
+                "manifest {} is invalid JSON: {error}",
+                manifest_path.display()
+            ))
+        })?;
+    let manifest: SnapshotManifest =
+        serde_json::from_value(manifest_value.clone()).map_err(|error| {
+            SnapshotManifestError::corrupt(format!(
+                "manifest {} has invalid fields: {error}",
+                manifest_path.display()
+            ))
+        })?;
+    validate_manifest(
+        history_root,
+        generation_dir,
+        snapshot_id,
+        &manifest,
+        &manifest_value,
+        lease,
+    )
 }
 
 fn open_current_manifest_with_retries(
@@ -492,15 +945,25 @@ fn validate_manifest(
             "generation directory is not nested under the supplied history root",
         ));
     }
+    let mut file_roles = manifest
+        .files
+        .iter()
+        .map(|file| manifest_role(file.role.as_str()))
+        .collect::<Result<Vec<_>, _>>()?;
+    file_roles.sort();
+    file_roles.dedup();
 
     Ok(ValidatedSnapshotManifest {
         generation_dir: generation_dir.to_path_buf(),
         cache_dir,
         snapshot_id: manifest.snapshot_id.clone(),
         identity_sha256: manifest.identity_sha256.clone(),
+        created_at: manifest.created_at.clone(),
+        required_features: manifest.required_features.clone(),
         metadata_snapshot_hash: manifest.metadata_snapshot_hash.clone(),
         catalog_complete: manifest.catalog.complete,
         catalog_symbols: manifest.catalog.symbols.clone(),
+        file_roles,
         _lease: lease,
     })
 }
@@ -803,27 +1266,42 @@ fn normalize_cache_relative_path(path: &str) -> Result<PathBuf, SnapshotManifest
 }
 
 fn validate_role(file: &ManifestFile, path: &Path) -> Result<(), SnapshotManifestError> {
-    let value = path.to_string_lossy();
-    let valid = match file.role.as_str() {
-        "tqbn_mutable_layout" => value.ends_with(".tqbn"),
-        "tqmk_immutable_generation" => value.ends_with(".tqmk"),
-        "tqdk_immutable_generation" => value.ends_with(".tqdk"),
-        "metadata_content_addressed" => value.ends_with(".json") && value.contains("/snapshots/"),
-        "pointer_copy" => value.ends_with("/active.json"),
-        _ => {
-            return Err(SnapshotManifestError::incompatible(format!(
-                "manifest file {} has unknown role {}",
-                file.path, file.role
-            )));
-        }
+    let declared_role = manifest_role(file.role.as_str())?;
+    let relative = path.strip_prefix("cache").map_err(|_| {
+        SnapshotManifestError::corrupt(format!(
+            "manifest file {} is outside cache role namespace",
+            file.path
+        ))
+    })?;
+    let disposition = classify_cache_relative_path(relative)?;
+    let BacktestHistorySnapshotFileDisposition::Include(role) = disposition else {
+        return Err(SnapshotManifestError::corrupt(format!(
+            "manifest file {} names a rebuildable path",
+            file.path
+        )));
     };
-    if !valid {
+    if declared_role != role {
         return Err(SnapshotManifestError::corrupt(format!(
             "manifest file {} does not match role {}",
             file.path, file.role
         )));
     }
     Ok(())
+}
+
+fn manifest_role(role: &str) -> Result<BacktestHistorySnapshotFileRole, SnapshotManifestError> {
+    match role {
+        "tqbn_mutable_layout" => Ok(BacktestHistorySnapshotFileRole::TqbnMutableLayout),
+        "tqmk_immutable_generation" => Ok(BacktestHistorySnapshotFileRole::TqmkImmutableGeneration),
+        "tqdk_immutable_generation" => Ok(BacktestHistorySnapshotFileRole::TqdkImmutableGeneration),
+        "metadata_content_addressed" => {
+            Ok(BacktestHistorySnapshotFileRole::MetadataContentAddressed)
+        }
+        "pointer_copy" => Ok(BacktestHistorySnapshotFileRole::PointerCopy),
+        _ => Err(SnapshotManifestError::incompatible(format!(
+            "manifest has unknown file role {role}"
+        ))),
+    }
 }
 
 fn validate_identity(

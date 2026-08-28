@@ -12,8 +12,9 @@ use super::report::{
 };
 use super::request::{BacktestHistoryPolicy, BacktestHistoryRequest};
 use super::snapshot_manifest::{
-    SnapshotManifestError, SnapshotManifestErrorKind, ValidatedSnapshotManifest,
-    open_current_manifest,
+    BacktestHistorySnapshotFileRole, BacktestHistorySnapshotManifestBuilder, SnapshotManifestError,
+    SnapshotManifestErrorKind, ValidatedSnapshotManifest, open_current_manifest,
+    open_generation_manifest,
 };
 use super::{
     BacktestHistoryClient, BacktestHistoryFailureReasons, BacktestHistoryRun,
@@ -228,6 +229,19 @@ impl BacktestHistorySnapshot {
         Self::from_validated_manifest(manifest)
     }
 
+    /// Opens and fully validates one unpublished staging or retained generation.
+    ///
+    /// The generation must be a direct child of `history_root/staging` or
+    /// `history_root/snapshots`; this does not read or mutate `CURRENT`.
+    pub fn open_generation(
+        history_root: impl AsRef<Path>,
+        generation_dir: impl AsRef<Path>,
+    ) -> Result<Self, BacktestHistorySnapshotError> {
+        let manifest = open_generation_manifest(history_root.as_ref(), generation_dir.as_ref())
+            .map_err(map_manifest_error)?;
+        Self::from_validated_manifest(manifest)
+    }
+
     pub(crate) fn from_validated_manifest(
         manifest: ValidatedSnapshotManifest,
     ) -> Result<Self, BacktestHistorySnapshotError> {
@@ -263,6 +277,12 @@ impl BacktestHistorySnapshot {
         self.manifest.identity_sha256()
     }
 
+    /// UTC creation time recorded in the validated manifest.
+    #[must_use]
+    pub fn created_at(&self) -> &str {
+        self.manifest.created_at()
+    }
+
     #[must_use]
     pub fn metadata_snapshot_hash(&self) -> &str {
         self.manifest.metadata_snapshot_hash()
@@ -271,6 +291,25 @@ impl BacktestHistorySnapshot {
     #[must_use]
     pub const fn catalog_complete(&self) -> bool {
         self.manifest.catalog_complete()
+    }
+
+    /// Explicit symbol universe recorded by the validated manifest.
+    #[must_use]
+    pub fn catalog_symbols(&self) -> &[String] {
+        self.manifest.catalog_symbols()
+    }
+
+    /// Distinct data and metadata file roles present in this generation.
+    #[must_use]
+    pub fn file_roles(&self) -> &[BacktestHistorySnapshotFileRole] {
+        self.manifest.file_roles()
+    }
+
+    /// Rebuild recipe preserving the validated creation/catalog contract.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn manifest_builder(&self) -> BacktestHistorySnapshotManifestBuilder {
+        self.manifest.manifest_builder()
     }
 
     /// Validates request semantics, catalog authority, metadata, coverage and finality without
@@ -370,7 +409,7 @@ fn map_metadata_error(
     BacktestHistorySnapshotError::new(reason, request_id, symbol, error.message())
 }
 
-fn map_manifest_error(error: SnapshotManifestError) -> BacktestHistorySnapshotError {
+pub(crate) fn map_manifest_error(error: SnapshotManifestError) -> BacktestHistorySnapshotError {
     let reason = match error.kind() {
         SnapshotManifestErrorKind::Unavailable => BacktestHistoryFailureReason::SnapshotUnavailable,
         SnapshotManifestErrorKind::Corrupt => BacktestHistoryFailureReason::SnapshotCorrupt,

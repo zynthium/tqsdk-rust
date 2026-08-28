@@ -134,6 +134,13 @@ eviction 或后台清理；refresh/purge 是显式 destructive operation，2d �
 `BacktestHistoryRequestReport::snapshot_hash` 继续表示现有 per-symbol metadata cache identity，
 两者用途不同，调用方不得直接按字符串相等比较。
 
+publisher 通过 `BacktestHistorySnapshotManifestBuilder` 构造 canonical manifest artifact，并通过
+`classify_backtest_history_snapshot_cache_path(...)` 取得唯一 file-role/disposition。已生成的 staging
+或 retained generation 用 `BacktestHistorySnapshot::open_generation(...)` 做同一套 identity、path、
+role、hash、catalog、format 与 metadata validation；`created_at()`、`file_roles()`、
+`catalog_symbols()` 和 hidden manifest rebuild recipe 只为 `tqsdk-cache` publisher 编排提供证据，
+不把 clone、fsync、CURRENT、retention 或 GC ownership 下沉到 data。
+
 `RemoteOnMiss` 先检查 durable coverage，只有缺口时才 lazy-load auth 并使用官方 futures
 server-backtest source；`CacheOnly` 不联网。`KQ.m@...` 的 calendar、session 和 physical segment
 mapping 以 versioned snapshot sidecar 持久化，terminal report 携带 snapshot hash；CacheOnly 需要已有
