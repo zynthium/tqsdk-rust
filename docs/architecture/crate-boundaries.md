@@ -350,6 +350,10 @@ sink、WAL、journal 或 cache writer。
   planner、跨 client single-flight fill、bounded `spawn_blocking` cache readers、request chunk 与
   terminal report。production orchestration 是 async；TQBN 解压/解码仍在有界 blocking worker 中，
   不将 `tokio::fs` 误称为吞吐优化
+- history row typed schema、strict inspect、snapshot manifest/identity/compatibility validator、
+  authoritative generation catalog 和 lease-bearing read-only snapshot handle；这些 primitive
+  同时供 `tqsdk-cache` publisher 与 relay 的本地 CacheOnly HTTP adapter 使用，但不拥有 HTTP
+  admission、JSON/gzip policy 或 daemon lifecycle
 - RemoteOnMiss source-lane 调度：最多保留 logical concurrency 个 clean lanes，顺序 slice 可复用
   session；只有 terminal 与 chart cleanup 都成功才回池，pool overflow、取消和错误直接销毁且不在
   series lease 内等待。data 不实现 session protocol，只组合
@@ -394,6 +398,9 @@ sink、WAL、journal 或 cache writer。
 - 将现有 `tqsdk` remote-on-miss warmup、`BacktestTickCache` / `MinuteKlineCache`
   read-only/diagnostic APIs 组合为默认 text / opt-in V3 JSON stdout（可选 legacy V2）+
   selectable stderr progress 的 operator contract；JSONL progress schema 为 v2，带 `cache_kind`
+- 显式 `--history-root` 下的 snapshot import/clone、prewarm、strict CacheOnly verify、实际 query
+  smoke、manifest publish、recover、rollback、scrub、retention 和 lease-aware GC；它只编排
+  `tqsdk-data` 的 snapshot/query primitive，不改变现有 `--cache-dir` 语义，也不成为 daemon
 - tick normal fill report 记录 canonical root、logical/physical symbols、coverage state、共同
   checkpoint 和调度配置，供 `verify --report` 复用；minute report 记录 logical cache symbols。
   取消时不提交未完成的 final coverage
@@ -428,10 +435,15 @@ sink、WAL、journal 或 cache writer。
   health 必须区分进程/下游监听、上游连接、合约集合刷新和数据 freshness
 - 新 K 线订阅可用 relay 内存 tick ring 回放已闭合的合成 K 线；这不代表远端 K 线回填
   或跨重启持久化已进入 V1
+- 可选的本地 CacheOnly history HTTP sibling：它使用独立 listener/runtime/thread/CPU/resource
+  路径，只读取 `tqsdk-cache` 已发布并由 `tqsdk-data` 验证的 immutable snapshot；它不进入
+  `RelayEngine` / `RelayServer`，不获取 market mutex，不改变 market readiness
 
 ### 不应承担的职责
 
-- 不向下游 SDK 客户端代理 trade / query / auth / schema / metadata
+- 不向下游 SDK 客户端代理 trade、上游 direct query、auth、远端 schema 或 metadata；本地
+  CacheOnly history `/v1/history/{query,coverage,schema}` 是
+  [受限例外](history-relay.md)，不是 TQ query proxy
 - 不进入现有 SDK crate 的默认依赖路径
 - 不进入 Cargo default-members；relay Rust 和 dashboard validation 必须显式运行
 - 不改变 `tqsdk-core` runtime contract

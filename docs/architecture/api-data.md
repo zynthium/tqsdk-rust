@@ -3,6 +3,12 @@
 ## 文档定位
 本文档描述的是建立在现有 `tqsdk-core + tqsdk-session + replay/history contract` 之上的研究/离线数据工具层。
 
+relay 本地历史查询仍复用本层唯一的 planner/query/coverage/finality/metadata owner。共享 typed
+field schema、strict inspect、snapshot validator 和 lease-bearing read-only handle 的架构合同见
+[history-relay.md](history-relay.md) 与
+[history-snapshot-manifest.md](history-snapshot-manifest.md)；HTTP/admission/JSON/gzip 不进入
+`tqsdk-data`。
+
 它回答的是：
 
 - `tqsdk-data` 应该承接哪些能力

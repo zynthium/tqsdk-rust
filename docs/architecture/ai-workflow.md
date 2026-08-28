@@ -207,6 +207,9 @@ tqsdk
 - research/offline data crate
 - history page/series/download
 - CSV export
+- relay/cache 共用的 history row typed schema、strict inspect、snapshot manifest validator、
+  authoritative generation catalog 和 lease-bearing read-only CacheOnly snapshot handle；data
+  只提供通用 byte permits，不拥有 HTTP/JSON/gzip 或 daemon resource policy
 - TQBN daily v3 (`.tqbn`) 当前默认和 canonical 格式，按交易日分区存储
 - TQBN market-data block 的 crate-internal 时间索引与范围读取；旧/不匹配索引必须逐 block 回退
 - TQBN final coverage 与 open-day provisional checkpoint；后者只用于增量恢复，不得进入普通
@@ -263,6 +266,9 @@ tqsdk
 职责：
 
 - 可选 TQBN tick、canonical-minute 与 native-daily cache operator CLI
+- 显式 `--history-root` 的 immutable snapshot import/clone、prewarm、verify/query smoke、publish、
+  recover、rollback、scrub、retention 和 lease-aware GC；保持非 daemon，且不改变现有
+  `--cache-dir` 语义
 - 默认 human summary / opt-in JSON stdout contract，stderr progress，closed-day fill、显式日期
   current-day 自动 provisional fill、`--require-final` 严格保护、report-bound CacheOnly verify、
   fast inventory 与 deep doctor
@@ -287,7 +293,10 @@ tqsdk
 职责：
 
 - 可选独立 market relay / cache 服务
-- 代理 SDK market websocket 子集；不代理 trade/query/auth/schema/metadata 给下游
+- 同进程但独立于 `RelayEngine` / `RelayServer` 的本地 CacheOnly history HTTP sibling；使用独立
+  listener/runtime/thread/CPU/resource 路径，只读取 publisher 已发布并由 data 验证的 snapshot
+- 代理 SDK market websocket 子集；不代理 trade、上游 direct query、auth、远端 schema/metadata；
+  本地 `/v1/history/{query,coverage,schema}` 是窄例外，不是通用 TQ proxy
 - 维护共享上游 tick source、内存 tick/quote/K 线 cache、K 线合成和 bootstrap 队列
 - relay 内部可用 `tqsdk-session` metadata 查询动态发现当前活跃期货合约集合，并按批执行
   `query_symbol_info` typed metadata 查询；`trading_time` 是合约交易时间段判断的优先来源

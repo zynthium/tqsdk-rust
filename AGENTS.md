@@ -43,6 +43,7 @@
 | public API、feature flags 或用户入口 | 根 README、受影响 crate README、`crates/*/examples/api_contract_sXX_*.rs` |
 | WebSocket 报文、DIFF 合并、状态树字段、行情/交易同步协议 | 按本文 DIFF 查阅规则定向读取 `docs/diff_protocol_spec.md` |
 | relay dashboard、dashboard UI、symbol telemetry | 受影响 relay 文档和 `docs/architecture/validation.md` 中的 relay/dashboard 验证项 |
+| relay CacheOnly history、snapshot publish/lease/GC | `docs/architecture/history-relay.md`、`history-relay-http.md`、`history-snapshot-manifest.md`、受影响 crate README 与 validation |
 
 ## 工具策略
 
@@ -120,6 +121,7 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 - `tqsdk-wait` 只做 single-owner diff-backed continuous consumption；可以通过 `session()` 复用底层 session，但不得复制 direct query API。
 - `tqsdk-task` 是执行工具层；`tqsdk-data` 是 research/offline data 层；不要把 task/data 能力下沉回 core/session/wait 或调用方自建消费层。
 - `tqsdk-relay` 是可选 market relay/cache service；它是 workspace member 但不属于 Cargo default-members；不要让现有 SDK crates 默认依赖 relay，也不要把 relay 扩展成通用天勤代理或多 provider 聚合框架。
+- relay history 只允许作为独立 listener/runtime 的本地 CacheOnly sibling：查询/manifest/lease primitive 归 `tqsdk-data`，发布/恢复/GC 归 `tqsdk-cache`；不得进入 `RelayEngine`、获取 market mutex、RemoteOnMiss、读取远端凭证或直接解析 cache 文件。
 - 所有可见状态变化必须经过 `RuntimeHandle -> StateStore -> CommitResult -> RuntimeReader/UpdateCursor`。不得新增旁路通知、第二棵状态树或 facade 私有 revision。
 - domain 状态写入必须经过 `MutationSource` 根路径防线。hot read 优先使用 `read_market_state()`、`read_trade_state()`、`read_market_trade_state()`。
 - command/order 状态必须遵守 runtime 状态机。不得用字符串或 adapter 本地判断绕过 `record_command_status()` 的转换校验。

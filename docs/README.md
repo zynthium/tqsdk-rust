@@ -34,6 +34,10 @@
   的 request/chunk/terminal contract、Tick/15s/60s/整数分钟 K 的 durable-source matrix、metadata
   sidecar 和 CacheOnly 语义。
 
+- [Relay 内置只读历史查询 ADR](architecture/history-relay.md)：三 crate ownership、隔离、feature、迁移与发布门。
+- [Relay History HTTP v1](architecture/history-relay-http.md)：严格请求、all-or-nothing JSON、typed error、ETag 与 gzip。
+- [History Snapshot Manifest v1](architecture/history-snapshot-manifest.md)：结构共享、manifest identity、lease、发布/恢复/GC。
+
 ## AI 助手读取顺序
 
 新 session 开始代码改动前必须先读：
