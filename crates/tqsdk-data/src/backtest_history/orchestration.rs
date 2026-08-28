@@ -650,17 +650,17 @@ async fn execute_fill_batch(
             () = cancellation.cancelled() => {
                 break FillStop::Interrupted("cancelled".to_string());
             }
-            () = tokio::time::sleep_until(idle_deadline) => {
-                break FillStop::Failed(format!(
-                    "history fill batch made no progress for {:?}",
-                    config.idle_timeout,
-                ));
-            }
-            () = wait_for_deadline(batch_deadline) => {
-                break FillStop::Failed(format!(
-                    "history fill batch exceeded {:?}",
-                    config.batch_timeout.expect("deadline requires timeout"),
-                ));
+            timeout = wait_for_fill_timeout(idle_deadline, batch_deadline) => {
+                break match timeout {
+                    FillTimeout::Idle => FillStop::Failed(format!(
+                        "history fill batch made no progress for {:?}",
+                        config.idle_timeout,
+                    )),
+                    FillTimeout::Batch => FillStop::Failed(format!(
+                        "history fill batch exceeded {:?}",
+                        config.batch_timeout.expect("deadline requires timeout"),
+                    )),
+                };
             }
             event = run.next(), if events_open => {
                 match event {
@@ -744,12 +744,22 @@ impl FillStop {
     }
 }
 
-async fn wait_for_deadline(deadline: Option<Instant>) {
-    if let Some(deadline) = deadline {
-        tokio::time::sleep_until(deadline).await;
-    } else {
-        pending::<()>().await;
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FillTimeout {
+    Idle,
+    Batch,
+}
+
+async fn wait_for_fill_timeout(
+    idle_deadline: Instant,
+    batch_deadline: Option<Instant>,
+) -> FillTimeout {
+    let (deadline, timeout) = match batch_deadline {
+        Some(deadline) if deadline <= idle_deadline => (deadline, FillTimeout::Batch),
+        _ => (idle_deadline, FillTimeout::Idle),
+    };
+    tokio::time::sleep_until(deadline).await;
+    timeout
 }
 
 async fn next_telemetry(
@@ -996,7 +1006,9 @@ mod tests {
             report.symbols()[0]
                 .error
                 .as_deref()
-                .is_some_and(|error| error.contains("exceeded"))
+                .is_some_and(|error| error.contains("exceeded")),
+            "unexpected terminal error: {:?}",
+            report.symbols()[0].error,
         );
         let _ = std::fs::remove_dir_all(root);
     }
