@@ -745,6 +745,36 @@ impl BacktestTickCache {
         })
     }
 
+    /// Deletes only the TQBN trading-day partitions intersecting the requested range.
+    ///
+    /// Surviving partitions are never decoded or rewritten. Callers sharing a cache
+    /// root must hold the exclusive consistency gate around this destructive call.
+    pub fn purge_symbol_ticks_in_range(
+        &self,
+        symbol: impl AsRef<str>,
+        range_start_ns: i64,
+        range_end_ns: i64,
+    ) -> Result<BacktestTickCachePurgeReport> {
+        let symbol = symbol.as_ref();
+        if symbol.is_empty() {
+            return Err(DataError::InvalidState(
+                "backtest tick cache symbol must not be empty",
+            ));
+        }
+        let report = self
+            .history
+            .purge_tick_series_range(symbol, range_start_ns, range_end_ns)?;
+        let removed = report.removed();
+        Ok(BacktestTickCachePurgeReport {
+            cache_dir: self.history.root_dir().to_path_buf(),
+            symbol: report.symbol,
+            series_path: report.path,
+            removed,
+            removed_files: report.removed_files,
+            removed_bytes: report.removed_bytes,
+        })
+    }
+
     pub fn compact_symbol_ticks(&self, symbol: impl AsRef<str>) -> Result<()> {
         let symbol = symbol.as_ref();
         if symbol.is_empty() {

@@ -239,6 +239,80 @@ fn daily_cache_diagnoses_corruption_and_explicit_purge_restores_a_missing_symbol
 }
 
 #[test]
+fn daily_fast_inventory_uses_the_embedded_symbol_without_decoding_the_tail() {
+    let root = temp_dir("fast-inventory-embedded-symbol");
+    let cache = DailyKlineCache::open(&root).unwrap();
+    let symbol = "SHFE:au2402";
+    let start_ns = utc_ns(2024, 1, 2);
+    let end_ns = start_ns + DAY_NS;
+    cache
+        .store_final_range(
+            symbol,
+            start_ns,
+            end_ns,
+            &DailyKlineCacheSnapshot::cst_v1(),
+            &[kline(1, start_ns, 10.0)],
+        )
+        .unwrap();
+    let path = cache.symbol_file_path(symbol);
+    assert!(path.ends_with("daily-kline-v1/SHFE_au2402.tqdk"));
+    let mut bytes = std::fs::read(&path).unwrap();
+    *bytes.last_mut().unwrap() ^= 0xff;
+    std::fs::write(&path, bytes).unwrap();
+
+    let inventory = DailyKlineCache::open_read_only(&root)
+        .fast_inventory()
+        .unwrap();
+
+    assert_eq!(inventory.total_files, 1);
+    assert_eq!(inventory.problem_files, 0);
+    assert_eq!(inventory.symbols.len(), 1);
+    assert_eq!(inventory.symbols[0].symbol, symbol);
+    assert_eq!(inventory.symbols[0].files, 1);
+}
+
+#[test]
+fn daily_diagnose_all_fully_decodes_files_and_checks_the_checksum() {
+    let root = temp_dir("diagnose-all-checksum");
+    let cache = DailyKlineCache::open(&root).unwrap();
+    let symbol = "SHFE.au2402";
+    let start_ns = utc_ns(2024, 1, 2);
+    let end_ns = start_ns + DAY_NS;
+    cache
+        .store_final_range(
+            symbol,
+            start_ns,
+            end_ns,
+            &DailyKlineCacheSnapshot::cst_v1(),
+            &[kline(1, start_ns, 10.0)],
+        )
+        .unwrap();
+    let path = cache.symbol_file_path(symbol);
+    let mut bytes = std::fs::read(&path).unwrap();
+    *bytes.last_mut().unwrap() ^= 0xff;
+    std::fs::write(&path, bytes).unwrap();
+
+    let report = DailyKlineCache::open_read_only(&root)
+        .diagnose_all()
+        .unwrap();
+
+    assert_eq!(report.problem_files, 1);
+    assert_eq!(report.files.len(), 1);
+    assert_eq!(report.files[0].symbol, symbol);
+    assert_eq!(
+        report.files[0].status,
+        DailyKlineCacheDiagnosticStatus::Corrupt
+    );
+    assert!(
+        report.files[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("checksum")
+    );
+}
+
+#[test]
 fn daily_cache_rejects_an_unsupported_file_version() {
     let root = temp_dir("unsupported-version");
     let cache = DailyKlineCache::open(&root).unwrap();

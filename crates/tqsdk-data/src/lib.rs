@@ -128,9 +128,10 @@ pub use client::{
 };
 pub use daily_kline_cache::{
     DAILY_KLINE_CACHE_FORMAT_ID, DAILY_KLINE_CACHE_SCHEMA_VERSION, DAILY_KLINE_DURATION_NS,
-    DailyKlineCache, DailyKlineCacheDiagnosticReport, DailyKlineCacheDiagnosticStatus,
-    DailyKlineCachePurgeReport, DailyKlineCacheSnapshot, DailyKlineCacheStatus,
-    DailyKlineCacheWriteReport, DailyKlineCoverage,
+    DailyKlineCache, DailyKlineCacheDiagnosticReport, DailyKlineCacheDiagnosticScanReport,
+    DailyKlineCacheDiagnosticStatus, DailyKlineCacheFastInventory,
+    DailyKlineCacheFastInventorySymbol, DailyKlineCachePurgeReport, DailyKlineCacheSnapshot,
+    DailyKlineCacheStatus, DailyKlineCacheWriteReport, DailyKlineCoverage,
 };
 pub use download::{
     DataDownloadProgress, KlineDataDownload, KlineDataDownloadPage, TickDataDownload,

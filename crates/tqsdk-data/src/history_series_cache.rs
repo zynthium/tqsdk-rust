@@ -437,6 +437,20 @@ impl HistorySeriesCache {
         self.purge_series(symbol, HistorySeriesKind::Tick)
     }
 
+    pub(crate) fn purge_tick_series_range(
+        &self,
+        symbol: &str,
+        range_start_ns: i64,
+        range_end_ns: i64,
+    ) -> Result<HistorySeriesPurgeReport> {
+        self.store.purge_series_range(
+            symbol,
+            HistorySeriesKind::Tick,
+            range_start_ns,
+            range_end_ns,
+        )
+    }
+
     pub(crate) fn purge_series(
         &self,
         symbol: &str,

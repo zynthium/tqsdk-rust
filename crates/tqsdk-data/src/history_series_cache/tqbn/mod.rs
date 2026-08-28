@@ -1191,6 +1191,35 @@ impl HistorySeriesStore for TqbnHistoryStore {
         Ok(report)
     }
 
+    fn purge_series_range(
+        &self,
+        symbol: &str,
+        kind: HistorySeriesKind,
+        range_start_ns: i64,
+        range_end_ns: i64,
+    ) -> Result<HistorySeriesPurgeReport> {
+        self.ensure_writable()?;
+        let path = self.series_path(symbol, kind.duration_ns());
+        let mut report = HistorySeriesPurgeReport {
+            path: path.clone(),
+            symbol: symbol.to_string(),
+            removed_files: 0,
+            removed_bytes: 0,
+        };
+        for file_path in
+            self.partition_paths_for_range(symbol, kind, range_start_ns, range_end_ns)?
+        {
+            with_exclusive_tqbn_lock(&file_path, || {
+                if let Some(size_bytes) = remove_tqbn_file_locked(&file_path)? {
+                    report.removed_files += 1;
+                    report.removed_bytes = report.removed_bytes.saturating_add(size_bytes);
+                }
+                Ok(())
+            })?;
+        }
+        Ok(report)
+    }
+
     fn open_reader(
         &self,
         request: HistorySeriesReadRequest,

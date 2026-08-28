@@ -370,6 +370,53 @@ fn read_only_cache_does_not_create_a_missing_root_or_allow_writes() {
 }
 
 #[test]
+fn tick_range_purge_removes_only_intersecting_trading_day_partitions() {
+    let dir = temp_dir("purge-range");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let first =
+        backtest_tick_trading_day_range(NaiveDate::from_ymd_opt(2026, 7, 23).unwrap()).unwrap();
+    let second =
+        backtest_tick_trading_day_range(NaiveDate::from_ymd_opt(2026, 7, 24).unwrap()).unwrap();
+    let symbol = "SHFE.rb2601";
+    cache
+        .store_ticks(
+            symbol,
+            first.start_ns,
+            second.end_ns,
+            [tick(1, first.start_ns + 1), tick(2, second.start_ns + 1)],
+        )
+        .unwrap();
+    let first_path = daily_tick_file(&dir, "20260723", symbol);
+    let second_path = daily_tick_file(&dir, "20260724", symbol);
+    assert!(first_path.exists());
+    assert!(second_path.exists());
+    let second_before = std::fs::read(&second_path).unwrap();
+
+    let report = cache
+        .purge_symbol_ticks_in_range(symbol, first.start_ns, first.end_ns)
+        .unwrap();
+
+    assert_eq!(report.removed_files, 1);
+    assert!(report.removed_bytes > 0);
+    assert!(!first_path.exists());
+    assert!(second_path.exists());
+    assert_eq!(std::fs::read(&second_path).unwrap(), second_before);
+    assert_eq!(
+        cache
+            .load_series(TickDataSeriesRequest::new(
+                symbol,
+                second.start_ns,
+                second.end_ns,
+            ))
+            .unwrap()
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+}
+
+#[test]
 fn provisional_tick_checkpoint_never_counts_as_final_coverage() {
     let dir = temp_dir("provisional-checkpoint");
     let cache = BacktestTickCache::open(&dir).unwrap();

@@ -129,6 +129,37 @@ pub struct DailyKlineCacheDiagnosticReport {
     pub error: Option<String>,
 }
 
+/// Lightweight filesystem inventory for native daily-Kline files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailyKlineCacheFastInventory {
+    pub format_id: &'static str,
+    pub cache_dir: PathBuf,
+    pub namespace_dir: PathBuf,
+    pub symbols: Vec<DailyKlineCacheFastInventorySymbol>,
+    pub total_files: usize,
+    pub total_bytes: u64,
+    pub problem_files: usize,
+}
+
+/// Per-symbol totals from [`DailyKlineCache::fast_inventory`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailyKlineCacheFastInventorySymbol {
+    pub symbol: String,
+    pub files: usize,
+    pub bytes: u64,
+    pub problem_files: usize,
+}
+
+/// Full-file diagnostic scan for every native daily-Kline file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailyKlineCacheDiagnosticScanReport {
+    pub format_id: &'static str,
+    pub cache_dir: PathBuf,
+    pub namespace_dir: PathBuf,
+    pub files: Vec<DailyKlineCacheDiagnosticReport>,
+    pub problem_files: usize,
+}
+
 /// Result of explicit daily-Kline symbol deletion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DailyKlineCachePurgeReport {
@@ -393,13 +424,73 @@ impl DailyKlineCache {
             .collect())
     }
 
+    /// Reads file metadata, the fixed header, and the embedded logical symbol only.
+    ///
+    /// This intentionally does not read row payloads or verify the file checksum;
+    /// use [`Self::diagnose_all`] for a full health scan.
+    pub fn fast_inventory(&self) -> Result<DailyKlineCacheFastInventory> {
+        let namespace_dir = self.namespace_dir();
+        let mut symbols = BTreeMap::<String, DailyFastInventoryAccumulator>::new();
+        let mut total_files = 0usize;
+        let mut total_bytes = 0u64;
+        let mut problem_files = 0usize;
+
+        for path in daily_cache_file_paths(namespace_dir.as_path())? {
+            total_files = total_files.saturating_add(1);
+            let size_bytes = fs::symlink_metadata(path.as_path())?.len();
+            total_bytes = total_bytes.saturating_add(size_bytes);
+            let (symbol, is_problem) = match read_daily_file_prefix(path.as_path()) {
+                Ok(symbol) => (symbol, false),
+                Err(_) => (fallback_daily_symbol(path.as_path()), true),
+            };
+            if is_problem {
+                problem_files = problem_files.saturating_add(1);
+            }
+            symbols
+                .entry(symbol.clone())
+                .or_insert_with(|| DailyFastInventoryAccumulator::new(symbol))
+                .push(size_bytes, is_problem);
+        }
+
+        Ok(DailyKlineCacheFastInventory {
+            format_id: self.format_id(),
+            cache_dir: self.root_dir.clone(),
+            namespace_dir,
+            symbols: symbols
+                .into_values()
+                .map(DailyFastInventoryAccumulator::finish)
+                .collect(),
+            total_files,
+            total_bytes,
+            problem_files,
+        })
+    }
+
+    /// Fully decodes every daily-Kline file and validates its checksum and rows.
+    pub fn diagnose_all(&self) -> Result<DailyKlineCacheDiagnosticScanReport> {
+        let namespace_dir = self.namespace_dir();
+        let mut files = daily_cache_file_paths(namespace_dir.as_path())?
+            .into_iter()
+            .map(|path| diagnose_existing_path(self, path, None))
+            .collect::<Result<Vec<_>>>()?;
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        let problem_files = files.iter().filter(|file| file.status.is_problem()).count();
+        Ok(DailyKlineCacheDiagnosticScanReport {
+            format_id: self.format_id(),
+            cache_dir: self.root_dir.clone(),
+            namespace_dir,
+            files,
+            problem_files,
+        })
+    }
+
     /// Reads and validates one symbol file without modifying it.
     pub fn diagnose(&self, symbol: impl AsRef<str>) -> Result<DailyKlineCacheDiagnosticReport> {
         let symbol = symbol.as_ref();
         validate_symbol(symbol)?;
         let path = self.symbol_file_path(symbol);
-        let metadata = match fs::metadata(path.as_path()) {
-            Ok(metadata) => metadata,
+        match fs::metadata(path.as_path()) {
+            Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(DailyKlineCacheDiagnosticReport {
                     format_id: self.format_id(),
@@ -416,58 +507,8 @@ impl DailyKlineCache {
                 });
             }
             Err(error) => return Err(error.into()),
-        };
-        if !metadata.is_file() {
-            return Ok(diagnostic_problem(
-                self,
-                path,
-                symbol,
-                DailyKlineCacheDiagnosticStatus::Corrupt,
-                metadata.len(),
-                "daily kline cache path is not a regular file".to_string(),
-            ));
         }
-        match load_file_unchecked(path.as_path()) {
-            Ok(file) if file.symbol == symbol => Ok(DailyKlineCacheDiagnosticReport {
-                format_id: self.format_id(),
-                cache_dir: self.root_dir.clone(),
-                namespace_dir: self.namespace_dir(),
-                path,
-                symbol: symbol.to_string(),
-                status: DailyKlineCacheDiagnosticStatus::Readable,
-                schema_version: Some(DAILY_KLINE_CACHE_SCHEMA_VERSION),
-                rows: file.rows.len(),
-                cached_ranges: file.coverage,
-                size_bytes: metadata.len(),
-                error: None,
-            }),
-            Ok(_) => Ok(diagnostic_problem(
-                self,
-                path,
-                symbol,
-                DailyKlineCacheDiagnosticStatus::Corrupt,
-                metadata.len(),
-                "daily kline cache symbol does not match file path".to_string(),
-            )),
-            Err(error) => {
-                let status = if error
-                    .to_string()
-                    .contains("unsupported daily kline cache version")
-                {
-                    DailyKlineCacheDiagnosticStatus::UnsupportedVersion
-                } else {
-                    DailyKlineCacheDiagnosticStatus::Corrupt
-                };
-                Ok(diagnostic_problem(
-                    self,
-                    path,
-                    symbol,
-                    status,
-                    metadata.len(),
-                    error.to_string(),
-                ))
-            }
-        }
+        diagnose_existing_path(self, path, Some(symbol))
     }
 
     /// Explicit destructive repair. It removes whole logical-symbol file only.
@@ -509,6 +550,41 @@ impl DailyKlineCache {
             return Err(DataError::InvalidState("daily kline cache is read-only"));
         }
         Ok(())
+    }
+}
+
+struct DailyFastInventoryAccumulator {
+    symbol: String,
+    files: usize,
+    bytes: u64,
+    problem_files: usize,
+}
+
+impl DailyFastInventoryAccumulator {
+    fn new(symbol: String) -> Self {
+        Self {
+            symbol,
+            files: 0,
+            bytes: 0,
+            problem_files: 0,
+        }
+    }
+
+    fn push(&mut self, size_bytes: u64, is_problem: bool) {
+        self.files = self.files.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(size_bytes);
+        if is_problem {
+            self.problem_files = self.problem_files.saturating_add(1);
+        }
+    }
+
+    fn finish(self) -> DailyKlineCacheFastInventorySymbol {
+        DailyKlineCacheFastInventorySymbol {
+            symbol: self.symbol,
+            files: self.files,
+            bytes: self.bytes,
+            problem_files: self.problem_files,
+        }
     }
 }
 
@@ -568,6 +644,136 @@ fn diagnostic_problem(
         size_bytes,
         error: Some(error),
     }
+}
+
+fn diagnose_existing_path(
+    cache: &DailyKlineCache,
+    path: PathBuf,
+    expected_symbol: Option<&str>,
+) -> Result<DailyKlineCacheDiagnosticReport> {
+    let metadata = fs::symlink_metadata(path.as_path())?;
+    let diagnostic_symbol = expected_symbol
+        .map(str::to_string)
+        .unwrap_or_else(|| fallback_daily_symbol(path.as_path()));
+    if !metadata.file_type().is_file() {
+        return Ok(diagnostic_problem(
+            cache,
+            path,
+            diagnostic_symbol.as_str(),
+            DailyKlineCacheDiagnosticStatus::Corrupt,
+            metadata.len(),
+            "daily kline cache path is not a regular file".to_string(),
+        ));
+    }
+    match load_file_unchecked(path.as_path()) {
+        Ok(file) if expected_symbol.is_none_or(|expected| expected == file.symbol) => {
+            Ok(DailyKlineCacheDiagnosticReport {
+                format_id: cache.format_id(),
+                cache_dir: cache.root_dir.clone(),
+                namespace_dir: cache.namespace_dir(),
+                path,
+                symbol: file.symbol,
+                status: DailyKlineCacheDiagnosticStatus::Readable,
+                schema_version: Some(DAILY_KLINE_CACHE_SCHEMA_VERSION),
+                rows: file.rows.len(),
+                cached_ranges: file.coverage,
+                size_bytes: metadata.len(),
+                error: None,
+            })
+        }
+        Ok(_) => Ok(diagnostic_problem(
+            cache,
+            path,
+            diagnostic_symbol.as_str(),
+            DailyKlineCacheDiagnosticStatus::Corrupt,
+            metadata.len(),
+            "daily kline cache symbol does not match file path".to_string(),
+        )),
+        Err(error) => {
+            let symbol = expected_symbol
+                .map(str::to_string)
+                .or_else(|| read_daily_file_prefix(path.as_path()).ok())
+                .unwrap_or_else(|| fallback_daily_symbol(path.as_path()));
+            let status = if error
+                .to_string()
+                .contains("unsupported daily kline cache version")
+            {
+                DailyKlineCacheDiagnosticStatus::UnsupportedVersion
+            } else {
+                DailyKlineCacheDiagnosticStatus::Corrupt
+            };
+            Ok(diagnostic_problem(
+                cache,
+                path,
+                symbol.as_str(),
+                status,
+                metadata.len(),
+                error.to_string(),
+            ))
+        }
+    }
+}
+
+fn daily_cache_file_paths(namespace_dir: &Path) -> Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(namespace_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == FILE_EXTENSION)
+        {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn read_daily_file_prefix(path: &Path) -> Result<String> {
+    let mut file = File::open(path)?;
+    let mut header = [0_u8; FILE_HEADER_BYTES];
+    file.read_exact(&mut header)?;
+    if header[..4] != FILE_MAGIC {
+        return Err(DataError::InvalidResponse(
+            "daily kline cache magic mismatch".to_string(),
+        ));
+    }
+    let version = u16::from_le_bytes(header[4..6].try_into().expect("fixed header slice"));
+    if version != FILE_VERSION {
+        return Err(DataError::InvalidResponse(format!(
+            "unsupported daily kline cache version {version}"
+        )));
+    }
+    let payload_len = u64::from_le_bytes(header[8..16].try_into().expect("fixed header slice"));
+    let mut symbol_len = [0_u8; 4];
+    file.read_exact(&mut symbol_len)?;
+    let symbol_len = usize::try_from(u32::from_le_bytes(symbol_len)).expect("u32 fits usize");
+    if symbol_len > MAX_STRING_BYTES
+        || payload_len < u64::try_from(4_usize.saturating_add(symbol_len)).unwrap_or(u64::MAX)
+    {
+        return Err(DataError::InvalidResponse(
+            "daily kline cache embedded symbol length is invalid".to_string(),
+        ));
+    }
+    let mut symbol = vec![0_u8; symbol_len];
+    file.read_exact(symbol.as_mut_slice())?;
+    let symbol = String::from_utf8(symbol).map_err(|_| {
+        DataError::InvalidResponse("daily kline cache string is not UTF-8".to_string())
+    })?;
+    validate_symbol(symbol.as_str())?;
+    Ok(symbol)
+}
+
+fn fallback_daily_symbol(path: &Path) -> String {
+    path.file_stem()
+        .map(|value| value.to_string_lossy().into_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "<unknown>".to_string())
 }
 
 fn load_file(

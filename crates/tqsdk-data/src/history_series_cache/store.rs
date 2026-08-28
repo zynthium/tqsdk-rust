@@ -218,6 +218,17 @@ pub(crate) trait HistorySeriesStore: Send + Sync {
         symbol: &str,
         kind: HistorySeriesKind,
     ) -> Result<HistorySeriesPurgeReport>;
+    fn purge_series_range(
+        &self,
+        _symbol: &str,
+        _kind: HistorySeriesKind,
+        _range_start_ns: i64,
+        _range_end_ns: i64,
+    ) -> Result<HistorySeriesPurgeReport> {
+        Err(DataError::InvalidState(
+            "history cache backend does not support partition range purge",
+        ))
+    }
     fn open_reader(
         &self,
         request: HistorySeriesReadRequest,

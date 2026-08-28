@@ -1237,17 +1237,23 @@ fn validate_command_kind(command: &Command, kind: CacheKind) -> Result<(), CliEr
     if matches!(kind, CacheKind::Daily)
         && !matches!(
             command,
-            Command::Inspect(_) | Command::Fill(_) | Command::Verify(_) | Command::Purge(_)
+            Command::Inventory
+                | Command::Inspect(_)
+                | Command::Fill(_)
+                | Command::Verify(_)
+                | Command::Doctor
+                | Command::Purge(_)
         )
     {
         return Err(CliError::Usage(
-            "--kind daily supports inspect, fill, verify, and purge".to_string(),
+            "--kind daily supports inventory, inspect, fill, verify, doctor, and purge".to_string(),
         ));
     }
-    if matches!(command, Command::Purge(_)) && !matches!(kind, CacheKind::Minute | CacheKind::Daily)
+    if matches!(command, Command::Purge(_))
+        && !matches!(kind, CacheKind::Tick | CacheKind::Minute | CacheKind::Daily)
     {
         return Err(CliError::Usage(
-            "purge supports only --kind minute or --kind daily".to_string(),
+            "purge supports only --kind tick, --kind minute, or --kind daily".to_string(),
         ));
     }
     if matches!(command, Command::RepairLocks(_)) && !matches!(kind, CacheKind::Tick) {
@@ -1334,6 +1340,7 @@ fn inventory(cache_dir: Option<&Path>, kind: CacheKind) -> Result<CommandOutcome
     let (cache, cache_dir) = open_read_only_cache(cache_dir)?;
     let tick_inventory = cache.fast_inventory()?;
     let minute_inventory = MinuteKlineCache::open_read_only(&cache_dir).fast_inventory()?;
+    let daily_inventory = DailyKlineCache::open_read_only(&cache_dir).fast_inventory()?;
     let tick_json = || {
         json!({
             "backend_format": tick_inventory.backend_format,
@@ -1365,14 +1372,30 @@ fn inventory(cache_dir: Option<&Path>, kind: CacheKind) -> Result<CommandOutcome
             })).collect::<Vec<_>>(),
         })
     };
+    let daily_json = || {
+        json!({
+            "backend_format": daily_inventory.format_id,
+            "total_files": daily_inventory.total_files,
+            "total_bytes": daily_inventory.total_bytes,
+            "total_days": Value::Null,
+            "problem_files": daily_inventory.problem_files,
+            "symbols": daily_inventory.symbols.iter().map(|symbol| json!({
+                "symbol": symbol.symbol,
+                "files": symbol.files,
+                "bytes": symbol.bytes,
+                "problem_files": symbol.problem_files,
+            })).collect::<Vec<_>>(),
+        })
+    };
     let result = match kind {
         CacheKind::Tick => tick_json(),
         CacheKind::Minute => minute_json(),
-        CacheKind::Daily => unreachable!("kind validation rejects daily for inventory"),
+        CacheKind::Daily => daily_json(),
         CacheKind::All => json!({
             "cache_kind": kind.as_str(),
             "tick": tick_json(),
             "minute": minute_json(),
+            "daily": daily_json(),
         }),
     };
     let mut result = result;
@@ -2489,6 +2512,7 @@ async fn verify_tick(
         value: json!({
             "schema_version": REPORT_SCHEMA_VERSION,
             "command": "verify",
+            "cache_kind": "tick",
             "cache_dir": canonical_cache_dir,
             "requested_days": window,
             "source_report": source_report,
@@ -2774,10 +2798,93 @@ fn purge(
     args: PurgeArgs,
 ) -> Result<CommandOutcome, CliError> {
     match kind {
+        CacheKind::Tick => purge_tick(cache_dir, args),
         CacheKind::Minute => purge_minute(cache_dir, args),
         CacheKind::Daily => purge_daily(cache_dir, args),
-        CacheKind::Tick | CacheKind::All => unreachable!("kind validation rejects this purge kind"),
+        CacheKind::All => unreachable!("kind validation rejects this purge kind"),
     }
+}
+
+fn purge_tick(cache_dir: Option<&Path>, args: PurgeArgs) -> Result<CommandOutcome, CliError> {
+    let symbols = normalized_symbols(args.symbols.symbols)?;
+    if symbols.len() != 1 {
+        return Err(CliError::Usage(
+            "--kind tick purge requires exactly one --symbol".to_string(),
+        ));
+    }
+    if !args.dry_run && !args.yes {
+        return Err(CliError::Usage(
+            "--kind tick purge is destructive; pass --yes or use --dry-run".to_string(),
+        ));
+    }
+    let symbol = symbols.into_iter().next().expect("one symbol was required");
+    let start_day = args
+        .days
+        .start_day
+        .ok_or_else(|| CliError::Usage("--kind tick purge requires --start-day".to_string()))?;
+    let end_day = args
+        .days
+        .end_day
+        .ok_or_else(|| CliError::Usage("--kind tick purge requires --end-day".to_string()))?;
+    let window = TradingDayWindow::from_days(start_day, end_day)?;
+    let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
+
+    if args.dry_run {
+        let start_day = parse_window_day(&window.start_day)?;
+        let end_day = parse_window_day(&window.end_day)?;
+        let cache = BacktestTickCache::open_read_only(&canonical_cache_dir);
+        let would_remove_files = cache
+            .diagnose()?
+            .files
+            .into_iter()
+            .filter(|file| file.symbol == symbol)
+            .filter_map(|file| {
+                let trading_day = file
+                    .trading_day
+                    .as_deref()
+                    .and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok())?;
+                (start_day <= trading_day && trading_day <= end_day).then(|| {
+                    json!({
+                        "trading_day": trading_day,
+                        "path": file.path,
+                        "size_bytes": file.size_bytes,
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        return Ok(CommandOutcome {
+            value: json!({
+                "schema_version": REPORT_SCHEMA_VERSION,
+                "command": "purge",
+                "cache_kind": "tick",
+                "cache_dir": canonical_cache_dir,
+                "symbol": symbol,
+                "requested_days": window,
+                "dry_run": true,
+                "would_remove_files": would_remove_files,
+            }),
+            exit_code: 0,
+        });
+    }
+
+    let cache = BacktestTickCache::open(&canonical_cache_dir)?;
+    let _lock = cache.try_acquire_consistency_read_lock()?;
+    let report = cache.purge_symbol_ticks_in_range(&symbol, window.start_ns, window.end_ns)?;
+    Ok(CommandOutcome {
+        value: json!({
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "command": "purge",
+            "cache_kind": "tick",
+            "cache_dir": canonical_cache_dir,
+            "symbol": symbol,
+            "requested_days": window,
+            "dry_run": false,
+            "removed": report.removed,
+            "removed_files": report.removed_files,
+            "removed_bytes": report.removed_bytes,
+        }),
+        exit_code: 0,
+    })
 }
 
 fn purge_minute(cache_dir: Option<&Path>, args: PurgeArgs) -> Result<CommandOutcome, CliError> {
@@ -2980,17 +3087,36 @@ fn doctor(cache_dir: Option<&Path>, kind: CacheKind) -> Result<CommandOutcome, C
             })).collect::<Vec<_>>(),
         }))
     };
+    let daily_value = || -> Result<Value, CliError> {
+        let report = DailyKlineCache::open_read_only(&canonical_cache_dir).diagnose_all()?;
+        Ok(json!({
+            "backend_format": report.format_id,
+            "problem_files": report.problem_files,
+            "files": report.files.into_iter().map(|file| json!({
+                "path": file.path,
+                "symbol": file.symbol,
+                "status": daily_diagnostic_status_name(file.status),
+                "rows": file.rows,
+                "cached_ranges": file.cached_ranges,
+                "size_bytes": file.size_bytes,
+                "schema_version": file.schema_version,
+                "error": file.error,
+            })).collect::<Vec<_>>(),
+        }))
+    };
     let mut value = match kind {
         CacheKind::Tick => tick_value()?,
         CacheKind::Minute => minute_value()?,
-        CacheKind::Daily => unreachable!("kind validation rejects daily for doctor"),
+        CacheKind::Daily => daily_value()?,
         CacheKind::All => {
             let tick = tick_value()?;
             let minute = minute_value()?;
+            let daily = daily_value()?;
             json!({
                 "cache_kind": kind.as_str(),
                 "tick": tick,
                 "minute": minute,
+                "daily": daily,
             })
         }
     };
@@ -3003,6 +3129,7 @@ fn doctor(cache_dir: Option<&Path>, kind: CacheKind) -> Result<CommandOutcome, C
                 + value["minute"]["problem_files"]
                     .as_u64()
                     .unwrap_or_default()
+                + value["daily"]["problem_files"].as_u64().unwrap_or_default()
         }
         _ => value["problem_files"].as_u64().unwrap_or_default(),
     };
@@ -3860,6 +3987,17 @@ fn minute_diagnostic_status_name(
         tqsdk_data::MinuteKlineCacheDiagnosticStatus::LegacyUnsupported => "legacy_unsupported",
         tqsdk_data::MinuteKlineCacheDiagnosticStatus::UnsupportedVersion => "unsupported_version",
         tqsdk_data::MinuteKlineCacheDiagnosticStatus::Corrupt => "corrupt",
+    }
+}
+
+fn daily_diagnostic_status_name(
+    status: tqsdk_data::DailyKlineCacheDiagnosticStatus,
+) -> &'static str {
+    match status {
+        tqsdk_data::DailyKlineCacheDiagnosticStatus::Missing => "missing",
+        tqsdk_data::DailyKlineCacheDiagnosticStatus::Readable => "readable",
+        tqsdk_data::DailyKlineCacheDiagnosticStatus::UnsupportedVersion => "unsupported_version",
+        tqsdk_data::DailyKlineCacheDiagnosticStatus::Corrupt => "corrupt",
     }
 }
 
