@@ -6,6 +6,7 @@ mod metadata;
 mod planner;
 mod report;
 mod request;
+mod schema;
 mod store_worker;
 mod telemetry;
 
@@ -44,6 +45,11 @@ pub use report::{
 pub use request::{
     BacktestHistoryAuthProvider, BacktestHistoryClientBuilder, BacktestHistoryCredentials,
     BacktestHistoryKind, BacktestHistoryPolicy, BacktestHistoryRequest, BacktestHistoryRequestId,
+};
+pub use schema::{
+    BacktestHistoryField, BacktestHistorySchemaSeries, BacktestHistoryValueKind,
+    backtest_history_default_fields, backtest_history_resolve_fields,
+    backtest_history_schema_fields,
 };
 pub use telemetry::BacktestHistoryTelemetryStream;
 
