@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -116,6 +117,200 @@ fn orchestration_progress_and_terminal_report_are_cache_family_neutral() {
     assert_eq!(report.failed_symbols(), 1);
     assert_eq!(report.interrupted_symbols(), 1);
     assert_eq!(report.rows_written(), 1);
+}
+
+#[tokio::test]
+async fn orchestration_run_isolates_symbol_failures_and_emits_all_family_progress() {
+    let root = std::env::temp_dir().join(format!(
+        "tqsdk-backtest-history-orchestration-failures-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    let client = BacktestHistoryClient::builder(&root)
+        .policy(BacktestHistoryPolicy::CacheOnly)
+        .build()
+        .unwrap();
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&progress);
+
+    let report = client
+        .orchestrate_fill(
+            [
+                BacktestHistoryRequest::tick(101, "SHFE.au2602", 1, 2),
+                BacktestHistoryRequest::kline(102, "SHFE.ag2602", Duration::from_secs(60), 1, 2),
+                BacktestHistoryRequest::kline(
+                    103,
+                    "KQ.i@SHFE.cu",
+                    Duration::from_secs(24 * 60 * 60),
+                    1,
+                    2,
+                ),
+            ],
+            BacktestHistoryFillConfig::default(),
+            BacktestHistoryFillCancellation::new(),
+            move |event| observed.lock().unwrap().push(event),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(report.status(), BacktestHistoryFillTerminalStatus::Failed);
+    assert_eq!(report.failed_symbols(), 3);
+    assert_eq!(report.symbols().len(), 3);
+    let progress = progress.lock().unwrap();
+    for family in [
+        BacktestHistoryFillFamily::Tick,
+        BacktestHistoryFillFamily::Minute,
+        BacktestHistoryFillFamily::Daily,
+    ] {
+        assert!(progress.iter().any(|event| matches!(
+            event,
+            BacktestHistoryFillProgress::Planning {
+                family: observed,
+                ..
+            } if *observed == family
+        )));
+    }
+    assert!(matches!(
+        progress.last(),
+        Some(BacktestHistoryFillProgress::Finished {
+            status: BacktestHistoryFillTerminalStatus::Failed,
+            failed_symbols: 3,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn orchestration_run_honors_preexisting_cancellation_without_touching_cache() {
+    let root = std::env::temp_dir().join(format!(
+        "tqsdk-backtest-history-orchestration-cancel-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    let client = BacktestHistoryClient::builder(&root)
+        .policy(BacktestHistoryPolicy::CacheOnly)
+        .build()
+        .unwrap();
+    let cancellation = BacktestHistoryFillCancellation::new();
+    cancellation.cancel();
+
+    let report = client
+        .orchestrate_fill(
+            [BacktestHistoryRequest::tick(104, "SHFE.au2602", 1, 2)],
+            BacktestHistoryFillConfig::default(),
+            cancellation,
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.status(),
+        BacktestHistoryFillTerminalStatus::Interrupted
+    );
+    assert_eq!(report.interrupted_symbols(), 1);
+    assert!(!root.exists());
+}
+
+#[tokio::test]
+async fn orchestration_run_uses_validated_batch_size_for_one_cache_family() {
+    let root = std::env::temp_dir().join(format!(
+        "tqsdk-backtest-history-orchestration-batches-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    let client = BacktestHistoryClient::builder(&root)
+        .policy(BacktestHistoryPolicy::CacheOnly)
+        .build()
+        .unwrap();
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&progress);
+    let config = BacktestHistoryFillConfig::default()
+        .with_symbol_batch_size(2)
+        .unwrap();
+
+    let report = client
+        .orchestrate_fill(
+            [
+                BacktestHistoryRequest::tick(105, "SHFE.au2602", 1, 2),
+                BacktestHistoryRequest::tick(106, "SHFE.ag2602", 1, 2),
+                BacktestHistoryRequest::tick(107, "SHFE.cu2602", 1, 2),
+            ],
+            config,
+            BacktestHistoryFillCancellation::new(),
+            move |event| observed.lock().unwrap().push(event),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(report.symbols().len(), 3);
+    let progress = progress.lock().unwrap();
+    assert_eq!(
+        progress
+            .iter()
+            .filter(|event| matches!(event, BacktestHistoryFillProgress::BatchStarted { .. }))
+            .count(),
+        2
+    );
+    assert!(progress.iter().any(|event| matches!(
+        event,
+        BacktestHistoryFillProgress::Planning {
+            total_batches: 2,
+            symbol_batch_size: 2,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn orchestration_cancellation_interrupts_root_lock_wait() {
+    let root = std::env::temp_dir().join(format!(
+        "tqsdk-backtest-history-orchestration-lock-wait-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    let cache = BacktestTickCache::open(&root).unwrap();
+    let exclusive = cache.try_acquire_consistency_read_lock().unwrap();
+    let client = BacktestHistoryClient::builder(&root).build().unwrap();
+    let cancellation = BacktestHistoryFillCancellation::new();
+    let signal = cancellation.clone();
+    let config = BacktestHistoryFillConfig::default()
+        .with_lock_wait(Some(Duration::from_secs(5)))
+        .unwrap();
+    let task = tokio::spawn(async move {
+        client
+            .orchestrate_fill(
+                [BacktestHistoryRequest::tick(108, "SHFE.au2602", 1, 2)],
+                config,
+                cancellation,
+                |_| {},
+            )
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    signal.cancel();
+    let report = task.await.unwrap().unwrap();
+
+    assert_eq!(
+        report.status(),
+        BacktestHistoryFillTerminalStatus::Interrupted
+    );
+    assert_eq!(report.interrupted_symbols(), 1);
+    drop(exclusive);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
