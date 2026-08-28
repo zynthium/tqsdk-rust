@@ -1,5 +1,7 @@
 # Daily Cache Unification Implementation Plan
 
+> Status: completed on `feat/daily-cache-unification`; archived after Task 7 verification.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make native daily history a first-class, fail-closed backtest cache family with the same fill progress, configuration, reporting, inspection, verification, and purge contracts as tick and canonical minute caches.

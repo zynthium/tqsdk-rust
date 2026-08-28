@@ -24,12 +24,14 @@ runtime contract；它只提供一个更容易开始的 facade：
 
 `.backtest(start_ns, end_ns)` 是默认 Python-style 策略回测入口。它默认使用
 `tqsdk-data` 共享 history cache root（`$HOME/.tqsdk/data_series_1`，可用
-`TQSDK_HISTORY_CACHE_DIR` 覆盖）。tick 使用 `BacktestTickCache`，而唯一持久 K 线输入使用
-独立 `MinuteKlineCache` 的 canonical 60s monthly files；两者都在本地回放到 `TqSim`。
+`TQSDK_HISTORY_CACHE_DIR` 覆盖）。tick 使用 `BacktestTickCache`；持久 K 线输入使用独立
+`MinuteKlineCache` 的 canonical 60s monthly files 与 `DailyKlineCache` 的 native 1d single file，
+三者都在本地回放到 `TqSim`。
 配置 `.cache_dir(...)`、`.cache_store(...)` 或 `.market_cache(...)` 会覆盖默认 cache；
 显式 `.disabled_cache()` 才直接使用官方 server-side backtest market stream 且不落盘。
 显式 `.cache_only()` 只读本地缓存；默认 `RemoteOnMiss` 在缓存完整时直接复用本地数据且不需要
-auth，缓存缺失时通过官方 server-side backtest stream 拉取 tick 或 canonical 60s K、推进本地回测并写入持久缓存。
+auth，缓存缺失时通过官方 server-side backtest stream 拉取 tick、canonical 60s 或 native 1d rows、
+推进本地回测并写入持久缓存。
 这个路径不使用专业历史下载接口，也不需要专业历史下载权限。`.universe(...)` 使用和 relay
 对齐的期货 selector 语法，适合全品种策略；同一套 selector 也被实时
 `quotes_universe(...)` 和 `MarketCachePolicy::record_universe(...)` 复用。最终 resolved
@@ -41,8 +43,8 @@ universe 会排除当前不受本地 history cache / relay 支持的 `KQD` 外�
 warmup 均使用具体合约 symbol，所以主连与相同日期的具体合约共用一份 tick cache；回放仍使用
 主连 symbol，quote 的 `underlying_symbol` 标注当时实际合约。`RemoteOnMiss` 只在 sidecar 缺失或
 覆盖不足时刷新 metadata；`.cache_only()` 必须已有本地 sidecar，绝不访问公开 metadata 服务。
-minute K cache 则始终以逻辑 `KQ.m@...` 为 key，dated physical contract 只保留在 replay metadata；
-`60s` 与整数分钟高周期均受支持。
+minute/daily K cache 始终以逻辑 `KQ.m@...` 为 key，dated physical contract 只保留在 replay metadata；
+`60s..<1d` 的整数分钟与 `1d..=28d` 的整数日均受支持。
 
 cache-backed local backtest 当前只支持 futures。`Tq::stock()` 选择股票 market / server-backtest
 endpoint，但股票回测必须显式 `.disabled_cache()`；futures universe selector 不适用于股票，股票策略
@@ -56,11 +58,10 @@ trading day 关闭后再填充。
 脱离该区间扩展到整个回测窗口。默认 `.connect()` 继续消费同一投影。
 
 cache-backed local backtest 可以显式声明 serial 输入：`.tick(symbol, view_width)` 复用
-tick cache；`.kline(symbol, duration, view_width)` 的 `<60s` K 从 tick 本地合成，`60s` 从
-canonical minute cache 读取，`>60s` 只能是 `N × 60s` 并在本地从已关闭分钟线按固定 CST `18:00`
-trading-day grid 聚合。盘中 break 不重置高周期 bucket，break 内不补造 minute row，但同一 bar 可跨
-break。`61s` / `90s` 会明确拒绝，K-only `>=60s` 不会隐式拉取 tick；仅需 quote fallback 时会
-隐式使用 60s minute。只有缺 tick 或 canonical minute 时才需要 auth。K 线 replay 需要 quote
+tick cache；`.kline(symbol, duration, view_width)` 使用固定三层来源：`<60s` 从 tick 本地合成，
+`60s..<1d` 的整数分钟从 canonical 60s cache 读取/聚合，`1d..=28d` 的整数日从 native 1d cache
+读取/聚合。daily miss 必须失败，不回退 minute。`61s` / `90s`、非整数日和大于 `28d` 明确拒绝；
+K-only `>=60s` 不会隐式拉取 tick。K 线 replay 需要 quote
 synthesis metadata；可在 backtest builder 上用 `.price_tick(...)`、`.instrument_spec(...)` 或
 `.default_price_tick(...)` 显式提供。
 
@@ -71,11 +72,15 @@ synthesis metadata；可在 backtest builder 上用 `.price_tick(...)`、`.instr
 持 shared cache-root gate，和普通 warmup 并发、与 refresh/repair/稳定检查互斥；结果收集完成后即释放，
 后续大输出格式化不会延长 gate 生命周期。prelude 故意不导出该高级 API。
 
+`BacktestHistoryClient` 也是 tick/minute/daily fill scheduling 的唯一 owner。默认 symbol batch size 1、
+concurrency 2、idle timeout 60 秒、无 batch timeout；batch size/concurrency 只接受 `1..=4`。facade
+只把统一 progress/terminal report 适配为既有用户表面。
+
 缓存运维入口保留在同一个 builder 心智里：`.inspect_cache()` / `.purge_cache_symbols()` 是
-tick-only 兼容 API；`.inspect_history_cache()` 返回 tick 与 canonical-minute 的 typed status，
-`.purge_history_cache()` 是两类缓存的显式 destructive operation；两条 purge API 都先取得 exclusive
+tick-only 兼容 API；`.inspect_history_cache()` 返回 tick、canonical-minute 与 native-daily typed status，
+`.purge_history_cache()` 是三类缓存的显式 destructive operation；两条 purge API 都先取得 exclusive
 cache-root gate，不能与普通 fill/query 穿插。`.warmup().await?` 只预热
-缓存、不创建策略 runtime；它会先跳过完整缓存，再把物理 tick range 和逻辑 minute symbol 的
+缓存、不创建策略 runtime；它会先跳过完整缓存，再把物理 tick range 和逻辑 minute/daily symbol 的
 `missing_ranges` 交给对应的官方 server-side backtest stream 补齐。默认不做
 时间切片；只有设置 `TQSDK_REMOTE_FILL_SLICE_SECS` 时才按时间切片 fallback。普通 final 补齐成功后只
 按本轮实际远端回填的 `symbol × trading day` 去重 compact 相交 tick 日分区，provisional fill 跳过 compaction，并返回
@@ -115,8 +120,8 @@ minute per-file lock 再保护物理文件。该 advisory 协议不保证新旧 
 的持续进程时应同步重启。
 
 固定 cache root 的运维作业可选用 workspace 的 `tqsdk-cache` binary：它通过同一个
-`.remote_on_miss().warmup()` / `.cache_only()` 路径执行 `inventory`、closed-day / 自动当前日
-provisional `fill`、report-bound `verify` 和 TQBN `doctor`。closed-day fill 可按本地通用交易日历
+history client 路径为 tick/minute/daily 执行 `inventory`、`inspect`、`fill`、report-bound `verify`、
+`doctor` 和显式 purge；daily fill 只请求官方 native 1d。closed-day fill 可按本地通用交易日历
 选择最近 N 个已结束交易日；显式日期结束于当前日时自动把单次 horizon 固定为启动时刻减 5 秒，
 严格任务可用 `--require-final` 拒绝当前日。CLI 将 JSON 保持在 stdout、进度保持在 stderr，
 不改变 facade 默认行为，也不替代 live `MarketCachePolicy` recording；完整命令合同见

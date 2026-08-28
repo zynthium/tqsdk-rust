@@ -26,13 +26,12 @@
 - [回测 Tick 持久缓存预热与验收](architecture/backtest-tick-cache-operations.md)：按已完成交易日
   增量填充共享 TQBN cache，或用显式当前结束日期自动保存 provisional 快照，并用 CacheOnly 和
   实际回放验证 final coverage。
-- [回测 Tick Cache CLI](architecture/backtest-tick-cache-cli.md)：可选 `tqsdk-cache` binary 的
-  默认文本摘要 / 按需 versioned JSON、calendar-aware closed-day fill、显式当前结束日期自动
-  provisional fill、`--require-final` 严格保护、selectable stderr progress、report-bound verify
-  与 TQBN doctor 合同。
+- [回测缓存 CLI](architecture/backtest-tick-cache-cli.md)：可选 `tqsdk-cache` binary 对 tick、canonical
+  minute、native daily 的统一 fill/progress/schema-v3 report，以及三类 inventory、inspect、verify、doctor
+  和显式 purge 合同。
 - [回测历史查询与缓存来源](architecture/api-data.md#回测历史查询与缓存来源)：`BacktestHistoryClient`
-  的 request/chunk/terminal contract、Tick/15s/60s/整数分钟 K 的 durable-source matrix、metadata
-  sidecar 和 CacheOnly 语义。
+  的 request/chunk/terminal contract、tick / `<60s`、`60s..<1d`、`1d..=28d` 三层 durable-source
+  matrix、native daily fail-closed 语义、metadata sidecar 和 CacheOnly 合同。
 
 ## AI 助手读取顺序
 

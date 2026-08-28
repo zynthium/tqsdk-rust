@@ -86,6 +86,9 @@ forced refresh 只推进 pointer，而不重写历史 snapshot。reader 必须�
 `MinuteKlineCache` 与 `DailyKlineCache`。持久 K 线输入只接受官方 server-side backtest 确认 terminal
 完成的 `60s` 或 native `1d` bar；不回退到 `DataClient` 历史下载路径：
 
+持久源分层是强合同：tick 服务 tick 与 `<60s`，canonical minute 服务 `60s..<1d`，native daily
+服务 `1d..=28d`。daily 缓存缺失、损坏或 coverage 不完整时直接失败，不得回退 minute 合成。
+
 | 请求 | 历史来源 | 持久化 / 回放 |
 | --- | --- | --- |
 | tick、quote、`<60s` K | tick cache | 按 tick 本地合成 |
@@ -172,8 +175,10 @@ native daily cache 与 minute cache 独立；它只保存 official server-backte
 schema、market、logical symbol、session、交易日和 physical mapping；任何 sidecar 缺失/损坏或比较失败均 fail
 closed，绝不降级为 cache miss。若比较全部通过，旧 coverage 可以读取；下一次写入新缺口必须在 per-symbol lock
 内原子 reheader 到新 snapshot。checksum 错、未知 schema version、损坏或 symbol 不一致同样 fail closed，不能自动
-修复或拼接。`inspect()` / `diagnose()` 只读；唯一 destructive recovery 是显式 `purge_symbol()` 删除整个
-logical-symbol 文件。每次 atomic replace 都 fsync file 后 rename，再 fsync parent directory。该 cache 没有
+修复或拼接。`fast_inventory()` 只读取 fixed header 与 embedded logical symbol，不以转义文件名推断 symbol；
+`diagnose_all()` 完整解码所有文件并校验 checksum/rows，单 symbol `inspect()` / `diagnose()` 同样只读。
+唯一 destructive recovery 是显式 `purge_symbol()` 删除整个 logical-symbol 文件。每次 atomic replace
+都 fsync file 后 rename，再 fsync parent directory。该 cache 没有
 retention、TTL、max-byte eviction、后台 refresh 或自动 cleanup。
 
 `KQ.m@...` 仍以 logical symbol 为文件 key，metadata sidecar 负责验证请求窗口的 calendar/session/

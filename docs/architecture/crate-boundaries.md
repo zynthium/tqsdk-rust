@@ -332,24 +332,22 @@ sink、WAL、journal 或 cache writer。
   不会自动调用它。
   旧 `.tqseries` 和旧单文件 `.tqbn` layout 不再作为默认 backend，且没有兼容读取或迁移 store
 - `MinuteKlineCache`：独立 v5 `logical symbol × trading month` `.tqmk` cache，只持久化由
-  official server-side backtest terminal 确认的 final 60s K；`<60s` query 从 Tick 按 session 聚合，
-  `N × 60s` query 从 canonical minute 按固定 CST `18:00` trading-day grid 聚合，盘中 break 不重置
-  bucket，二者都不落盘。task 只把这些 source/result 转成 replay events。文件 format id 是
-  `tqsdk.minute-kline.monthly.v5`，row payload 仅在 zstd 更小时无损压缩；目录名继续为
-  `minute-kline-v3`。旧 v4 只允许显式备份迁移，v3 诊断为 `LegacyUnsupported` 而不是静默迁移。它不做
-- `DailyKlineCache`：独立 v1 `logical symbol` `.tqdk` cache，只持久化由 official server-side backtest
-  terminal 确认的 native 1d K；一个 logical symbol 一个 `daily-kline-v1/<escaped-symbol>.tqdk` 原子替换
-  文件，不按时间分区。`2d` 至 `28d` query 仅从 final 1d rows 按其 native timestamp phase 临时聚合；没有
-  automatic retention 或自动修复。snapshot/checksum/schema 错误都 fail closed；只有显式 `purge_symbol()`
-  可以删除整个文件，结算价和涨跌停价未支持
-  automatic retention/max-byte eviction 或后台清理，Refresh/purge 都是显式破坏性操作；
-  `fast_inventory()` 是不解码、不建 root 的只读盘点，`diagnose()` 是逐月深检并区分
-  readable / legacy / unsupported / corrupt
-- remote backtest cache fill 的完整性 accumulator / report 类型
-- `BacktestHistoryClient`：持久 session/calendar/continuous-mapping sidecar、CacheOnly / RemoteOnMiss
-  planner、跨 client single-flight fill、bounded `spawn_blocking` cache readers、request chunk 与
-  terminal report。production orchestration 是 async；TQBN 解压/解码仍在有界 blocking worker 中，
-  不将 `tokio::fs` 误称为吞吐优化
+  official server-side backtest terminal 确认的 final 60s K；`60s..<1d` 的整数分钟只从这些
+  canonical rows 临时聚合。文件 format id 是 `tqsdk.minute-kline.monthly.v5`，目录名继续为
+  `minute-kline-v3`；旧 v4 只允许显式备份迁移，v3 诊断为 `LegacyUnsupported`
+- `DailyKlineCache`：独立 v1 logical-symbol `.tqdk` cache，只持久化 official server-side
+  backtest terminal 确认的 native 1d K；一个 logical symbol 一个
+  `daily-kline-v1/<escaped-symbol>.tqdk` 原子替换文件，不按时间分区。`2d..=28d` 仅从 final 1d
+  rows 临时聚合，daily miss 不回退到 minute。snapshot/checksum/schema 错误 fail closed；结算价和
+  涨跌停价未支持
+- 三层 source policy 固定为 tick 服务 tick 与 `<60s`、canonical minute 服务 `60s..<1d`、native
+  daily 服务 `1d..=28d`。三类 cache 都没有 automatic retention/max-byte eviction 或后台清理
+- minute 的 `fast_inventory()`/deep `diagnose()` 与 daily 的 `fast_inventory()`/`diagnose_all()`
+  都由 cache API 所有；daily inventory 以 embedded logical symbol 为权威，doctor 完整解码 checksum/rows
+- remote backtest cache fill 的完整性 accumulator / schema-v3 report 类型
+- `BacktestHistoryClient`：三类 fill 调度的唯一 owner，负责持久 sidecar、CacheOnly/RemoteOnMiss
+  planner、batch/concurrency/idle/batch-timeout/cancellation/progress、跨 client single-flight、
+  bounded `spawn_blocking` cache readers、request chunk 与 terminal report。facade 和 CLI 只做适配
 - RemoteOnMiss source-lane 调度：最多保留 logical concurrency 个 clean lanes，顺序 slice 可复用
   session；只有 terminal 与 chart cleanup 都成功才回池，pool overflow、取消和错误直接销毁且不在
   series lease 内等待。data 不实现 session protocol，只组合
@@ -384,27 +382,23 @@ sink、WAL、journal 或 cache writer。
 ### 正确职责
 
 - 可选 workspace binary，不进入 Cargo default-members
-- 以 `--kind tick|minute|all`（默认 tick）选择 cache family：tick 与 minute 都提供
-  read-only `inventory`；tick 提供 physical-symbol `inspect`、closed-day/current-day provisional
-  `fill`、CacheOnly `verify`；minute 提供 logical-symbol final-only `fill`、`inspect`、`verify`
-  与 deep diagnostic；`all` 只可用于 `inventory` / `doctor`
-- minute fill 只通过 `Tq::futures()` / `Tq::stock()` 的 server-side backtest 60s Kline 流补齐；
-  stock 不接受 futures universe selector，必须显式 symbol。minute report 写入
-  `<cache-root>/reports/minute/`，并以 `cache_kind=minute` 供 `verify --report` 绑定
-- 将现有 `tqsdk` remote-on-miss warmup、`BacktestTickCache` / `MinuteKlineCache`
-  read-only/diagnostic APIs 组合为默认 text / opt-in V3 JSON stdout（可选 legacy V2）+
-  selectable stderr progress 的 operator contract；JSONL progress schema 为 v2，带 `cache_kind`
-- tick normal fill report 记录 canonical root、logical/physical symbols、coverage state、共同
-  checkpoint 和调度配置，供 `verify --report` 复用；minute report 记录 logical cache symbols。
-  取消时不提交未完成的 final coverage
+- 以 `--kind tick|minute|daily|all`（默认 tick）选择 cache family；三类都提供 inventory、inspect、
+  fill、verify、doctor 和各自粒度的 purge，`all` 只可用于汇总 inventory/doctor
+- tick fill 使用 official tick stream；minute fill 使用 futures/stock official 60s stream；daily fill
+  只使用 futures official native 1d stream，不从 tick/minute 聚合且 daily miss 不回退到 minute
+- tick/minute/daily fill 共享 `BacktestHistoryClient` 的 batch/concurrency/timeout/cancellation/progress
+  合同。默认 batch size 1、concurrency 2、idle timeout 60s、无 batch timeout，最大 batch size 与
+  concurrency 均为 4
+- 新 fill report 统一写 schema v3，默认目录为 `reports/tick/`、`reports/minute/`、
+  `reports/daily/`；reader 兼容 tick v1/v2、minute v1、daily v1
+- tick purge 删除相交 TQBN trading-day partitions，minute purge 删除相交整月，daily purge 删除整个
+  logical-symbol `.tqdk`；真实 purge 均要求 `--yes` 与 exclusive root gate
 
 ### 不应承担的职责
 
 - 新的持久格式、store adapter、remote protocol client 或 proxy policy
 - session/state-tree/backtest runtime ownership，live tick recording、daemon、relay 或 dashboard
-- tick 的 `refresh` / purge / compact 继续要求显式 SDK API 和人工确认；CLI 仅提供 minute
-  `purge`，它必须恰好一个 symbol、明确日期范围与 `--yes`，`--dry-run` 只列出月文件且不写入。
-  两类 cache 都不进行自动清理
+- 自动 retention、eviction、清理或未经确认的 destructive recovery
 
 ### 判断
 

@@ -216,8 +216,10 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
 - `tqsdk-data`
   - research/offline data crate
   - `DataClient`
-  - `BacktestHistoryClient`：metadata sidecar、source planner、single-flight official fill、
-    bounded async scan、Tick/60s/1d aggregation 与 query terminal report 的唯一 owner；公开
+- `BacktestHistoryClient`：metadata sidecar、source planner、single-flight official fill、统一的
+  tick/minute/daily batch/concurrency/timeout/progress 调度、bounded async scan 与 query terminal report
+  的唯一 owner；tick 服务 tick 与 `<60s`，canonical minute 服务 `60s..<1d`，native daily 服务
+  `1d..=28d`，daily miss 不回退到 minute；公开
     `RemoteOnMiss` run 自动持有 shared cache-root gate，facade 已持锁时传递同一守卫，避免嵌套自锁
   - `query_his_cont_quotes`
   - `query_his_cont_underlyings`
@@ -253,15 +255,16 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
   physical mapping 全部证明一致时才能读旧行，并在 new-gap write 的 symbol lock 内原子 reheader；缺 sidecar、
   checksum/schema/snapshot 错误都 fail closed，结算价与涨跌停价未支持
 - `tqsdk-cache`
-  - 可选 operator CLI；以 `--kind tick|minute|daily|all`（默认 tick）管理 canonical daily TQBN
-    tick cache、canonical final-60s minute cache 与 native final-1d single-file cache。`all` 只允许
-    inventory / doctor；daily 目前只开放 futures closed-day `fill`，它以官方 native `1d` chart 补洞，
-    不从 tick/minute 聚合；minute fill 支持 futures / stock（stock 必须显式 symbol），minute purge 是
-    单 symbol、明确日期范围、`--yes` 才执行的 destructive operation
-  - tick 保留 remote-on-miss / current-day provisional / `--require-final`、calendar-aware
-    `--last-trading-days` 等合同；三类 fill 都有 selectable stderr progress（plain/TTY/JSONL），
-    JSONL progress 为 schema v2 并携带 `cache_kind`。tick report 保持 schema v2（兼容 v1），
-    minute report 写入 `reports/minute/` 并可由 minute `verify --report` 复用
+- 可选 operator CLI；以 `--kind tick|minute|daily|all`（默认 tick）管理 canonical daily TQBN
+  tick cache、canonical final-60s minute cache 与 native final-1d single-file cache。`all` 的 inventory /
+  doctor 同时包含三类缓存；daily 还支持 inspect/fill/verify/purge，且只通过官方 native `1d` chart补洞，
+  不从 tick/minute 聚合
+ - tick 保留 remote-on-miss / current-day provisional / `--require-final`、calendar-aware
+   `--last-trading-days` 等合同；三类 fill 共享 batch/concurrency/timeout defaults 和 selectable stderr
+   progress（plain/TTY/JSONL）。新 fill report 统一写 schema v3 与 `cache_kind`，默认目录为
+   `reports/tick/`、`reports/minute/`、`reports/daily/`；reader 兼容 tick v1/v2、minute v1、daily v1
+ - tick purge 删除相交 trading-day partitions，minute purge 删除相交整月，daily purge 删除整 symbol
+   文件；真实 purge 均要求 `--yes` 与 exclusive root gate，三类缓存都没有自动 eviction/retention
   - 普通 fill/query 取得 shared root gate；refresh、stale repair、verify、doctor 和真实 purge 取得
     exclusive root gate，冲突以退出码 75 / `cache_busy` fail fast。`inventory` 与 purge dry-run 不取稳定视图锁
   - generic trading-calendar snapshot 只用于日期 selector 和进度分母；TQBN coverage、CST `18:00`

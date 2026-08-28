@@ -225,8 +225,9 @@ tqsdk
 - history page/series/download/export
 - Greeks、历史主连等研究派生能力
 - `BacktestHistoryClient`：持久 metadata sidecar、请求 planner、official server-backtest
-  fill/single-flight、bounded async cache scan 与 Tick/60s/1d 派生 K 线查询。它是回测数据路径的
-  唯一 cache/fill owner；`tqsdk-wait` 不参与 data fill，`tqsdk-task` 不拥有 durable partition
+  fill/single-flight、统一 tick/minute/daily batch/concurrency/timeout/cancellation/progress 调度、bounded
+  async cache scan 与 Tick/60s/1d 派生 K 线查询。它是回测数据路径的唯一 cache/fill owner；
+  facade 与 CLI 只能适配该合同，`tqsdk-wait` 不参与 data fill，`tqsdk-task` 不拥有 durable partition
 - `RemoteOnMiss` 在单个 client 内最多保留 `logical_concurrency` 个 clean server-backtest source lanes；
   同一 lane 可顺序服务多个 Tick 交易日或 minute window，但只有显式 terminal 且 chart lease 清理成功
   才能复用。pool 饱和时不得在持有 series lease 期间等待，overflow session 完成后直接销毁。取消、
@@ -239,6 +240,8 @@ tqsdk
   `N × 60s`（`<1d`）从 canonical minutes 按固定 CST `18:00` trading-day grid 临时聚合、native final-1d
   logical-symbol single-file cache，以及 `2d` 至 `28d` 从 complete 1d rows 临时聚合。分钟盘中 break 不重置
   高周期 bucket；Tick/60s/1d cache 没有自动清理，派生 K 不落盘。daily row 不支持结算价或涨跌停价
+- daily miss、损坏或 coverage 不完整必须 fail closed，禁止回退到 minute；native daily 始终为一个
+  logical symbol 一个 `.tqdk` 文件，不做时间分区
 - canonical-minute 月分区绑定写入时的 immutable metadata snapshot。active metadata pointer 前移不单独
   使旧分区失效。snapshot hash 不同时，必须加载月文件绑定的旧 sidecar 与目标 sidecar，并仅对实际读取的
   cached range 比较 schema、market、logical symbol、session、交易日和 physical mapping；全部相同才可
@@ -263,9 +266,10 @@ tqsdk
 职责：
 
 - 可选 TQBN tick、canonical-minute 与 native-daily cache operator CLI
-- 默认 human summary / opt-in JSON stdout contract，stderr progress，closed-day fill、显式日期
-  current-day 自动 provisional fill、`--require-final` 严格保护、report-bound CacheOnly verify、
-  fast inventory 与 deep doctor
+- 三类 fill 共享 `BacktestHistoryClient` 调度与 stderr progress；新 report 统一写 schema v3 到
+  `reports/tick|minute|daily/`，reader 兼容 tick v1/v2、minute v1、daily v1
+- tick/minute/daily 都提供 inventory、inspect、fill、verify、doctor 和各自粒度 purge；真实 purge
+  必须 `--yes` 并持 exclusive root gate，`all` 只汇总三类 inventory/doctor
 - 使用 `BacktestTickCache` shared/exclusive root advisory gate 与 data-owned per-series lease 协调并发；
   首次关闭信号请求协作式取消并等待 tick 短尾 flush，但不提交未确认 final coverage 或推进 provisional
   checkpoint；第二次关闭信号立即以 130 退出

@@ -32,7 +32,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
 | [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、task-owned replay source、streaming local backtest execution、Python-compatible local backtest sim、kline default price tick、cash/equity drawdown summary、低延迟 trading desk profile |
 | [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、`BacktestHistoryClient` 异步缓存查询、TQBN daily v3 (`.tqbn`) tick cache、canonical final-60s K cache、native final-1d K cache、tick companion-lock repair API 和共享 universe selector |
-| [`tqsdk-cache`](crates/tqsdk-cache) | 可选 tick / canonical-minute / native-daily cache 运维与区间查询 CLI：默认文本摘要、按需 versioned JSON、lossless JSONL / token-aware LLM CSV、inventory、coverage inspect、closed-day fill、tick 的显式当前日 provisional fill、native 1d 日线 fill/report、tick companion-lock dry-run/repair、selectable stderr progress、CacheOnly verify、deep doctor 与受控 minute/daily purge；不进入默认策略 hot path |
+| [`tqsdk-cache`](crates/tqsdk-cache) | 可选 tick / canonical-minute / native-daily cache 运维与区间查询 CLI：统一 fill progress/schema-v3 report、inventory、inspect、CacheOnly verify、deep doctor 与受控 tick/minute/daily purge；不进入默认策略 hot path |
 | [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端的 quote / tick / K 线请求；未配置 relay 时 SDK 仍直连天勤 |
 
 一般使用建议：
@@ -181,6 +181,9 @@ validation error；K-only `>=60s` 不会隐式补 tick。分钟高周期的盘�
 | `1d` K | `daily-kline-v1/<escaped-logical-symbol>.tqdk` 的 native final-1d file | 原样读取 |
 | `2d` 到 `28d` K | 同一 native 1d file | 从 complete final 1d rows 本地聚合；不落盘 |
 
+三层来源由 `BacktestHistoryClient` 统一规划和填充：tick 服务 tick 与 `<60s`，canonical minute 服务
+`60s..<1d`，native daily 服务 `1d..=28d`。daily 缓存缺失或损坏时必须失败，不回退到 minute。
+
 tick、60s minute 与 1d cache 均没有自动 retention、max-byte eviction 或后台清理；1d 是单 symbol
 完整文件，不按时间分区，只有显式 `purge_symbol` 才删除。daily row 当前只保存 `Kline` 的
 OHLC、volume、open/close OI；结算价与涨跌停价未支持、不会伪造为 1d 字段。`tqsdk::advanced::data::BacktestHistoryClient` 是面向区间查询的异步入口：它按 request id
@@ -218,9 +221,10 @@ cached range 比较 schema、market、logical symbol、session、交易日和主
 cache-backed local backtest 当前只支持 futures；`Tq::stock().backtest(...)` 必须显式
 `.disabled_cache()` 并使用官方股票 server-backtest 行情。futures universe selector 不适用于股票，
 股票策略应显式声明 symbol。
-tick 与 minute cache 都不会因读取、写入、retention 或 max-byte 配置而自动删除数据。清除或重拉必须
-显式使用 backtest builder 的 `refresh` / purge API；`tqsdk-cache` 的 CLI purge 目前只作用于
-minute cache，且需要范围与确认。混合 minute snapshot 的受控重拉可显式使用 minute fill 的
+tick、minute 与 daily cache 都不会因读取、写入、retention 或 max-byte 配置而自动删除数据。清除或
+重拉必须显式使用 backtest builder 的 `refresh` / purge API 或 `tqsdk-cache`：tick 按 trading-day
+range 删除分区，minute 按 range 删除相交整月，daily 只删除整 logical-symbol 文件；真实 CLI purge
+都要求 `--yes` 和 exclusive root lock。混合 minute snapshot 的受控重拉可显式使用 minute fill 的
 `--repair-stale`，它只删除已定位的冲突整月分区。
 
 自有多资产调度器可在 `.prepare().await?` 后读取 `PreparedBacktest::tick_sources()`，

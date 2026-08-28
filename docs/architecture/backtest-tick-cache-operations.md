@@ -11,8 +11,12 @@
 [History Cache Format](history-cache-format.md)。
 
 固定 cache root 的 operator 作业可使用可选 [`tqsdk-cache` CLI](backtest-tick-cache-cli.md)。
-它复用本文相同的 remote-on-miss / CacheOnly 语义，并额外提供 root lock、JSON report 和
-deep TQBN doctor；它不是 relay、守护进程或另一套缓存格式。
+它复用本文相同的 remote-on-miss / CacheOnly 语义，并对 tick、canonical minute、native daily
+提供统一 fill progress/schema-v3 report、inventory、inspect、verify、doctor 和受控 purge；它不是
+relay、守护进程或另一套缓存格式。
+
+K 线缓存遵循固定三层来源：tick 合成 `<60s`，canonical 60s minute 聚合 `60s..<1d`，native server 1d
+聚合 `1d..=28d`。daily 缺口必须从官方 native 1d stream 补齐；CacheOnly 缺失时直接失败，不回退 minute。
 
 只在用户明确授权连接远端并写入目标 cache root 后执行远端预热。预热只读行情，不登录交易账户，
 也不会提交订单。
@@ -232,12 +236,9 @@ async fn verify(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
 
 当窗口本来没有任何行情时，最后一项应改为检查预期的空 coverage，而不是强制 replay 非空。
 
-CLI fill report 的当前 schema 为 `2`，记录原始 selector、解析日历及每 physical cache report range
-的日计数；盘中报告额外使用 `coverage_state`、`complete_through_ns` 和 `day_complete`
-区分“本轮快照成功”与“全日 final coverage 完成”。`verify --report` 仍可读取旧 schema `1`，
-缺少这些字段时按 `coverage_state=final`、`complete_through_ns=null`、
-`day_complete=complete` 解释。无论报告版本如何，最终验收都必须以同 root、同窗口的
-CacheOnly coverage 为准。
+新生成的 tick、minute、daily fill report 统一使用 schema `3`，默认写入 `reports/tick/`、
+`reports/minute/`、`reports/daily/`。reader 仍兼容 tick v1/v2、minute v1、daily v1。无论报告版本，
+最终验收都必须使用 report 绑定的同 root、同 symbol/window 做 CacheOnly readback。
 
 ## 5. 仓库内端到端 runner
 

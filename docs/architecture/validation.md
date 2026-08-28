@@ -272,15 +272,15 @@ metadata tests 还覆盖 remote-on-miss 的短 snapshot 不会降级更宽 activ
 pointer、以及 partial range 的 metadata refresh 扩展到完整 CST trading month。
 `daily_kline_cache` 覆盖 v1 单 logical-symbol `.tqdk` 的 atomic replace（rename 后 parent directory fsync）、
 final coverage、retained-sidecar 对既有 coverage 的 compatible reheader、mapping 变化时 fail-closed 且文件 bytes
-不变、checksum corruption diagnosis、显式 `purge_symbol()` 与当前/未来 CST trading day final-coverage rejection。
+不变、fixed-header/embedded-symbol fast inventory、全文件 checksum/rows diagnosis、显式 `purge_symbol()` 与
+当前/未来 CST trading day final-coverage rejection。
 `server_backtest_history` 覆盖 native daily 的 `set_chart.duration=86400000000000`、
 `klines/<symbol>/86400000000000` 与 `CanonicalDaily` event。`minute_kline_aggregate` 和 `history_backtest_replay` 覆盖 60s open/final、`N × 60s` 固定 CST `18:00`
 trading-day grid 聚合（盘中 break 不重置 bucket）、same-timestamp batch、以及主连 minute cache 保持 logical key 而 replay 保留 dated
-`underlying_symbol`。`tqsdk-cache` tests 还覆盖 minute/tick/daily/all kind routing、minute 与 daily logical-symbol
-inspect、stock minute fill 拒绝 futures universe、tick fill 拒绝 stock market、native daily CacheOnly dry-run
-不创建 root、CacheOnly minute dry-run、minute/daily report-bound verify、daily local-1d replay、minute range purge
-与 daily whole-symbol purge（含 `--yes`、日期参数拒绝与 root lock busy）以及 schema-v2 `cache_kind`
-JSONL progress。facade contract 还覆盖
+`underlying_symbol`。当前 76 项 `tqsdk-cache --test cli` 矩阵还覆盖 tick/minute/daily/all routing、三类
+inventory/inspect/verify/doctor、daily fast inventory 与 deep doctor、统一 fill defaults/validation/progress、
+新 schema-v3 report 与 tick v1/v2、minute v1、daily v1 兼容读取，以及 tick trading-day range purge、
+minute month purge、daily whole-symbol purge（真实删除均要求 `--yes` 和 exclusive root lock）。facade contract 还覆盖
 61s/90s rejection、K-only minute path 不请求 tick、CacheOnly 不创建 minute namespace、typed history
 inspect/purge、stock backtest builder selection，以及 `DataClient` 的 retention/max-byte 配置只在显式
 `run_configured_history_cache_maintenance()` 时执行；任何 tick/minute/daily history read/write 都不能自动删除数据。

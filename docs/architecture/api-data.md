@@ -90,6 +90,10 @@ planner、official server-backtest cache fill、single-flight 协调、bounded c
 `tqsdk-session` 只提供 server-history chart substrate，`tqsdk-task` 只拥有 replay/backtest event
 语义，`tqsdk-wait` 不参与 data fill。
 
+同一个 `BacktestHistoryClient` 也拥有 tick、minute、daily fill scheduling：默认 symbol batch size 1、
+concurrency 2、idle timeout 60 秒、无 batch timeout；batch size/concurrency 都只接受 `1..=4`。
+它统一产生 planning、batch、telemetry、terminal progress，facade 与 CLI 只适配该合同。
+
 | 用户请求 | durable source | 派生和持久化 |
 | --- | --- | --- |
 | Tick | CST trading-day TQBN v3 tick partition | 原样返回；不复制 |
@@ -102,6 +106,7 @@ planner、official server-backtest cache fill、single-flight 协调、bounded c
 `61s`、`90s` 等既非 sub-minute、也非 60s 整数倍的周期会被拒绝；非整数日和大于 `28d` 的日周期同样
 直接 validation error。Tick、canonical-minute 与 native-daily cache 都没有 automatic retention、max-byte
 eviction 或后台清理；refresh/purge 是显式 destructive operation，2d 至 28d 派生 K 从不落盘。
+native-daily 缺失、损坏或 coverage 不完整时必须失败，不允许以 minute 数据回退合成。
 
 `<60s` K 仍以 metadata trading-session window 划 bucket，不能跨 break；`N × 60s`（`N > 1`）
 则以官方固定 CST `18:00` trading-day grid 划 bucket。后者的盘中 break 只造成 source 60s row
@@ -404,6 +409,9 @@ tqsdk-wait        tqsdk-data
 - `MinuteKlineCache::fast_inventory()` 不解码月文件、也不创建缺失 root；`diagnose()` 以只读方式
   深检每个月文件，区分 readable v5、legacy v4/v3、unsupported version 和 corruption。这些是 data
   layer 的 typed operator API，不会迁移、修复或删除缓存
+- `DailyKlineCache::fast_inventory()` 只读取 fixed header 与 embedded logical symbol，文件名不是 symbol
+  权威；`diagnose_all()` 完整解码所有 `.tqdk` 并校验 checksum/rows。tick range purge、minute month purge
+  与 daily whole-symbol purge 都是显式 destructive API，不触发自动 retention 或跨 family recovery
 - `HistorySeriesCache` 公开 typed range writer / cache-only reader；generic segment writer、
   coverage commit 和 row reader 只作为 crate 内部 seam，避免 task/facade 直接绑定底层 store shape
 - `BacktestTickCache::compact_symbol_ticks(...)` 是 tick-only、按 symbol 的全部日分区文件粒度维护 API；

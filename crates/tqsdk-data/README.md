@@ -23,6 +23,7 @@
 - `BacktestTickCache::mark_provisional(...)` / `provisional_coverage(...)`
 - `BacktestTickCache::open(...).compact_symbol_ticks(...)`
 - `BacktestTickCache::open_read_only(...).fast_inventory()`
+- `BacktestTickCache::purge_symbol_ticks_in_range(...)`
 - `BacktestTickCache::diagnose()` / `try_acquire_remote_fill_shared_lock()` /
   `try_acquire_remote_fill_lock()` / `try_acquire_consistency_read_lock()`
 - `BacktestTickCache::repair_tick_locks(BacktestTickCacheLockRepairMode)`
@@ -30,6 +31,8 @@
 - `MinuteKlineCache::open(...)` / `open_read_only(...)` / `coverage(...)`
 - `MinuteKlineCache::store_final_range(...)` / `open_reader(...)` / `purge_range(...)`
 - `MinuteKlineCache::fast_inventory()` / `diagnose()`
+- `DailyKlineCache::open(...)` / `open_read_only(...)` / `coverage(...)` / `purge_symbol(...)`
+- `DailyKlineCache::fast_inventory()` / `diagnose_all()`
 - `MinuteKlineCacheInventory` / `MinuteKlineCacheInventorySymbol`
 - `MinuteKlineCacheDiagnosticReport` / `MinuteKlineCacheDiagnosticFile` /
   `MinuteKlineCacheDiagnosticStatus`
@@ -44,6 +47,7 @@
 - `DataClient::from_session(...).export_kline_data_csv(...)`
 - `DataClient::from_session(...).export_tick_data_csv(...)`
 - `BacktestHistoryClient::builder(...).query(...)` / `query_batch(...)`
+- `BacktestHistoryClient::orchestrate_fill(...)` / `BacktestHistoryFillConfig`
 - `BacktestHistoryRun::next()` / `finish()` / `collect()` / `collect_all(max_total_bytes)`
 - `BacktestHistoryMetadataCache` / `BacktestHistoryMaintenanceClient`
 
@@ -54,6 +58,10 @@ API 的别名。它统一拥有 metadata sidecar、CacheOnly/RemoteOnMiss planne
 fill、进程内 single-flight、跨进程 per-series fill lease、shared cache-root gate、bounded cache reader
 与 K 线聚合；`tqsdk-session` 仅提供 Tick/60s/native-1d
 server-history chart substrate，`tqsdk-task` 仅消费结果来安排 replay event。
+
+同一个 client 是 tick/minute/daily fill scheduling 的唯一 owner：默认 symbol batch size 1、concurrency 2、
+idle timeout 60 秒、无 batch timeout；batch size/concurrency 都只接受 `1..=4`。它统一产生 planning、
+batch、telemetry、terminal progress，facade 与 CLI 不再各自实现调度。
 
 | 请求 | durable source | 是否新建 K 线文件 |
 | --- | --- | --- |
@@ -68,6 +76,7 @@ server-history chart substrate，`tqsdk-task` 仅消费结果来安排 replay ev
 max-byte eviction 或后台清理；2d 到 28d 派生 K 永不落盘，1d 的显式 `purge_symbol` 与其他 refresh/purge
 均是 destructive operation。`RemoteOnMiss` 只在 coverage 缺口时
 读取 `TQ_AUTH_*` 并调用官方 futures server-backtest source；`CacheOnly` 永不联网。
+daily 缓存缺失、损坏或 coverage 不完整时必须失败，不允许从 minute 回退聚合。
 
 `<60s` K 的 metadata trading-session window 仍是聚合边界；相反，`N × 60s` 的盘中 break 只留下
 source-minute 空洞，不会关闭、重开或重置高周期 bucket，因此一根 bar 可以跨越 break。
@@ -181,10 +190,12 @@ chart cleanup 成功后，同一 session 可顺序服务后续 trading-day/minut
 - `DailyKlineCache` 同样以 immutable metadata snapshot fail closed；snapshot hash/identity 不同只有 retained
   sidecar 对每个已有 coverage 的 schema/market/symbol/session/trading-day/physical mapping 全部证明一致时才能复用，
   next-gap write 在 per-symbol lock 内原子 reheader。缺 sidecar、损坏或不一致仍是错误而非 cache miss。只有已
-  terminal 的原生 1d range 才能写 final coverage；当前或未来 CST trading day 直接拒绝。`inspect()` / `diagnose()`
-  只读，checksum 或 schema version 错误同样 fail closed；只能由显式 `purge_symbol()` 删除整个 logical-symbol 文件
+  terminal 的原生 1d range 才能写 final coverage；当前或未来 CST trading day 直接拒绝。
+  `fast_inventory()` 只读 fixed header 与 embedded logical symbol，`diagnose_all()` 完整校验 checksum/rows；
+  只能由显式 `purge_symbol()` 删除整个 logical-symbol 文件
 - `BacktestTickCache::inspect(...)` 输出 backend format、缓存目录、series 文件路径、完整性、
-  cached/missing ranges；`tick_series_path(...)` 返回逻辑 series 路径，`purge_symbol_ticks(...)` 和
+  cached/missing ranges；`tick_series_path(...)` 返回逻辑 series 路径，`purge_symbol_ticks(...)`、
+  `purge_symbol_ticks_in_range(...)` 和
   `compact_symbol_ticks(...)` 是按 `(symbol, tick)` 的全部日分区文件粒度的显式运维入口；facade
   final fill 使用范围版本，只重写本轮实际远端回填范围相交的日分区，避免 cache-hit 历史被重复 compact
 - `BacktestTickCache::repair_tick_locks(BacktestTickCacheLockRepairMode)` 是只针对既有 tick
@@ -200,9 +211,9 @@ chart cleanup 成功后，同一 session 可顺序服务后续 trading-day/minut
   `try_acquire_remote_fill_lock()` / `try_acquire_consistency_read_lock()` 提供与普通操作互斥的 exclusive
   maintenance/stable view；它们是 advisory lock，不替代单 TQBN 文件写锁。每个 series 的远端补洞另有
   跨进程 lease。锁协议只保证当前实现之间协作，不承诺新旧 binary 进程长期混跑
-- 可选 `tqsdk-cache` binary 只编排上述 data/facade 能力。它以 `--kind tick|minute|all`
-  选择 cache family（默认 tick），为 minute 提供 final-only closed-day fill、report-bound verify、
-  fast inventory / deep doctor 和显式 purge；它不属于本 crate 的 runtime、store adapter 或 live
+- 可选 `tqsdk-cache` binary 只编排上述 data/facade 能力。它以 `--kind tick|minute|daily|all`
+  选择 cache family（默认 tick），为三类提供统一 fill progress/schema-v3 report、inventory、inspect、
+  verify、deep doctor 和显式 purge；它不属于本 crate 的 runtime、store adapter 或 live
   writer 边界，详见 [回测缓存 CLI](../../docs/architecture/backtest-tick-cache-cli.md)
 - `LiveTickCacheWriter` 是纯数据层 writer：调用方或 `tqsdk` facade 传入已经收到的 live tick
   rows，它负责追加 rows、按连续 tick id 推进 coverage，并在跳号处留下缺口。连续单 tick push
