@@ -742,6 +742,40 @@ struct SourceInspection {
     missing_ranges: Vec<(i64, i64)>,
 }
 
+pub(crate) enum StrictInspectionFailure {
+    Planning(DataError),
+    Source(DataError),
+    CoverageIncomplete(Vec<(i64, i64)>),
+    Provisional { as_of_ns: i64 },
+}
+
+pub(crate) async fn strict_inspect_request(
+    config: Arc<BacktestHistoryClientConfig>,
+    request: ValidatedBacktestHistoryRequest,
+) -> std::result::Result<super::report::BacktestHistoryRequestReport, StrictInspectionFailure> {
+    let plan = plan_request_for_execution(&config, request)
+        .await
+        .map_err(StrictInspectionFailure::Planning)?;
+    if let BacktestHistoryFinality::Provisional { as_of_ns } = plan.finality {
+        return Err(StrictInspectionFailure::Provisional { as_of_ns });
+    }
+
+    let mut cached_ranges = Vec::new();
+    let mut missing_ranges = Vec::new();
+    for slice in &plan.source_slices {
+        let inspection =
+            inspect_source(&config, &plan, slice).map_err(StrictInspectionFailure::Source)?;
+        cached_ranges.extend(inspection.cached_ranges);
+        missing_ranges.extend(inspection.missing_ranges);
+    }
+    let missing_ranges = merge_ranges(missing_ranges);
+    if !missing_ranges.is_empty() {
+        return Err(StrictInspectionFailure::CoverageIncomplete(missing_ranges));
+    }
+
+    Ok(plan.report_template(0, merge_ranges(cached_ranges), Vec::new(), false))
+}
+
 fn inspect_source(
     config: &BacktestHistoryClientConfig,
     plan: &PlannedBacktestHistoryRequest,

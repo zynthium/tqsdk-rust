@@ -35,6 +35,50 @@ const ACTIVE_FILE_NAME: &str = "active.json";
 const LOCK_FILE_NAME: &str = ".metadata.lock";
 const SNAPSHOTS_DIR_NAME: &str = "snapshots";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StrictMetadataErrorKind {
+    Corrupt,
+    Incompatible,
+    Missing,
+}
+
+#[derive(Debug)]
+pub(crate) struct StrictMetadataError {
+    kind: StrictMetadataErrorKind,
+    message: String,
+}
+
+impl StrictMetadataError {
+    pub(crate) const fn kind(&self) -> StrictMetadataErrorKind {
+        self.kind
+    }
+
+    pub(crate) fn message(self) -> String {
+        self.message
+    }
+
+    fn corrupt(message: impl Into<String>) -> Self {
+        Self {
+            kind: StrictMetadataErrorKind::Corrupt,
+            message: message.into(),
+        }
+    }
+
+    fn incompatible(message: impl Into<String>) -> Self {
+        Self {
+            kind: StrictMetadataErrorKind::Incompatible,
+            message: message.into(),
+        }
+    }
+
+    fn missing(message: impl Into<String>) -> Self {
+        Self {
+            kind: StrictMetadataErrorKind::Missing,
+            message: message.into(),
+        }
+    }
+}
+
 /// Market family represented by a metadata snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BacktestHistoryMarketKind {
@@ -314,6 +358,98 @@ impl BacktestHistoryMetadataCache {
             .join(METADATA_NAMESPACE)
             .join(escape_symbol_path_component(logical_symbol)))
     }
+}
+
+pub(crate) fn validate_active_snapshot_strict(
+    cache_dir: &Path,
+    logical_symbol: &str,
+) -> std::result::Result<(), StrictMetadataError> {
+    let cache = BacktestHistoryMetadataCache::open_read_only(cache_dir);
+    let symbol_dir = cache
+        .symbol_dir(logical_symbol)
+        .map_err(|error| StrictMetadataError::corrupt(error.to_string()))?;
+    let active_path = symbol_dir.join(ACTIVE_FILE_NAME);
+    let active_bytes = match fs::read(&active_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Err(StrictMetadataError::missing(format!(
+                "metadata sidecar {} is missing",
+                active_path.display()
+            )));
+        }
+        Err(error) => {
+            return Err(StrictMetadataError::corrupt(format!(
+                "active pointer {} cannot be read: {error}",
+                active_path.display()
+            )));
+        }
+    };
+    let pointer: ActiveSnapshotPointer =
+        serde_json::from_slice(active_bytes.as_slice()).map_err(|error| {
+            StrictMetadataError::corrupt(format!(
+                "active pointer {} is invalid JSON: {error}",
+                active_path.display()
+            ))
+        })?;
+    pointer.validate_strict(active_path.as_path())?;
+
+    let snapshots_dir = symbol_dir.join(SNAPSHOTS_DIR_NAME);
+    let entries = fs::read_dir(&snapshots_dir).map_err(|error| {
+        StrictMetadataError::corrupt(format!(
+            "snapshot directory {} cannot be read: {error}",
+            snapshots_dir.display()
+        ))
+    })?;
+    let mut active_found = false;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            StrictMetadataError::corrupt(format!(
+                "snapshot directory {} cannot be read: {error}",
+                snapshots_dir.display()
+            ))
+        })?;
+        let snapshot_path = entry.path();
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        let Some(snapshot_hash) = file_name.strip_suffix(".json") else {
+            continue;
+        };
+        if !is_sha1_hex(snapshot_hash) {
+            return Err(StrictMetadataError::corrupt(format!(
+                "snapshot file {} has an invalid content-addressed name",
+                snapshot_path.display()
+            )));
+        }
+        let snapshot_bytes = fs::read(&snapshot_path).map_err(|error| {
+            StrictMetadataError::corrupt(format!(
+                "snapshot {} cannot be read: {error}",
+                snapshot_path.display()
+            ))
+        })?;
+        let snapshot: BacktestHistoryMetadataSnapshot =
+            serde_json::from_slice(snapshot_bytes.as_slice()).map_err(|error| {
+                StrictMetadataError::corrupt(format!(
+                    "snapshot {} is invalid JSON: {error}",
+                    snapshot_path.display()
+                ))
+            })?;
+        if snapshot.schema_version != BACKTEST_HISTORY_METADATA_SCHEMA_VERSION {
+            return Err(StrictMetadataError::incompatible(format!(
+                "snapshot {} has unsupported schema version {}",
+                snapshot_path.display(),
+                snapshot.schema_version
+            )));
+        }
+        validate_loaded_snapshot(&snapshot, logical_symbol, snapshot_hash)
+            .map_err(|error| StrictMetadataError::corrupt(error.to_string()))?;
+        active_found |= snapshot_hash == pointer.snapshot_hash;
+    }
+    if !active_found {
+        return Err(StrictMetadataError::corrupt(format!(
+            "active pointer {} references a missing snapshot",
+            active_path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn read_active_snapshot(
@@ -1452,22 +1588,27 @@ struct ActiveSnapshotPointer {
 
 impl ActiveSnapshotPointer {
     fn validate(&self, path: &Path) -> Result<()> {
+        self.validate_strict(path)
+            .map_err(|error| metadata_response_error(error.message()))
+    }
+
+    fn validate_strict(&self, path: &Path) -> std::result::Result<(), StrictMetadataError> {
         if self.format_id != BACKTEST_HISTORY_METADATA_FORMAT_ID {
-            return Err(metadata_response_error(format!(
+            return Err(StrictMetadataError::incompatible(format!(
                 "active pointer {} has unsupported format {}",
                 path.display(),
                 self.format_id
             )));
         }
         if self.schema_version != BACKTEST_HISTORY_METADATA_SCHEMA_VERSION {
-            return Err(metadata_response_error(format!(
+            return Err(StrictMetadataError::incompatible(format!(
                 "active pointer {} has unsupported schema version {}",
                 path.display(),
                 self.schema_version
             )));
         }
         if !is_sha1_hex(self.snapshot_hash.as_str()) {
-            return Err(metadata_response_error(format!(
+            return Err(StrictMetadataError::corrupt(format!(
                 "active pointer {} has invalid snapshot hash",
                 path.display()
             )));

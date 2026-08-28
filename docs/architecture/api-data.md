@@ -118,6 +118,14 @@ eviction 或后台清理；refresh/purge 是显式 destructive operation，2d �
 `RequestCompleted` 到达前都是 provisional；一个请求失败不会取消 batch 里其他请求。`finish()` 会排空
 未消费事件并返回所有 terminal report。单请求 `collect()` 使用 builder 的默认 512 MiB 上限；批量
 `collect_all(max_total_bytes)` 必须显式给出总内存预算，避免把大范围 Tick/15s 查询无界物化。
+`BacktestHistoryFailureReason` 是 strict snapshot inspect/query seam 的 typed 失败分类；coverage 缺口携带
+完整 physical `missing_ranges`。既有 `BacktestHistoryRequestFailure` 保持 source-compatible，调用方不得解析
+其 `error` 文本来推断 strict snapshot 状态。
+
+`BacktestHistorySnapshot` 打开时持有 generation shared lease，并在加锁后重读 `CURRENT`；其
+`metadata_snapshot_hash()` 返回 manifest 的 generation 级 metadata inventory SHA-256。
+`BacktestHistoryRequestReport::snapshot_hash` 继续表示现有 per-symbol metadata cache identity，
+两者用途不同，调用方不得直接按字符串相等比较。
 
 `RemoteOnMiss` 先检查 durable coverage，只有缺口时才 lazy-load auth 并使用官方 futures
 server-backtest source；`CacheOnly` 不联网。`KQ.m@...` 的 calendar、session 和 physical segment

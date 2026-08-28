@@ -79,6 +79,18 @@ format 必须 fail closed。
 
 manifest 不把自身 bytes 或 snapshot_id 放入被 hash 的 payload，避免 self-reference。
 
+`metadata_snapshot_hash` 是 generation 级 metadata inventory identity，不是单个请求 report
+里的 per-symbol metadata cache hash。其 canonical payload 是 `files` 中 role 为
+`metadata_content_addressed` 或 `pointer_copy` 的条目，保持 normalized path 顺序，并编码为
+紧凑 JSON 数组 `[[path, role, sha256], ...]`；字段值是该 payload 的完整
+`sha256:<64 lowercase hex>`。validator 在打开 generation 时重算该值。strict inspect 的
+per-symbol hash 仍由现有 metadata planner 验证；relay 对外的 generation metadata hash 使用
+本 manifest 字段。
+
+`required_features` 按 UTF-8 byte order 排序且无重复。v1 唯一已知可选 reader feature 是
+`tqbn-zstd`：只有 reader 编译时启用同名 Cargo feature 才接受；未知 feature 或已知但未编译
+feature 都是 incompatible，而不是 corrupt。
+
 ### Authoritative catalog
 
 `catalog.complete=true` 表示 publisher 使用同一个 metadata snapshot 枚举并验证了本 generation

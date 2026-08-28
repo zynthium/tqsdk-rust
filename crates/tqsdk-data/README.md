@@ -45,6 +45,8 @@
 - `DataClient::from_session(...).export_tick_data_csv(...)`
 - `BacktestHistoryClient::builder(...).query(...)` / `query_batch(...)`
 - `BacktestHistoryRun::next()` / `finish()` / `collect()` / `collect_all(max_total_bytes)`
+- `BacktestHistorySnapshot`（lease-pinned read-only generation；manifest metadata hash 是 generation 级
+  inventory SHA-256，request report hash 仍是 per-symbol metadata identity）
 - `BacktestHistoryMetadataCache` / `BacktestHistoryMaintenanceClient`
 
 ## 回测历史查询
@@ -268,6 +270,7 @@ Python-compatible mmap 缓存；旧 binary/mmap history cache 已从 public surf
 - `BacktestHistoryClientBuilder`
 - `BacktestHistoryRequest` / `BacktestHistoryPolicy`
 - `BacktestHistoryEvent` / `BacktestHistoryRun` / `BacktestHistoryBatchReport`
+- `BacktestHistoryRequestFailure`（既有 query 兼容面）/ `BacktestHistoryFailureReason`（strict snapshot seam typed failure）
 - `BacktestHistoryMetadataCache` / `BacktestHistoryMaintenanceClient`
 - `DailyKlineCache` / `DailyKlineCoverage` / `DailyKlineCacheStatus` /
   `DailyKlineCacheDiagnosticReport` / `DailyKlineCachePurgeReport`

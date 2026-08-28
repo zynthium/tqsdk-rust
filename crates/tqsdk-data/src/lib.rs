@@ -91,15 +91,17 @@ pub use backtest_history::{
     BacktestHistoryAuthProvider, BacktestHistoryBatchReport, BacktestHistoryChunk,
     BacktestHistoryClient, BacktestHistoryClientBuilder, BacktestHistoryCollected,
     BacktestHistoryCollectedBatch, BacktestHistoryCoverageReport, BacktestHistoryCredentials,
-    BacktestHistoryEvent, BacktestHistoryField, BacktestHistoryFinality, BacktestHistoryKind,
+    BacktestHistoryEvent, BacktestHistoryFailureReason, BacktestHistoryField,
+    BacktestHistoryFinality, BacktestHistoryInspection, BacktestHistoryKind,
     BacktestHistoryMaintenanceClient, BacktestHistoryMaintenanceClientBuilder,
     BacktestHistoryMarketKind, BacktestHistoryMetadataCache, BacktestHistoryMetadataSnapshot,
     BacktestHistoryPhase, BacktestHistoryPhysicalSegment, BacktestHistoryPolicy,
     BacktestHistoryRequest, BacktestHistoryRequestFailure, BacktestHistoryRequestId,
     BacktestHistoryRequestReport, BacktestHistoryRows, BacktestHistoryRun,
-    BacktestHistorySchemaSeries, BacktestHistoryTelemetryEvent, BacktestHistoryTelemetryStream,
-    BacktestHistoryTradingDay, BacktestHistoryValueKind, backtest_history_default_fields,
-    backtest_history_resolve_fields, backtest_history_schema_fields,
+    BacktestHistorySchemaSeries, BacktestHistorySnapshot, BacktestHistorySnapshotError,
+    BacktestHistoryTelemetryEvent, BacktestHistoryTelemetryStream, BacktestHistoryTradingDay,
+    BacktestHistoryValueKind, backtest_history_default_fields, backtest_history_resolve_fields,
+    backtest_history_schema_fields,
 };
 #[doc(hidden)]
 pub use backtest_history::{

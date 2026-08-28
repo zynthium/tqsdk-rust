@@ -7,6 +7,8 @@ mod planner;
 mod report;
 mod request;
 mod schema;
+mod snapshot;
+mod snapshot_manifest;
 mod store_worker;
 mod telemetry;
 
@@ -38,9 +40,9 @@ pub use metadata::{
 pub use report::{
     BacktestHistoryBatchReport, BacktestHistoryChunk, BacktestHistoryCollected,
     BacktestHistoryCollectedBatch, BacktestHistoryCoverageReport, BacktestHistoryEvent,
-    BacktestHistoryFinality, BacktestHistoryPhase, BacktestHistoryPhysicalSegment,
-    BacktestHistoryRequestFailure, BacktestHistoryRequestReport, BacktestHistoryRows,
-    BacktestHistoryTelemetryEvent,
+    BacktestHistoryFailureReason, BacktestHistoryFinality, BacktestHistoryPhase,
+    BacktestHistoryPhysicalSegment, BacktestHistoryRequestFailure, BacktestHistoryRequestReport,
+    BacktestHistoryRows, BacktestHistoryTelemetryEvent,
 };
 pub use request::{
     BacktestHistoryAuthProvider, BacktestHistoryClientBuilder, BacktestHistoryCredentials,
@@ -50,6 +52,9 @@ pub use schema::{
     BacktestHistoryField, BacktestHistorySchemaSeries, BacktestHistoryValueKind,
     backtest_history_default_fields, backtest_history_resolve_fields,
     backtest_history_schema_fields,
+};
+pub use snapshot::{
+    BacktestHistoryInspection, BacktestHistorySnapshot, BacktestHistorySnapshotError,
 };
 pub use telemetry::BacktestHistoryTelemetryStream;
 
