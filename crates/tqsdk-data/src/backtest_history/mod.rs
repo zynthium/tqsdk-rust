@@ -55,11 +55,53 @@ pub use schema::{
 };
 pub use snapshot::{
     BacktestHistoryInspection, BacktestHistorySnapshot, BacktestHistorySnapshotError,
+    BacktestHistorySnapshotEvent, BacktestHistorySnapshotRun,
 };
 pub use telemetry::BacktestHistoryTelemetryStream;
 
-use executor::BacktestHistoryExecutionMode;
+use executor::{BacktestHistoryExecutionMode, BacktestHistoryExecutionState};
 use request::{BacktestHistoryClientConfig, ValidatedBacktestHistoryRequest};
+
+pub(crate) type BacktestHistoryLifecyclePin = Arc<dyn Send + Sync + 'static>;
+pub(crate) type BacktestHistoryFailureReasons =
+    Arc<Mutex<BTreeMap<BacktestHistoryRequestId, BacktestHistoryFailureReason>>>;
+
+pub(crate) fn classify_snapshot_failure(
+    error: &DataError,
+    cancelled: bool,
+) -> BacktestHistoryFailureReason {
+    if cancelled {
+        return BacktestHistoryFailureReason::Cancelled;
+    }
+    match error {
+        DataError::Validation(_) => BacktestHistoryFailureReason::InvalidRequest,
+        DataError::CacheMiss(miss) => BacktestHistoryFailureReason::CoverageIncomplete {
+            missing_ranges: miss.missing_ranges.clone(),
+        },
+        DataError::InvalidResponse(_) | DataError::Io(_) | DataError::Json(_) => {
+            BacktestHistoryFailureReason::SnapshotCorrupt
+        }
+        DataError::CacheBusy { .. }
+        | DataError::FeatureDisabled(_)
+        | DataError::RemoteBacktestHistoryFillUnavailable => {
+            BacktestHistoryFailureReason::SnapshotUnavailable
+        }
+        DataError::Timeout(_) => BacktestHistoryFailureReason::HistoryTimeout,
+        DataError::CollectLimitExceeded {
+            limit_bytes,
+            attempted_bytes,
+        } => BacktestHistoryFailureReason::ResponseTooLarge {
+            limit_bytes: *limit_bytes,
+            attempted_bytes: *attempted_bytes,
+        },
+        DataError::InvalidState(_)
+        | DataError::Session(_)
+        | DataError::PermissionDenied(_)
+        | DataError::RequestFailed { .. } => BacktestHistoryFailureReason::Internal,
+        #[cfg(feature = "services")]
+        DataError::Http(_) => BacktestHistoryFailureReason::Internal,
+    }
+}
 
 /// Cache-backed client for Tick and locally derived Kline history used by a
 /// backtest.
@@ -93,7 +135,21 @@ impl BacktestHistoryClient {
         requests: impl IntoIterator<Item = BacktestHistoryRequest>,
     ) -> Result<BacktestHistoryRun> {
         let validated = validate_requests(requests)?;
-        self.start_run(validated, BacktestHistoryExecutionMode::Query, None)
+        self.start_run(validated, BacktestHistoryExecutionMode::Query, None, None)
+    }
+
+    pub(crate) async fn query_with_lifecycle_pin(
+        &self,
+        request: BacktestHistoryRequest,
+        lifecycle_pin: BacktestHistoryLifecyclePin,
+    ) -> Result<BacktestHistoryRun> {
+        let validated = validate_requests([request])?;
+        self.start_run(
+            validated,
+            BacktestHistoryExecutionMode::Query,
+            None,
+            Some(lifecycle_pin),
+        )
     }
 
     /// Opens a terminal-event/telemetry run that only establishes durable
@@ -107,6 +163,7 @@ impl BacktestHistoryClient {
         self.start_run(
             validated,
             BacktestHistoryExecutionMode::MaterializeCache,
+            None,
             None,
         )
     }
@@ -123,6 +180,7 @@ impl BacktestHistoryClient {
             validated,
             BacktestHistoryExecutionMode::MaterializeCache,
             Some(root_gate),
+            None,
         )
     }
 
@@ -153,6 +211,7 @@ impl BacktestHistoryClient {
         requests: Vec<ValidatedBacktestHistoryRequest>,
         mode: BacktestHistoryExecutionMode,
         root_gate: Option<Arc<BacktestTickCacheOperationLock>>,
+        lifecycle_pin: Option<BacktestHistoryLifecyclePin>,
     ) -> Result<BacktestHistoryRun> {
         let root_gate = match self.config.policy {
             BacktestHistoryPolicy::CacheOnly => None,
@@ -183,6 +242,8 @@ impl BacktestHistoryClient {
         let telemetry = telemetry::TelemetryHub::new();
         let report = Arc::new(Mutex::new(BacktestHistoryBatchReport::default()));
         let report_for_task = Arc::clone(&report);
+        let failure_reasons = Arc::new(Mutex::new(BTreeMap::new()));
+        let failure_reasons_for_task = Arc::clone(&failure_reasons);
         let config = Arc::clone(&self.config);
         let cancellation = Arc::new(AtomicBool::new(false));
         let cancellation_for_task = Arc::clone(&cancellation);
@@ -196,6 +257,7 @@ impl BacktestHistoryClient {
                 telemetry_for_task.clone(),
                 cancellation_for_task,
                 mode,
+                BacktestHistoryExecutionState::new(lifecycle_pin, failure_reasons_for_task),
             )
             .await;
             telemetry_for_task.close();
@@ -214,6 +276,7 @@ impl BacktestHistoryClient {
             collect_limit_bytes: self.config.collect_limit_bytes,
             telemetry: Some(telemetry.stream()),
             cancellation,
+            failure_reasons,
         })
     }
 }
@@ -246,6 +309,7 @@ pub struct BacktestHistoryRun {
     collect_limit_bytes: usize,
     telemetry: Option<BacktestHistoryTelemetryStream>,
     cancellation: Arc<AtomicBool>,
+    failure_reasons: BacktestHistoryFailureReasons,
 }
 
 impl Drop for BacktestHistoryRun {
@@ -255,6 +319,10 @@ impl Drop for BacktestHistoryRun {
 }
 
 impl BacktestHistoryRun {
+    pub(crate) fn failure_reasons(&self) -> BacktestHistoryFailureReasons {
+        Arc::clone(&self.failure_reasons)
+    }
+
     /// Receives the next chunk or terminal event without requiring a stream
     /// extension trait import.
     pub async fn next(&mut self) -> Option<BacktestHistoryEvent> {

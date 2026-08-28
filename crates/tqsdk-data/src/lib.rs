@@ -99,8 +99,9 @@ pub use backtest_history::{
     BacktestHistoryRequest, BacktestHistoryRequestFailure, BacktestHistoryRequestId,
     BacktestHistoryRequestReport, BacktestHistoryRows, BacktestHistoryRun,
     BacktestHistorySchemaSeries, BacktestHistorySnapshot, BacktestHistorySnapshotError,
-    BacktestHistoryTelemetryEvent, BacktestHistoryTelemetryStream, BacktestHistoryTradingDay,
-    BacktestHistoryValueKind, backtest_history_default_fields, backtest_history_resolve_fields,
+    BacktestHistorySnapshotEvent, BacktestHistorySnapshotRun, BacktestHistoryTelemetryEvent,
+    BacktestHistoryTelemetryStream, BacktestHistoryTradingDay, BacktestHistoryValueKind,
+    backtest_history_default_fields, backtest_history_resolve_fields,
     backtest_history_schema_fields,
 };
 #[doc(hidden)]

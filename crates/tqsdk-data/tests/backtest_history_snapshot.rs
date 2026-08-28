@@ -471,6 +471,20 @@ async fn concrete_tick_final_empty_snapshot_inspects_as_complete() {
     assert_eq!(report.snapshot_hash, expected_metadata_hash);
     assert!(snapshot.metadata_snapshot_hash().starts_with("sha256:"));
     assert!(!report.remote_used);
+
+    let collected = snapshot
+        .query(BacktestHistoryRequest::tick(
+            13,
+            symbol,
+            DAY_START_NS,
+            DAY_END_NS,
+        ))
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert!(collected.rows.is_empty());
 }
 
 #[tokio::test]

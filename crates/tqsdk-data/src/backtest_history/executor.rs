@@ -24,14 +24,15 @@ use super::planner::{
 };
 use super::report::{
     BacktestHistoryBatchReport, BacktestHistoryChunk, BacktestHistoryEvent,
-    BacktestHistoryFinality, BacktestHistoryRows, BacktestHistoryTelemetryEvent,
+    BacktestHistoryFailureReason, BacktestHistoryFinality, BacktestHistoryRows,
+    BacktestHistoryTelemetryEvent,
 };
 use super::request::{
     BacktestHistoryClientConfig, BacktestHistoryPolicy, ValidatedBacktestHistoryRequest,
 };
 use super::store_worker::{
-    DailyScanSpec, MinuteScanSpec, StoreRows, StoreScanMessage, StoreScanSpec, SymbolBufferBudget,
-    TickScanSpec, spawn_scan,
+    DailyScanSpec, MinuteScanSpec, StoreRows, StoreScanFailure, StoreScanMessage, StoreScanSpec,
+    SymbolBufferBudget, TickScanSpec, spawn_scan,
 };
 use super::telemetry::TelemetryHub;
 
@@ -42,6 +43,23 @@ const REQUEST_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 pub(crate) enum BacktestHistoryExecutionMode {
     Query,
     MaterializeCache,
+}
+
+pub(crate) struct BacktestHistoryExecutionState {
+    lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
+    failure_reasons: super::BacktestHistoryFailureReasons,
+}
+
+impl BacktestHistoryExecutionState {
+    pub(crate) fn new(
+        lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
+        failure_reasons: super::BacktestHistoryFailureReasons,
+    ) -> Self {
+        Self {
+            lifecycle_pin,
+            failure_reasons,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,12 +81,14 @@ struct BaseScanSpec {
     cancellation: Arc<AtomicBool>,
     blocking_permits: Arc<Semaphore>,
     buffer_budget: SymbolBufferBudget,
+    lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct SharedScanRegistry {
     entries: Arc<Mutex<Vec<SharedScanEntry>>>,
     budgets: Arc<Mutex<Vec<(String, SymbolBufferBudget)>>>,
+    lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
 }
 
 #[derive(Clone)]
@@ -89,6 +109,14 @@ struct SharedScanSubscription {
 }
 
 impl SharedScanRegistry {
+    fn new(lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>) -> Self {
+        Self {
+            entries: Arc::new(Mutex::new(Vec::new())),
+            budgets: Arc::new(Mutex::new(Vec::new())),
+            lifecycle_pin,
+        }
+    }
+
     fn source_stream(
         &self,
         config: &BacktestHistoryClientConfig,
@@ -111,6 +139,7 @@ impl SharedScanRegistry {
                 cancellation,
                 blocking_permits,
                 buffer_budget: budget,
+                lifecycle_pin: self.lifecycle_pin.clone(),
             });
         }
 
@@ -159,6 +188,7 @@ impl SharedScanRegistry {
                 cancellation,
                 blocking_permits,
                 buffer_budget: budget,
+                lifecycle_pin: self.lifecycle_pin.clone(),
             });
         }
 
@@ -180,6 +210,7 @@ impl SharedScanRegistry {
             chunk_bytes,
             blocking_permits,
             budget,
+            self.lifecycle_pin.clone(),
         ));
         receiver
     }
@@ -208,6 +239,7 @@ async fn run_shared_scan(
     chunk_bytes: usize,
     blocking_permits: Arc<Semaphore>,
     buffer_budget: SymbolBufferBudget,
+    lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
 ) {
     // Give concurrently scheduled cache-hit requests one scheduler turn to
     // subscribe before the first source range is fixed. Later consumers fall
@@ -244,6 +276,7 @@ async fn run_shared_scan(
             cancellation: Arc::clone(&scan_cancellation),
             blocking_permits: Arc::clone(&blocking_permits),
             buffer_budget: buffer_budget.clone(),
+            lifecycle_pin: lifecycle_pin.clone(),
         });
         while let Some(message) = source.recv().await {
             match message {
@@ -302,6 +335,7 @@ fn spawn_base_scan(spec: BaseScanSpec) -> mpsc::Receiver<StoreScanMessage> {
             cancellation: spec.cancellation,
             permits: spec.blocking_permits,
             buffer_budget: spec.buffer_budget,
+            lifecycle_pin: spec.lifecycle_pin,
         })),
         PlannedBaseSource::CanonicalMinute => {
             spawn_scan(StoreScanSpec::CanonicalMinute(MinuteScanSpec {
@@ -313,6 +347,7 @@ fn spawn_base_scan(spec: BaseScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 cancellation: spec.cancellation,
                 permits: spec.blocking_permits,
                 buffer_budget: spec.buffer_budget,
+                lifecycle_pin: spec.lifecycle_pin,
             }))
         }
         PlannedBaseSource::CanonicalDaily => {
@@ -324,6 +359,7 @@ fn spawn_base_scan(spec: BaseScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 cancellation: spec.cancellation,
                 permits: spec.blocking_permits,
                 buffer_budget: spec.buffer_budget,
+                lifecycle_pin: spec.lifecycle_pin,
             }))
         }
     }
@@ -350,10 +386,15 @@ pub(crate) async fn execute_batch(
     telemetry: TelemetryHub,
     cancellation: Arc<AtomicBool>,
     mode: BacktestHistoryExecutionMode,
+    execution_state: BacktestHistoryExecutionState,
 ) -> BacktestHistoryBatchReport {
+    let BacktestHistoryExecutionState {
+        lifecycle_pin,
+        failure_reasons,
+    } = execution_state;
     let logical_permits = Arc::new(Semaphore::new(config.logical_concurrency));
     let blocking_permits = Arc::new(Semaphore::new(config.blocking_workers));
-    let scan_registry = SharedScanRegistry::default();
+    let scan_registry = SharedScanRegistry::new(lifecycle_pin);
     let mut tasks = JoinSet::new();
     for request in requests {
         let config = Arc::clone(&config);
@@ -363,6 +404,7 @@ pub(crate) async fn execute_batch(
         let logical_permits = Arc::clone(&logical_permits);
         let blocking_permits = Arc::clone(&blocking_permits);
         let scan_registry = scan_registry.clone();
+        let failure_reasons = Arc::clone(&failure_reasons);
         tasks.spawn(async move {
             let request_id = request.request_id;
             let symbol = request.symbol.clone();
@@ -384,10 +426,17 @@ pub(crate) async fn execute_batch(
                         scan_registry,
                         chunk_bytes,
                         mode,
+                        failure_reasons,
                     };
                     run_request(context, request).await
                 }
-                Err(error) => RequestTerminal::failed(request_id, symbol, error.to_string(), 0),
+                Err(error) => {
+                    failure_reasons
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(request_id, BacktestHistoryFailureReason::Cancelled);
+                    RequestTerminal::failed(request_id, symbol, error.to_string(), 0)
+                }
             }
         });
     }
@@ -398,14 +447,20 @@ pub(crate) async fn execute_batch(
         match result {
             Ok(RequestTerminal::Completed(completed)) => report.completed.push(completed),
             Ok(RequestTerminal::Failed(failure)) => report.failed.push(failure),
-            Err(error) => report
-                .failed
-                .push(super::report::BacktestHistoryRequestFailure {
-                    request_id: 0,
-                    symbol: "<scheduler>".to_string(),
-                    error: format!("backtest history request task failed: {error}"),
-                    emitted_rows: 0,
-                }),
+            Err(error) => {
+                failure_reasons
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(0, BacktestHistoryFailureReason::Internal);
+                report
+                    .failed
+                    .push(super::report::BacktestHistoryRequestFailure {
+                        request_id: 0,
+                        symbol: "<scheduler>".to_string(),
+                        error: format!("backtest history request task failed: {error}"),
+                        emitted_rows: 0,
+                    });
+            }
         }
     }
     report
@@ -469,6 +524,16 @@ async fn run_request(
             RequestTerminal::Completed(report)
         }
         Err(execution) => {
+            let reason = super::classify_snapshot_failure(
+                &execution.error,
+                context.cancellation.load(Ordering::Acquire),
+            );
+            context
+                .failure_reasons
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .entry(request_id)
+                .or_insert(reason);
             let failure = super::report::BacktestHistoryRequestFailure {
                 request_id,
                 symbol,
@@ -509,6 +574,7 @@ struct RequestExecutionContext {
     scan_registry: SharedScanRegistry,
     chunk_bytes: usize,
     mode: BacktestHistoryExecutionMode,
+    failure_reasons: super::BacktestHistoryFailureReasons,
 }
 
 async fn execute_request(
@@ -850,7 +916,12 @@ async fn execute_tick_plan(
                                 "backtest history request was cancelled",
                             ));
                         }
-                        let mut rows = tick_rows_for_slice(message, slice)?;
+                        let mut rows = tick_rows_for_slice(
+                            message,
+                            slice,
+                            &context.failure_reasons,
+                            plan.request_id,
+                        )?;
                         rows.retain(|row| {
                             row.datetime >= plan.requested_range.0
                                 && row.datetime < plan.effective_end_ns
@@ -884,7 +955,12 @@ async fn execute_tick_plan(
                                 "backtest history request was cancelled",
                             ));
                         }
-                        let rows = tick_rows_for_slice(message, slice)?;
+                        let rows = tick_rows_for_slice(
+                            message,
+                            slice,
+                            &context.failure_reasons,
+                            plan.request_id,
+                        )?;
                         for row in rows {
                             if let Some(update) = aggregator.update(&row)?
                                 && let Some(closed) = update.closed
@@ -967,7 +1043,12 @@ async fn execute_minute_plan(
                             "backtest history request was cancelled",
                         ));
                     }
-                    let mut rows = minute_rows_for_slice(message, slice)?;
+                    let mut rows = minute_rows_for_slice(
+                        message,
+                        slice,
+                        &context.failure_reasons,
+                        plan.request_id,
+                    )?;
                     rows.retain(|row| {
                         row.datetime >= plan.requested_range.0
                             && row.datetime < plan.effective_end_ns
@@ -1005,7 +1086,12 @@ async fn execute_minute_plan(
                         "backtest history request was cancelled",
                     ));
                 }
-                let rows = minute_rows_for_slice(message, slice)?;
+                let rows = minute_rows_for_slice(
+                    message,
+                    slice,
+                    &context.failure_reasons,
+                    plan.request_id,
+                )?;
                 for row in rows {
                     if let Some(update) = aggregator.update(&row)?
                         && let Some(closed) = update.closed
@@ -1083,7 +1169,12 @@ async fn execute_daily_plan(
                             "backtest history request was cancelled",
                         ));
                     }
-                    for row in daily_rows_for_slice(message, slice)? {
+                    for row in daily_rows_for_slice(
+                        message,
+                        slice,
+                        &context.failure_reasons,
+                        plan.request_id,
+                    )? {
                         if row.datetime >= plan.requested_range.0
                             && row.datetime < plan.effective_end_ns
                         {
@@ -1122,7 +1213,12 @@ async fn execute_daily_plan(
                             "backtest history request was cancelled",
                         ));
                     }
-                    for row in daily_rows_for_slice(message, slice)? {
+                    for row in daily_rows_for_slice(
+                        message,
+                        slice,
+                        &context.failure_reasons,
+                        plan.request_id,
+                    )? {
                         if let Some(closed) = aggregator.update(&row)?
                             && should_emit_daily_kline(&closed, plan, duration_ns)?
                         {
@@ -1175,9 +1271,15 @@ async fn execute_daily_plan(
 fn tick_rows_for_slice(
     message: StoreScanMessage,
     slice: &super::planner::PlannedSourceSlice,
+    failure_reasons: &super::BacktestHistoryFailureReasons,
+    request_id: u64,
 ) -> Result<Vec<Tick>> {
     match message {
-        StoreScanMessage::Failed(error) => Err(DataError::InvalidResponse(error)),
+        StoreScanMessage::Failed(failure) => Err(record_store_scan_failure(
+            failure_reasons,
+            request_id,
+            failure,
+        )),
         StoreScanMessage::Chunk(chunk) => match &chunk.rows {
             StoreRows::Ticks(rows) => {
                 let mut rows = rows
@@ -1198,9 +1300,15 @@ fn tick_rows_for_slice(
 fn minute_rows_for_slice(
     message: StoreScanMessage,
     slice: &super::planner::PlannedSourceSlice,
+    failure_reasons: &super::BacktestHistoryFailureReasons,
+    request_id: u64,
 ) -> Result<Vec<Kline>> {
     match message {
-        StoreScanMessage::Failed(error) => Err(DataError::InvalidResponse(error)),
+        StoreScanMessage::Failed(failure) => Err(record_store_scan_failure(
+            failure_reasons,
+            request_id,
+            failure,
+        )),
         StoreScanMessage::Chunk(chunk) => match &chunk.rows {
             StoreRows::CanonicalMinutes(rows) => {
                 let mut rows = rows
@@ -1221,9 +1329,15 @@ fn minute_rows_for_slice(
 fn daily_rows_for_slice(
     message: StoreScanMessage,
     slice: &super::planner::PlannedSourceSlice,
+    failure_reasons: &super::BacktestHistoryFailureReasons,
+    request_id: u64,
 ) -> Result<Vec<Kline>> {
     match message {
-        StoreScanMessage::Failed(error) => Err(DataError::InvalidResponse(error)),
+        StoreScanMessage::Failed(failure) => Err(record_store_scan_failure(
+            failure_reasons,
+            request_id,
+            failure,
+        )),
         StoreScanMessage::Chunk(chunk) => match &chunk.rows {
             StoreRows::CanonicalDaily(rows) => {
                 let mut rows = rows
@@ -1239,6 +1353,18 @@ fn daily_rows_for_slice(
             )),
         },
     }
+}
+
+fn record_store_scan_failure(
+    failure_reasons: &super::BacktestHistoryFailureReasons,
+    request_id: u64,
+    failure: StoreScanFailure,
+) -> DataError {
+    failure_reasons
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(request_id, failure.reason);
+    DataError::InvalidResponse(failure.message)
 }
 
 async fn send_tick_chunk(

@@ -8,6 +8,8 @@ use std::time::Duration;
 
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
+#[cfg(test)]
+use std::sync::{MutexGuard, OnceLock, mpsc as std_mpsc};
 
 use tokio::sync::{Semaphore, mpsc};
 use tqsdk_core::{Kline, Tick};
@@ -15,12 +17,135 @@ use tqsdk_core::{Kline, Tick};
 use crate::backtest_tick_cache::BacktestTickCache;
 use crate::client::TickDataSeriesRequest;
 use crate::daily_kline_cache::{DailyKlineCache, DailyKlineCacheSnapshot};
+use crate::error::DataError;
 use crate::minute_kline_cache::{MinuteKlineCache, MinuteKlineCacheSnapshot};
 
 #[cfg(test)]
 static TICK_SCAN_OPENS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static MINUTE_SCAN_OPENS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+struct BlockingScanTestGateState {
+    entered: Mutex<Option<std_mpsc::SyncSender<()>>>,
+    released: Mutex<bool>,
+    wake: Condvar,
+    panic_after_release: bool,
+}
+
+#[cfg(test)]
+static BLOCKING_SCAN_TEST_GATE: OnceLock<Mutex<Option<Arc<BlockingScanTestGateState>>>> =
+    OnceLock::new();
+#[cfg(test)]
+static BLOCKING_SCAN_TEST_SERIAL: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub(crate) struct BlockingScanTestGate {
+    state: Arc<BlockingScanTestGateState>,
+    _serial: MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl BlockingScanTestGate {
+    pub(crate) fn install() -> (Self, std_mpsc::Receiver<()>) {
+        Self::install_with_panic(false)
+    }
+
+    pub(crate) fn install_panicking() -> (Self, std_mpsc::Receiver<()>) {
+        Self::install_with_panic(true)
+    }
+
+    fn install_with_panic(panic_after_release: bool) -> (Self, std_mpsc::Receiver<()>) {
+        let serial = BLOCKING_SCAN_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (entered_sender, entered_receiver) = std_mpsc::sync_channel(1);
+        let state = Arc::new(BlockingScanTestGateState {
+            entered: Mutex::new(Some(entered_sender)),
+            released: Mutex::new(false),
+            wake: Condvar::new(),
+            panic_after_release,
+        });
+        let mut installed = BLOCKING_SCAN_TEST_GATE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            installed.is_none(),
+            "blocking scan test gate already installed"
+        );
+        *installed = Some(Arc::clone(&state));
+        (
+            Self {
+                state,
+                _serial: serial,
+            },
+            entered_receiver,
+        )
+    }
+
+    pub(crate) fn release(&self) {
+        {
+            let mut released = self
+                .state
+                .released
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *released = true;
+            self.state.wake.notify_all();
+        }
+        let mut installed = BLOCKING_SCAN_TEST_GATE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if installed
+            .as_ref()
+            .is_some_and(|state| Arc::ptr_eq(state, &self.state))
+        {
+            *installed = None;
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for BlockingScanTestGate {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[cfg(test)]
+fn wait_on_blocking_scan_test_gate() {
+    let state = BLOCKING_SCAN_TEST_GATE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let Some(state) = state else {
+        return;
+    };
+    if let Some(entered) = state
+        .entered
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+    {
+        let _ = entered.send(());
+    }
+    let mut released = state
+        .released
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    while !*released {
+        released = state
+            .wake
+            .wait(released)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+    if state.panic_after_release {
+        panic!("blocking scan test failure");
+    }
+}
 
 #[cfg(test)]
 pub(crate) fn reset_scan_open_counts() {
@@ -34,6 +159,20 @@ pub(crate) fn scan_open_counts() -> (usize, usize) {
         TICK_SCAN_OPENS.load(Ordering::Acquire),
         MINUTE_SCAN_OPENS.load(Ordering::Acquire),
     )
+}
+
+#[cfg(test)]
+#[test]
+fn store_scan_failure_preserves_error_category_before_stringification() {
+    let failure = StoreScanFailure::from_error(DataError::CacheBusy {
+        cache_dir: PathBuf::from("test-cache"),
+        operation: "test scan",
+    });
+    assert_eq!(
+        failure.reason,
+        super::BacktestHistoryFailureReason::SnapshotUnavailable
+    );
+    assert!(failure.message.contains("test scan"));
 }
 
 /// Shared byte budget for every Tick and canonical-minute base scan belonging
@@ -146,13 +285,41 @@ pub(crate) enum StoreRows {
     CanonicalDaily(Arc<[Kline]>),
 }
 
-/// One source-reader message. Failures use a string because one failure is
-/// fanned out to many independent requests, while [`DataError`] itself is not
-/// cloneable.
+/// One source-reader message. Failures retain a cloneable typed reason plus the
+/// legacy display message so one failure can fan out to many requests.
 #[derive(Debug)]
 pub(crate) enum StoreScanMessage {
     Chunk(Arc<StoreChunk>),
-    Failed(String),
+    Failed(StoreScanFailure),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StoreScanFailure {
+    pub(crate) reason: super::BacktestHistoryFailureReason,
+    pub(crate) message: String,
+}
+
+impl StoreScanFailure {
+    fn from_error(error: DataError) -> Self {
+        Self {
+            reason: super::classify_snapshot_failure(&error, false),
+            message: error.to_string(),
+        }
+    }
+
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            reason: super::BacktestHistoryFailureReason::SnapshotUnavailable,
+            message: message.into(),
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            reason: super::BacktestHistoryFailureReason::Internal,
+            message: message.into(),
+        }
+    }
 }
 
 /// Complete specification for one bounded blocking cache scan.
@@ -171,6 +338,7 @@ pub(crate) struct TickScanSpec {
     pub(crate) cancellation: Arc<AtomicBool>,
     pub(crate) permits: Arc<Semaphore>,
     pub(crate) buffer_budget: SymbolBufferBudget,
+    pub(crate) lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
 }
 
 pub(crate) struct MinuteScanSpec {
@@ -182,6 +350,7 @@ pub(crate) struct MinuteScanSpec {
     pub(crate) cancellation: Arc<AtomicBool>,
     pub(crate) permits: Arc<Semaphore>,
     pub(crate) buffer_budget: SymbolBufferBudget,
+    pub(crate) lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
 }
 
 pub(crate) struct DailyScanSpec {
@@ -192,6 +361,7 @@ pub(crate) struct DailyScanSpec {
     pub(crate) cancellation: Arc<AtomicBool>,
     pub(crate) permits: Arc<Semaphore>,
     pub(crate) buffer_budget: SymbolBufferBudget,
+    pub(crate) lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
 }
 
 /// Starts the selected source reader without occupying a Tokio worker while
@@ -215,33 +385,42 @@ fn spawn_tick_scan(spec: TickScanSpec) -> mpsc::Receiver<StoreScanMessage> {
         cancellation,
         permits,
         buffer_budget,
+        lifecycle_pin,
     } = spec;
     #[cfg(test)]
     TICK_SCAN_OPENS.fetch_add(1, Ordering::AcqRel);
     let (sender, receiver) = mpsc::channel(2);
     tokio::spawn(async move {
+        let scan_lifecycle_pin = lifecycle_pin;
         let permit = match permits.acquire_owned().await {
             Ok(permit) => permit,
             Err(_) => {
                 let _ = sender
-                    .send(StoreScanMessage::Failed(
-                        "backtest history blocking scan workers are unavailable".to_string(),
-                    ))
+                    .send(StoreScanMessage::Failed(StoreScanFailure::unavailable(
+                        "backtest history blocking scan workers are unavailable",
+                    )))
                     .await;
                 return;
             }
         };
         let blocking_sender = sender.clone();
         let blocking_cancellation = Arc::clone(&cancellation);
+        let blocking_lifecycle_pin = scan_lifecycle_pin.clone();
         let join = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if blocking_lifecycle_pin.is_some() {
+                wait_on_blocking_scan_test_gate();
+            }
+            let _lifecycle_pin = blocking_lifecycle_pin;
             let _permit = permit;
             let cache = BacktestTickCache::open_read_only(&cache_dir);
             let request = TickDataSeriesRequest::new(symbol, range.0, range.1);
             let mut reader = match cache.open_history_query_reader(request, provisional_as_of_ns) {
                 Ok(reader) => reader,
                 Err(error) => {
-                    let _ =
-                        blocking_sender.blocking_send(StoreScanMessage::Failed(error.to_string()));
+                    let _ = blocking_sender.blocking_send(StoreScanMessage::Failed(
+                        StoreScanFailure::from_error(error),
+                    ));
                     return;
                 }
             };
@@ -252,8 +431,9 @@ fn spawn_tick_scan(spec: TickScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 let rows = match reader.next_tick_chunk(target_bytes) {
                     Ok(rows) => rows,
                     Err(error) => {
-                        let _ = blocking_sender
-                            .blocking_send(StoreScanMessage::Failed(error.to_string()));
+                        let _ = blocking_sender.blocking_send(StoreScanMessage::Failed(
+                            StoreScanFailure::from_error(error),
+                        ));
                         return;
                     }
                 };
@@ -276,8 +456,8 @@ fn spawn_tick_scan(spec: TickScanSpec) -> mpsc::Receiver<StoreScanMessage> {
             && !cancellation.load(Ordering::Acquire)
         {
             let _ = sender
-                .send(StoreScanMessage::Failed(format!(
-                    "backtest history Tick blocking reader failed: {error}"
+                .send(StoreScanMessage::Failed(StoreScanFailure::internal(
+                    format!("backtest history Tick blocking reader failed: {error}"),
                 )))
                 .await;
         }
@@ -297,32 +477,41 @@ fn spawn_minute_scan(spec: MinuteScanSpec) -> mpsc::Receiver<StoreScanMessage> {
         cancellation,
         permits,
         buffer_budget,
+        lifecycle_pin,
     } = spec;
     #[cfg(test)]
     MINUTE_SCAN_OPENS.fetch_add(1, Ordering::AcqRel);
     let (sender, receiver) = mpsc::channel(2);
     tokio::spawn(async move {
+        let scan_lifecycle_pin = lifecycle_pin;
         let permit = match permits.acquire_owned().await {
             Ok(permit) => permit,
             Err(_) => {
                 let _ = sender
-                    .send(StoreScanMessage::Failed(
-                        "backtest history blocking scan workers are unavailable".to_string(),
-                    ))
+                    .send(StoreScanMessage::Failed(StoreScanFailure::unavailable(
+                        "backtest history blocking scan workers are unavailable",
+                    )))
                     .await;
                 return;
             }
         };
         let blocking_sender = sender.clone();
         let blocking_cancellation = Arc::clone(&cancellation);
+        let blocking_lifecycle_pin = scan_lifecycle_pin.clone();
         let join = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if blocking_lifecycle_pin.is_some() {
+                wait_on_blocking_scan_test_gate();
+            }
+            let _lifecycle_pin = blocking_lifecycle_pin;
             let _permit = permit;
             let cache = MinuteKlineCache::open_read_only(&cache_dir);
             let mut reader = match cache.open_reader(symbol, range.0, range.1, &snapshot) {
                 Ok(reader) => reader,
                 Err(error) => {
-                    let _ =
-                        blocking_sender.blocking_send(StoreScanMessage::Failed(error.to_string()));
+                    let _ = blocking_sender.blocking_send(StoreScanMessage::Failed(
+                        StoreScanFailure::from_error(error),
+                    ));
                     return;
                 }
             };
@@ -333,8 +522,9 @@ fn spawn_minute_scan(spec: MinuteScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 let rows = match reader.next_kline_chunk(target_bytes) {
                     Ok(rows) => rows,
                     Err(error) => {
-                        let _ = blocking_sender
-                            .blocking_send(StoreScanMessage::Failed(error.to_string()));
+                        let _ = blocking_sender.blocking_send(StoreScanMessage::Failed(
+                            StoreScanFailure::from_error(error),
+                        ));
                         return;
                     }
                 };
@@ -358,8 +548,8 @@ fn spawn_minute_scan(spec: MinuteScanSpec) -> mpsc::Receiver<StoreScanMessage> {
             && !cancellation.load(Ordering::Acquire)
         {
             let _ = sender
-                .send(StoreScanMessage::Failed(format!(
-                    "backtest history canonical-minute blocking reader failed: {error}"
+                .send(StoreScanMessage::Failed(StoreScanFailure::internal(
+                    format!("backtest history canonical-minute blocking reader failed: {error}"),
                 )))
                 .await;
         }
@@ -378,23 +568,31 @@ fn spawn_daily_scan(spec: DailyScanSpec) -> mpsc::Receiver<StoreScanMessage> {
         cancellation,
         permits,
         buffer_budget,
+        lifecycle_pin,
     } = spec;
     let (sender, receiver) = mpsc::channel(2);
     tokio::spawn(async move {
+        let scan_lifecycle_pin = lifecycle_pin;
         let permit = match permits.acquire_owned().await {
             Ok(permit) => permit,
             Err(_) => {
                 let _ = sender
-                    .send(StoreScanMessage::Failed(
-                        "backtest history blocking scan workers unavailable".to_string(),
-                    ))
+                    .send(StoreScanMessage::Failed(StoreScanFailure::unavailable(
+                        "backtest history blocking scan workers unavailable",
+                    )))
                     .await;
                 return;
             }
         };
         let blocking_sender = sender.clone();
         let blocking_cancellation = Arc::clone(&cancellation);
+        let blocking_lifecycle_pin = scan_lifecycle_pin.clone();
         let join = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if blocking_lifecycle_pin.is_some() {
+                wait_on_blocking_scan_test_gate();
+            }
+            let _lifecycle_pin = blocking_lifecycle_pin;
             let _permit = permit;
             if blocking_cancellation.load(Ordering::Acquire) {
                 return;
@@ -404,8 +602,9 @@ fn spawn_daily_scan(spec: DailyScanSpec) -> mpsc::Receiver<StoreScanMessage> {
             {
                 Ok(rows) => rows,
                 Err(error) => {
-                    let _ =
-                        blocking_sender.blocking_send(StoreScanMessage::Failed(error.to_string()));
+                    let _ = blocking_sender.blocking_send(StoreScanMessage::Failed(
+                        StoreScanFailure::from_error(error),
+                    ));
                     return;
                 }
             };
@@ -423,8 +622,8 @@ fn spawn_daily_scan(spec: DailyScanSpec) -> mpsc::Receiver<StoreScanMessage> {
             && !cancellation.load(Ordering::Acquire)
         {
             let _ = sender
-                .send(StoreScanMessage::Failed(format!(
-                    "backtest history daily blocking reader failed: {error}"
+                .send(StoreScanMessage::Failed(StoreScanFailure::internal(
+                    format!("backtest history daily blocking reader failed: {error}"),
                 )))
                 .await;
         }

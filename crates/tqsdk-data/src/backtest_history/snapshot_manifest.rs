@@ -143,6 +143,10 @@ impl ValidatedSnapshotManifest {
     pub(crate) fn catalog_symbols(&self) -> &[String] {
         self.catalog_symbols.as_slice()
     }
+
+    pub(crate) fn lifecycle_pin(&self) -> super::BacktestHistoryLifecyclePin {
+        self._lease.clone()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1004,7 +1008,17 @@ fn sha256_prefixed(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::backtest_history::store_worker::BlockingScanTestGate;
+    use crate::backtest_history::{
+        BACKTEST_HISTORY_METADATA_SCHEMA_VERSION, BacktestHistoryMarketKind,
+        BacktestHistoryMetadataCache, BacktestHistoryMetadataSnapshot,
+        BacktestHistoryPhysicalSegment, BacktestHistoryRequest, BacktestHistorySnapshot,
+        BacktestHistoryTradingDay,
+    };
+    use crate::{DailyKlineCache, DailyKlineCacheSnapshot, KlineSessionTemplate};
 
     #[test]
     fn opens_a_valid_current_manifest() {
@@ -1014,6 +1028,92 @@ mod tests {
         assert!(validated.catalog_contains("KQ.i@SHFE.au"));
         assert!(!validated.catalog_contains("SHFE.missing"));
         assert!(validated.cache_dir().ends_with("cache"));
+        remove_root(root);
+    }
+
+    #[tokio::test]
+    async fn pinned_query_holds_lease_until_detached_blocking_scan_exits() {
+        let root = valid_root("pinned-query");
+        let manifest = open_current_manifest(root.as_path()).unwrap();
+        let lease_path = generation_dir(root.as_path()).join(LEASE_FILE);
+        let exclusive = OpenOptions::new().read(true).open(lease_path).unwrap();
+
+        let cache_dir = manifest.cache_dir().to_path_buf();
+        fs::remove_dir_all(&cache_dir).unwrap();
+        fs::create_dir_all(&cache_dir).unwrap();
+        let logical_symbol = "KQ.i@SHFE.au";
+        let physical_symbol = "SHFE.au2612";
+        let start_ns = 1_767_572_800_000_000_000_i64;
+        let end_ns = 1_767_659_200_000_000_000_i64;
+        let metadata = BacktestHistoryMetadataCache::open(&cache_dir)
+            .unwrap()
+            .store_snapshot(BacktestHistoryMetadataSnapshot {
+                schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+                market_kind: BacktestHistoryMarketKind::Futures,
+                logical_symbol: logical_symbol.to_string(),
+                captured_at_ns: end_ns,
+                trading_days: vec![BacktestHistoryTradingDay {
+                    date: "2026-01-05".to_string(),
+                    is_trading_day: true,
+                    start_ns,
+                    end_ns,
+                }],
+                session: KlineSessionTemplate::cst_trading_day(),
+                physical_segments: vec![BacktestHistoryPhysicalSegment {
+                    physical_symbol: physical_symbol.to_string(),
+                    start_ns,
+                    end_ns,
+                }],
+                snapshot_hash: String::new(),
+            })
+            .unwrap();
+        let cache_snapshot = DailyKlineCacheSnapshot::new(
+            metadata.schema_version,
+            metadata.snapshot_hash.clone(),
+            metadata.session.snapshot_hash(),
+        )
+        .unwrap();
+        DailyKlineCache::open(&cache_dir)
+            .unwrap()
+            .store_final_range(logical_symbol, start_ns, end_ns, &cache_snapshot, &[])
+            .unwrap();
+        let snapshot = BacktestHistorySnapshot::from_validated_manifest(manifest).unwrap();
+        let (gate, entered) = BlockingScanTestGate::install();
+        let run = snapshot
+            .query(BacktestHistoryRequest::kline(
+                1,
+                logical_symbol,
+                Duration::from_secs(86_400),
+                start_ns,
+                end_ns,
+            ))
+            .await
+            .unwrap();
+        drop(snapshot);
+
+        tokio::task::spawn_blocking(move || entered.recv_timeout(Duration::from_secs(1)))
+            .await
+            .unwrap()
+            .expect("blocking scan must enter the test gate");
+        let locked_while_running = FileExt::try_lock_exclusive(&exclusive).is_err();
+        drop(run);
+        let locked_after_run_drop = FileExt::try_lock_exclusive(&exclusive).is_err();
+        gate.release();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if FileExt::try_lock_exclusive(&exclusive).is_ok() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("generation lease must release after blocking scan exits");
+        FileExt::unlock(&exclusive).unwrap();
+
+        assert!(locked_while_running);
+        assert!(locked_after_run_drop);
         remove_root(root);
     }
 

@@ -124,6 +124,13 @@ eviction 或后台清理；refresh/purge 是显式 destructive operation，2d �
 
 `BacktestHistorySnapshot` 打开时持有 generation shared lease，并在加锁后重读 `CURRENT`；其
 `metadata_snapshot_hash()` 返回 manifest 的 generation 级 metadata inventory SHA-256。
+`inspect()` 在不读取 row 的情况下执行 strict coverage/finality 检查；`query()` 仅在 strict
+检查成功后启动 CacheOnly run，并把同一 generation lease 传入 coordinator、shared scan 和
+实际 blocking reader。HTTP disconnect、timeout 或 `BacktestHistorySnapshotRun` drop 只发出取消信号，
+不会在 detached blocking reader 完全退出前释放 generation lease。
+`query()` 返回 snapshot-owned `BacktestHistorySnapshotRun`；其 `next()`、`collect()` 和 `finish()`
+在 reader 已启动后仍返回 typed `BacktestHistoryFailureReason`。legacy `BacktestHistoryRun`、
+`BacktestHistoryEvent` 和 `BacktestHistoryRequestFailure` 的字段与字符串行为保持不变。
 `BacktestHistoryRequestReport::snapshot_hash` 继续表示现有 per-symbol metadata cache identity，
 两者用途不同，调用方不得直接按字符串相等比较。
 
