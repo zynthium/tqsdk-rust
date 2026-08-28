@@ -25,3 +25,4 @@ docs/designs
 opencode.jsonc
 GEMINI.md
 .tokensave/
+.serena/
