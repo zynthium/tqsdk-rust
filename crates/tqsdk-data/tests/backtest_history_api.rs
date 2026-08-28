@@ -4,9 +4,119 @@ use std::time::Duration;
 
 use tqsdk_data::{
     BacktestHistoryAuthProvider, BacktestHistoryClient, BacktestHistoryCredentials,
-    BacktestHistoryEvent, BacktestHistoryPolicy, BacktestHistoryRequest, BacktestTickCache,
-    DataError,
+    BacktestHistoryEvent, BacktestHistoryFillCancellation, BacktestHistoryFillConfig,
+    BacktestHistoryFillFamily, BacktestHistoryFillProgress, BacktestHistoryFillSymbolResult,
+    BacktestHistoryFillSymbolStatus, BacktestHistoryFillTerminalReport,
+    BacktestHistoryFillTerminalStatus, BacktestHistoryPolicy, BacktestHistoryRequest,
+    BacktestTickCache, DataError,
 };
+
+#[test]
+fn orchestration_config_defaults_are_bounded_and_explicit() {
+    let config = BacktestHistoryFillConfig::default();
+
+    assert_eq!(config.symbol_batch_size(), 1);
+    assert_eq!(config.symbol_concurrency(), 2);
+    assert_eq!(config.idle_timeout(), Duration::from_secs(60));
+    assert_eq!(config.batch_timeout(), None);
+    assert_eq!(config.lock_wait(), None);
+}
+
+#[test]
+fn orchestration_config_rejects_invalid_values_without_clamping() {
+    assert_validation(BacktestHistoryFillConfig::default().with_symbol_batch_size(0));
+    assert_validation(BacktestHistoryFillConfig::default().with_symbol_batch_size(5));
+    assert_validation(BacktestHistoryFillConfig::default().with_symbol_concurrency(0));
+    assert_validation(BacktestHistoryFillConfig::default().with_symbol_concurrency(5));
+    assert_validation(BacktestHistoryFillConfig::default().with_idle_timeout(Duration::ZERO));
+    assert_validation(
+        BacktestHistoryFillConfig::default().with_batch_timeout(Some(Duration::ZERO)),
+    );
+    assert_validation(BacktestHistoryFillConfig::default().with_lock_wait(Some(Duration::ZERO)));
+
+    let config = BacktestHistoryFillConfig::default()
+        .with_symbol_batch_size(4)
+        .unwrap()
+        .with_symbol_concurrency(4)
+        .unwrap()
+        .with_idle_timeout(Duration::from_secs(7))
+        .unwrap()
+        .with_batch_timeout(Some(Duration::from_secs(11)))
+        .unwrap()
+        .with_lock_wait(Some(Duration::from_secs(13)))
+        .unwrap();
+    assert_eq!(config.symbol_batch_size(), 4);
+    assert_eq!(config.symbol_concurrency(), 4);
+    assert_eq!(config.idle_timeout(), Duration::from_secs(7));
+    assert_eq!(config.batch_timeout(), Some(Duration::from_secs(11)));
+    assert_eq!(config.lock_wait(), Some(Duration::from_secs(13)));
+    assert_eq!(config.without_batch_timeout().batch_timeout(), None);
+}
+
+#[test]
+fn orchestration_cancellation_is_cloneable_and_monotonic() {
+    let cancellation = BacktestHistoryFillCancellation::new();
+    let observer = cancellation.clone();
+    assert!(!observer.is_cancelled());
+    cancellation.cancel();
+    assert!(observer.is_cancelled());
+}
+
+#[test]
+fn orchestration_progress_and_terminal_report_are_cache_family_neutral() {
+    let progress = BacktestHistoryFillProgress::BatchStarted {
+        family: BacktestHistoryFillFamily::Daily,
+        batch_number: 1,
+        total_batches: 1,
+        symbols: vec!["KQ.i@SHFE.au".to_string()],
+    };
+    assert!(matches!(
+        progress,
+        BacktestHistoryFillProgress::BatchStarted {
+            family: BacktestHistoryFillFamily::Daily,
+            ..
+        }
+    ));
+
+    let complete = BacktestHistoryFillSymbolResult {
+        request_id: 7,
+        symbol: "KQ.i@SHFE.au".to_string(),
+        family: BacktestHistoryFillFamily::Daily,
+        requested_range: (1, 2),
+        status: BacktestHistoryFillSymbolStatus::Complete,
+        rows_written: 1,
+        remote_used: true,
+        error: None,
+    };
+    let failed = BacktestHistoryFillSymbolResult {
+        request_id: 8,
+        symbol: "KQ.i@SHFE.ag".to_string(),
+        family: BacktestHistoryFillFamily::Minute,
+        requested_range: (1, 2),
+        status: BacktestHistoryFillSymbolStatus::Failed,
+        rows_written: 0,
+        remote_used: false,
+        error: Some("fixture failure".to_string()),
+    };
+    let interrupted = BacktestHistoryFillSymbolResult {
+        request_id: 9,
+        symbol: "SHFE.cu2601".to_string(),
+        family: BacktestHistoryFillFamily::Tick,
+        requested_range: (1, 2),
+        status: BacktestHistoryFillSymbolStatus::Interrupted,
+        rows_written: 0,
+        remote_used: false,
+        error: Some("cancelled".to_string()),
+    };
+    let report =
+        BacktestHistoryFillTerminalReport::from_symbols(vec![complete, failed, interrupted]);
+
+    assert_eq!(report.status(), BacktestHistoryFillTerminalStatus::Failed);
+    assert_eq!(report.completed_symbols(), 1);
+    assert_eq!(report.failed_symbols(), 1);
+    assert_eq!(report.interrupted_symbols(), 1);
+    assert_eq!(report.rows_written(), 1);
+}
 
 #[tokio::test]
 async fn local_query_contract_is_available_without_remote_configuration() {

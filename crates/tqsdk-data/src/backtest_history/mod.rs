@@ -3,6 +3,7 @@
 mod executor;
 mod fill;
 mod metadata;
+mod orchestration;
 mod planner;
 mod report;
 mod request;
@@ -33,6 +34,11 @@ pub use metadata::{
 pub use metadata::{
     plan_minute_cache_stale_partition_repair, resolve_backtest_metadata_snapshot,
     resolve_minute_cache_metadata_snapshot,
+};
+pub use orchestration::{
+    BacktestHistoryFillCancellation, BacktestHistoryFillConfig, BacktestHistoryFillFamily,
+    BacktestHistoryFillProgress, BacktestHistoryFillSymbolResult, BacktestHistoryFillSymbolStatus,
+    BacktestHistoryFillTerminalReport, BacktestHistoryFillTerminalStatus,
 };
 pub use report::{
     BacktestHistoryBatchReport, BacktestHistoryChunk, BacktestHistoryCollected,
