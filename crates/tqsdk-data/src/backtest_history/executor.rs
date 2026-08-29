@@ -848,9 +848,9 @@ async fn plan_request_for_execution(
     let active_metadata = BacktestHistoryMetadataCache::open_read_only(config.cache_dir.as_path())
         .load_active(request.symbol.as_str())?;
     let base_source = classify_request(&request)?;
-    let is_synthetic_symbol = request.symbol.starts_with("KQ.");
+    let is_main_continuous = request.symbol.starts_with("KQ.m@");
     let requires_metadata =
-        !matches!(base_source, PlannedBaseSource::CanonicalDaily) || is_synthetic_symbol;
+        !matches!(base_source, PlannedBaseSource::CanonicalDaily) || is_main_continuous;
     let selected_metadata = if !requires_metadata {
         None
     } else if matches!(base_source, PlannedBaseSource::CanonicalMinute) {
@@ -868,7 +868,7 @@ async fn plan_request_for_execution(
         .is_some_and(|snapshot| !metadata_snapshot_covers_range(snapshot, requested_range));
     if requires_metadata
         && config.policy == BacktestHistoryPolicy::RemoteOnMiss
-        && (metadata_needs_refresh || (is_synthetic_symbol && active_metadata.is_none()))
+        && (metadata_needs_refresh || (is_main_continuous && active_metadata.is_none()))
     {
         ensure_metadata_for_remote_miss(
             config.cache_dir.as_path(),
