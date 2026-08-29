@@ -70,6 +70,9 @@ required-features = ["live"]
 name = "api_contract_s45_facade_backtest_cache_warmup"
 required-features = ["live"]
 
+[[example]]
+name = "api_contract_s48_facade_historical_universe"
+
 [lints]
 workspace = true
 

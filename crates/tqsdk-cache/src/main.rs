@@ -275,6 +275,9 @@ struct FillArgs {
     /// Futures universe expression resolved by the SDK; may be combined with --symbol.
     #[arg(long, value_name = "EXPRESSION")]
     universe: Option<String>,
+    /// JSON `HistoricalUniversePlan` for lifecycle-aware tick cache warmup.
+    #[arg(long, value_name = "PATH", conflicts_with = "universe")]
+    universe_timeline: Option<PathBuf>,
     #[command(flatten)]
     days: FillDaysArgs,
     /// Resolve and inspect coverage without acquiring a fill lock or requesting remote data.
@@ -1505,6 +1508,11 @@ async fn fill(
     market: MarketKind,
     args: FillArgs,
 ) -> Result<CommandOutcome, CliError> {
+    if args.universe_timeline.is_some() && !matches!(kind, CacheKind::Tick) {
+        return Err(CliError::Usage(
+            "--universe-timeline currently supports only --kind tick fill".to_string(),
+        ));
+    }
     match kind {
         CacheKind::Tick if args.repair_stale => Err(CliError::Usage(
             "--repair-stale is supported only for --kind minute fill".to_string(),
@@ -2066,6 +2074,9 @@ fn minute_cache_only_report(
 }
 
 async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome, CliError> {
+    if let Some(plan_path) = args.universe_timeline.clone() {
+        return fill_tick_historical_universe_plan(cache_dir, args, plan_path).await;
+    }
     let allow_open_day = args.include_open_day || !args.require_final;
     let config = fill_config(&args);
     let symbols = normalized_symbols_allow_empty(args.symbols.symbols)?;
@@ -2316,6 +2327,74 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
             "report": report,
         }),
         exit_code: if complete { 0 } else { 1 },
+    })
+}
+
+async fn fill_tick_historical_universe_plan(
+    cache_dir: Option<&Path>,
+    args: FillArgs,
+    plan_path: PathBuf,
+) -> Result<CommandOutcome, CliError> {
+    if !args.symbols.symbols.is_empty() {
+        return Err(CliError::Usage(
+            "--universe-timeline cannot be combined with --symbol".to_string(),
+        ));
+    }
+    if args.days.start_day.is_some()
+        || args.days.end_day.is_some()
+        || args.days.last_trading_days.is_some()
+        || !matches!(args.days.calendar, CalendarMode::Auto)
+        || args.days.refresh_calendar
+        || args.include_open_day
+        || args.require_final
+    {
+        return Err(CliError::Usage(
+            "--universe-timeline supplies its exact range; omit trading-day and open-day flags"
+                .to_string(),
+        ));
+    }
+    if args.report.is_some() {
+        return Err(CliError::Usage(
+            "--report is not yet supported with --universe-timeline".to_string(),
+        ));
+    }
+
+    let bytes = fs::read(&plan_path)?;
+    let plan: tqsdk_data::HistoricalUniversePlan = serde_json::from_slice(&bytes)?;
+    plan.verify()?;
+    let config = fill_config(&args);
+    let (cache, canonical_cache_dir) = if args.dry_run {
+        open_read_only_cache(cache_dir)?
+    } else {
+        open_cache(cache_dir)?
+    };
+    let mut builder = builder_with_environment_auth(false)?
+        .backtest(plan.timeline.start_ns, plan.timeline.end_ns)
+        .cache_store(cache)
+        .remote_fill_config(config)
+        .historical_universe_plan(plan.clone())?;
+    if args.dry_run {
+        builder = builder.cache_only();
+    }
+    if let Some(wait_secs) = args.lock_wait_secs {
+        builder = builder.remote_fill_lock_wait(Duration::from_secs(wait_secs));
+    }
+    let warmup = builder.warmup().await?;
+    Ok(CommandOutcome {
+        value: json!({
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "command": "fill",
+            "kind": "tick",
+            "cache_dir": canonical_cache_dir,
+            "dry_run": args.dry_run,
+            "universe_timeline": plan_path,
+            "plan_sha256": plan.plan_sha256,
+            "catalog_id": plan.timeline.catalog_id,
+            "range": {"start_ns": plan.timeline.start_ns, "end_ns": plan.timeline.end_ns},
+            "transition_batches": plan.timeline.batches.len(),
+            "symbols_warmed": warmup.symbols.len(),
+        }),
+        exit_code: 0,
     })
 }
 
@@ -4148,6 +4227,8 @@ fn write_output(value: &Value, pretty: bool) -> Result<(), CliError> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{
         CacheKind, CalendarMode, Cli, Command, FillDaysArgs, MigrateArgs, ProgressMode,
         current_open_trading_day, fill_was_interrupted, migrate, persist_calendar_if_needed,
@@ -4485,6 +4566,24 @@ mod tests {
             panic!("expected fill command");
         };
         assert!(args.days.refresh_calendar);
+    }
+
+    #[test]
+    fn fill_accepts_historical_universe_timeline_path() {
+        let cli = Cli::try_parse_from([
+            "tqsdk-cache",
+            "fill",
+            "--universe-timeline",
+            "fixture-plan.json",
+        ])
+        .unwrap();
+        let Command::Fill(args) = cli.command else {
+            panic!("expected fill command");
+        };
+        assert_eq!(
+            args.universe_timeline,
+            Some(PathBuf::from("fixture-plan.json"))
+        );
     }
 
     #[test]

@@ -1010,6 +1010,7 @@ pub struct BacktestBuilder {
     kline_specs: Vec<BacktestKlineSpec>,
     tick_specs: Vec<BacktestTickSpec>,
     universe_expression: Option<tqsdk_data::UniverseExpression>,
+    historical_universe_plan: Option<tqsdk_data::HistoricalUniversePlan>,
     warmup_batch_size: usize,
     remote_fill_config: Option<BacktestRemoteFillConfig>,
     remote_fill_progress: Option<BacktestRemoteFillProgressHandler>,
@@ -2881,6 +2882,36 @@ impl BacktestBuilder {
         Ok(self)
     }
 
+    /// Apply an offline-prepared, hash-pinned historical membership timeline.
+    ///
+    /// This is distinct from [`Self::universe`]: static universe expressions
+    /// resolve current metadata, while this method changes membership at each
+    /// historical effective timestamp during local replay.
+    pub fn historical_universe_plan(
+        mut self,
+        plan: tqsdk_data::HistoricalUniversePlan,
+    ) -> Result<Self> {
+        plan.verify()?;
+        if plan.timeline.start_ns != self.start_ns || plan.timeline.end_ns != self.end_ns {
+            return Err(data_validation(
+                "historical universe plan range must exactly match backtest range",
+            ));
+        }
+        for batch in &plan.timeline.batches {
+            for change in &batch.changes {
+                if let tqsdk_data::UniverseMemberChange::Add {
+                    instrument: tqsdk_data::UniverseInstrumentId::Physical { symbol },
+                    ..
+                } = change
+                {
+                    push_unique_string(&mut self.symbols, symbol.clone());
+                }
+            }
+        }
+        self.historical_universe_plan = Some(plan);
+        Ok(self)
+    }
+
     /// Validate cache coverage and prepare the local replay inputs.
     pub async fn prepare(mut self) -> Result<PreparedBacktest> {
         self.validate_range()?;
@@ -2928,7 +2959,10 @@ impl BacktestBuilder {
         } else {
             None
         };
-        let prepared_inputs = self.resolved_prepared_inputs().await?;
+        let mut prepared_inputs = self.resolved_prepared_inputs().await?;
+        if let Some(plan) = &self.historical_universe_plan {
+            restrict_tick_sources_to_historical_universe(&mut prepared_inputs, plan)?;
+        }
         if (!prepared_inputs.minute_klines.is_empty() || !prepared_inputs.daily_klines.is_empty())
             && matches!(
                 self.cache_policy,
@@ -3416,7 +3450,7 @@ impl PreparedBacktest {
             .clone()
             .ok_or_else(|| data_validation("prepared backtest cache missing"))?;
         let remote_fill_runtime = builder.remote_fill_runtime();
-        let inputs = match mode {
+        let mut inputs = match mode {
             PreparedBacktestMode::CacheHit { inputs } => inputs,
             PreparedBacktestMode::RemoteCaching {
                 inputs: _,
@@ -3477,6 +3511,9 @@ impl PreparedBacktest {
             }
         };
 
+        if let Some(plan) = &builder.historical_universe_plan {
+            restrict_tick_sources_to_historical_universe(&mut inputs, plan)?;
+        }
         let BacktestBuilder {
             base,
             start_ns,
@@ -3487,6 +3524,7 @@ impl PreparedBacktest {
             kline_specs,
             tick_specs,
             universe_expression: _,
+            historical_universe_plan,
             warmup_batch_size: _,
             remote_fill_config: _,
             remote_fill_progress: _,
@@ -3507,11 +3545,86 @@ impl PreparedBacktest {
         for spec in &tick_specs {
             base = base.tick_symbol(spec.symbol.clone(), spec.view_width);
         }
+        if let Some(plan) = historical_universe_plan {
+            base = base.historical_universe(plan.timeline);
+        }
         let stream = history_backtest_stream(cache.cache_dir(), start_ns, end_ns, inputs).await?;
         base.replay_backtest_stream(Box::new(stream))
             .connect()
             .await
     }
+}
+
+fn restrict_tick_sources_to_historical_universe(
+    inputs: &mut PreparedBacktestInputs,
+    plan: &tqsdk_data::HistoricalUniversePlan,
+) -> Result<()> {
+    let mut starts = BTreeMap::<String, i64>::new();
+    let mut ranges = BTreeMap::<String, Vec<(i64, i64)>>::new();
+    for batch in &plan.timeline.batches {
+        for change in &batch.changes {
+            match change {
+                tqsdk_data::UniverseMemberChange::Add {
+                    instrument: tqsdk_data::UniverseInstrumentId::Physical { symbol },
+                    ..
+                } => {
+                    if starts.insert(symbol.clone(), batch.effective_ns).is_some() {
+                        return Err(data_validation(format!(
+                            "historical universe adds already-active physical symbol {symbol}"
+                        )));
+                    }
+                }
+                tqsdk_data::UniverseMemberChange::Remove {
+                    instrument: tqsdk_data::UniverseInstrumentId::Physical { symbol },
+                } => {
+                    let start_ns = starts.remove(symbol).ok_or_else(|| {
+                        data_validation(format!(
+                            "historical universe removes inactive physical symbol {symbol}"
+                        ))
+                    })?;
+                    ranges
+                        .entry(symbol.clone())
+                        .or_default()
+                        .push((start_ns, batch.effective_ns));
+                }
+                _ => {}
+            }
+        }
+    }
+    for (symbol, start_ns) in starts {
+        ranges
+            .entry(symbol)
+            .or_default()
+            .push((start_ns, plan.timeline.end_ns));
+    }
+
+    let restrict_source = |source: tqsdk_task::HistoryBacktestTickSource| {
+        let Some(active_ranges) = ranges.get(&source.cache_symbol) else {
+            return vec![source];
+        };
+        active_ranges
+            .iter()
+            .filter_map(|(active_start_ns, active_end_ns)| {
+                let start_ns = source.start_ns.max(*active_start_ns);
+                let end_ns = source.end_ns.min(*active_end_ns);
+                (start_ns < end_ns).then_some(tqsdk_task::HistoryBacktestTickSource {
+                    start_ns,
+                    end_ns,
+                    ..source.clone()
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+
+    inputs.tick_sources = std::mem::take(&mut inputs.tick_sources)
+        .into_iter()
+        .flat_map(&restrict_source)
+        .collect();
+    inputs.synthetic_tick_sources = std::mem::take(&mut inputs.synthetic_tick_sources)
+        .into_iter()
+        .flat_map(&restrict_source)
+        .collect();
+    Ok(())
 }
 
 async fn history_backtest_stream(
@@ -3730,6 +3843,7 @@ impl TqBuilder {
             kline_specs: Vec::new(),
             tick_specs: Vec::new(),
             universe_expression: None,
+            historical_universe_plan: None,
             warmup_batch_size: DEFAULT_BACKTEST_WARMUP_BATCH_SIZE,
             remote_fill_config: None,
             remote_fill_progress: None,
@@ -3823,6 +3937,11 @@ impl TqBuilder {
     #[must_use]
     pub fn default_price_tick(mut self, tick: f64) -> Self {
         self.local_backtest_recipe = self.local_backtest_recipe.default_price_tick(tick);
+        self
+    }
+
+    fn historical_universe(mut self, timeline: tqsdk_data::HistoricalUniverseTimeline) -> Self {
+        self.local_backtest_recipe = self.local_backtest_recipe.historical_universe(timeline);
         self
     }
 
@@ -4422,12 +4541,81 @@ fn parse_env_value(name: &'static str, value: String) -> Result<String> {
 mod tests {
     use std::path::PathBuf;
 
-    use tqsdk_data::BacktestTickCache;
+    use tqsdk_data::{
+        ActiveInterval, BacktestTickCache, CatalogContract, CatalogSnapshot, DynamicUniverseScope,
+        UniverseBudget,
+    };
 
     use super::{
-        BacktestTickCacheStatus, Error, ProvisionalOpenDayFill, fill_requests_from_status,
-        parse_env_value, provisional_fill_requests_from_status,
+        BacktestTickCacheStatus, Error, PreparedBacktestInputs, ProvisionalOpenDayFill, Tq,
+        fill_requests_from_status, parse_env_value, provisional_fill_requests_from_status,
+        restrict_tick_sources_to_historical_universe,
     };
+
+    fn historical_universe_plan() -> tqsdk_data::HistoricalUniversePlan {
+        let scope = DynamicUniverseScope::all();
+        CatalogSnapshot::new(
+            "fixture-v1",
+            "calendar-sha256:fixture",
+            true,
+            scope.clone(),
+            vec![
+                CatalogContract::new(
+                    "SHFE.au2406",
+                    "SHFE",
+                    "au",
+                    vec![ActiveInterval::new(10, 20).unwrap()],
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap()
+        .compile_timeline(0, 30, scope, [])
+        .unwrap()
+        .prepare(UniverseBudget::new(4, 4).unwrap())
+        .unwrap()
+    }
+
+    #[test]
+    fn historical_universe_plan_restricts_tick_reads_to_active_interval() {
+        let mut inputs = PreparedBacktestInputs {
+            tick_sources: vec![tqsdk_task::HistoryBacktestTickSource {
+                replay_symbol: "SHFE.au2406".to_string(),
+                cache_symbol: "SHFE.au2406".to_string(),
+                start_ns: 0,
+                end_ns: 30,
+            }],
+            synthetic_tick_sources: vec![tqsdk_task::HistoryBacktestTickSource {
+                replay_symbol: "SHFE.au2406".to_string(),
+                cache_symbol: "SHFE.au2406".to_string(),
+                start_ns: 0,
+                end_ns: 30,
+            }],
+            ..PreparedBacktestInputs::default()
+        };
+        restrict_tick_sources_to_historical_universe(&mut inputs, &historical_universe_plan())
+            .unwrap();
+        assert_eq!(
+            inputs
+                .tick_sources
+                .iter()
+                .map(|source| (source.start_ns, source.end_ns))
+                .collect::<Vec<_>>(),
+            vec![(10, 20)]
+        );
+        assert_eq!(inputs.synthetic_tick_sources, inputs.tick_sources);
+    }
+
+    #[test]
+    fn historical_universe_plan_must_match_backtest_range() {
+        let result = Tq::futures()
+            .backtest(0, 31)
+            .historical_universe_plan(historical_universe_plan());
+        let Err(error) = result else {
+            panic!("mismatched historical universe plan must fail");
+        };
+        assert!(error.to_string().contains("must exactly match"));
+    }
 
     #[test]
     fn parse_env_value_trims_non_empty_credentials() {

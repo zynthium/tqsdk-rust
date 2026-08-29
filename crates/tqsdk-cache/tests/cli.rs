@@ -2149,7 +2149,7 @@ fn fill_rejects_last_trading_days_when_calendar_is_off() {
 }
 
 #[test]
-fn fill_requires_an_explicit_end_day_without_last_trading_days() {
+fn fill_start_day_defaults_to_latest_closed_trading_day() {
     let output = run_json([
         "fill",
         "--symbol",
@@ -2158,16 +2158,9 @@ fn fill_requires_an_explicit_end_day_without_last_trading_days() {
         "2020-01-02",
     ]);
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(0));
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let _ = v3_result(&json, "fill", "error", 2);
-    assert_eq!(json["error"]["code"], "usage");
-    assert!(
-        json["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("--end-day")
-    );
+    let _ = v3_result(&json, "fill", "success", 0);
 }
 
 #[test]
@@ -2540,20 +2533,70 @@ fn default_output_is_human_readable_even_when_stdout_is_captured() {
 }
 
 #[test]
+fn fill_tick_accepts_a_pinned_historical_universe_plan() {
+    let cache_dir = temp_dir("historical-universe-plan");
+    let scope = tqsdk_data::DynamicUniverseScope::all();
+    let plan = tqsdk_data::CatalogSnapshot::new(
+        "fixture-v1",
+        "calendar-sha256:fixture",
+        true,
+        scope.clone(),
+        vec![
+            tqsdk_data::CatalogContract::new(
+                "SHFE.au2406",
+                "SHFE",
+                "au",
+                vec![tqsdk_data::ActiveInterval::new(10, 20).unwrap()],
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap()
+    .compile_timeline(0, 30, scope, [])
+    .unwrap()
+    .prepare(tqsdk_data::UniverseBudget::new(4, 4).unwrap())
+    .unwrap();
+    BacktestTickCache::open(&cache_dir)
+        .unwrap()
+        .mark_complete("SHFE.au2406", 10, 20, 0, None)
+        .unwrap();
+    let plan_path = cache_dir.join("historical-universe-plan.json");
+    fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
+
+    let output = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "fill",
+        "--universe-timeline",
+        plan_path.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "fill", "success", 0);
+    assert_eq!(result["plan_sha256"], plan.plan_sha256);
+    assert_eq!(result["symbols_warmed"], 1);
+
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
 fn default_output_uses_human_stderr_for_runtime_errors() {
     let output = run([
         "fill",
         "--symbol",
         "SHFE.rb2601",
-        "--start-day",
-        "2020-01-02",
+        "--last-trading-days",
+        "5",
+        "--calendar",
+        "off",
     ]);
 
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("tqsdk-cache fill: error (exit 2)"));
-    assert!(stderr.contains("--end-day"));
+    assert!(stderr.contains("--last-trading-days"));
     assert!(!stderr.trim_start().starts_with('{'));
 }
 
@@ -2595,12 +2638,14 @@ fn output_schema_v2_preserves_legacy_top_level_result_and_stderr_errors() {
         "fill",
         "--symbol",
         "SHFE.rb2601",
-        "--start-day",
-        "2020-01-02",
+        "--last-trading-days",
+        "5",
+        "--calendar",
+        "off",
     ]);
     assert_eq!(usage_error.status.code(), Some(2));
     assert!(usage_error.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&usage_error.stderr).contains("--end-day"));
+    assert!(String::from_utf8_lossy(&usage_error.stderr).contains("--last-trading-days"));
 
     let _ = std::fs::remove_dir_all(cache_dir);
 }

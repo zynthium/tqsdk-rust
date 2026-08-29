@@ -142,11 +142,46 @@ fn prepared_plan_is_pinned_and_requires_an_explicit_budget() {
         .unwrap();
     assert!(plan.plan_sha256.starts_with("sha256:"));
     assert_eq!(plan.timeline, timeline);
+    plan.verify().unwrap();
+    let mut tampered = plan.clone();
+    tampered.timeline.end_ns += 1;
+    assert!(
+        tampered
+            .verify()
+            .unwrap_err()
+            .to_string()
+            .contains("hash mismatch")
+    );
     assert!(
         timeline
             .prepare(UniverseBudget::new(1, 1).unwrap())
             .unwrap_err()
             .to_string()
             .contains("exceeding budget")
+    );
+}
+
+#[test]
+fn timeline_validation_rejects_inconsistent_membership_changes() {
+    let scope = DynamicUniverseScope::all();
+    let timeline = CatalogSnapshot::new(
+        "fixture-v1",
+        "calendar-sha256:abc",
+        true,
+        scope.clone(),
+        vec![contract("SHFE.au2406", 10, 20)],
+    )
+    .unwrap()
+    .compile_timeline(0, 30, scope, [])
+    .unwrap();
+    let mut inconsistent = timeline.clone();
+    let duplicate = inconsistent.batches[0].changes[0].clone();
+    inconsistent.batches[0].changes.push(duplicate);
+    assert!(
+        inconsistent
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("already-active")
     );
 }

@@ -298,6 +298,7 @@ pub struct HistoricalUniversePlan {
 
 impl HistoricalUniverseTimeline {
     pub fn prepare(self, budget: UniverseBudget) -> Result<HistoricalUniversePlan> {
+        self.validate()?;
         let changes: usize = self.batches.iter().map(|batch| batch.changes.len()).sum();
         if self.batches.len() > budget.max_batches {
             return Err(validation(format!(
@@ -319,6 +320,70 @@ impl HistoricalUniverseTimeline {
             timeline: self,
             budget,
         })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.start_ns >= self.end_ns {
+            return Err(validation(
+                "historical universe timeline end_ns must be greater than start_ns",
+            ));
+        }
+        let mut previous = None;
+        let mut active = BTreeSet::new();
+        for batch in &self.batches {
+            if !(self.start_ns..self.end_ns).contains(&batch.effective_ns) {
+                return Err(validation(
+                    "historical universe batch falls outside its timeline",
+                ));
+            }
+            if previous.is_some_and(|time| time >= batch.effective_ns) {
+                return Err(validation(
+                    "historical universe batches must be strictly time ordered",
+                ));
+            }
+            if batch.changes.is_empty() {
+                return Err(validation("historical universe batch must not be empty"));
+            }
+            for change in &batch.changes {
+                match change {
+                    UniverseMemberChange::Add { instrument, .. } => {
+                        if !active.insert(instrument.clone()) {
+                            return Err(validation(
+                                "historical universe adds an already-active instrument",
+                            ));
+                        }
+                    }
+                    UniverseMemberChange::Remove { instrument } => {
+                        if !active.remove(instrument) {
+                            return Err(validation(
+                                "historical universe removes an inactive instrument",
+                            ));
+                        }
+                    }
+                }
+            }
+            previous = Some(batch.effective_ns);
+        }
+        Ok(())
+    }
+}
+
+impl HistoricalUniversePlan {
+    pub fn verify(&self) -> Result<()> {
+        if self.plan_version != 1 {
+            return Err(validation(format!(
+                "unsupported historical universe plan version {}",
+                self.plan_version
+            )));
+        }
+        self.timeline.validate()?;
+        UniverseBudget::new(self.budget.max_batches, self.budget.max_changes)?;
+        let bytes = serde_json::to_vec(&(self.plan_version, &self.timeline, self.budget))?;
+        let expected = format!("sha256:{:x}", Sha256::digest(bytes));
+        if self.plan_sha256 != expected {
+            return Err(validation("historical universe plan hash mismatch"));
+        }
+        Ok(())
     }
 }
 

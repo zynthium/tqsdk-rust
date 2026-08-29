@@ -14,6 +14,10 @@ daemon。
 与 daily 的持久化合同分别属于 `MinuteKlineCache` 与 `DailyKlineCache`。格式细节见
 [history-cache-format.md](history-cache-format.md)。
 
+## 历史动态 universe
+
+`fill --universe-timeline <PLAN.json>` 是 tick-only 的补数入口。PLAN 是离线产出的 `HistoricalUniversePlan` JSON，不是 selector：它带 version、catalog/calendar identity、预算、精确 nanosecond horizon 和 SHA-256。命令在接触 cache 前验证计划，并拒绝与 `--symbol`、`--universe`、`--start-day`、`--end-day`、`--last-trading-days`、calendar/open-day flags 混用。随后复用 facade warmup，因此每个物理 symbol 只访问其 timeline 生效区间；`--dry-run` 使用 CacheOnly 做同一组区间的纯本地验证。continuous/index 仅是 timeline 里的派生 membership，不会隐式变成数据下载绑定。静态 `--universe` 保持当前 metadata selector 语义。
+
 ## Cache family 与命令路由
 
 全局 `--kind tick|minute|daily|all` 选择 cache family，缺省为 `tick`：

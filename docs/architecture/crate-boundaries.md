@@ -319,6 +319,8 @@ sink、WAL、journal 或 cache writer。
 
 `tqsdk-data` 当前应继续承担：
 
+历史动态 universe 的 catalog、timeline 编译、预算和持久化计划归 `tqsdk-data`；`tqsdk-task` 只在 replay step 中消费已验证 timeline；`tqsdk` 只暴露 facade 接入，不重新解释静态 universe selector，也不维护第二套 membership state。
+
 - history page / series / download / export substrate
 - `HistorySeriesCache` public facade 和 crate 内部 store adapter seam
 - `HistorySeriesCache::open(root_dir)` 使用 canonical TQBN daily v3 history cache format；

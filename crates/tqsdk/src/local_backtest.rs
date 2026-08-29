@@ -31,6 +31,7 @@ pub(super) struct LocalBacktestRecipe {
     price_ticks: HashMap<String, f64>,
     instrument_specs: Vec<tqsdk_session::InstrumentSpec>,
     default_price_tick: Option<f64>,
+    historical_universe: Option<tqsdk_data::HistoricalUniverseTimeline>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +111,15 @@ impl LocalBacktestRecipe {
         self
     }
 
+    #[must_use]
+    pub(super) fn historical_universe(
+        mut self,
+        timeline: tqsdk_data::HistoricalUniverseTimeline,
+    ) -> Self {
+        self.historical_universe = Some(timeline);
+        self
+    }
+
     pub(super) async fn connect(self, replay: ReplayMarketSource) -> Result<Tq> {
         let mut builder = StrategyBacktest::builder(replay);
         builder = self.apply_to_builder(builder);
@@ -138,6 +148,7 @@ impl LocalBacktestRecipe {
             price_ticks,
             instrument_specs,
             default_price_tick,
+            historical_universe,
         } = self;
         if let Some(default_price_tick) = default_price_tick {
             builder = builder.default_price_tick(default_price_tick);
@@ -154,6 +165,9 @@ impl LocalBacktestRecipe {
         }
         for (symbol, tick) in &price_ticks {
             builder = builder.price_tick(symbol, *tick);
+        }
+        if let Some(timeline) = historical_universe {
+            builder = builder.historical_universe(timeline);
         }
         builder
     }
