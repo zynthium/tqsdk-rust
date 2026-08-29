@@ -127,18 +127,21 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | HTTP grammar、JSON、error、ETag、gzip、limits/cancel | `crates/tqsdk-relay/tests/history_http.rs` |
 | dedicated runtime、market-lock isolation、reload、generation health | `crates/tqsdk-relay/tests/history_runtime.rs` |
 | readiness/reload/query/buffer/compression metrics、单条结构化 audit | `crates/tqsdk-relay/src/history/observability.rs`、`crates/tqsdk-relay/src/metrics_http_impl.rs` 单元测试 |
-| market send-to-downstream p99、顺序/无丢失、gzip/fallback 证据 | `crates/tqsdk-relay/tests/history_isolation_gate.rs` ignored same-spec candidate gate |
+| market send-to-downstream p99、顺序/无丢失、gzip/fallback 容量特征 | `crates/tqsdk-relay/tests/history_isolation_gate.rs` ignored same-spec candidate gate；非阻塞，不作为低并发功能验收 |
 
 还必须验证 `cargo check -p tqsdk-relay --no-default-features` 和
 `cargo check -p tqsdk-relay --no-default-features --features history`，证明 history 只传播本地
-reader feature。生产同规格干扰门要求 8 并发 history、512 MiB budget、2 gzip workers 时 market
-无丢失/乱序/异常断连，market p99 增量不超过 `max(1 ms, 10%)`。完整合同见
+reader feature。低并发功能验收不承诺 history 吞吐量或 market p99 SLO；部署侧必须由受控 gateway
+设置符合实际业务的低并发配额。8 并发 history、512 MiB budget、2 gzip workers 的测试继续观察
+market 无丢失/乱序/异常断连，以及 p99 增量是否不超过 `max(1 ms, 10%)`，但作为非阻塞容量特征项。
+2026-08-29 当前生产宿主机未达到该 p99 目标；这不是已通过的性能门，但不阻塞低并发功能验收。
+完整合同见
 [history-relay.md](history-relay.md)、[history-relay-http.md](history-relay-http.md) 与
 [history-snapshot-manifest.md](history-snapshot-manifest.md)。
 
 本地 candidate gate 必须使用 release profile，并显式提供 market、history、driver 三组可用且
 两两互斥的 CPU set；driver 至少包含三个逻辑 CPU，分别承载 downstream 计时、upstream fixture
-和 history load clients。测试输出是候选机证据，不得代替生产同规格门槛结论：
+和 history load clients。测试输出是候选机证据，不得用来声明普遍的生产性能保证：
 
 gate 固定执行 loaded/baseline/baseline/loaded 四阶段；每阶段先完成 market warmup，再收集
 2,048 个有效 forward-latency 样本。最终分别合并两组 raw baseline 与 raw loaded 样本后各算
@@ -621,5 +624,6 @@ cargo test -p tqsdk-session instrument_spec_normalizes_contract_metadata_from_sy
 history HTTP 验证还必须覆盖 paired CPU-set fail-fast、实际 worker affinity 握手、64 KiB
 threshold、gzip level 1、两 worker 有界 try admission 与池满 identity fallback，以及
 identity/gzip ETag、304、`Vary`、q=0 和 timeout（压缩计入 10 s）。512 MiB 检查应覆盖
-scan、JSON 和 compression buffers。生产同规格性能 gate 仍是待实测验收项，不得由单元测试
-或 affinity 配置本身宣称通过。
+scan、JSON 和 compression buffers。生产同规格性能 gate 是非阻塞容量特征项，不得由单元测试
+或 affinity 配置本身宣称通过。2026-08-29 当前生产宿主机未达到该 p99 目标；需要高并发或明确
+p99 SLO 时必须重新实测并单独验收。

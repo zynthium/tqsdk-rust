@@ -590,4 +590,8 @@ least 64 KiB; the bounded pool uses non-blocking try admission and returns ident
 full. Negotiated responses carry `Vary: Accept-Encoding`; identity and gzip have separate
 strong ETags, with 304 matching the selected representation. The 10-second deadline
 includes compression, and the 512 MiB history budget includes scan, JSON, and compression
-buffers. These settings do not by themselves prove the production performance gate.
+buffers. These limits are safety bounds, not a throughput or p99 SLO. The current delivery is accepted
+for low-concurrency use behind a controlled gateway quota; the ignored isolation gate remains a
+non-blocking capacity characterization. The current production host did not meet its p99 target on
+2026-08-29; this is not a passed performance gate. Re-run it for any high-concurrency or explicit
+market p99 requirement.

@@ -146,17 +146,28 @@ relay 增量消费 `BacktestHistoryRun::next()`，但必须先缓存在有界私
   500；同 generation 的其他并发和后续请求返回 503。该状态不写入 immutable snapshot，
   market 继续服务。
 
-## 发布门
+## 容量证据与发布口径
 
-在生产同规格机器运行非 live 干扰测试：
+本阶段按受控网关后的低并发 CacheOnly 查询完成验收。默认 active request、buffer 和 gzip worker
+仍是安全上限，不代表经过验证的吞吐量或 p99 SLO。部署侧必须在网关设置符合实际业务的低并发
+配额；当前架构不声明一个经过验证的安全并发数字。
+
+以下非 live 干扰测试保留为容量特征项：
 
 - 8 个并发 history query；
 - 512 MiB history buffer budget；
 - 2 个 gzip worker；
 - market 无丢失、乱序或异常断连；
-- market p99 latency 增量不超过 `max(1 ms, 10%)`。
+- 观察 market p99 latency 增量是否不超过 `max(1 ms, 10%)`。
 
-CPU affinity 只能减少 scheduler 竞争；通过上述 measured gate 后才能接受发布，不能以绑核替代测量。
+2026-08-29 在当前生产宿主机运行该测试时，上述 p99 目标未通过。该端到端 gate 同时包含
+loopback、peek 闭环、scheduler/softirq、fixture 与客户端解码，因此只能证明 history 负载期间观察到
+market 尾延迟恶化，不能把原因归结为 relay 内部 CPU 核共享。它不阻塞本阶段低并发功能版本收尾，
+也不得被报告为已经通过。
+
+CPU affinity 只能减少部分 scheduler 竞争，不能替代容量测量。若以后需要高并发或明确的 market
+p99 SLO，应先做分段、分因素基准，再评估 relay 私有 `HistoryExecutor` worker process；worker process
+本身也不能隔离共享 LLC、内存带宽、page cache、磁盘或 IRQ/softirq。
 
 ## 明确不做
 
@@ -180,4 +191,4 @@ gzip 使用两个专用 worker、level 1 和 64 KiB threshold。提交采用有�
 admission；池满立即返回 identity。响应协商带 `Vary: Accept-Encoding`，ETag 在选定的
 identity/gzip 精确 bytes 上分别计算为 strong ETag，304 保留所选 representation 的
 headers。10 s total timeout 包含压缩，512 MiB daemon budget 包含 scan、JSON 与压缩
-buffer。生产同规格 gate 仍需单独实测，CPU affinity 不是该 gate 的替代品。
+buffer。生产同规格 gate 作为非阻塞容量特征项保留，CPU affinity 不是该测量的替代品。
