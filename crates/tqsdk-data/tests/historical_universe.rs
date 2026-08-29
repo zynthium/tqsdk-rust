@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use tqsdk_data::{
     ActiveInterval, CatalogContract, CatalogSnapshot, DerivedView, DynamicUniverseScope,
-    UniverseInstrumentId, UniverseMemberChange,
+    UniverseBudget, UniverseInstrumentId, UniverseMemberChange,
 };
 
 fn contract(symbol: &str, start_ns: i64, end_ns: i64) -> CatalogContract {
@@ -121,4 +121,32 @@ fn lifecycle_intervals_must_be_sorted_and_non_overlapping() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("sorted and non-overlapping"));
+}
+
+#[test]
+fn prepared_plan_is_pinned_and_requires_an_explicit_budget() {
+    let scope = DynamicUniverseScope::all();
+    let timeline = CatalogSnapshot::new(
+        "fixture-v1",
+        "calendar-sha256:abc",
+        true,
+        scope.clone(),
+        vec![contract("SHFE.au2406", 10, 20)],
+    )
+    .unwrap()
+    .compile_timeline(0, 30, scope, [])
+    .unwrap();
+    let plan = timeline
+        .clone()
+        .prepare(UniverseBudget::new(2, 2).unwrap())
+        .unwrap();
+    assert!(plan.plan_sha256.starts_with("sha256:"));
+    assert_eq!(plan.timeline, timeline);
+    assert!(
+        timeline
+            .prepare(UniverseBudget::new(1, 1).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("exceeding budget")
+    );
 }

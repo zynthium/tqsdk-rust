@@ -151,7 +151,8 @@ pub use export::{KlineCsvExportSummary, TickCsvExportSummary};
 pub use greeks::{OptionGreeksRequest, OptionGreeksResult, OptionGreeksRow};
 pub use historical_universe::{
     ActiveInterval, CatalogContract, CatalogSnapshot, DerivedView, DynamicUniverseScope,
-    HistoricalUniverseTimeline, UniverseInstrumentId, UniverseMemberChange, UniverseTimelineBatch,
+    HistoricalUniversePlan, HistoricalUniverseTimeline, UniverseBudget, UniverseInstrumentId,
+    UniverseMemberChange, UniverseTimelineBatch,
 };
 #[allow(deprecated)]
 pub use history_series_cache::SERIES_FILE_HISTORY_SERIES_FORMAT_ID;

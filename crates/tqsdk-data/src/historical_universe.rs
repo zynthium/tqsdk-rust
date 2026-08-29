@@ -268,6 +268,60 @@ pub struct HistoricalUniverseTimeline {
     pub batches: Vec<UniverseTimelineBatch>,
 }
 
+/// Explicit resource limit required to prepare a dynamic universe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UniverseBudget {
+    pub max_batches: usize,
+    pub max_changes: usize,
+}
+
+impl UniverseBudget {
+    pub fn new(max_batches: usize, max_changes: usize) -> Result<Self> {
+        if max_batches == 0 || max_changes == 0 {
+            return Err(validation("universe budget limits must be positive"));
+        }
+        Ok(Self {
+            max_batches,
+            max_changes,
+        })
+    }
+}
+
+/// Reusable, identity-pinned offline preparation result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoricalUniversePlan {
+    pub plan_version: u32,
+    pub plan_sha256: String,
+    pub timeline: HistoricalUniverseTimeline,
+    pub budget: UniverseBudget,
+}
+
+impl HistoricalUniverseTimeline {
+    pub fn prepare(self, budget: UniverseBudget) -> Result<HistoricalUniversePlan> {
+        let changes: usize = self.batches.iter().map(|batch| batch.changes.len()).sum();
+        if self.batches.len() > budget.max_batches {
+            return Err(validation(format!(
+                "historical universe requires {} batches, exceeding budget {}",
+                self.batches.len(),
+                budget.max_batches
+            )));
+        }
+        if changes > budget.max_changes {
+            return Err(validation(format!(
+                "historical universe requires {changes} changes, exceeding budget {}",
+                budget.max_changes
+            )));
+        }
+        let bytes = serde_json::to_vec(&(1_u32, &self, budget))?;
+        Ok(HistoricalUniversePlan {
+            plan_version: 1,
+            plan_sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+            timeline: self,
+            budget,
+        })
+    }
+}
+
 impl CatalogSnapshot {
     pub fn compile_timeline(
         &self,
