@@ -156,8 +156,120 @@ async fn strategy_backtest_commits_historical_universe_with_same_timestamp_marke
         Some(&serde_json::json!(1_000))
     );
     assert_eq!(
+        snapshot.get(["replay", "local-backtest-universe", "universe", "changes",]),
+        Some(&serde_json::json!([{
+            "instrument": "SHFE.rb2501",
+            "active": true,
+            "readiness": "ready",
+            "provenance": "catalog:fixture-catalog",
+        }]))
+    );
+    assert_eq!(
         snapshot.get(["quotes", "SHFE.rb2501", "last_price"]),
         Some(&serde_json::json!(100.0))
+    );
+}
+
+#[tokio::test]
+async fn strategy_backtest_rejects_opening_an_inactive_historical_member() {
+    let scope = DynamicUniverseScope::all();
+    let timeline = CatalogSnapshot::new(
+        "fixture-catalog",
+        "calendar:fixture",
+        true,
+        scope.clone(),
+        vec![
+            CatalogContract::new(
+                "SHFE.rb2501",
+                "SHFE",
+                "rb",
+                vec![ActiveInterval::new(1_000, 2_000).unwrap()],
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap()
+    .compile_timeline(1_000, 3_000, scope, [])
+    .unwrap();
+    let replay = ReplayMarketSource::new(vec![
+        quote_event("SHFE.rb2501", 1_000, 100.0, 10, 99.0, 8),
+        quote_event("SHFE.rb2501", 2_000, 100.0, 10, 99.0, 8),
+    ]);
+    let mut backtest = StrategyBacktest::builder(replay)
+        .historical_universe(timeline)
+        .build()
+        .await
+        .unwrap();
+    drop(backtest.next().await.unwrap().unwrap());
+
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    let ticket = ctx
+        .orders("TQSIM")
+        .buy_open("SHFE.rb2501", 1)
+        .limit(100.0)
+        .send_once("inactive-open")
+        .await
+        .unwrap();
+    let error = ctx.finish_sim_step().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("rejects opening an inactive instrument")
+    );
+    assert!(matches!(
+        ticket.status(ctx.task_host().api()).unwrap(),
+        OrderTicketState::Rejected { .. }
+    ));
+}
+
+#[tokio::test]
+async fn strategy_backtest_fails_when_a_removed_member_has_a_position() {
+    let scope = DynamicUniverseScope::all();
+    let timeline = CatalogSnapshot::new(
+        "fixture-catalog",
+        "calendar:fixture",
+        true,
+        scope.clone(),
+        vec![
+            CatalogContract::new(
+                "SHFE.rb2501",
+                "SHFE",
+                "rb",
+                vec![ActiveInterval::new(1_000, 2_000).unwrap()],
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap()
+    .compile_timeline(1_000, 3_000, scope, [])
+    .unwrap();
+    let replay = ReplayMarketSource::new(vec![
+        quote_event("SHFE.rb2501", 1_000, 100.0, 10, 99.0, 8),
+        quote_event("SHFE.rb2501", 2_000, 100.0, 10, 99.0, 8),
+    ]);
+    let mut backtest = StrategyBacktest::builder(replay)
+        .historical_universe(timeline)
+        .build()
+        .await
+        .unwrap();
+    let mut ctx = backtest.next().await.unwrap().unwrap();
+    ctx.orders("TQSIM")
+        .buy_open("SHFE.rb2501", 1)
+        .limit(100.0)
+        .send_once("position-before-remove")
+        .await
+        .unwrap();
+    ctx.finish_sim_step().unwrap();
+    drop(ctx);
+
+    let result = backtest.next().await;
+    let Err(error) = result else {
+        panic!("removing a member with a position must fail");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("removes an instrument with open state")
     );
 }
 

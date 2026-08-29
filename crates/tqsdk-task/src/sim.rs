@@ -319,7 +319,14 @@ impl TqSim {
         self.positions.entry(symbol.into()).or_default();
     }
 
-    pub(crate) fn process_host_orders(&mut self, host: &TaskHost) -> Result<TqSimStepReport> {
+    pub(crate) fn process_host_orders_with_guard<F>(
+        &mut self,
+        host: &TaskHost,
+        mut guard: F,
+    ) -> Result<TqSimStepReport>
+    where
+        F: FnMut(&str, TradeOffset) -> Result<()>,
+    {
         let dispatches = host.api().session().handle().drain_dispatches()?;
         let mut report = TqSimStepReport::default();
         let mut command_ids = Vec::new();
@@ -330,6 +337,15 @@ impl TqSim {
                 continue;
             };
             let request = self.resolve_order_request(request);
+            if let Err(error) = guard(&request.symbol, request.offset) {
+                let _ = host.api().session().handle().record_command_status(
+                    dispatch.command_id,
+                    CommandStatus::Rejected,
+                    Some(json!({"reason": error.to_string()})),
+                    CommitScope::ReplayStep,
+                )?;
+                return Err(error);
+            }
             let _ = host.api().session().handle().record_command_status(
                 dispatch.command_id,
                 CommandStatus::Sent,

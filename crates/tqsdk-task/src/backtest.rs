@@ -61,6 +61,7 @@ pub struct StrategyBacktest {
     default_price_tick: Option<f64>,
     summary: StrategyBacktestSummary,
     universe_batches: VecDeque<UniverseTimelineBatch>,
+    active_universe: Option<BTreeSet<String>>,
     universe_session_id: ReplaySessionId,
 }
 
@@ -81,6 +82,7 @@ pub struct StrategyBacktestContext<'a> {
     sim: &'a mut TqSim,
     summary: &'a mut StrategyBacktestSummary,
     tracked_symbols: &'a [String],
+    active_universe: Option<&'a BTreeSet<String>>,
 }
 
 #[derive(Debug, Default)]
@@ -157,6 +159,7 @@ impl StrategyBacktest {
             sim: &mut self.sim,
             summary: &mut self.summary,
             tracked_symbols: &self.tracked_symbols,
+            active_universe: self.active_universe.as_ref(),
         }))
     }
 
@@ -284,6 +287,40 @@ impl StrategyBacktest {
                 .universe_batches
                 .pop_front()
                 .expect("front was checked above");
+            if let Some(active_universe) = &mut self.active_universe {
+                for change in &universe.changes {
+                    match change {
+                        UniverseMemberChange::Add { instrument, .. } => {
+                            if !active_universe.insert(instrument.symbol()) {
+                                return Err(TaskError::InvalidState(
+                                    "historical universe adds an already-active instrument",
+                                ));
+                            }
+                        }
+                        UniverseMemberChange::Remove { instrument } => {
+                            let symbol = instrument.symbol();
+                            let position = self.sim.position(&symbol);
+                            let has_position =
+                                position.volume_long != 0 || position.volume_short != 0;
+                            let has_open_order = self.sim.orders().iter().any(|order| {
+                                order.volume_left > 0
+                                    && format!("{}.{}", order.exchange_id, order.instrument_id)
+                                        == symbol
+                            });
+                            if has_position || has_open_order {
+                                return Err(TaskError::InvalidState(
+                                    "historical universe removes an instrument with open state",
+                                ));
+                            }
+                            if !active_universe.remove(&symbol) {
+                                return Err(TaskError::InvalidState(
+                                    "historical universe removes an inactive instrument",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
             let changes = universe
                 .changes
                 .into_iter()
@@ -294,7 +331,7 @@ impl StrategyBacktest {
                     } => ReplayUniverseChange {
                         instrument: instrument.symbol(),
                         active: true,
-                        readiness: None,
+                        readiness: Some("ready".to_string()),
                         provenance: Some(provenance),
                     },
                     UniverseMemberChange::Remove { instrument } => ReplayUniverseChange {
@@ -584,6 +621,7 @@ impl StrategyBacktestBuilder {
             tick_subscriptions,
             default_price_tick,
             summary,
+            active_universe: historical_universe.as_ref().map(|_| BTreeSet::new()),
             universe_batches: historical_universe
                 .map(|timeline| timeline.batches.into())
                 .unwrap_or_default(),
@@ -694,7 +732,20 @@ impl StrategyBacktestContext<'_> {
     }
 
     pub fn finish_sim_step(&mut self) -> Result<TqSimStepReport> {
-        let report = self.sim.process_host_orders(self.context.task_host())?;
+        let active_universe = self.active_universe.as_ref();
+        let report = self.sim.process_host_orders_with_guard(
+            self.context.task_host(),
+            |symbol, offset| {
+                if offset == tqsdk_core::TradeOffset::Open
+                    && active_universe.is_some_and(|members| !members.contains(symbol))
+                {
+                    return Err(TaskError::InvalidState(
+                        "historical universe rejects opening an inactive instrument",
+                    ));
+                }
+                Ok(())
+            },
+        )?;
         if report.is_empty() {
             self.summary
                 .record_unchanged_account_observation(Some(self.event.event_time_ns()));
