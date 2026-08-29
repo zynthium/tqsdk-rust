@@ -1,4 +1,4 @@
 interface:
   display_name: "TQSDK Rust"
-  short_description: "将行情、合约查询、回测缓存历史查询和交易场景路由到正确的 TQSDK Rust 入口"
-  default_prompt: "使用 $tqsdk-rust，把我的量化交易、行情、回测缓存历史查询或模型行情输入场景映射到 TQSDK Rust 默认入口、CLI 或正确的高级 crate。"
+  short_description: "将行情、历史查询、relay HTTP 部署调用和交易场景路由到正确入口"
+  default_prompt: "使用 $tqsdk-rust，把我的量化交易、行情、回测缓存历史查询、relay HTTP 部署调用或模型行情输入场景映射到 TQSDK Rust 默认入口、CLI 或正确的高级 crate。"
