@@ -110,9 +110,10 @@ history 的默认硬边界：
 | gzip level | 1 |
 
 512 MiB 是 relay 拥有的跨请求、跨 generation history buffer policy，至少覆盖 scan chunks、JSON 和
-compression buffers；它不是整个进程 RSS 上限。data 只提供与 HTTP/JSON/gzip 无关的通用 byte-permit
-primitive，relay 负责配置总额并把 permit 带入 data scan。per-run/per-symbol semaphore 只能作为其
-下级限制。
+compression buffers；它不是整个进程 RSS 上限。data 只提供
+`BacktestHistorySnapshotResourceBudget` / opaque reservation seam；relay 负责配置总额，并通过
+`BacktestHistorySnapshotQueryResources` 把同一 budget 与 per-request active pin 带入 coordinator、
+shared scan 和 blocking reader。per-run/per-symbol semaphore 只能作为其下级限制。
 
 relay 增量消费 `BacktestHistoryRun::next()`，但必须先缓存在有界私有内存中，只有 terminal report
 证明 coverage、finality、metadata hash 和 snapshot identity 全部一致后才发送完整 body。任何失败都

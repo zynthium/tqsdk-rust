@@ -4,12 +4,14 @@
 //! a [`tqsdk_relay::RelayServer`].  History is a separate runtime sibling of
 //! the market relay, not an alternate market-data path.
 
+mod codec;
 mod http;
+mod snapshot;
 
 use std::fs;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -206,10 +208,19 @@ fn run_listener_thread(
                 return;
             }
         };
+        let snapshots = Arc::new(snapshot::SnapshotSlot::new(config.root));
         if startup.send(Ok(())).is_err() {
             return;
         }
-        if let Err(error) = http::serve_until(listener, config.identity_header, shutdown).await {
+        let initial_snapshot = snapshots.clone();
+        tokio::spawn(async move {
+            if let Err(error) = initial_snapshot.reload().await {
+                eprintln!("history snapshot unavailable at startup: {error}");
+            }
+        });
+        if let Err(error) =
+            http::serve_until(listener, config.identity_header, snapshots, shutdown).await
+        {
             eprintln!("history listener stopped with error: {error}");
         }
     });

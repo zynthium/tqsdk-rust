@@ -209,8 +209,13 @@ runtime，不改变 SDK 默认直连路径。history listener 默认关闭，只
 
 部分配置、非法 root/header 或 listener/runtime 启动失败都会让进程 fail fast。history 使用 binary-private
 模块、独立 OS thread 和独立 Tokio worker，不接收 `RelayEngine`、`RelayServer` 或 market mutex。
-当前最小启动 slice 提供 `GET /v1/history/schema`；已知但尚未挂载 snapshot runtime 的 query/coverage
-请求在通过 grammar 校验后返回 typed `503 history_unavailable`。默认不发送 CORS header。
+listener 提供 `GET /v1/history/schema`、`/v1/history/coverage` 和 `/v1/history/query`。
+coverage/query 只读取 `CURRENT` 指向的 immutable CacheOnly generation；每 5 秒校验并切换
+last-good snapshot，旧请求通过 generation lease 继续固定旧快照。query 在 terminal success
+前不会发送 partial body，并执行 8 个 active request、100 ms queue、10 秒 total timeout、
+Tick 50,000/Kline 10,000 rows、32 MiB response 和 512 MiB daemon-global buffer 限制。
+identity JSON 成功响应带 strong ETag，支持 `If-None-Match`/304；默认不发送 CORS header。
+缺少或无效 `CURRENT` 只让 history 返回 typed `503 history_unavailable`，不改变 market readiness。
 
 关闭默认 feature 时不编译 history multi-thread runtime；reader-only 构建可用：
 
