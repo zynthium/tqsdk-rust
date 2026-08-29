@@ -198,6 +198,35 @@ cargo run -p tqsdk-relay
 如果没有设置 `TQSDK_RELAY_FUTURES_UNIVERSE`，relay 只会启动下游服务，不连接上游。
 这个模式适合做本地协议冒烟测试，但不会产生实时行情数据。
 
+### CacheOnly history listener
+
+默认 feature 包含 `history`；它只启用 `tqsdk-data/tqbn-zstd` 与专属 multi-thread Tokio
+runtime，不改变 SDK 默认直连路径。history listener 默认关闭，只有下面三个环境变量同时存在时才启动：
+
+- `TQSDK_RELAY_HISTORY_LISTEN`：独立 HTTP/1 socket address；
+- `TQSDK_RELAY_HISTORY_ROOT`：已存在、非 symlink 的 absolute published history root；
+- `TQSDK_RELAY_HISTORY_IDENTITY_HEADER`：受控网关注入的 trusted identity header 名。
+
+部分配置、非法 root/header 或 listener/runtime 启动失败都会让进程 fail fast。history 使用 binary-private
+模块、独立 OS thread 和独立 Tokio worker，不接收 `RelayEngine`、`RelayServer` 或 market mutex。
+listener 提供 `GET /v1/history/schema`、`/v1/history/coverage` 和 `/v1/history/query`。
+coverage/query 只读取 `CURRENT` 指向的 immutable CacheOnly generation；每 5 秒校验并切换
+last-good snapshot，旧请求通过 generation lease 继续固定旧快照。query 在 terminal success
+前不会发送 partial body，并执行 8 个 active request、100 ms queue、10 秒 total timeout、
+Tick 50,000/Kline 10,000 rows、32 MiB response 和 512 MiB daemon-global buffer 限制。
+identity JSON 成功响应带 strong ETag，支持 `If-None-Match`/304；默认不发送 CORS header。
+缺少或无效 `CURRENT` 只让 history 返回 typed `503 history_unavailable`，不改变 market readiness。
+
+Linux Docker Compose 部署模板位于
+[`deploy/docker/`](../../deploy/docker/README.md)。模板使用 host networking、只读 published-root
+bind mount 和独立 one-shot publisher profile；它不改变同进程 history failure domain。
+
+关闭默认 feature 时不编译 history multi-thread runtime；reader-only 构建可用：
+
+```bash
+cargo check -p tqsdk-relay --no-default-features --features history
+```
+
 ## 配置
 
 二进制程序读取以下环境变量：
@@ -347,6 +376,13 @@ open http://127.0.0.1:7789/dashboard
 对早期监控的兼容；`market_data_ready` 表示上游已连通、合约集合已刷新成功，并且最近
 行情更新活跃时间没有超过默认 `30s` freshness 窗口。关键字段包括：
 
+响应还会增加顶层 `history` 对象；不启用 history listener 时它是稳定的 disabled object：
+`{"configured":false,"listener":false,"ready":false}`。
+`history.ready` 只表示 history listener 已启动且当前 generation 健康，不参与上述 market
+`ready` / `market_data_ready`。replacement reload 失败时 last-good generation 继续可用，
+`history.degraded=true`；当前 generation 检测到损坏后 `history.ready=false`，同一 snapshot id
+的后续 reload 不会把它恢复为健康，只有新的健康 generation 才会恢复 readiness。
+
 - `process_started`：relay engine 已启动。
 - `downstream_listening`：下游 market websocket 监听已可接入。
 - `upstream_connected` / `upstream_status`：兼容字段，表示上游是否已经进入可用行情状态；只有收到有效 tick 或 quote 后才会变为 `up` / `true`。
@@ -368,7 +404,11 @@ open http://127.0.0.1:7789/dashboard
 - `recent_invalid_rows_1m` / `current_decode_health`：最近 1 分钟坏行数和可恢复的当前解码健康状态。
 - `last_upstream_invalid_tick_row_error` / `last_invalid_row_unix_secs`：最近一条解码错误和时间。
 
-`/metrics` 返回 `RelayEngine::metrics_snapshot()` 的完整 JSON。
+`/metrics` 保留 `RelayEngine::metrics_snapshot()` 的全部顶层字段；启用 history listener 时额外
+增加低基数的 `history` 对象；不启用时同样返回上述 disabled object。该对象包含 listener/generation
+readiness，active/queued query，query 总量、总耗时及按 endpoint/status class/stable error code
+聚合的计数，buffer used/limit/high-water，compression queued/active/success/fallback/failure，以及
+reload attempt/success/failure/last code。symbol 只进入结构化 audit，不作为 metrics label。
 
 `/symbol-metrics` 返回合约级 telemetry 快照，当前健康集合固定为“当前上游 universe ∪
 当前下游订阅”。已经退出 universe 且当前未被订阅的历史 telemetry 不再进入当前健康；
@@ -538,3 +578,24 @@ pnpm run test:e2e
 cd ../../..
 cargo test -p tqsdk-relay --test binary_smoke relay_binary_serves_embedded_dashboard_assets
 ```
+
+#### History CPU affinity and gzip
+
+The optional history compression path is enabled only when both CPU-set variables are
+present and non-empty: `TQSDK_RELAY_MARKET_CPU_SET` reserves CPUs for the market current
+thread, and `TQSDK_RELAY_HISTORY_CPU_SET` reserves CPUs for the history supervisor, Tokio
+workers, and gzip workers. When both are absent, affinity and gzip are disabled and
+identity responses remain available. A single-sided, empty, malformed, duplicate,
+unavailable, overlapping, or unapplied set is a startup error (fail-fast).
+
+Startup confirms binding for the market current thread, history supervisor, every history
+Tokio worker, and exactly two dedicated gzip workers. Gzip uses level 1 for responses at
+least 64 KiB; the bounded pool uses non-blocking try admission and returns identity when
+full. Negotiated responses carry `Vary: Accept-Encoding`; identity and gzip have separate
+strong ETags, with 304 matching the selected representation. The 10-second deadline
+includes compression, and the 512 MiB history budget includes scan, JSON, and compression
+buffers. These limits are safety bounds, not a throughput or p99 SLO. The current delivery is accepted
+for low-concurrency use behind a controlled gateway quota; the ignored isolation gate remains a
+non-blocking capacity characterization. The current production host did not meet its p99 target on
+2026-08-29; this is not a passed performance gate. Re-run it for any high-concurrency or explicit
+market p99 requirement.

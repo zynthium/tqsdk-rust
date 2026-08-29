@@ -15,6 +15,10 @@ mod storage;
 mod store;
 mod tqbn;
 
+pub(crate) fn tqbn_snapshot_requires_zstd(bytes: &[u8]) -> Result<bool> {
+    tqbn::snapshot_requires_zstd(bytes)
+}
+
 pub(crate) use ranges::{rangeset_difference, rangeset_intersection};
 #[allow(deprecated)]
 pub use store::SERIES_FILE_HISTORY_SERIES_FORMAT_ID;

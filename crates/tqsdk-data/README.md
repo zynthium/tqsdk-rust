@@ -49,6 +49,15 @@
 - `BacktestHistoryClient::builder(...).query(...)` / `query_batch(...)`
 - `BacktestHistoryClient::orchestrate_fill(...)` / `BacktestHistoryFillConfig`
 - `BacktestHistoryRun::next()` / `finish()` / `collect()` / `collect_all(max_total_bytes)`
+- `BacktestHistorySnapshot::open(...)` / `inspect(...)` / `query(...)`（lease-pinned read-only
+  generation；manifest metadata hash 是 generation 级 inventory SHA-256，request report hash 仍是
+  per-symbol metadata identity；query lease 会保留到 detached blocking scan 完全退出）
+- `BacktestHistorySnapshotRun::next()` / `collect()` / `finish()`（terminal failure 保留
+  `BacktestHistoryFailureReason`，不要求调用方解析 legacy error string）
+- publisher-facing manifest seam：`BacktestHistorySnapshotManifestBuilder`、
+  `classify_backtest_history_snapshot_cache_path(...)` 与
+  `BacktestHistorySnapshot::open_generation(...)`；canonical identity、file-role allowlist、staging/
+  retained validation 仍只在 data 实现，`tqsdk-cache` 不复制 manifest parser
 - `BacktestHistoryMetadataCache` / `BacktestHistoryMaintenanceClient`
 
 ## 回测历史查询
@@ -279,6 +288,9 @@ Python-compatible mmap 缓存；旧 binary/mmap history cache 已从 public surf
 - `BacktestHistoryClientBuilder`
 - `BacktestHistoryRequest` / `BacktestHistoryPolicy`
 - `BacktestHistoryEvent` / `BacktestHistoryRun` / `BacktestHistoryBatchReport`
+- `BacktestHistoryRequestFailure`（既有 query 兼容面）/ `BacktestHistoryFailureReason`（strict snapshot seam typed failure）
+- `BacktestHistorySnapshot` / `BacktestHistorySnapshotRun` / `BacktestHistorySnapshotQueryResources`
+- `BacktestHistorySnapshotResourceBudget` / `BacktestHistorySnapshotResourceReservation`（daemon-owned scan budget 与 opaque RAII guard）
 - `BacktestHistoryMetadataCache` / `BacktestHistoryMaintenanceClient`
 - `DailyKlineCache` / `DailyKlineCoverage` / `DailyKlineCacheStatus` /
   `DailyKlineCacheDiagnosticReport` / `DailyKlineCachePurgeReport`

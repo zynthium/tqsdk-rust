@@ -11,12 +11,14 @@ repository = "https://github.com/zynthium/tqsdk-rust"
 build = "build.rs"
 
 [features]
-default = ["server", "metadata"]
+default = ["server", "metadata", "history"]
+history = ["tqsdk-data/tqbn-zstd", "tokio/rt-multi-thread"]
 metadata = ["dep:tqsdk-session"]
 server = ["dep:yawc", "tqsdk-core/websocket-transport"]
 
 [dependencies]
 chrono.workspace = true
+core_affinity.workspace = true
 futures.workspace = true
 include_dir.workspace = true
 serde.workspace = true

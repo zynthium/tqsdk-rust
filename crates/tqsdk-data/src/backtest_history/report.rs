@@ -205,6 +205,39 @@ pub struct BacktestHistoryRequestReport {
     pub remote_used: bool,
 }
 
+/// Machine-readable reason for one terminal request failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BacktestHistoryFailureReason {
+    /// The request did not satisfy the public validation contract.
+    InvalidRequest,
+    /// A complete authoritative catalog proved that the symbol does not exist.
+    SymbolNotFound,
+    /// Durable cache coverage did not span the complete requested range.
+    CoverageIncomplete { missing_ranges: Vec<(i64, i64)> },
+    /// The available rows were provisional rather than final.
+    ProvisionalData { as_of_ns: i64 },
+    /// Required metadata was absent or incomplete.
+    MetadataIncomplete,
+    /// Snapshot bytes or their declared digests were corrupt.
+    SnapshotCorrupt,
+    /// The snapshot format or schema is not supported by this reader.
+    SnapshotIncompatible,
+    /// The request was cancelled before terminal success.
+    Cancelled,
+    /// Materializing the complete response would exceed its byte limit.
+    ResponseTooLarge {
+        limit_bytes: usize,
+        attempted_bytes: usize,
+    },
+    /// The selected snapshot is not currently available.
+    SnapshotUnavailable,
+    /// The history operation exceeded its time limit.
+    HistoryTimeout,
+    /// An internal failure has no safer public classification.
+    Internal,
+}
+
 /// Terminal failure report for one request.
 #[derive(Debug, Clone)]
 pub struct BacktestHistoryRequestFailure {

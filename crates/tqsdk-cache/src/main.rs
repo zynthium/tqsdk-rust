@@ -32,6 +32,7 @@ use tqsdk_session::SessionClientBuilder;
 
 mod progress;
 mod query;
+mod snapshot;
 mod terminal;
 
 use progress::{
@@ -139,6 +140,8 @@ enum Command {
     Purge(PurgeArgs),
     /// Query cache-backed history and emit raw JSONL or token-aware LLM CSV context.
     Query(QueryArgs),
+    /// Manage immutable history generations under an explicit history root.
+    Snapshot(snapshot::SnapshotArgs),
 }
 
 impl Command {
@@ -154,6 +157,7 @@ impl Command {
             Self::MetadataRefresh(_) => "metadata-refresh",
             Self::Purge(_) => "purge",
             Self::Query(_) => "query",
+            Self::Snapshot(_) => "snapshot",
         }
     }
 }
@@ -1212,6 +1216,11 @@ fn elapsed_millis(started_at: Instant) -> u64 {
 
 async fn run(cli: Cli) -> Result<CommandOutcome, CliError> {
     validate_command_kind(&cli.command, cli.kind)?;
+    if matches!(cli.command, Command::Snapshot(_)) && cli.cache_dir.is_some() {
+        return Err(CliError::Usage(
+            "snapshot commands use --history-root; do not pass --cache-dir".to_string(),
+        ));
+    }
     match cli.command {
         Command::Inventory => inventory(cli.cache_dir.as_deref(), cli.kind),
         Command::Inspect(args) => inspect(cli.cache_dir.as_deref(), cli.kind, args),
@@ -1225,10 +1234,14 @@ async fn run(cli: Cli) -> Result<CommandOutcome, CliError> {
         }
         Command::Purge(args) => purge(cli.cache_dir.as_deref(), cli.kind, args),
         Command::Query(_) => unreachable!("main dispatches query output separately"),
+        Command::Snapshot(args) => snapshot::execute(args).await,
     }
 }
 
 fn validate_command_kind(command: &Command, kind: CacheKind) -> Result<(), CliError> {
+    if matches!(command, Command::Snapshot(_)) {
+        return Ok(());
+    }
     if matches!(kind, CacheKind::All) && !matches!(command, Command::Inventory | Command::Doctor) {
         return Err(CliError::Usage(
             "--kind all is only supported by inventory and doctor".to_string(),

@@ -1,520 +1,62 @@
 # AI 工作流与架构守则
 
-## 文档定位
+本文是 Codex、Claude Code 和其他代码代理的新 session 入口。它只给出不可违反的边界、最小阅读路由和变更同步规则；不得复制完整架构说明或验证矩阵。
 
-本文档是给 Codex、Claude Code 和其他代码代理的新 session 入口。它不是替代完整架构文档，而是把当前架构的硬边界、设计意图和变更同步规则固化下来，防止后续代理因为只看到局部代码或旧审查报告而随意改动边界。
+## 权威与最小阅读
 
-权威阅读顺序：
+当前代码、[`docs/architecture/`](./) 和受影响 crate 的 README 优先于 review、历史计划和归档。`docs/reviews/` 是决策输入，`docs/superpowers/` 是执行记录，`docs/archive/` 是历史记录，均不能覆盖当前架构。
 
-1. 本文档
-2. [`README.md`](../../README.md)
-3. [`docs/README.md`](../README.md)
-4. [`docs/architecture/README.md`](README.md)
-5. [`crate-boundaries.md`](crate-boundaries.md)
-6. 受影响 crate 的 `README.md`
-7. 受影响专题文档，例如 `api-wait.md`、`api-task.md`、`api-data.md`、`runtime-core/*.md`、`validation.md`
+| 任务 | 必读 | 按需加读 |
+| --- | --- | --- |
+| 文档或 AI 工作流 | 根 [`README.md`](../../README.md)、[`docs/README.md`](../README.md) | 本文、目标文档 |
+| 修改具体 crate | 根 README、`docs/README.md`、目标 crate README | 相关 API / 专题文档 |
+| crate 边界或 public API | [`README.md`](README.md)、[`crate-boundaries.md`](crate-boundaries.md) | 对应 `api-*.md`、contract example |
+| runtime / 状态 / cursor / command | [`runtime-core/overview.md`](runtime-core/overview.md) | `runtime-core/*.md`、[`validation.md`](validation.md) |
+| feature、用户入口或验证 | 根 README、目标 crate README | contract example、`validation.md` |
+| WebSocket DIFF / 状态字段 | [`diff_protocol_spec.md`](../diff_protocol_spec.md) 的目标章节 | 不全文读取协议 |
+| relay history / snapshot | [`history-relay.md`](history-relay.md)、[`history-relay-http.md`](history-relay-http.md)、[`history-snapshot-manifest.md`](history-snapshot-manifest.md) | relay README、`validation.md` |
 
-[`docs/reviews/`](../reviews/) 是当前审查和 public API 决策记录，[`docs/archive/`](../archive/) 是历史审查输入，[`docs/superpowers/`](../superpowers/) 是 specs/plans 执行记录。它们都不是当前架构的唯一权威来源。若审查报告、历史计划与已落地代码或 `docs/architecture` 不一致，必须先核对代码和架构文档，再决定是否把建议转化为新的计划。
+修改前先检查工作树，不覆盖已有改动。可用时先用 CodeGraph 定位代码；修改 Rust 符号前按 `AGENTS.md` 做 impact analysis。HIGH、CRITICAL 或 unresolved UNKNOWN 风险先向用户报告。真实账号、行情、交易、发布和不可逆操作始终需要显式授权及环境变量门控。
 
-## 当前总体架构
+## 不可违反的架构边界
 
-当前 workspace 采用“稳定底座 + 可替换 facade”的分层。下图表示用户能力层级，不是 Cargo 依赖图：
+- `tqsdk-core` 拥有 protocol runtime、状态、commit/revision、cursor、adapter 与底层 contract；不拥有 facade、direct query、task 或 data 语义。
+- `tqsdk` 仅是默认入口、prelude、轻量 wrapper 和 curated re-export；不拥有第二棵状态树或第二套 runtime。
+- `tqsdk-session` 拥有 shared session、one-shot request/response、direct query、GraphQL、metadata、calendar、ranking、EDB、auth refresh 与 replay control。
+- `tqsdk-wait` 仅做 single-owner continuous consumption；`tqsdk-task` 是执行层，`tqsdk-data` 是 research/offline data 层。
+- `tqsdk-relay` 是可选 CacheOnly market relay；不进入默认 SDK 依赖路径，不扩展为通用代理或 provider 聚合。
+- 可见状态变化只能走 `RuntimeHandle -> StateStore -> CommitResult -> RuntimeReader/UpdateCursor`；禁止旁路通知、私有 revision 或第二棵状态树。
+- domain 写入经过 `MutationSource`；command/order 遵守 runtime 状态机，禁止 adapter 本地字符串判断绕过转换校验。
+- core public surface 保持克制。完整定义见 [`crate-boundaries.md`](crate-boundaries.md) 与 [`runtime-core/`](runtime-core/)。
 
-```text
-tqsdk-core
-    ^
-    |
-tqsdk-session
-    ^
-    |
-tqsdk-wait / tqsdk-data
-    ^
-    |
-tqsdk-task
-    ^
-    |
-tqsdk
-```
+## Codex 多代理路由
 
-实际 Cargo 依赖中，`tqsdk` 作为默认入口会直接依赖 `tqsdk-core`、`tqsdk-session`、
-`tqsdk-wait`、`tqsdk-task` 和 `tqsdk-data`。内部能力归属仍由这些 crate 自己维护。
-`tqsdk-cache` 是此图之外的可选 operator binary：它调用已存在的 facade/data cache APIs，
-不参与策略 runtime 或默认依赖路径。
+`.codex/config.toml` 与 `.codex/agents/*.toml` 定义模型、推理深度、并发与 sandbox；本文定义委派门槛。
 
-设计意图：
+- 默认不委派。主代理负责全部探索、实现、验证、失败归因、风险升级与结果整合。
+- 只有已确认 HIGH/CRITICAL 风险，或明确需要 public API、并发、持久化、迁移、安全的独立审查时，才使用 `architecture_reviewer`；每任务最多一个 reviewer，只允许一层委派。
+- 委派显式使用 `fork_turns="none"`，任务消息自包含审查目标、必要证据、交付物和停止条件。只有 reviewer 必须解释主线程对话时才传最近必要轮次；只有必须解释完整对话历程时才使用 `all`，并写明原因。
+- reviewer 只返回按严重度排序的发现、`file:line` 证据和验收缺口；不得编辑、验证或继续委派。最终判断与验证由主代理负责。
+- 每次委派最终报告实际代理数、耗时、返工和质量结果；系统提供实际 token usage 时一并记录，否则标记 unavailable，不做估算。相对同类单代理基线无质量提升且总 token 未下降的路由应移除。
 
-- 保留一个 protocol-complete runtime contract，先保证所有远端协议域共享同一套状态、revision、commit、causality 和 cursor 语义。
-- 把用户使用形态放在上层 crate 中演进，避免 core 为某一种 facade 心智提前定型。
-- `tqsdk` 是面向普通用户的默认 facade / prelude；它降低入口复杂度，但不拥有
-  第二套 runtime、状态树、direct query、task 或 data 实现。
-- 让高性能和多消费者异步系统用户停留在 `tqsdk-core + tqsdk-session` 自建消费层，让 Python 心智用户使用 `tqsdk-wait`，让执行和研究能力分别进入 `tqsdk-task` 与 `tqsdk-data`。
-- 避免回退成单体 `TqApi` crate，也避免把 direct query、task、downloader、research helpers 塞回底层。
+## 实施与同步
 
-## Crate 职责边界
+1. 分类：docs-only、局部实现、public API/facade、runtime contract 或架构边界变更。
+2. 探索：只读取本任务路由所需上下文；用图谱工具和定向搜索，不无目的扫仓库。
+3. 实现：遵守既有 crate 边界、error 类型、async 风格和测试组织；不顺手重构。
+4. 验证：选择最小充分的本地、非 live 检查；完整矩阵见 [`validation.md`](validation.md)。
+5. 收尾：确认改动归属。提交前执行图谱 detect changes；已闭环的 spec / plan / review 移入 `docs/archive/superpowers/`，当前架构文档不自动归档。
 
-### `tqsdk`
+以下属于架构更新：新增/删除/重命名 crate；移动能力归属；改变 runtime、状态树、commit/revision/cursor、mutation 或 command lifecycle；改变 public surface、feature/依赖裁剪或 session/cache/aggregation 模型。
 
-职责：
+架构更新同轮更新本文、[`README.md`](README.md)、受影响专题文档和 crate README；用户入口变化更新根 README；AI 工作流变化更新 `AGENTS.md` / `CLAUDE.md`；验收变化更新 [`validation.md`](validation.md)。最终说明明确是否属于架构更新、更新哪些权威文档及验证结果。
 
-- 默认用户入口和 `prelude`
-- `Tq` / `TqBuilder` 这类轻量 ergonomic wrapper
-- curated re-export 和 `advanced::*` 下钻命名空间
-- 组合现有 wait/task/data/session 能力，降低普通策略样板
+## 验证入口
 
-非职责：
-
-- runtime contract、状态树、commit/revision/cursor
-- direct query / metadata 的真实实现
-- 调用方自建 fan-out 的真实实现
-- task/data 能力下沉或重新实现
-
-设计原因：
-
-- 普通用户应该先看到一个 crate 和一个主循环，而不是先学习六个内部 crate。
-- 内部 crate 边界仍然是架构防线；`tqsdk` 只是对外入口，不是物理单体化。
-
-### `tqsdk-core`
-
-职责：
-
-- 统一命令模型、命令账本和命令状态机
-- 统一 runtime state、domain partitions、commit/revision、causality、cursor/log
-- protocol adapters、transport contracts、session runtime orchestration
-- 官方对象的纯 schema/type contract
-- 纯交易时段状态 helper，例如 `TradingSessionSchedule`
-- `RuntimeHandle` / `RuntimeReader` / `UpdateCursor` / `CommitResult`
-
-非职责：
-
-- `wait_update()` / fan-out / callback / `TqApi` facade
-- GraphQL / HTTP direct-query convenience wrappers
-- downloader、DataFrame/polars、GUI/report、research workflow
-- `TargetPosTask`、scheduler、业务执行工具
-- 天勤账号认证、`TqKq`、reqwest HTTP executor 这类具体实现的 public core API
-
-设计原因：
-
-- core 是所有上层 facade 的公共底座，public surface 越宽，后续破坏成本越高。
-- core 必须保持纯 async substrate，不在内部创建 Tokio runtime，也不强迫用户引入 reqwest/base64 等天勤实现依赖。
-- `StateSnapshot` 和 `CommitLog` 可以作为兼容/底层原语存在，但主读契约应是 `RuntimeReader` 及其 read guard。
-
-禁止回退：
-
-- 不要恢复 `ContractFuture` public alias；trait async 边界使用 AFIT/RPITIT，boxing 只允许在显式 dyn erased boundary。
-- 不要从 `tqsdk-core` 重新导出 `TqAuthProvider`、`PasswordCredentials`、`BrokerInfo`、`TqKqAccountConfig`、`ReqwestHttpExecutor`。
-- 不要让 core 重新依赖 `reqwest` 或 `base64`。
-- 不要在 `tqsdk_core::internal` 下新增面向用户的 API；它只是 session 吸收 runtime assembly 细节期间供 sibling crates 使用的临时桥接层，不能演变成第二套 public surface。
-
-### `tqsdk-session`
-
-职责：
-
-- shared session owner
-- lazy establish、route/pending-route driving、reconnect/resync control
-- one-shot request/response helpers
-- low-level market command helpers that remain one-shot command submission
-- typed symbol metadata normalization：`SymbolInfo` 对齐官方合约信息表，
-  `InstrumentSpec` 保持窄的下单校验规格对象
-- GraphQL / HTTP query、schema refresh、metadata、calendar、settlement、ranking、EDB
-- value-style GraphQL direct query 内部串行化完整 query lifecycle；raw command-style
-  query 仍由调用方负责推进顺序
-- auth refresh、replay step/reset 这类 one-shot control-plane helper
-- 官方单日 replay session 创建、facade 自动 heartbeat 与显式控速/terminate 这类
-  authenticated service helper；terminate 仍不伪装成 async Drop
-- session-level error diagnostics / retry hints
-- `ServerBacktestHistoryStream::close().await` 在复用 session 前等待 chart leases 释放；Drop 仅作为
-  无法显式 close 时的异步 best-effort cleanup
-- 天勤特定 auth/http/TqKq 实现的内部落点
-
-设计原因：
-
-- 这些能力是一轮请求/响应或“一次命令 -> 等待完成 -> 返回值”，不要求用户持有持续变化的 live object。
-- `wait` 和调用方自建消费层都需要共享同一个底层 session，因此 session 是它们之前的薄层，而不是某个 facade 的内部实现细节。
-
-禁止回退：
-
-- 不要把 wait facade 的 `quote` / `kline` live handles、live trade refs、`step()` / `step_until(...)`、object fan-out、task、downloader、research workflow 塞进 session。
-- 不要把消费层配置塞回 session；消费形态配置应留在消费层或调用方自建层。
-
-### `tqsdk-wait`
-
-职责：
-
-- Python 风格单 owner `TqApi`
-- `step()` / `step_until(...)` 主推进点
-- `WaitStep::is_changing()` / field-level changing checks
-- diff-backed market/trade live refs
-- serial/window 视图；`kline` / `tick` 返回 non-blocking handle，严格 chart
-  初始化等待使用 `kline_ready` / `tick_ready`；多合约 K 线使用
-  `kline_multi([...])` 和服务端 binding 对齐，Tick serial 仍为单合约
-- trade command 的 wait 风格薄包装
-
-设计原因：
-
-- 它承载 Python 用户心智，但不是 Python 单体 `TqApi` 的全量复制。
-- 它必须只消费 runtime contract，不拥有第二棵状态树。
-
-禁止回退：
-
-- 不要复制 direct query / schema / metadata API；需要时通过 `api.session()` 使用 `tqsdk-session`。
-- 不要加入 downloader、task、DataFrame/polars、callback/fan-out 语义。
-
-### `tqsdk-task`
-
-职责：
-
-- `TaskHost`
-- `TargetPosTask`
-- `TargetPosScheduler`
-- ownership / guarded order
-- task-level typed order builder
-- pre-trade risk gate
-- execution group foundation
-- account group / multi-account order foundation
-- strategy host / strategy context / strategy environment / deployment / supervisor adapter
-- strategy supervisor 的 typed health/metrics/shutdown report 和 telemetry/export hook；
-  生产观测导出保持 transport-neutral，不内置 GUI、web helper 或 HTTP health/metrics endpoint
-- strategy replay driver with task-owned replay market source
-- Python-compatible local backtest sim foundation
-- S31 低延迟 trading desk thin profile，hot path 使用
-  `tqsdk-session + RuntimeReader`，并复用 task 层 `RiskEngine` / `TaskOrderIntent`
-  / typed latency report
-- public fake market / fake broker test harness
-- execution report
-- planner/executor 的本地任务状态机
-
-设计原因：
-
-- 任务层维护业务执行状态，既不是协议 substrate，也不是通用消费 facade。
-- 它可以依赖 `tqsdk-wait` 的稳定截面语义，但不得反向要求 core 改写提交模型。
-- 它拥有 `replay::ReplayMarketEvent` / `replay::ReplayMarketSource` 这类 deterministic replay
-  输入类型，并可消费 `tqsdk-data` 已完成查询的 history rows。data 负责 source selection 和
-  K 线聚合；task 只负责把行转换为时间有序 replay/backtest event，不能复制缓存、远端 fill 或
-  聚合器。不得把 JSONL cache storage 下沉进 data public surface，也不得把 strategy execution
-  下沉进 data。
-- 它可以在 task/data 上层组合 `backtest::StrategyBacktest + sim::TqSim`，提供 Python-compatible
-  本地回测模拟账户能力；这不允许反向改变 core/session/wait 的职责边界。
-
-演进方向：
-
-- 后续可继续把内部共享可变状态收敛为更清晰的 single-owner/actor 模型。
-- 这类优化应保持 task 层内部收敛，除非有明确的 runtime contract 缺口。
-
-### `tqsdk-data`
-
-职责：
-
-- research/offline data crate
-- history page/series/download
-- CSV export
-- TQBN daily v3 (`.tqbn`) 当前默认和 canonical 格式，按交易日分区存储
-- TQBN market-data block 的 crate-internal 时间索引与范围读取；旧/不匹配索引必须逐 block 回退
-- TQBN final coverage 与 open-day provisional checkpoint；后者只用于增量恢复，不得进入普通
-  coverage/cache-hit，物理淘汰仅由显式 maintenance/compaction 触发
-- TQBN 每分区 advisory lock、原子首次发布、opened-file snapshot 与 tail checkpoint；新格式 reader
-  只读取 checkpoint 确认的长度，解压/流式消费在短锁外完成，未确认坏后缀由下一 writer 截断恢复
-- `repair-locks` 是只修复 lock 的窄维护路径：它对每个 Tick 分区分别报告 legacy
-  `<partition>/.tqbn.lock` 和逐文件 `<file>.tqbn.lock`，绝不重写 TQBN、coverage 或 index，也不访问 remote/auth
-- 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store
-- `LiveTickCacheWriter` 只作为纯数据层 writer，接收已解码 tick rows 并写入共享回测缓存；
-  它可以做有界行缓冲和显式 `flush()`，但 live 订阅、`wait_update()` 驱动、timer task 和后台进程
-  不属于 `tqsdk-data`
-- canonical-minute 使用独立 v5 `.tqmk` 月文件；row payload 只在 zstd 更小时无损压缩，绝不删除
-  零成交或重复分钟。v4 只能由带 cache-root 外备份的显式 `tqsdk-cache --kind minute migrate` 升级，
-  v3 保持 fail-closed `LegacyUnsupported`
-- history page/series/download/export
-- Greeks、历史主连等研究派生能力
-- `BacktestHistoryClient`：持久 metadata sidecar、请求 planner、official server-backtest
-  fill/single-flight、统一 tick/minute/daily batch/concurrency/timeout/cancellation/progress 调度、bounded
-  async cache scan 与 Tick/60s/1d 派生 K 线查询。它是回测数据路径的唯一 cache/fill owner；
-  facade 与 CLI 只能适配该合同，`tqsdk-wait` 不参与 data fill，`tqsdk-task` 不拥有 durable partition
-- `RemoteOnMiss` 在单个 client 内最多保留 `logical_concurrency` 个 clean server-backtest source lanes；
-  同一 lane 可顺序服务多个 Tick 交易日或 minute window，但只有显式 terminal 且 chart lease 清理成功
-  才能复用。pool 饱和时不得在持有 series lease 期间等待，overflow session 完成后直接销毁。取消、
-  transport/protocol error 或 cleanup error 也必须销毁 lane。lane 调度属于 data fill，session 推进、
-  分页和 chart 生命周期仍由 `tqsdk-session` substrate 拥有
-- `RemoteOnMiss` client/facade/CLI 必须进入 shared cache-root gate，并由 `family × symbol` lease 去重
-  重叠 fill；refresh、stale repair、verify、doctor 和真实 purge 使用 exclusive gate。不要绕过该门禁
-  增加另一条远端 fill 路径，也不要承诺不理解该协议的旧进程可与新进程长期混跑
-- durable source 固定为 Tick daily TQBN、`<60s` 从 Tick 按 session 临时聚合、canonical 60s monthly、
-  `N × 60s`（`<1d`）从 canonical minutes 按固定 CST `18:00` trading-day grid 临时聚合、native final-1d
-  logical-symbol single-file cache，以及 `2d` 至 `28d` 从 complete 1d rows 临时聚合。分钟盘中 break 不重置
-  高周期 bucket；Tick/60s/1d cache 没有自动清理，派生 K 不落盘。daily row 不支持结算价或涨跌停价
-- daily miss、损坏或 coverage 不完整必须 fail closed，禁止回退到 minute；native daily 始终为一个
-  logical symbol 一个 `.tqdk` 文件，不做时间分区
-- canonical-minute 月分区绑定写入时的 immutable metadata snapshot。active metadata pointer 前移不单独
-  使旧分区失效。snapshot hash 不同时，必须加载月文件绑定的旧 sidecar 与目标 sidecar，并仅对实际读取的
-  cached range 比较 schema、market、logical symbol、session、交易日和 physical mapping；全部相同才可
-  复用旧 coverage。新增尾部日期保持为 miss，当前月下一次原子写入时才迁移 header。缺失 sidecar、session/
-  交易日/映射变化、损坏或语义冲突的混合分区必须 fail closed，
-  不得自动删除、重写或拼接缓存。唯一例外是 operator 显式传 `tqsdk-cache --kind minute fill
-  --repair-stale`：active snapshot 覆盖窗口时，它仅删除与 active snapshot 冲突的整月分区，随后由同一次
-  remote-on-miss fill 重建；这不是 reader 或普通 fill 的自动修复
-- remote-on-miss 的 canonical-minute metadata refresh 必须覆盖涉及的完整 CST trading month；更窄 snapshot
-  不得替换更宽 active pointer，兼容且覆盖请求的 retained snapshot 可供后续 miss 复用
-
-设计原因：
-
-- 这些能力有批量、离线、tabular、缓存物化、衍生计算语义，不应污染 live session、wait 或调用方自建消费层的最小心智。
-
-禁止回退：
-
-- 不要把 downloader、DataFrame/polars 或研究级派生计算下沉到 core/session/wait 或调用方自建消费层。
-
-### `tqsdk-cache`
-
-职责：
-
-- 可选 TQBN tick、canonical-minute 与 native-daily cache operator CLI
-- 三类 fill 共享 `BacktestHistoryClient` 调度与 stderr progress；新 report 统一写 schema v3 到
-  `reports/tick|minute|daily/`，reader 兼容 tick v1/v2、minute v1、daily v1
-- tick/minute/daily 都提供 inventory、inspect、fill、verify、doctor 和各自粒度 purge；真实 purge
-  必须 `--yes` 并持 exclusive root gate，`all` 只汇总三类 inventory/doctor
-- 使用 `BacktestTickCache` shared/exclusive root advisory gate 与 data-owned per-series lease 协调并发；
-  首次关闭信号请求协作式取消并等待 tick 短尾 flush，但不提交未确认 final coverage 或推进 provisional
-  checkpoint；第二次关闭信号立即以 130 退出
-
-非职责：
-
-- 新 cache format/store adapter、session owner、live subscription/recording loop 或 backtest runtime
-- relay、daemon、monitor/dashboard、通用 downloader 或 destructive maintenance automation
-
-设计原因：
-
-- 固定 cache root 的 batch 运维以终端摘要为默认合同，脚本可显式请求 JSON；但不能把运维进程、网络调度或
-  storage 语义塞回默认 SDK hot path。
-- 该 binary 不在 Cargo default-members；普通策略用 `.backtest(...)`、`.warmup()` 和
-  `MarketCachePolicy`，不会因它增加依赖或运行成本。
-
-### `tqsdk-relay`
-
-职责：
-
-- 可选独立 market relay / cache 服务
-- 代理 SDK market websocket 子集；不代理 trade/query/auth/schema/metadata 给下游
-- 维护共享上游 tick source、内存 tick/quote/K 线 cache、K 线合成和 bootstrap 队列
-- relay 内部可用 `tqsdk-session` metadata 查询动态发现当前活跃期货合约集合，并按批执行
-  `query_symbol_info` typed metadata 查询；`trading_time` 是合约交易时间段判断的优先来源
-- 产品发现模式默认按本地每日固定时间刷新合约集合，并在连接上游前检查 `ins_list`
-  长度阈值；超出 hard limit 时给出 relay 实例拆分建议
-- 提供 dry-run 启动自检、结构化启动日志、HTTP `/health` 和 `/metrics`；
-  `/health` 区分进程/下游监听、上游连接、合约集合刷新和数据 freshness
-- 新 K 线订阅可用内存 tick ring 回放已闭合的合成 K 线
-
-设计原因：
-
-- relay 是为减少多进程、全品种、多周期行情订阅字符串压力的可选部署层，不改变 SDK
-  默认直连路径。
-- relay 仍是 workspace member，便于共享依赖和 CI，但不属于 Cargo default-members；
-  SDK 默认验证走 core/session/wait/task/data/tqsdk，relay 用显式 `-p tqsdk-relay` gate。
-- relay 自身可以使用 metadata 查询来构建上游 tick 源，但不得把 query/auth/schema
-  代理暴露给下游 SDK 客户端。
-
-禁止回退：
-
-- 不要让现有 SDK crates 默认依赖 relay。
-- 不要把 relay 变成通用天勤代理或多 provider 行情聚合框架。
-- 不要把 relay 内存 cache 伪装成跨重启持久化历史数据能力。
-
-## Runtime 不变量
-
-下面是不允许被局部重构破坏的系统级不变量。
-
-### 单一提交源
-
-所有对外可见状态必须通过 runtime core 提交：
-
-```text
-RuntimeCommand / RuntimeInput
-    -> ProtocolAdapter
-    -> NormalizedMutation
-    -> RuntimeHandle
-    -> StateStore
-    -> CommitResult
-    -> SharedCommitResult
-    -> RuntimeReader / UpdateCursor
-```
-
-设计原因：
-
-- 只有这样，wait、task、data、自建消费层以及低层用户才能共享同一套因果解释。
-- 旁路 future、私有 watcher 或 adapter 直接通知上层都会破坏 revision 和 causality。
-
-### 单一 revision / cursor 语义
-
-- 只有 runtime core 可以推进 `Revision`。
-- facade 只能消费 `RuntimeReader::cursor()` / `RuntimeReader::next()` / `RuntimeReader::next_view()`。
-- `CommitResult` 是不可变提交 payload；写侧返回、`CommitLog`、`RuntimeReader::next()` 和 fan-out 应共享 `SharedCommitResult = Arc<CommitResult>`，不得用深拷贝绕过同一提交身份。
-- `CommitLog` 是底层共享原语，不是新 facade 的首选 public contract。
-- 慢消费者应得到明确 lag/closed/error surface，不得反向改变 commit 生成策略。
-
-### 状态分区与兼容状态树并存
-
-当前设计不是彻底删除全局状态树，而是：
-
-- 对外仍保持一棵兼容的 runtime state tree 语义。
-- 内部用 domain partitions 降低跨领域污染和热路径锁竞争。
-- market/trade 热读优先走 `RuntimeReader::read_market_state()` / `RuntimeReader::read_trade_state()`。
-- 同一低延迟决策需要同时读取 market 与 trade 时，优先走
-  `RuntimeReader::read_market_trade_state()`，让两个分区读锁绑定到同一 revision。
-- generic path、system、query/schema/replay 或尚无 typed partition view 的路径，可以继续通过 `RuntimeReader::read()` 读取 full snapshot。
-
-设计原因：
-
-- 天勤 DIFF 模型天然接近全局 data 字典，兼容状态树有助于覆盖官方稀疏对象和 query/schema/replay。
-- domain partitions 是安全和性能防线，先按高风险、高频路径收敛，不必一次性引入完整强类型 state rewrite。
-
-### MutationSource 根路径防线
-
-runtime apply 前必须校验 mutation 来源和根路径：
-
-- market 只允许行情根，例如 `quotes`、`trading_status`、`charts`、`klines`、`ticks`
-- trade 只允许 `trade`
-- query 只允许 `query`
-- schema 只允许 `schema`
-- replay 只允许 `replay`
-- session control 只允许 `system` / `runtime`
-
-设计原因：
-
-- adapter 解码错误不能跨领域污染资金、持仓或行情状态。
-- 这是完整强类型状态分区之前的低成本、高价值安全防线。
-
-### Command / order 状态机
-
-命令状态必须由 runtime 校验合法转换：
-
-- `Queued -> Sent | Rejected | Failed | Cancelled`
-- `Sent -> Acked | PartiallyApplied | Completed | Rejected | Failed | Cancelled`
-- `Acked -> PartiallyApplied | Completed | Rejected | Failed | Cancelled`
-- `PartiallyApplied -> Completed | Rejected | Failed | Cancelled`
-- terminal 状态不可回退；相同 terminal 重复写入保持幂等
-
-设计原因：
-
-- 下单和撤单是实盘风险最高路径，不能依赖 adapter 本地顺序假设。
-- 乱序消息不能把 `Completed` 回退到 `Sent` 或 `Acked`。
-
-禁止回退：
-
-- 不要用字符串终态判断替代 `CommandStatus` / `OrderLifecycle`。
-- 不要绕过 `RuntimeHandle::record_command_status()`。
-
-## 提交与归档纪律
-
-- 当一个改动单元已经足够自洽、验证通过，并且不需要继续耦合其他无关任务时，AI 助手应优先提交代码，再继续下一项工作或结束 session。
-- 在 superpowers 的 spec-driven / plan-driven 流程里，默认收尾顺序是：实现 -> 验证 -> 提交 -> 归档执行文档。
-- `superpowers` 的 spec / plan / execution review 属于执行记录，不是当前架构权威。对应的代码修改闭环并验证后，应把这些文档移到 `docs/archive/superpowers/` 的相应目录，并同步更新归档索引。
-- `docs/architecture/*`、crate README，以及仍在指导未闭环工作的 review / scenario 文档不是自动归档对象；它们必须留在活跃位置，直到它们不再承担当前权威或当前决策职责。
-- 如果一个文档同时承担当前权威和执行记录的角色，以当前权威为准，不得自动归档；应就地更新。
-
-## 开始工作前的分类流程
-
-每个新 session 开始改代码前，先把任务归类：
-
-1. **局部实现 / bugfix**
-   - 不改变 crate 归属、public API、runtime contract。
-   - 读取相关 crate README 与局部代码即可。
-   - 测试覆盖以受影响 crate 为主。
-2. **facade 能力扩展**
-   - 新 live object、fan-out、wait ref、task/data helper。
-   - 必须检查本文件的 crate 归属表，确认能力落点。
-   - 不得为了便利回改 core/session 边界。
-3. **runtime contract 变更**
-   - 涉及 `RuntimeHandle`、`RuntimeReader`、commit/revision、state store、mutation、command ledger、adapter contract。
-   - 必须更新 `runtime-core/*.md` 与 `validation.md`。
-   - 必须添加或更新 contract tests。
-4. **架构边界变更**
-   - 新 crate、移动模块、改变 direct query/live consumption/task/data 归属、扩大/收窄 public API。
-   - 必须更新本文档、`crate-boundaries.md`、`docs/architecture/README.md`、根 README 和受影响 crate README。
-
-如果无法判断类别，按更高风险类别处理。
-
-## 修改约束
-
-- 优先遵循现有 crate 边界，不要因为“更方便”移动职责。
-- 不要新增 `tqsdk-protocol`、`tqsdk-tq` 或其他 crate，除非任务本身就是经过文档化的架构更新。
-- 不要把审查报告中的长期建议直接落成大重构；先拆成和当前阶段一致的最小安全增量。
-- 不要在 facade 中维护第二棵状态树、第二套 revision、第二套 command lifecycle。
-- 不要用 public re-export 解决 sibling crate 的内部协作问题；必要的临时桥接应保持最窄可见性并明确标注。
-- 不要把 live smoke 作为普通验证默认运行；需要外部账号或实盘权限的测试必须保持 ignored 或显式环境变量门控。
-
-## 架构更新同步规则
-
-架构可以演进，但文档必须同轮更新。以下任一行为都属于架构更新：
-
-- 新增、删除或重命名 crate
-- 移动能力归属，例如 direct query 从 session 移到 wait/消费层，或 task/data 能力下沉
-- 改变 `RuntimeHandle` / `RuntimeReader` / `UpdateCursor` / `CommitResult` 的语义
-- 改变状态树、domain partition、mutation guard、command lifecycle 的规则
-- 扩大或收窄 core/session/facade 的 public surface
-- 引入新的 session ownership、actor、cache、aggregation 或 multi-source 模型
-- 改变 feature flags 或依赖裁剪策略，导致用户选择路径变化
-
-同一提交或同一 PR 必须同步更新：
-
-- 本文档
-- [`docs/architecture/README.md`](README.md)
-- 受影响专题文档
-- 受影响 crate README
-- 根 [`README.md`](../../README.md)，如果用户可见入口变化
-- `AGENTS.md` / `CLAUDE.md`，如果 AI 工作流入口或硬约束变化
-- [`validation.md`](validation.md)，如果验收命令、contract tests 或风险面变化
-
-提交说明中应明确：
-
-- 是否属于架构更新
-- 更新了哪些架构文档
-- 新增或调整了哪些 contract/static acceptance tests
-
-## 推荐验证
-
-局部文档/工作流改动：
+文档或工作流改动运行：
 
 ```bash
 git diff --check
 ```
 
-Rust 代码改动的默认验证：
-
-```bash
-cargo check --examples
-cargo test
-cargo clippy --examples --all-targets -- -D warnings
-```
-
-如果修改了 feature flags、workspace 依赖或 crate feature 传播，还必须验证：
-
-```bash
-cargo check --no-default-features
-cargo check --all-features --examples
-```
-
-如果改动会影响格式化，提交前仍应补充：
-
-```bash
-cargo fmt --all --check
-```
-
-场景驱动 public API example 的处理原则：
-
-1. 已经成为正式 API 契约的 `crates/*/examples/api_contract_sXX_*.rs`
-   必须保持可编译。
-2. 当前 API 尚不支持、或只能用绕路代码伪装表达的场景，只能作为
-   desired API sketch 保存在 `docs/scenarios/api_gaps/`，不得放在正式
-   examples 中伪装成已支持。
-3. 一旦某个 gap 被修复，应将 sketch 提升为正式 example，并纳入
-   `cargo check --examples` 或对应 opt-in crate 的 `-p <crate>` example gate 与 CI。
-4. 如果重构导致 example 变长、变绕、暴露更多内部细节，应优先判定为
-   API 退化，而不是用户使用问题。
-
-架构边界相关改动还应补充静态验收，例如：
-
-```bash
-rg "pub type ContractFuture|tqsdk_core::ContractFuture" crates
-rg "TqAuthProvider|PasswordCredentials|TqKqAccountConfig|ReqwestHttpExecutor" crates/tqsdk-core
-rg "reqwest|base64" crates/tqsdk-core/Cargo.toml
-rg "reader\\.read\\(\\)" crates/tqsdk-wait/src
-```
-
-这些静态检查不是固定全集；每次应按改动风险补充更贴近当前边界的检查。
+Rust、feature、public API、relay 与 release 检查按 [`validation.md`](validation.md) 的任务分类执行。public API、crate 拆分、feature 或 facade/runtime 消费方式变化时，相关 `crates/*/examples/api_contract_sXX_*.rs` 必须继续清晰且可编译。

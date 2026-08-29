@@ -3,6 +3,12 @@
 ## 文档定位
 本文档描述的是建立在现有 `tqsdk-core + tqsdk-session + replay/history contract` 之上的研究/离线数据工具层。
 
+relay 本地历史查询仍复用本层唯一的 planner/query/coverage/finality/metadata owner。共享 typed
+field schema、strict inspect、snapshot validator 和 lease-bearing read-only handle 的架构合同见
+[history-relay.md](history-relay.md) 与
+[history-snapshot-manifest.md](history-snapshot-manifest.md)；HTTP/admission/JSON/gzip 不进入
+`tqsdk-data`。
+
 它回答的是：
 
 - `tqsdk-data` 应该承接哪些能力
@@ -117,6 +123,28 @@ native-daily 缺失、损坏或 coverage 不完整时必须失败，不允许以
 `RequestCompleted` 到达前都是 provisional；一个请求失败不会取消 batch 里其他请求。`finish()` 会排空
 未消费事件并返回所有 terminal report。单请求 `collect()` 使用 builder 的默认 512 MiB 上限；批量
 `collect_all(max_total_bytes)` 必须显式给出总内存预算，避免把大范围 Tick/15s 查询无界物化。
+`BacktestHistoryFailureReason` 是 strict snapshot inspect/query seam 的 typed 失败分类；coverage 缺口携带
+完整 physical `missing_ranges`。既有 `BacktestHistoryRequestFailure` 保持 source-compatible，调用方不得解析
+其 `error` 文本来推断 strict snapshot 状态。
+
+`BacktestHistorySnapshot` 打开时持有 generation shared lease，并在加锁后重读 `CURRENT`；其
+`metadata_snapshot_hash()` 返回 manifest 的 generation 级 metadata inventory SHA-256。
+`inspect()` 在不读取 row 的情况下执行 strict coverage/finality 检查；`query()` 仅在 strict
+检查成功后启动 CacheOnly run，并把同一 generation lease 传入 coordinator、shared scan 和
+实际 blocking reader。HTTP disconnect、timeout 或 `BacktestHistorySnapshotRun` drop 只发出取消信号，
+不会在 detached blocking reader 完全退出前释放 generation lease。
+`query()` 返回 snapshot-owned `BacktestHistorySnapshotRun`；其 `next()`、`collect()` 和 `finish()`
+在 reader 已启动后仍返回 typed `BacktestHistoryFailureReason`。legacy `BacktestHistoryRun`、
+`BacktestHistoryEvent` 和 `BacktestHistoryRequestFailure` 的字段与字符串行为保持不变。
+`BacktestHistoryRequestReport::snapshot_hash` 继续表示现有 per-symbol metadata cache identity，
+两者用途不同，调用方不得直接按字符串相等比较。
+
+publisher 通过 `BacktestHistorySnapshotManifestBuilder` 构造 canonical manifest artifact，并通过
+`classify_backtest_history_snapshot_cache_path(...)` 取得唯一 file-role/disposition。已生成的 staging
+或 retained generation 用 `BacktestHistorySnapshot::open_generation(...)` 做同一套 identity、path、
+role、hash、catalog、format 与 metadata validation；`created_at()`、`file_roles()`、
+`catalog_symbols()` 和 hidden manifest rebuild recipe 只为 `tqsdk-cache` publisher 编排提供证据，
+不把 clone、fsync、CURRENT、retention 或 GC ownership 下沉到 data。
 
 `RemoteOnMiss` 先检查 durable coverage，只有缺口时才 lazy-load auth 并使用官方 futures
 server-backtest source；`CacheOnly` 不联网。`KQ.m@...` 的 calendar、session 和 physical segment

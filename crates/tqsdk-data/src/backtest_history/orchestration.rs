@@ -636,6 +636,7 @@ async fn execute_fill_batch(
         batch.requests,
         BacktestHistoryExecutionMode::MaterializeCache,
         root_gate,
+        None,
     )?;
     let mut telemetry = run.take_telemetry();
     let mut events_open = true;

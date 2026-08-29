@@ -29,11 +29,12 @@ use fs2::FileExt;
 use tqsdk_core::{Kline, Tick};
 
 use codec::{
-    DecodedTqbnRecord, EncodedTickRecord, TqbnBlockType, checksum64_fnv1a, decode_block_payload,
-    decode_block_payload_into, decode_file_prefix, decode_kline_record, decode_one_record,
-    decode_tick_delta_block, decode_tick1_record, decode_tick5_record, encode_block,
-    encode_compacted_records_block, encode_file_prefix, encode_kline_record, encode_records_block,
-    encode_tick_delta_block, encode_tick_record, is_tick_delta_block, validate_block_flags,
+    DecodedTqbnRecord, EncodedTickRecord, TQBN_BLOCK_FLAG_ZSTD, TqbnBlockType, checksum64_fnv1a,
+    decode_block_payload, decode_block_payload_into, decode_file_prefix, decode_kline_record,
+    decode_one_record, decode_tick_delta_block, decode_tick1_record, decode_tick5_record,
+    encode_block, encode_compacted_records_block, encode_file_prefix, encode_kline_record,
+    encode_records_block, encode_tick_delta_block, encode_tick_record, is_tick_delta_block,
+    validate_block_flags,
 };
 
 use format::{
@@ -74,6 +75,55 @@ const TQBN_COVERAGE_INDEX_PAYLOAD_LEN: usize = 40;
 const TQBN_RECORDS_INDEX_MAGIC: [u8; 4] = *b"TQRI";
 const TQBN_RECORDS_INDEX_VERSION: u8 = 1;
 const TQBN_RECORDS_INDEX_PAYLOAD_LEN: usize = 32;
+
+pub(crate) fn snapshot_requires_zstd(bytes: &[u8]) -> Result<bool> {
+    let (_, mut offset) = decode_file_prefix(bytes)?;
+    let mut requires_zstd = false;
+
+    while offset < bytes.len() {
+        let header_end = offset.checked_add(TQBN_BLOCK_HEADER_LEN).ok_or_else(|| {
+            DataError::InvalidResponse("TQBN block header offset overflow".to_string())
+        })?;
+        let header = bytes.get(offset..header_end).ok_or_else(|| {
+            DataError::InvalidResponse(format!("TQBN block header truncated at offset {offset}"))
+        })?;
+        if &header[0..4] != b"TQBB" {
+            return Err(DataError::InvalidResponse(format!(
+                "TQBN block magic mismatch at offset {offset}"
+            )));
+        }
+
+        let block_type = header[4];
+        let flags = header[5];
+        validate_block_flags(block_type, flags)?;
+        requires_zstd |= flags & TQBN_BLOCK_FLAG_ZSTD != 0;
+
+        let payload_len_u64 = u64::from_le_bytes([
+            header[8], header[9], header[10], header[11], header[12], header[13], header[14],
+            header[15],
+        ]);
+        let payload_len = usize::try_from(payload_len_u64).map_err(|_| {
+            DataError::InvalidResponse(format!(
+                "TQBN block payload length {payload_len_u64} does not fit in usize"
+            ))
+        })?;
+        if payload_len > MAX_TQBN_BLOCK_PAYLOAD_BYTES {
+            return Err(DataError::InvalidResponse(format!(
+                "TQBN block payload length {payload_len} exceeds max {MAX_TQBN_BLOCK_PAYLOAD_BYTES}"
+            )));
+        }
+        offset = header_end.checked_add(payload_len).ok_or_else(|| {
+            DataError::InvalidResponse("TQBN block payload offset overflow".to_string())
+        })?;
+        if offset > bytes.len() {
+            return Err(DataError::InvalidResponse(format!(
+                "TQBN block payload truncated: requires {payload_len} bytes"
+            )));
+        }
+    }
+
+    Ok(requires_zstd)
+}
 const TQBN_TICK_LEGACY_TIMESTAMP_SKEW_NS: i64 = 1_000;
 const TQBN_TICK_LEGACY_SAME_ID_TIMESTAMP_SKEW_NS: i64 = 20_000_000;
 // The residual legacy-page replays observed in the six-month oracle cache

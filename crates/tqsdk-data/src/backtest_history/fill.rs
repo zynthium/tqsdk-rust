@@ -905,9 +905,12 @@ impl RemoteFillCoordinator {
         shared: &SharedFill,
     ) -> Result<usize> {
         ensure_final_tick_range_is_closed(request.range)?;
-        let snapshot = request.minute_snapshot.as_ref().ok_or_else(|| {
-            DataError::InvalidState("canonical-minute fill was missing its cache snapshot")
-        })?;
+        let snapshot = request
+            .minute_snapshot
+            .as_ref()
+            .ok_or(DataError::InvalidState(
+                "canonical-minute fill was missing its cache snapshot",
+            ))?;
         let cache = MinuteKlineCache::open(self.config.cache_dir.as_path())?;
         let mut rows_by_datetime = BTreeMap::<i64, Kline>::new();
         self.emit(
@@ -1062,9 +1065,9 @@ impl RemoteFillCoordinator {
             self.sleep_or_shared_cancel(shared, retry_delay(attempt))
                 .await?;
         }
-        Err(last_error.unwrap_or_else(|| {
-            DataError::InvalidState("server backtest history source exhausted its retry budget")
-        }))
+        Err(last_error.unwrap_or(DataError::InvalidState(
+            "server backtest history source exhausted its retry budget",
+        )))
     }
 
     async fn fill_daily(
@@ -1073,9 +1076,12 @@ impl RemoteFillCoordinator {
         shared: &SharedFill,
     ) -> Result<usize> {
         ensure_final_tick_range_is_closed(request.range)?;
-        let snapshot = request.minute_snapshot.as_ref().ok_or_else(|| {
-            DataError::InvalidState("canonical-daily fill is missing cache snapshot")
-        })?;
+        let snapshot = request
+            .minute_snapshot
+            .as_ref()
+            .ok_or(DataError::InvalidState(
+                "canonical-daily fill is missing cache snapshot",
+            ))?;
         let mut rows_by_datetime = BTreeMap::<i64, Kline>::new();
         self.consume_with_retries(request, shared, |event| match event {
             ServerBacktestHistoryEvent::CanonicalDaily { symbol, rows, .. } => {
@@ -1132,9 +1138,12 @@ impl RemoteFillCoordinator {
             )?
             .missing_ranges),
             FillFamily::CanonicalMinute => {
-                let snapshot = request.minute_snapshot.as_ref().ok_or_else(|| {
-                    DataError::InvalidState("canonical-minute fill was missing its cache snapshot")
-                })?;
+                let snapshot = request
+                    .minute_snapshot
+                    .as_ref()
+                    .ok_or(DataError::InvalidState(
+                        "canonical-minute fill was missing its cache snapshot",
+                    ))?;
                 Ok(
                     MinuteKlineCache::open_read_only(self.config.cache_dir.as_path())
                         .coverage(
@@ -1147,9 +1156,12 @@ impl RemoteFillCoordinator {
                 )
             }
             FillFamily::CanonicalDaily => {
-                let snapshot = request.minute_snapshot.as_ref().ok_or_else(|| {
-                    DataError::InvalidState("canonical-daily fill is missing cache snapshot")
-                })?;
+                let snapshot = request
+                    .minute_snapshot
+                    .as_ref()
+                    .ok_or(DataError::InvalidState(
+                        "canonical-daily fill is missing cache snapshot",
+                    ))?;
                 Ok(
                     DailyKlineCache::open_read_only(self.config.cache_dir.as_path())
                         .coverage(

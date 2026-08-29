@@ -1,5 +1,9 @@
 # History Cache Format
 
+本文件只定义底层 cache 文件格式、file lock 和 opened-file snapshot 语义。history generation 的
+manifest envelope、结构共享、CURRENT、lease、发布/恢复/GC 合同见
+[history-snapshot-manifest.md](history-snapshot-manifest.md)；generation 层不得改写本文件的格式规则。
+
 ## 文档定位
 
 本文档定义 `tqsdk-data` 历史序列缓存当前默认的 TQBN daily v3 (`.tqbn`) 格式。
@@ -211,6 +215,12 @@ cache 文件。此 phase 与 official high-period chart 的实际一致性不由
   路径，不代表单个物理文件；`scan()`、coverage、purge 和 compact 会遍历匹配的全部日分区文件。
 
 ## 文件锁、opened-file snapshot 与尾部恢复
+
+这里的 per-file lock 保护 writable cache root 内的文件操作；它不同于 generation
+`lease.lock`。已发布 generation 必须只读，relay 的 shared generation lease 保护整个 detached
+query/coordinator 生命周期，publisher 只有取得 exclusive generation lease 才能 GC。结构共享时
+`.tqbn` 因 append/truncate 语义禁止 hardlink；`.tqmk`/`.tqdk` 只有在继续保持 pathname
+atomic-replace 时才可作为 immutable generation file hardlink。
 
 每个 `.tqbn` 日分区使用同路径的 `.tqbn.lock` sidecar 做 advisory file lock；该 sidecar 同时保存
 最近一次确认提交的 tail checkpoint。writer 持 exclusive lock，reader 持 shared lock。首次建文件在

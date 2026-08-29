@@ -1,6 +1,6 @@
 ---
 name: tqsdk-rust
-description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实时行情/quote/盘口/K线/tick、品种/合约列表、metadata/direct query、历史数据下载/缓存/CSV/命令行历史查询/JSONL/LLM CSV、回测/实盘共享 tick cache、交易账户/下单/撤单、TargetPosTask/风控/多账户/策略执行、低延迟柜台、fan-out/event consumers、replay/backtest/live-sim-replay；也用于智能体需要实时或历史量化数据、交易执行 substrate 或模型行情输入时，即使未明确提到 TQSDK。
+description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实时行情/quote/盘口/K线/tick、品种/合约列表、metadata/direct query、历史数据下载/缓存/CSV/命令行历史查询/JSONL/LLM CSV、relay history HTTP/Docker 部署与调用、回测/实盘共享 tick cache、交易账户/下单/撤单、TargetPosTask/风控/多账户/策略执行、低延迟柜台、fan-out/event consumers、replay/backtest/live-sim-replay；也用于智能体需要实时或历史量化数据、交易执行 substrate 或模型行情输入时，即使未明确提到 TQSDK。
 ---
 
 # TQSDK Rust
@@ -17,7 +17,8 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 4. 用户要求按角色给示例、完整覆盖场景、场景契约、public API 证据，或问“每类用户应该怎么做”时，读 [references/scenario-contracts.md](references/scenario-contracts.md)。
 5. 策略循环、事件总线、研究、回放、测试、低延迟柜台工作流，读 [references/quant-workflows.md](references/quant-workflows.md)。
 6. 凭证、权限、实盘交易、模拟、下单副作用、风控、live smoke test，读 [references/safety-and-operations.md](references/safety-and-operations.md)。
-7. 只有用户要求新建独立 starter project 时，才使用 [scripts/new-tqsdk-rust-project.py](scripts/new-tqsdk-rust-project.py) 和 [assets/templates/tq-strategy-loop](assets/templates/tq-strategy-loop)。明确要求 Python-style wait starter 时才选 `--template wait-quote-loop`。
+7. relay history HTTP、`/v1/history/*`、Docker 部署、监听地址、宿主机 history root、健康检查或服务调用，读 [references/relay-history-http.md](references/relay-history-http.md)。
+8. 只有用户要求新建独立 starter project 时，才使用 [scripts/new-tqsdk-rust-project.py](scripts/new-tqsdk-rust-project.py) 和 [assets/templates/tq-strategy-loop](assets/templates/tq-strategy-loop)。明确要求 Python-style wait starter 时才选 `--template wait-quote-loop`。
 
 ## 核心规则
 

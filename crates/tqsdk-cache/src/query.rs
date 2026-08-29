@@ -10,9 +10,12 @@ use serde_json::{Map, Value, json};
 use sha1::{Digest, Sha1};
 use tqsdk::advanced::core::{Kline, Tick};
 use tqsdk_data::{
-    BacktestHistoryClient, BacktestHistoryFinality, BacktestHistoryMetadataCache,
-    BacktestHistoryMetadataSnapshot, BacktestHistoryPolicy, BacktestHistoryRequest,
-    BacktestHistoryRequestFailure, BacktestHistoryRequestReport, BacktestHistoryRows, DataError,
+    BacktestHistoryClient, BacktestHistoryField as Field, BacktestHistoryFinality,
+    BacktestHistoryMetadataCache, BacktestHistoryMetadataSnapshot, BacktestHistoryPolicy,
+    BacktestHistoryRequest, BacktestHistoryRequestFailure, BacktestHistoryRequestReport,
+    BacktestHistoryRows, BacktestHistorySchemaSeries, BacktestHistoryValueKind, DataError,
+    backtest_history_default_fields, backtest_history_resolve_fields,
+    backtest_history_schema_fields,
 };
 
 use crate::{CacheKind, CliError, CommandOutcome, MarketKind, OutputFormat};
@@ -359,193 +362,6 @@ struct QueryFailure {
     message: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Field {
-    Time,
-    Id,
-    Open,
-    High,
-    Low,
-    Close,
-    Volume,
-    OpenOi,
-    CloseOi,
-    LastPrice,
-    Average,
-    Highest,
-    Lowest,
-    AskPrice1,
-    AskVolume1,
-    BidPrice1,
-    BidVolume1,
-    AskPrice2,
-    AskVolume2,
-    BidPrice2,
-    BidVolume2,
-    AskPrice3,
-    AskVolume3,
-    BidPrice3,
-    BidVolume3,
-    AskPrice4,
-    AskVolume4,
-    BidPrice4,
-    BidVolume4,
-    AskPrice5,
-    AskVolume5,
-    BidPrice5,
-    BidVolume5,
-    Amount,
-    OpenInterest,
-}
-
-impl Field {
-    const fn code(self) -> &'static str {
-        match self {
-            Self::Time => "t",
-            Self::Id => "id",
-            Self::Open => "o",
-            Self::High => "h",
-            Self::Low => "l",
-            Self::Close => "c",
-            Self::Volume => "v",
-            Self::OpenOi => "oi0",
-            Self::CloseOi | Self::OpenInterest => "oi",
-            Self::LastPrice => "lp",
-            Self::Average => "avg",
-            Self::Highest => "hi",
-            Self::Lowest => "lo",
-            Self::AskPrice1 => "ap1",
-            Self::AskVolume1 => "av1",
-            Self::BidPrice1 => "bp1",
-            Self::BidVolume1 => "bv1",
-            Self::AskPrice2 => "ap2",
-            Self::AskVolume2 => "av2",
-            Self::BidPrice2 => "bp2",
-            Self::BidVolume2 => "bv2",
-            Self::AskPrice3 => "ap3",
-            Self::AskVolume3 => "av3",
-            Self::BidPrice3 => "bp3",
-            Self::BidVolume3 => "bv3",
-            Self::AskPrice4 => "ap4",
-            Self::AskVolume4 => "av4",
-            Self::BidPrice4 => "bp4",
-            Self::BidVolume4 => "bv4",
-            Self::AskPrice5 => "ap5",
-            Self::AskVolume5 => "av5",
-            Self::BidPrice5 => "bp5",
-            Self::BidVolume5 => "bv5",
-            Self::Amount => "amt",
-        }
-    }
-
-    const fn aliases(self) -> &'static [&'static str] {
-        match self {
-            Self::Time => &["t", "time", "timestamp", "datetime"],
-            Self::Id => &["id"],
-            Self::Open => &["o", "open"],
-            Self::High => &["h", "high"],
-            Self::Low => &["l", "low"],
-            Self::Close => &["c", "close"],
-            Self::Volume => &["v", "volume"],
-            Self::OpenOi => &["oi0", "open_oi"],
-            Self::CloseOi => &["oi", "close_oi"],
-            Self::LastPrice => &["lp", "last_price"],
-            Self::Average => &["avg", "average"],
-            Self::Highest => &["hi", "highest"],
-            Self::Lowest => &["lo", "lowest"],
-            Self::AskPrice1 => &["ap1", "ask_price1"],
-            Self::AskVolume1 => &["av1", "ask_volume1"],
-            Self::BidPrice1 => &["bp1", "bid_price1"],
-            Self::BidVolume1 => &["bv1", "bid_volume1"],
-            Self::AskPrice2 => &["ap2", "ask_price2"],
-            Self::AskVolume2 => &["av2", "ask_volume2"],
-            Self::BidPrice2 => &["bp2", "bid_price2"],
-            Self::BidVolume2 => &["bv2", "bid_volume2"],
-            Self::AskPrice3 => &["ap3", "ask_price3"],
-            Self::AskVolume3 => &["av3", "ask_volume3"],
-            Self::BidPrice3 => &["bp3", "bid_price3"],
-            Self::BidVolume3 => &["bv3", "bid_volume3"],
-            Self::AskPrice4 => &["ap4", "ask_price4"],
-            Self::AskVolume4 => &["av4", "ask_volume4"],
-            Self::BidPrice4 => &["bp4", "bid_price4"],
-            Self::BidVolume4 => &["bv4", "bid_volume4"],
-            Self::AskPrice5 => &["ap5", "ask_price5"],
-            Self::AskVolume5 => &["av5", "ask_volume5"],
-            Self::BidPrice5 => &["bp5", "bid_price5"],
-            Self::BidVolume5 => &["bv5", "bid_volume5"],
-            Self::Amount => &["amt", "amount"],
-            Self::OpenInterest => &["oi", "open_interest"],
-        }
-    }
-
-    const fn value_kind(self) -> &'static str {
-        match self {
-            Self::Time => "timestamp",
-            Self::Id
-            | Self::Volume
-            | Self::OpenOi
-            | Self::CloseOi
-            | Self::AskVolume1
-            | Self::BidVolume1
-            | Self::AskVolume2
-            | Self::BidVolume2
-            | Self::AskVolume3
-            | Self::BidVolume3
-            | Self::AskVolume4
-            | Self::BidVolume4
-            | Self::AskVolume5
-            | Self::BidVolume5
-            | Self::OpenInterest => "integer",
-            Self::Amount => "decimal",
-            _ => "price",
-        }
-    }
-}
-
-const KLINE_FIELDS: [Field; 9] = [
-    Field::Time,
-    Field::Id,
-    Field::Open,
-    Field::High,
-    Field::Low,
-    Field::Close,
-    Field::Volume,
-    Field::OpenOi,
-    Field::CloseOi,
-];
-
-const TICK_FIELDS: [Field; 29] = [
-    Field::Time,
-    Field::Id,
-    Field::LastPrice,
-    Field::Average,
-    Field::Highest,
-    Field::Lowest,
-    Field::AskPrice1,
-    Field::AskVolume1,
-    Field::BidPrice1,
-    Field::BidVolume1,
-    Field::AskPrice2,
-    Field::AskVolume2,
-    Field::BidPrice2,
-    Field::BidVolume2,
-    Field::AskPrice3,
-    Field::AskVolume3,
-    Field::BidPrice3,
-    Field::BidVolume3,
-    Field::AskPrice4,
-    Field::AskVolume4,
-    Field::BidPrice4,
-    Field::BidVolume4,
-    Field::AskPrice5,
-    Field::AskVolume5,
-    Field::BidPrice5,
-    Field::BidVolume5,
-    Field::Volume,
-    Field::Amount,
-    Field::OpenInterest,
-];
-
 #[derive(Debug, Clone, Copy)]
 enum CellValue {
     Timestamp(i64),
@@ -799,15 +615,15 @@ fn schema_execution(
         .iter()
         .map(|field| {
             json!({
-                "name": field.code(),
+                "name": field.canonical_name(),
                 "aliases": field.aliases(),
-                "value_kind": field.value_kind(),
+                "value_kind": field_value_kind(field.value_kind()),
             })
         })
         .collect::<Vec<_>>();
     let defaults = default_fields(args.series)
         .into_iter()
-        .map(|field| field.code())
+        .map(|field| field.canonical_name())
         .collect::<Vec<_>>();
     Ok(QueryExecution::Summary(CommandOutcome {
         value: json!({
@@ -1238,7 +1054,7 @@ fn block_summary_value(artifact: &QueryArtifact, block: &QueryBlock) -> Result<V
         "period_ns": block.spec.duration_ns,
         "requested": range_value(block.spec.start_ns, block.spec.end_ns),
         "rows": block.rows.len(),
-        "fields": block.spec.fields.iter().map(|field| field.code()).collect::<Vec<_>>(),
+        "fields": block.spec.fields.iter().map(|field| field.canonical_name()).collect::<Vec<_>>(),
         "source": if block.request.remote_used { "remote-on-miss" } else { "cache" },
         "finality": finality_value(block.request.coverage.finality),
         "coverage": coverage_value(&block.request),
@@ -1272,7 +1088,7 @@ fn render_jsonl(artifact: &QueryArtifact) -> Result<String, CliError> {
             "series": block.spec.series.as_str(),
             "period_ns": block.spec.duration_ns,
             "requested": range_value(block.spec.start_ns, block.spec.end_ns),
-            "fields": block.spec.fields.iter().map(|field| field.code()).collect::<Vec<_>>(),
+            "fields": block.spec.fields.iter().map(|field| field.canonical_name()).collect::<Vec<_>>(),
             "source": if block.request.remote_used { "remote-on-miss" } else { "cache" },
             "finality": finality_value(block.request.coverage.finality),
             "coverage": coverage_value(&block.request),
@@ -1648,7 +1464,7 @@ fn llm_columns_line(block: &QueryBlock, codec: LlmTimeCodec) -> String {
     for field in &block.spec.fields {
         cells.push(format!(
             "{}={}",
-            field.code(),
+            field.canonical_name(),
             llm_field_name(*field, block.spec.series)
         ));
         if matches!(field, Field::Time) && matches!(codec.mode, LlmTimeMode::Both) {
@@ -1704,7 +1520,7 @@ fn llm_field_name(field: Field, series: QuerySeries) -> &'static str {
 fn llm_header(block: &QueryBlock, codec: LlmTimeCodec) -> String {
     let mut cells = Vec::with_capacity(block.spec.fields.len() + 1);
     for field in &block.spec.fields {
-        cells.push(field.code().to_string());
+        cells.push(field.canonical_name().to_string());
         if matches!(field, Field::Time) && matches!(codec.mode, LlmTimeMode::Both) {
             cells.push("dt".to_string());
         }
@@ -1881,7 +1697,7 @@ fn row_json(
     let mut values = Map::new();
     for field in &block.spec.fields {
         values.insert(
-            field.code().to_string(),
+            field.canonical_name().to_string(),
             json_cell(cell(*field), &block.spec, settings)?,
         );
     }
@@ -2224,7 +2040,7 @@ fn data_hash(
     let mut content = spec
         .fields
         .iter()
-        .map(|field| field.code())
+        .map(|field| field.canonical_name())
         .collect::<Vec<_>>()
         .join(",");
     for row in rows_as_csv(&block, settings)? {
@@ -2280,7 +2096,7 @@ fn query_hash(specs: &[QuerySpec], settings: &QuerySettings) -> String {
             spec.end_ns,
             spec.fields
                 .iter()
-                .map(|field| field.code())
+                .map(|field| field.canonical_name())
                 .collect::<Vec<_>>()
                 .join(","),
             spec.weight,
@@ -2476,29 +2292,15 @@ fn resolve_fields(series: QuerySeries, requested: &[String]) -> Result<Vec<Field
     if requested.is_empty() {
         return Ok(default_fields(series));
     }
-    let mut selected = BTreeSet::new();
-    for value in requested {
-        for alias in value.split(',') {
-            let alias = alias.trim().to_ascii_lowercase();
-            let field = schema_fields(series)
-                .iter()
-                .copied()
-                .find(|field| field.aliases().contains(&alias.as_str()))
-                .ok_or_else(|| {
-                    CliError::Usage(format!(
-                        "field {alias:?} is not valid for {} rows; use `query schema --series {}`",
-                        series.as_str(),
-                        series.as_str()
-                    ))
-                })?;
-            if !selected.insert(field) {
-                return Err(CliError::Usage(format!(
-                    "field {alias:?} selects duplicate canonical field {}",
-                    field.code()
-                )));
-            }
-        }
-    }
+    let aliases = requested
+        .iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    let selected = backtest_history_resolve_fields(history_schema_series(series), aliases)
+        .map_err(|error| CliError::Usage(error.to_string()))?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     Ok(schema_fields(series)
         .iter()
         .copied()
@@ -2507,33 +2309,26 @@ fn resolve_fields(series: QuerySeries, requested: &[String]) -> Result<Vec<Field
 }
 
 fn default_fields(series: QuerySeries) -> Vec<Field> {
-    match series {
-        QuerySeries::Tick => vec![
-            Field::Time,
-            Field::LastPrice,
-            Field::AskPrice1,
-            Field::AskVolume1,
-            Field::BidPrice1,
-            Field::BidVolume1,
-            Field::Volume,
-            Field::OpenInterest,
-        ],
-        QuerySeries::Kline => vec![
-            Field::Time,
-            Field::Open,
-            Field::High,
-            Field::Low,
-            Field::Close,
-            Field::Volume,
-            Field::CloseOi,
-        ],
-    }
+    backtest_history_default_fields(history_schema_series(series)).to_vec()
 }
 
 fn schema_fields(series: QuerySeries) -> &'static [Field] {
+    backtest_history_schema_fields(history_schema_series(series))
+}
+
+const fn history_schema_series(series: QuerySeries) -> BacktestHistorySchemaSeries {
     match series {
-        QuerySeries::Tick => &TICK_FIELDS,
-        QuerySeries::Kline => &KLINE_FIELDS,
+        QuerySeries::Tick => BacktestHistorySchemaSeries::Tick,
+        QuerySeries::Kline => BacktestHistorySchemaSeries::Kline,
+    }
+}
+
+const fn field_value_kind(value_kind: BacktestHistoryValueKind) -> &'static str {
+    match value_kind {
+        BacktestHistoryValueKind::Timestamp => "timestamp",
+        BacktestHistoryValueKind::Integer => "integer",
+        BacktestHistoryValueKind::Price => "price",
+        BacktestHistoryValueKind::Decimal => "decimal",
     }
 }
 
@@ -2680,7 +2475,10 @@ mod tests {
     fn fields_are_canonicalized_and_duplicates_are_rejected() {
         let fields = resolve_fields(QuerySeries::Kline, &["close,time,open".to_string()]).unwrap();
         assert_eq!(
-            fields.iter().map(|field| field.code()).collect::<Vec<_>>(),
+            fields
+                .iter()
+                .map(|field| field.canonical_name())
+                .collect::<Vec<_>>(),
             vec!["t", "o", "c"]
         );
         assert!(resolve_fields(QuerySeries::Kline, &["time,timestamp".to_string()]).is_err());

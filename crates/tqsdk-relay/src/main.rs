@@ -4,11 +4,14 @@ use std::sync::{Arc, Mutex};
 
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use tqsdk_relay::{
-    RelayConfig, RelayEngine, RelayError, RelayServer, RelayStartupReport, serve_metrics_until,
-};
+use tqsdk_relay::{RelayConfig, RelayEngine, RelayError, RelayServer, RelayStartupReport};
 #[cfg(feature = "server")]
 use tqsdk_relay::{resolve_configured_upstream_tick_charts, spawn_configured_upstream_pump};
+
+#[cfg(feature = "history")]
+mod history;
+#[path = "metrics_http_impl.rs"]
+mod metrics_http_impl;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -20,6 +23,12 @@ async fn main() {
 
 async fn run() -> Result<(), RelayError> {
     let config = RelayConfig::from_env()?;
+    #[cfg(feature = "history")]
+    let history_config = history::HistoryConfig::from_env()?;
+    #[cfg(feature = "history")]
+    if let Some(history_config) = &history_config {
+        history_config.bind_market_current()?;
+    }
 
     if config.dry_run {
         #[cfg(feature = "server")]
@@ -58,6 +67,18 @@ async fn run() -> Result<(), RelayError> {
     let metrics_listener = TcpListener::bind(&config.metrics_listen)
         .await
         .map_err(|err| RelayError::Transport(format!("metrics bind failed: {err}")))?;
+    #[cfg(feature = "history")]
+    let history_service = history_config.map(history::spawn).transpose()?;
+    #[cfg(feature = "history")]
+    let history_metrics: Arc<dyn metrics_http_impl::HistoryMetrics> = history_service
+        .as_ref()
+        .map(|service| {
+            Arc::new(service.metrics_overlay()) as Arc<dyn metrics_http_impl::HistoryMetrics>
+        })
+        .unwrap_or_else(|| Arc::new(metrics_http_impl::NoHistoryMetrics));
+    #[cfg(not(feature = "history"))]
+    let history_metrics: Arc<dyn metrics_http_impl::HistoryMetrics> =
+        Arc::new(metrics_http_impl::NoHistoryMetrics);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (metrics_shutdown_tx, metrics_shutdown_rx) = oneshot::channel();
     #[cfg(feature = "server")]
@@ -73,7 +94,14 @@ async fn run() -> Result<(), RelayError> {
     };
 
     tokio::spawn(async move {
-        if let Err(err) = serve_metrics_until(metrics_listener, engine, metrics_shutdown_rx).await {
+        if let Err(err) = metrics_http_impl::serve_metrics_until_with_history(
+            metrics_listener,
+            engine,
+            metrics_shutdown_rx,
+            history_metrics,
+        )
+        .await
+        {
             eprintln!("{err}");
         }
     });
@@ -90,5 +118,10 @@ async fn run() -> Result<(), RelayError> {
         "tqsdk-relay listening: downstream={} metrics={}",
         config.downstream_listen, config.metrics_listen
     );
-    server.serve_until(listener, shutdown_rx).await
+    let result = server.serve_until(listener, shutdown_rx).await;
+    #[cfg(feature = "history")]
+    if let Some(history_service) = history_service {
+        history_service.shutdown()?;
+    }
+    result
 }

@@ -1,0 +1,85 @@
+name: tqsdk
+
+services:
+  relay:
+    image: ${TQSDK_RELAY_IMAGE:-tqsdk-relay:local}
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: relay
+    network_mode: host
+    user: "${TQSDK_CONTAINER_UID:-10001}:${TQSDK_CONTAINER_GID:-10001}"
+    env_file:
+      - ${TQSDK_RELAY_ENV_FILE:-./relay.env}
+    environment:
+      TQSDK_RELAY_HISTORY_ROOT: /var/lib/tqsdk/history-published
+      TZ: ${TQSDK_TIMEZONE:-Asia/Shanghai}
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid
+    volumes:
+      - type: bind
+        source: ${TQSDK_HISTORY_ROOT:?set TQSDK_HISTORY_ROOT in deploy/docker/.env}
+        target: /var/lib/tqsdk/history-published
+        read_only: true
+        bind:
+          create_host_path: false
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - --show-error
+        - --max-time
+        - "2"
+        - http://127.0.0.1:7789/health
+      interval: 15s
+      timeout: 3s
+      retries: 4
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  publisher:
+    profiles:
+      - publisher
+    image: ${TQSDK_CACHE_IMAGE:-tqsdk-cache:local}
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: cache
+    user: "${TQSDK_CONTAINER_UID:-10001}:${TQSDK_CONTAINER_GID:-10001}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid
+    volumes:
+      - type: bind
+        source: ${TQSDK_WRITABLE_CACHE_ROOT:?set TQSDK_WRITABLE_CACHE_ROOT in deploy/docker/.env}
+        target: /var/lib/tqsdk/history-writable
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${TQSDK_HISTORY_ROOT:?set TQSDK_HISTORY_ROOT in deploy/docker/.env}
+        target: /var/lib/tqsdk/history-published
+        bind:
+          create_host_path: false
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    entrypoint:
+      - /usr/local/bin/tqsdk-cache
+    command:
+      - snapshot
+      - --help
