@@ -136,13 +136,19 @@ reader feature。生产同规格干扰门要求 8 并发 history、512 MiB budge
 [history-relay.md](history-relay.md)、[history-relay-http.md](history-relay-http.md) 与
 [history-snapshot-manifest.md](history-snapshot-manifest.md)。
 
-本地 candidate gate 必须显式提供两组可用且互斥的 CPU set；测试输出是候选机证据，不得代替
-生产同规格门槛结论：
+本地 candidate gate 必须使用 release profile，并显式提供 market、history、driver 三组可用且
+两两互斥的 CPU set；driver 至少包含三个逻辑 CPU，分别承载 downstream 计时、upstream fixture
+和 history load clients。测试输出是候选机证据，不得代替生产同规格门槛结论：
+
+gate 固定执行 loaded/baseline/baseline/loaded 四阶段；每阶段先完成 market warmup，再收集
+2,048 个有效 forward-latency 样本。最终分别合并两组 raw baseline 与 raw loaded 样本后各算
+一次 p99；不得使用 majority、best-of 或各阶段 p99 的中位数掩盖违规。
 
 ```bash
 TQSDK_RELAY_ISOLATION_GATE_MARKET_CPU_SET=<market-cpus> \
 TQSDK_RELAY_ISOLATION_GATE_HISTORY_CPU_SET=<history-cpus> \
-cargo test -p tqsdk-relay --test history_isolation_gate -- --ignored --nocapture
+TQSDK_RELAY_ISOLATION_GATE_DRIVER_CPU_SET=<at-least-three-driver-cpus> \
+cargo test --release -p tqsdk-relay --test history_isolation_gate -- --ignored --nocapture
 ```
 
 修改 relay dashboard、dashboard UI 或 symbol telemetry 时，补充运行：

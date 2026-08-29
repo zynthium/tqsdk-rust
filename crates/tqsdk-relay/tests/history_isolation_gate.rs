@@ -12,7 +12,8 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -34,21 +35,41 @@ const PHYSICAL_SYMBOL: &str = "SHFE.au2608";
 const MARKET_SYMBOL: &str = "SHFE.au2608";
 const DAY_START_NS: i64 = 1_767_572_800_000_000_000;
 const DAY_END_NS: i64 = 1_767_659_200_000_000_000;
-const MARKET_FRAMES: usize = 96;
+// Keep enough samples that p99 is not the single worst scheduler outlier.
+const MARKET_FRAMES: usize = 2_048;
 const HISTORY_CLIENTS: usize = 8;
 const HISTORY_ROWS: usize = 6_000;
+const WARMUP_FRAMES: usize = 64;
 
 #[test]
 #[ignore = "local candidate gate; requires explicit disjoint CPU sets and a same-spec machine"]
 fn candidate_history_load_preserves_market_sequence_and_p99() {
+    assert!(
+        !cfg!(debug_assertions),
+        "candidate isolation gate requires `cargo test --release -- --ignored`"
+    );
     let cpu_sets = RequiredCpuSets::from_env();
-    let baseline = run_phase("baseline", &cpu_sets, false);
-    let loaded = run_phase("history-load", &cpu_sets, true);
+    let loaded_a = run_phase("loaded-a", &cpu_sets, true);
+    let baseline_a = run_phase("baseline-a", &cpu_sets, false);
+    let baseline_b = run_phase("baseline-b", &cpu_sets, false);
+    let loaded_b = run_phase("loaded-b", &cpu_sets, true);
 
-    let allowed_delta = Duration::from_millis(1).max(baseline.p99_forward_latency / 10);
-    let observed_delta = loaded
-        .p99_forward_latency
-        .saturating_sub(baseline.p99_forward_latency);
+    let baseline_samples = baseline_a
+        .forward_latencies
+        .iter()
+        .chain(&baseline_b.forward_latencies)
+        .copied()
+        .collect::<Vec<_>>();
+    let loaded_samples = loaded_a
+        .forward_latencies
+        .iter()
+        .chain(&loaded_b.forward_latencies)
+        .copied()
+        .collect::<Vec<_>>();
+    let baseline_p99 = p99_forward_latency(&baseline_samples);
+    let loaded_p99 = p99_forward_latency(&loaded_samples);
+    let allowed_delta = Duration::from_millis(1).max(baseline_p99 / 10);
+    let observed_delta = loaded_p99.saturating_sub(baseline_p99);
     let result = json!({
         "gate": "history_market_isolation_candidate",
         "status": if observed_delta <= allowed_delta { "pass" } else { "fail" },
@@ -56,12 +77,19 @@ fn candidate_history_load_preserves_market_sequence_and_p99() {
         "market_frames": MARKET_FRAMES,
         "history_clients": HISTORY_CLIENTS,
         "history_rows_per_response": HISTORY_ROWS,
-        "baseline_forward_latency_p99_ms": millis(baseline.p99_forward_latency),
-        "history_load_forward_latency_p99_ms": millis(loaded.p99_forward_latency),
+        "phase_order": ["loaded-a", "baseline-a", "baseline-b", "loaded-b"],
+        "phase_forward_latency_p99_ms": [
+            millis(p99_forward_latency(&loaded_a.forward_latencies)),
+            millis(p99_forward_latency(&baseline_a.forward_latencies)),
+            millis(p99_forward_latency(&baseline_b.forward_latencies)),
+            millis(p99_forward_latency(&loaded_b.forward_latencies)),
+        ],
+        "merged_baseline_forward_latency_p99_ms": millis(baseline_p99),
+        "merged_loaded_forward_latency_p99_ms": millis(loaded_p99),
         "forward_latency_p99_delta_ms": millis(observed_delta),
         "allowed_delta_ms": millis(allowed_delta),
-        "history_load_compression_success_total": loaded.compression_success_total,
-        "history_load_compression_fallback_total": loaded.compression_fallback_total,
+        "history_load_compression_success_total": loaded_a.compression_success_total.unwrap_or(0) + loaded_b.compression_success_total.unwrap_or(0),
+        "history_load_compression_fallback_total": loaded_a.compression_fallback_total.unwrap_or(0) + loaded_b.compression_fallback_total.unwrap_or(0),
         "market_cpu_set": cpu_sets.market,
         "history_cpu_set": cpu_sets.history,
     });
@@ -77,6 +105,7 @@ fn candidate_history_load_preserves_market_sequence_and_p99() {
 struct RequiredCpuSets {
     market: String,
     history: String,
+    driver: Vec<core_affinity::CoreId>,
 }
 
 impl RequiredCpuSets {
@@ -105,12 +134,79 @@ impl RequiredCpuSets {
             !history.trim().is_empty(),
             "history CPU set must not be empty"
         );
-        Self { market, history }
+        let driver_raw = std::env::var("TQSDK_RELAY_ISOLATION_GATE_DRIVER_CPU_SET")
+            .unwrap_or_else(|_| {
+                panic!(
+                    "set TQSDK_RELAY_ISOLATION_GATE_DRIVER_CPU_SET to at least three CPUs distinct from market/history"
+                )
+            });
+        let market_ids = parse_cpu_set(&market, "market");
+        let history_ids = parse_cpu_set(&history, "history");
+        let driver_ids = parse_cpu_set(&driver_raw, "driver");
+        assert!(
+            driver_ids.len() >= 3,
+            "driver CPU set needs at least three CPUs"
+        );
+        assert!(
+            market_ids.is_disjoint(&history_ids),
+            "market/history CPU sets overlap"
+        );
+        assert!(
+            market_ids.is_disjoint(&driver_ids),
+            "market/driver CPU sets overlap"
+        );
+        assert!(
+            history_ids.is_disjoint(&driver_ids),
+            "history/driver CPU sets overlap"
+        );
+        let available =
+            core_affinity::get_core_ids().expect("core affinity unavailable; harness invalid");
+        let driver = driver_ids
+            .iter()
+            .map(|id| {
+                available
+                    .iter()
+                    .copied()
+                    .find(|core| core.id == *id)
+                    .unwrap_or_else(|| panic!("driver CPU {id} unavailable; harness invalid"))
+            })
+            .collect();
+        Self {
+            market,
+            history,
+            driver,
+        }
     }
 }
 
+fn parse_cpu_set(raw: &str, name: &str) -> std::collections::BTreeSet<usize> {
+    let mut ids = std::collections::BTreeSet::new();
+    for component in raw.split(',').filter(|value| !value.trim().is_empty()) {
+        let component = component.trim();
+        let (start, end) = match component.split_once('-') {
+            Some((start, end)) => (
+                start
+                    .parse::<usize>()
+                    .unwrap_or_else(|_| panic!("invalid {name} CPU set")),
+                end.parse::<usize>()
+                    .unwrap_or_else(|_| panic!("invalid {name} CPU set")),
+            ),
+            None => {
+                let id = component
+                    .parse::<usize>()
+                    .unwrap_or_else(|_| panic!("invalid {name} CPU set"));
+                (id, id)
+            }
+        };
+        assert!(start <= end, "invalid {name} CPU range");
+        ids.extend(start..=end);
+    }
+    assert!(!ids.is_empty(), "{name} CPU set must not be empty");
+    ids
+}
+
 struct PhaseResult {
-    p99_forward_latency: Duration,
+    forward_latencies: Vec<Duration>,
     compression_success_total: Option<u64>,
     compression_fallback_total: Option<u64>,
 }
@@ -118,7 +214,7 @@ struct PhaseResult {
 fn run_phase(name: &str, cpu_sets: &RequiredCpuSets, apply_history_load: bool) -> PhaseResult {
     let history_root = temp_dir(name);
     publish_queryable_snapshot(&history_root);
-    let upstream = spawn_market_upstream(MARKET_FRAMES);
+    let mut upstream = spawn_market_upstream(WARMUP_FRAMES + MARKET_FRAMES, cpu_sets.driver[1]);
     let downstream = free_loopback_addr();
     let metrics = free_loopback_addr();
     let history = free_loopback_addr();
@@ -130,42 +226,91 @@ fn run_phase(name: &str, cpu_sets: &RequiredCpuSets, apply_history_load: bool) -
         &upstream.url,
         cpu_sets,
     );
-
     wait_for_history_ready(metrics, &mut relay);
     upstream.wait_ready();
-    let mut market = connect_market_client(downstream, &mut relay);
-    upstream.start();
 
-    let history_load = apply_history_load.then(|| {
-        let path = history_query_path();
-        (0..HISTORY_CLIENTS)
-            .map(|_| {
-                thread::spawn({
-                    let path = path.clone();
-                    move || request_history(history, &path)
-                })
-            })
-            .collect::<Vec<_>>()
+    let (receiver_connected_tx, receiver_connected_rx) = mpsc::sync_channel(1);
+    let (receiver_start_tx, receiver_start_rx) = mpsc::sync_channel(1);
+    let (warmup_done_tx, warmup_done_rx) = mpsc::sync_channel(1);
+    let (driver_ready_tx, driver_ready_rx) = mpsc::sync_channel(HISTORY_CLIENTS + 1);
+    let barrier = Arc::new(Barrier::new(HISTORY_CLIENTS + 2));
+    let measurement_active = Arc::new(AtomicBool::new(true));
+    let sent = upstream.take_sent();
+    let receiver_barrier = barrier.clone();
+    let receiver_core = cpu_sets.driver[0];
+    let receiver_ready = driver_ready_tx.clone();
+    let receiver = thread::spawn(move || {
+        bind_driver(receiver_core, "downstream receiver");
+        let mut market = connect_market_client_on_driver(downstream);
+        receiver_connected_tx.send(()).unwrap();
+        receiver_start_rx.recv().unwrap();
+        let _ = receive_market_sequence(&mut market, &sent, 1, WARMUP_FRAMES);
+        warmup_done_tx.send(()).unwrap();
+        receiver_ready.send(()).unwrap();
+        receiver_barrier.wait();
+        receive_market_sequence(&mut market, &sent, WARMUP_FRAMES + 1, MARKET_FRAMES)
     });
-    let forward_latencies = receive_market_sequence(&mut market, &upstream, MARKET_FRAMES);
-    let gzip_count = if let Some(history_load) = history_load {
+    receiver_connected_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("receiver did not connect");
+    upstream.start();
+    receiver_start_tx.send(()).unwrap();
+    warmup_done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("market warmup did not complete");
+
+    let path = history_query_path();
+    let mut history_load = Vec::with_capacity(HISTORY_CLIENTS);
+    for index in 0..HISTORY_CLIENTS {
+        let path = path.clone();
+        let ready = driver_ready_tx.clone();
+        let barrier = barrier.clone();
+        let measurement_active = measurement_active.clone();
+        let core = cpu_sets.driver[2 + index % (cpu_sets.driver.len() - 2)];
+        history_load.push(thread::spawn(move || {
+            bind_driver(core, "history load client");
+            ready.send(()).unwrap();
+            barrier.wait();
+            let mut responses = Vec::new();
+            while apply_history_load && measurement_active.load(Ordering::Acquire) {
+                responses.push(request_history(history, &path));
+            }
+            responses
+        }));
+    }
+    drop(driver_ready_tx);
+    for _ in 0..=HISTORY_CLIENTS {
+        driver_ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("driver thread failed to become ready");
+    }
+    barrier.wait();
+    let forward_latencies = receiver.join().expect("receiver thread panicked");
+    measurement_active.store(false, Ordering::Release);
+    let gzip_count = if apply_history_load {
         let mut gzip_count = 0_u64;
         for request in history_load {
-            let response = request.join().expect("history load thread panicked");
+            let responses = request.join().expect("history load thread panicked");
             assert!(
-                response.status_line.starts_with("HTTP/1.1 200 OK"),
-                "history load request failed: {}",
-                response.status_line
+                !responses.is_empty(),
+                "history client did not issue a request"
             );
-            match response.headers.get("content-encoding").map(String::as_str) {
-                Some("gzip") => gzip_count += 1,
-                None => {}
-                Some(other) => panic!("unexpected history content encoding: {other}"),
+            for response in responses {
+                assert!(
+                    response.status_line.starts_with("HTTP/1.1 200 OK"),
+                    "history load request failed: {}",
+                    response.status_line
+                );
+                match response.headers.get("content-encoding").map(String::as_str) {
+                    Some("gzip") => gzip_count += 1,
+                    None => {}
+                    Some(other) => panic!("unexpected history content encoding: {other}"),
+                }
             }
         }
         assert!(
-            gzip_count > 0,
-            "history load must exercise at least one gzip representation"
+            gzip_count >= u64::try_from(HISTORY_CLIENTS).unwrap(),
+            "history load must complete at least one full wave of gzip representations"
         );
         Some(gzip_count)
     } else {
@@ -190,11 +335,10 @@ fn run_phase(name: &str, cpu_sets: &RequiredCpuSets, apply_history_load: bool) -
         relay.try_wait().is_none(),
         "relay exited while market stream was active"
     );
-    drop(market);
     upstream.join();
 
     PhaseResult {
-        p99_forward_latency: p99_forward_latency(&forward_latencies),
+        forward_latencies,
         compression_success_total,
         compression_fallback_total,
     }
@@ -338,7 +482,7 @@ struct UpstreamFixture {
     url: String,
     ready: mpsc::Receiver<()>,
     start: mpsc::Sender<()>,
-    sent: mpsc::Receiver<SentMarketFrame>,
+    sent: Option<mpsc::Receiver<SentMarketFrame>>,
     server: websocket_support::TestWebSocketServer,
 }
 
@@ -362,18 +506,19 @@ impl UpstreamFixture {
         self.server.join();
     }
 
-    fn next_sent(&self) -> SentMarketFrame {
+    fn take_sent(&mut self) -> mpsc::Receiver<SentMarketFrame> {
         self.sent
-            .recv_timeout(Duration::from_secs(5))
-            .expect("upstream did not record the market frame send")
+            .take()
+            .expect("upstream send channel already taken")
     }
 }
 
-fn spawn_market_upstream(frames: usize) -> UpstreamFixture {
+fn spawn_market_upstream(frames: usize, core: core_affinity::CoreId) -> UpstreamFixture {
     let (ready_tx, ready) = mpsc::channel();
     let (start, start_rx) = mpsc::channel();
     let (sent_tx, sent) = mpsc::channel();
     let server = websocket_support::TestWebSocketServer::spawn(move |mut socket| {
+        bind_driver(core, "upstream fixture");
         socket
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
@@ -417,7 +562,7 @@ fn spawn_market_upstream(frames: usize) -> UpstreamFixture {
         url: server.url("/market"),
         ready,
         start,
-        sent,
+        sent: Some(sent),
         server,
     }
 }
@@ -435,6 +580,14 @@ fn wait_for_upstream_peek(socket: &mut websocket_support::TestWebSocketConnectio
             return;
         }
     }
+}
+
+fn bind_driver(core: core_affinity::CoreId, role: &str) {
+    assert!(
+        core_affinity::set_for_current(core),
+        "{role} failed to bind CPU {}; harness invalid",
+        core.id
+    );
 }
 
 fn spawn_relay(
@@ -463,14 +616,12 @@ fn spawn_relay(
     }
 }
 
-fn connect_market_client(addr: SocketAddr, relay: &mut ChildGuard) -> TcpStream {
+fn connect_market_client_on_driver(addr: SocketAddr) -> TcpStream {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Some(status) = relay.try_wait() {
-            panic!("relay exited before market listener started: {status}");
-        }
         match TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
             Ok(mut stream) => {
+                stream.set_nodelay(true).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
@@ -509,11 +660,12 @@ Sec-WebSocket-Version: 13\r\n\
 
 fn receive_market_sequence(
     stream: &mut TcpStream,
-    upstream: &UpstreamFixture,
+    sent: &mpsc::Receiver<SentMarketFrame>,
+    first_sequence: usize,
     expected: usize,
 ) -> Vec<Duration> {
     let mut forward_latencies = Vec::with_capacity(expected);
-    for sequence in 1..=expected {
+    for sequence in first_sequence..first_sequence + expected {
         write_client_text(stream, json!({"aid": "peek_message"}).to_string());
         let payload = read_server_text(stream);
         let observed = payload["data"][0]["quotes"][MARKET_SYMBOL]["last_price"]
@@ -524,7 +676,9 @@ fn receive_market_sequence(
             "market sequence must have no loss, duplicate, or reordering"
         );
         let received_at = Instant::now();
-        let sent = upstream.next_sent();
+        let sent = sent
+            .recv_timeout(Duration::from_secs(5))
+            .expect("upstream did not record the market frame send");
         assert_eq!(
             sent.sequence, sequence,
             "upstream send sequence must align with decoded downstream frame"
