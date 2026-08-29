@@ -27,6 +27,7 @@ use tqsdk_data::{
     HISTORY_SERIES_CACHE_FORMAT_ID, HISTORY_SERIES_CACHE_SCHEMA_VERSION,
     HistorySeriesCacheFileStatus, MINUTE_KLINE_CACHE_FORMAT_ID, MINUTE_KLINE_CACHE_SCHEMA_VERSION,
     MinuteKlineCache, MinuteKlineCacheSnapshot, backtest_tick_trading_day_for_timestamp_ns,
+    backtest_tick_trading_day_range,
 };
 use tqsdk_session::SessionClientBuilder;
 
@@ -232,7 +233,8 @@ struct FillDaysArgs {
     /// First trading day, inclusive, in YYYY-MM-DD form.
     #[arg(long, value_name = "YYYY-MM-DD", conflicts_with = "last_trading_days")]
     start_day: Option<NaiveDate>,
-    /// Last trading day, inclusive, or the anchor for --last-trading-days.
+    /// Last trading day, inclusive, or the anchor for --last-trading-days. Defaults to latest
+    /// closed trading day when only --start-day is set.
     ///
     /// The current trading day is always rejected for minute fills; tick fills
     /// use provisional coverage unless --require-final is set.
@@ -652,10 +654,17 @@ async fn resolve_fill_window(
     let start_day = args.start_day.ok_or_else(|| {
         CliError::Usage("fill requires --start-day or --last-trading-days".to_string())
     })?;
-    let end_day = args
-        .end_day
-        .ok_or_else(|| CliError::Usage("fill requires --end-day with --start-day".to_string()))?;
-    let window = TradingDayWindow::through_open_day_from_days(start_day, end_day)?;
+    let window = match args.end_day {
+        Some(end_day) => TradingDayWindow::through_open_day_from_days(start_day, end_day)?,
+        None => {
+            let current_open_day = current_open_trading_day()?;
+            let current_open_range = backtest_tick_trading_day_range(current_open_day)?;
+            let latest_closed_day = backtest_tick_trading_day_for_timestamp_ns(
+                current_open_range.start_ns.saturating_sub(1),
+            )?;
+            TradingDayWindow::closed_from_days(start_day, latest_closed_day)?
+        }
+    };
     let normalized_start = parse_window_day(&window.start_day)?;
     let normalized_end = parse_window_day(&window.end_day)?;
     let mut snapshot = local_snapshot;
@@ -4241,6 +4250,48 @@ mod tests {
         };
 
         assert!(error.to_string().contains("--last-trading-days"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn start_day_defaults_to_latest_closed_trading_day() {
+        let args = FillDaysArgs {
+            start_day: Some(NaiveDate::from_ymd_opt(2020, 1, 2).unwrap()),
+            end_day: None,
+            last_trading_days: None,
+            calendar: CalendarMode::Off,
+            refresh_calendar: false,
+        };
+        let current_open_range =
+            super::backtest_tick_trading_day_range(current_open_trading_day().unwrap()).unwrap();
+
+        let resolved = resolve_fill_window(std::path::Path::new("/tmp/unused"), &args, true, false)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.window.start_day, "2020-01-02");
+        assert_eq!(resolved.window.end_ns, current_open_range.start_ns);
+    }
+
+    #[test]
+    fn fill_accepts_start_day_without_end_day() {
+        let cli = Cli::try_parse_from([
+            "tqsdk-cache",
+            "fill",
+            "--symbol",
+            "SHFE.au2608",
+            "--start-day",
+            "2026-07-20",
+        ])
+        .unwrap();
+        let Command::Fill(args) = cli.command else {
+            panic!("expected fill command");
+        };
+
+        assert_eq!(
+            args.days.start_day,
+            Some(NaiveDate::from_ymd_opt(2026, 7, 20).unwrap())
+        );
+        assert!(args.days.end_day.is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
