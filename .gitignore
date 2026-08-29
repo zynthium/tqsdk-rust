@@ -29,3 +29,6 @@ opencode.jsonc
 GEMINI.md
 .tokensave/
 .serena/
+deploy/docker/.env
+deploy/docker/relay.env
+deploy/docker/verify.json

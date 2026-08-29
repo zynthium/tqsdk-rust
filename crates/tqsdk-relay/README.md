@@ -217,6 +217,10 @@ Tick 50,000/Kline 10,000 rows、32 MiB response 和 512 MiB daemon-global buffer
 identity JSON 成功响应带 strong ETag，支持 `If-None-Match`/304；默认不发送 CORS header。
 缺少或无效 `CURRENT` 只让 history 返回 typed `503 history_unavailable`，不改变 market readiness。
 
+Linux Docker Compose 部署模板位于
+[`deploy/docker/`](../../deploy/docker/README.md)。模板使用 host networking、只读 published-root
+bind mount 和独立 one-shot publisher profile；它不改变同进程 history failure domain。
+
 关闭默认 feature 时不编译 history multi-thread runtime；reader-only 构建可用：
 
 ```bash
