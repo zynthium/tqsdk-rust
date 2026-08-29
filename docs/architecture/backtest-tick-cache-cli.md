@@ -16,7 +16,17 @@ daemon。
 
 ## 历史动态 universe
 
-`fill --universe-timeline <PLAN.json>` 支持 tick 与 native daily 的补数。PLAN 是离线产出的 `HistoricalUniversePlan` JSON，不是 selector：它带 version、catalog/calendar identity、预算、精确 nanosecond horizon 和 SHA-256。命令在接触 cache 前验证计划，并拒绝与 `--symbol`、`--universe`、`--start-day`、`--end-day`、`--last-trading-days`、calendar/open-day flags 混用。计划 v2 的每个物理 symbol 从 `physical_listing_starts`（上市日）开始检查/补数；tick 到最后一个 timeline 生效区间结束，daily 以原生 1d 请求到计划结束。continuous/index 仅是 timeline 里的派生 membership，不会隐式变成数据下载绑定。`--dry-run` 使用 CacheOnly 做同一组 cache 区间的纯本地验证。v1 计划仍可校验并保持原有从首个生效批次开始的行为；要获得上市日补数范围需重新编译为 v2。静态 `--universe` 保持当前 metadata selector 语义。
+`fill --universe-plan <PLAN.json>` 支持 tick、minute 与 native daily 的 pinned-plan 补数；
+`--universe-timeline` 是 visible compatibility alias。PLAN 是离线产出的
+`HistoricalUniversePlan` JSON，不是 selector：它带 version、catalog/calendar identity、预算、
+精确 horizon 和 SHA-256。命令在接触 cache 前验证计划，并拒绝与 symbol/day flags 混用。
+minute/daily 共享 history-client terminal/progress/cancel/report executor；tick 经同一 coordinator
+使用 coverage-aware facade adapter。`--dry-run` 使用 CacheOnly。
+
+`--universe physical:all` 属于独立 historical grammar：它只采集稳定的 provider-current roster 和
+metadata acquisition。没有 authoritative listing/kind bounds 时返回 `executable=false`/exit 1，
+不会用 expiry/name 推断后开始下载；dry-run 不落盘。`timeline(...)` 必须先从 authoritative
+lifecycle catalog 编译，再使用 `--universe-plan`。
 
 ## Cache family 与命令路由
 

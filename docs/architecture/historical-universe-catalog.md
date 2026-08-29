@@ -38,6 +38,12 @@ observed proof 伪装成 authoritative lifecycle。
 - 没有安全 bounds 查询或经过验证的空窗口证明时，自动全历史填充必须 fail closed，不能发送
   无界请求后把空响应解释成未上市。
 
+2026-08-30 的真实 provider spike 返回 5,372 个稳定的中国物理 futures metadata（4,505 个
+expired），但最早 expiry 只到 2020；2010 起点的单合约 minute 请求被 metadata coverage 拒绝，
+而 direct page/bounds 查询需要当前账号没有的 `tq_dl` 权限。因此首版 `physical:all` 只发布
+`provider_current_observed` acquisition 和诊断，`kind_boundaries_proven=0` 时明确不可执行；
+`timeline(...)` 也不会从 expiry/name 自动升级为 authoritative plan。
+
 ## 持久化
 
 data 层拥有 codec、验证器和 content-addressed store：

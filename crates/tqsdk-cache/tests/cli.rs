@@ -2673,6 +2673,74 @@ fn fill_minute_accepts_a_pinned_historical_universe_plan() {
 }
 
 #[test]
+fn historical_universe_plan_is_preferred_and_timeline_remains_an_alias() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tqsdk-cache"))
+        .args(["fill", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--universe-plan <PATH>"));
+    assert!(stdout.contains("--universe-timeline"));
+}
+
+#[test]
+fn physical_all_routes_to_historical_acquisition_before_current_parser() {
+    let cache_dir = temp_dir("physical-all-missing-auth");
+    let output = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "fill",
+        "--universe",
+        "physical:all",
+        "--start-day",
+        "2020-01-01",
+        "--end-day",
+        "2020-01-02",
+        "--calendar",
+        "off",
+        "--dry-run",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!cache_dir.exists());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("physical:all requires TQ_AUTH_USER")
+    );
+}
+
+#[test]
+fn timeline_expression_requires_an_authoritative_pinned_plan() {
+    let output = run_without_auth_json([
+        "--kind",
+        "minute",
+        "fill",
+        "--universe",
+        "timeline(active:all;cont:all;index:all)",
+        "--start-day",
+        "2020-01-01",
+        "--end-day",
+        "2020-01-02",
+        "--calendar",
+        "off",
+        "--dry-run",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--universe-plan")
+    );
+}
+
+#[test]
 fn default_output_uses_human_stderr_for_runtime_errors() {
     let output = run([
         "fill",

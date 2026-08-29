@@ -55,6 +55,7 @@ mod export;
 mod greeks;
 mod historical_fill_universe;
 mod historical_universe;
+mod historical_universe_acquisition;
 mod historical_universe_artifact;
 mod historical_universe_resolution;
 mod history_series_cache;
@@ -160,6 +161,9 @@ pub use historical_universe::{
     HistoricalCatalogProof, HistoricalUniverseFillTarget, HistoricalUniversePlan,
     HistoricalUniversePlanV3Identity, HistoricalUniverseTimeline, UniverseBudget,
     UniverseInstrumentId, UniverseMemberChange, UniverseTimelineBatch,
+};
+pub use historical_universe_acquisition::{
+    PROVIDER_CURRENT_FUTURES_SOURCE_IDENTITY, ProviderCurrentHistoricalCatalogAcquirer,
 };
 pub use historical_universe_artifact::{
     HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION, HISTORICAL_UNIVERSE_ARTIFACT_NAMESPACE,

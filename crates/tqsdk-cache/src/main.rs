@@ -276,8 +276,13 @@ struct FillArgs {
     /// Futures universe expression resolved by the SDK; may be combined with --symbol.
     #[arg(long, value_name = "EXPRESSION")]
     universe: Option<String>,
-    /// JSON `HistoricalUniversePlan` for lifecycle-aware tick cache warmup.
-    #[arg(long, value_name = "PATH", conflicts_with = "universe")]
+    /// JSON `HistoricalUniversePlan` for lifecycle-aware historical cache fill.
+    #[arg(
+        long = "universe-plan",
+        visible_alias = "universe-timeline",
+        value_name = "PATH",
+        conflicts_with = "universe"
+    )]
     universe_timeline: Option<PathBuf>,
     #[command(flatten)]
     days: FillDaysArgs,
@@ -1516,6 +1521,20 @@ async fn fill(
             "--universe-timeline supports only --kind tick, minute, or daily fill".to_string(),
         ));
     }
+    if let Some(universe) = args.universe.as_deref()
+        && (universe == "physical:all" || universe.starts_with("timeline("))
+    {
+        let historical = tqsdk_data::HistoricalFillUniverseSpec::parse(universe)?;
+        return match historical {
+            tqsdk_data::HistoricalFillUniverseSpec::ObservedPhysicalAll => {
+                fill_provider_current_physical_catalog(cache_dir, kind, market, args).await
+            }
+            tqsdk_data::HistoricalFillUniverseSpec::Timeline(_) => Err(CliError::Usage(
+                "timeline(...) requires authoritative lifecycle artifacts; compile and pass the pinned result with --universe-plan"
+                    .to_string(),
+            )),
+        };
+    }
     if let Some(plan_path) = args.universe_timeline.clone() {
         return fill_historical_universe_plan(cache_dir, kind, market, args, plan_path).await;
     }
@@ -1530,6 +1549,117 @@ async fn fill(
         CacheKind::Minute => fill_minute(cache_dir, market, args).await,
         CacheKind::Daily => fill_daily(cache_dir, market, args).await,
         CacheKind::All => unreachable!("kind validation rejects all for fill"),
+    }
+}
+
+async fn fill_provider_current_physical_catalog(
+    cache_dir: Option<&Path>,
+    kind: CacheKind,
+    market: MarketKind,
+    args: FillArgs,
+) -> Result<CommandOutcome, CliError> {
+    if !matches!(market, MarketKind::Futures) {
+        return Err(CliError::Usage(
+            "--universe physical:all supports only --market futures".to_string(),
+        ));
+    }
+    if !args.symbols.symbols.is_empty()
+        || args.repair_stale
+        || args.include_open_day
+        || args.require_final
+        || args.daily_slices
+    {
+        return Err(CliError::Usage(
+            "--universe physical:all cannot be combined with explicit symbols, repair, open-day, require-final, or slicing flags"
+                .to_string(),
+        ));
+    }
+    if args.dry_run && args.report.is_some() {
+        return Err(CliError::Usage(
+            "--report cannot be combined with --dry-run because dry-run performs no writes"
+                .to_string(),
+        ));
+    }
+    let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
+    let resolved =
+        resolve_fill_window(&canonical_cache_dir, &args.days, args.dry_run, false).await?;
+    let user = std::env::var("TQ_AUTH_USER").map_err(|_| {
+        CliError::Usage(
+            "--universe physical:all requires TQ_AUTH_USER and TQ_AUTH_PASS".to_string(),
+        )
+    })?;
+    let pass = std::env::var("TQ_AUTH_PASS").map_err(|_| {
+        CliError::Usage(
+            "--universe physical:all requires TQ_AUTH_USER and TQ_AUTH_PASS".to_string(),
+        )
+    })?;
+    let discovery = tqsdk_data::session_client_builder_for_futures_discovery(&user, &pass)
+        .build()
+        .map_err(tqsdk::Error::from)?;
+    let observed_at_ns = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .ok_or_else(|| CliError::Usage("current timestamp exceeds nanosecond range".to_string()))?;
+    let acquisition = tqsdk_data::ProviderCurrentHistoricalCatalogAcquirer::new(discovery)
+        .acquire(resolved.window.end_ns, observed_at_ns)
+        .await?;
+    let store = tqsdk_data::HistoricalUniverseArtifactStore::new(&canonical_cache_dir);
+    let artifact_path = store.acquisition_path(&acquisition.acquisition_sha256)?;
+    let persisted_path = if args.dry_run {
+        None
+    } else {
+        Some(store.publish_acquisition(&acquisition)?)
+    };
+    let proven_boundaries = acquisition
+        .contracts
+        .iter()
+        .filter(|contract| {
+            contract
+                .first_available_data_ns
+                .contains_key(&historical_data_kind(kind))
+        })
+        .count();
+    let value = json!({
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "command": "fill",
+        "cache_kind": kind.as_str(),
+        "market": market.as_str(),
+        "cache_dir": canonical_cache_dir,
+        "dry_run": args.dry_run,
+        "status": "incomplete",
+        "complete": false,
+        "remote_used": true,
+        "rows_written": 0,
+        "requested_days": resolved.window,
+        "historical_universe": {
+            "canonical": "physical:all",
+            "proof": "provider_current_observed",
+            "complete_roster": acquisition.complete,
+            "contracts": acquisition.contracts.len(),
+            "expired_contracts": acquisition.contracts.iter().filter(|contract| contract.expired).count(),
+            "active_contracts": acquisition.contracts.iter().filter(|contract| !contract.expired).count(),
+            "kind_boundaries_proven": proven_boundaries,
+            "acquisition_sha256": acquisition.acquisition_sha256,
+            "artifact_path": artifact_path,
+            "persisted_path": persisted_path,
+            "executable": false,
+            "blocked_reason": "provider metadata supplies expiry but no authoritative listing or kind-specific first-available boundary; name/expiry inference is probe-only and cannot safely define full-history fill targets",
+        },
+    });
+    if let Some(path) = &args.report {
+        write_atomically(path, &serde_json::to_vec_pretty(&value)?)?;
+    }
+    Ok(CommandOutcome {
+        value,
+        exit_code: 1,
+    })
+}
+
+fn historical_data_kind(kind: CacheKind) -> tqsdk_data::HistoricalDataKind {
+    match kind {
+        CacheKind::Tick => tqsdk_data::HistoricalDataKind::Tick,
+        CacheKind::Minute => tqsdk_data::HistoricalDataKind::Minute,
+        CacheKind::Daily => tqsdk_data::HistoricalDataKind::Daily,
+        CacheKind::All => unreachable!("historical universe kind gate rejects all"),
     }
 }
 

@@ -15,11 +15,21 @@ session owner、后台守护进程、relay 或监控服务。完整合同见
 
 ### 历史动态 universe fill
 
-`fill --universe-timeline PLAN.json` 接受 `tqsdk-data::HistoricalUniversePlan` 的 JSON，支持 `--kind tick` 与 `--kind daily`，不接受 `--symbol`、`--universe` 或 trading-day/open-day flags：计划本身提供精确 `[start_ns, end_ns)` 和每个物理合约的生命周期。计划 v2 会从每个物理合约的 `physical_listing_starts`（上市日）开始补数；daily 直接填原生 1d 到计划结束，tick 仍按生命周期回放范围预热。continuous/index 是派生 membership，不会成为物理下载源。`--dry-run` 强制 CacheOnly，不写入 cache；静态 `--universe` 的现有 current-selector 语义不变。
+`fill --universe-plan PLAN.json` 接受 `tqsdk-data::HistoricalUniversePlan` 的 JSON，支持
+`--kind tick|minute|daily`。`--universe-timeline` 保留为 visible compatibility alias。计划本身
+提供精确 `[start_ns, end_ns)` 和每个物理合约的生命周期；v2/v3 从固定 listing start 补数，
+tick 回放仍按生命周期裁剪。minute/daily 共享 terminal/progress/cancel/report executor，tick 通过
+同一 coordinator 复用现有 coverage-aware facade adapter。`--dry-run` 强制 CacheOnly。
+
+历史自动表达式也放在 `--universe`：`physical:all` 会稳定查询前后 roster、完整 metadata 并
+生成 `provider_current_observed` acquisition。当前 provider 没有 authoritative listing 或
+kind-specific first-available bounds，因此该 lane 会以 `executable=false`/exit 1 fail closed；
+`--dry-run` 只返回拟写 artifact path，不创建 root/lock/temp。`timeline(...)` 需要 authoritative
+lifecycle artifact，必须先编译后通过 `--universe-plan` 执行。名称/到期日不会被当作上市证明。
 
 ```bash
 tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
-  --universe-timeline historical-universe-plan.json --dry-run
+  --universe-plan historical-universe-plan.json --dry-run
 ```
 
 ## Cache family
