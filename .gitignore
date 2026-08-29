@@ -8,7 +8,10 @@ Cargo.lock
 # Development tool configurations
 .claude/
 .agents/
-.codex/
+.codex/*
+!.codex/config.toml
+!.codex/agents/
+!.codex/agents/*.toml
 .codegraph/
 .code-review-graph/
 .cursor/
@@ -25,3 +28,4 @@ docs/designs
 opencode.jsonc
 GEMINI.md
 .tokensave/
+.serena/
