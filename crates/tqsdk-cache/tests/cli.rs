@@ -2627,6 +2627,52 @@ fn fill_daily_accepts_a_pinned_historical_universe_plan() {
 }
 
 #[test]
+fn fill_minute_accepts_a_pinned_historical_universe_plan() {
+    let cache_dir = temp_dir("historical-universe-minute-plan");
+    let scope = tqsdk_data::DynamicUniverseScope::all();
+    let plan = tqsdk_data::CatalogSnapshot::new(
+        "fixture-v1",
+        "calendar-sha256:fixture",
+        true,
+        scope.clone(),
+        vec![
+            tqsdk_data::CatalogContract::new(
+                "SHFE.au2406",
+                "SHFE",
+                "au",
+                vec![tqsdk_data::ActiveInterval::new(10, 20).unwrap()],
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap()
+    .compile_timeline(0, 30, scope, [])
+    .unwrap()
+    .prepare(tqsdk_data::UniverseBudget::new(4, 4).unwrap())
+    .unwrap();
+    BacktestTickCache::open(&cache_dir).unwrap();
+    let plan_path = cache_dir.join("historical-universe-plan.json");
+    fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
+
+    let output = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "minute",
+        "fill",
+        "--universe-timeline",
+        plan_path.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "fill", "incomplete", 1);
+    assert_eq!(result["universe_timeline"]["plan_sha256"], plan.plan_sha256);
+    assert_eq!(result["universe_timeline"]["physical_symbols"], 1);
+    let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
 fn default_output_uses_human_stderr_for_runtime_errors() {
     let output = run([
         "fill",

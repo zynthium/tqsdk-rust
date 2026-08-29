@@ -216,6 +216,35 @@ fn v1_plan_remains_verifiable_without_listing_starts() {
     plan.timeline.physical_listing_starts.clear();
     plan.plan_sha256 = format!("sha256:{:x}", Sha256::digest(legacy_bytes));
     plan.verify().unwrap();
+    assert!(
+        plan.physical_fill_targets()
+            .unwrap_err()
+            .to_string()
+            .contains("plan v2 or later")
+    );
+}
+
+#[test]
+fn v2_fill_targets_start_at_listing_and_end_at_plan_end() {
+    let scope = DynamicUniverseScope::all();
+    let plan = CatalogSnapshot::new(
+        "fixture-v1",
+        "calendar-sha256:abc",
+        true,
+        scope.clone(),
+        vec![contract("SHFE.au2406", 10, 20)],
+    )
+    .unwrap()
+    .compile_timeline(0, 30, scope, [])
+    .unwrap()
+    .prepare(UniverseBudget::new(2, 2).unwrap())
+    .unwrap();
+
+    let targets = plan.physical_fill_targets().unwrap();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].symbol, "SHFE.au2406");
+    assert_eq!(targets[0].start_ns, 10);
+    assert_eq!(targets[0].end_ns, 30);
 }
 
 #[test]

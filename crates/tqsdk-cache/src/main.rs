@@ -1508,9 +1508,11 @@ async fn fill(
     market: MarketKind,
     args: FillArgs,
 ) -> Result<CommandOutcome, CliError> {
-    if args.universe_timeline.is_some() && !matches!(kind, CacheKind::Tick | CacheKind::Daily) {
+    if args.universe_timeline.is_some()
+        && !matches!(kind, CacheKind::Tick | CacheKind::Minute | CacheKind::Daily)
+    {
         return Err(CliError::Usage(
-            "--universe-timeline supports only --kind tick or daily fill".to_string(),
+            "--universe-timeline supports only --kind tick, minute, or daily fill".to_string(),
         ));
     }
     match kind {
@@ -1751,7 +1753,7 @@ async fn fill_daily_historical_universe_plan(
         ));
     }
     let plan: tqsdk_data::HistoricalUniversePlan = serde_json::from_slice(&fs::read(plan_path)?)?;
-    plan.verify()?;
+    let targets = plan.physical_fill_targets()?;
     let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
     let mut builder = BacktestHistoryClient::builder(canonical_cache_dir.clone());
     builder = builder.policy(if args.dry_run {
@@ -1763,18 +1765,16 @@ async fn fill_daily_historical_universe_plan(
         builder = builder.auth_env();
     }
     let client = builder.build()?;
-    let requests = plan
-        .timeline
-        .physical_listing_starts
+    let requests = targets
         .iter()
         .enumerate()
-        .map(|(index, (symbol, start_ns))| {
+        .map(|(index, target)| {
             BacktestHistoryRequest::kline(
                 u64::try_from(index).expect("symbol count fits request identifier"),
-                symbol,
+                &target.symbol,
                 Duration::from_secs(24 * 60 * 60),
-                *start_ns,
-                plan.timeline.end_ns,
+                target.start_ns,
+                target.end_ns,
             )
         })
         .collect::<Vec<_>>();
@@ -1810,6 +1810,85 @@ async fn fill_daily_historical_universe_plan(
     })
 }
 
+async fn fill_minute_historical_universe_plan(
+    cache_dir: Option<&Path>,
+    market: MarketKind,
+    args: FillArgs,
+    plan_path: PathBuf,
+) -> Result<CommandOutcome, CliError> {
+    if !matches!(market, MarketKind::Futures) || args.repair_stale {
+        return Err(CliError::Usage(
+            "--universe-timeline minute fill supports futures without --repair-stale".to_string(),
+        ));
+    }
+    if !args.symbols.symbols.is_empty()
+        || args.days.start_day.is_some()
+        || args.days.end_day.is_some()
+        || args.days.last_trading_days.is_some()
+        || !matches!(args.days.calendar, CalendarMode::Auto)
+        || args.days.refresh_calendar
+        || args.include_open_day
+        || args.require_final
+        || args.daily_slices
+        || args.report.is_some()
+    {
+        return Err(CliError::Usage(
+            "--universe-timeline supplies physical ranges; omit symbols, trading-day, and report flags"
+                .to_string(),
+        ));
+    }
+    let plan: tqsdk_data::HistoricalUniversePlan = serde_json::from_slice(&fs::read(plan_path)?)?;
+    let targets = plan.physical_fill_targets()?;
+    let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
+    let mut builder =
+        BacktestHistoryClient::builder(canonical_cache_dir.clone()).policy(if args.dry_run {
+            BacktestHistoryPolicy::CacheOnly
+        } else {
+            BacktestHistoryPolicy::RemoteOnMiss
+        });
+    if !args.dry_run {
+        builder = builder.auth_env();
+    }
+    let client = builder.build()?;
+    let requests = targets
+        .iter()
+        .enumerate()
+        .map(|(index, target)| {
+            BacktestHistoryRequest::kline(
+                u64::try_from(index).expect("symbol count fits request identifier"),
+                &target.symbol,
+                Duration::from_secs(60),
+                target.start_ns,
+                target.end_ns,
+            )
+        })
+        .collect::<Vec<_>>();
+    let report = client
+        .orchestrate_fill(
+            requests.clone(),
+            history_fill_config(&args)?,
+            BacktestHistoryFillCancellation::new(),
+            |_| {},
+        )
+        .await?;
+    let complete = matches!(report.status(), BacktestHistoryFillTerminalStatus::Complete);
+    Ok(CommandOutcome {
+        value: json!({
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "command": "fill",
+            "cache_kind": "minute",
+            "market": market.as_str(),
+            "cache_dir": canonical_cache_dir,
+            "dry_run": args.dry_run,
+            "universe_timeline": {"plan_sha256": plan.plan_sha256, "catalog_id": plan.timeline.catalog_id, "start_ns": plan.timeline.start_ns, "end_ns": plan.timeline.end_ns, "physical_symbols": requests.len()},
+            "complete": complete,
+            "remote_used": report.symbols().iter().any(|item| item.remote_used),
+            "rows_written": report.rows_written(),
+        }),
+        exit_code: if complete { 0 } else { 1 },
+    })
+}
+
 fn daily_cache_statuses(
     cache_dir: &Path,
     symbols: &[String],
@@ -1836,6 +1915,9 @@ async fn fill_minute(
     market: MarketKind,
     args: FillArgs,
 ) -> Result<CommandOutcome, CliError> {
+    if let Some(plan_path) = args.universe_timeline.clone() {
+        return fill_minute_historical_universe_plan(cache_dir, market, args, plan_path).await;
+    }
     let config = fill_config(&args);
     if args.repair_stale && args.dry_run {
         return Err(CliError::Usage(
@@ -2452,7 +2534,7 @@ async fn fill_tick_historical_universe_plan(
 
     let bytes = fs::read(&plan_path)?;
     let plan: tqsdk_data::HistoricalUniversePlan = serde_json::from_slice(&bytes)?;
-    plan.verify()?;
+    let _targets = plan.physical_fill_targets()?;
     let config = fill_config(&args);
     let (cache, canonical_cache_dir) = if args.dry_run {
         open_read_only_cache(cache_dir)?

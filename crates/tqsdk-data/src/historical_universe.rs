@@ -300,6 +300,14 @@ pub struct HistoricalUniversePlan {
     pub budget: UniverseBudget,
 }
 
+/// One physical history range required to warm a historical universe plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoricalUniverseFillTarget {
+    pub symbol: String,
+    pub start_ns: i64,
+    pub end_ns: i64,
+}
+
 impl HistoricalUniverseTimeline {
     pub fn prepare(self, budget: UniverseBudget) -> Result<HistoricalUniversePlan> {
         self.validate()?;
@@ -435,6 +443,37 @@ impl HistoricalUniversePlan {
             return Err(validation("historical universe plan hash mismatch"));
         }
         Ok(())
+    }
+
+    /// Resolves the physical ranges required by cache fill executors.
+    ///
+    /// Legacy v1 plans remain readable and verifiable for replay compatibility,
+    /// but they do not carry listing starts and therefore are not executable fill
+    /// inputs.
+    pub fn physical_fill_targets(&self) -> Result<Vec<HistoricalUniverseFillTarget>> {
+        self.verify()?;
+        if self.plan_version < 2 {
+            return Err(validation(
+                "historical universe fill requires plan v2 or later",
+            ));
+        }
+
+        self.timeline
+            .physical_listing_starts
+            .iter()
+            .map(|(symbol, start_ns)| {
+                if *start_ns >= self.timeline.end_ns {
+                    return Err(validation(format!(
+                        "historical universe fill target {symbol} has an empty range"
+                    )));
+                }
+                Ok(HistoricalUniverseFillTarget {
+                    symbol: symbol.clone(),
+                    start_ns: *start_ns,
+                    end_ns: self.timeline.end_ns,
+                })
+            })
+            .collect()
     }
 }
 
