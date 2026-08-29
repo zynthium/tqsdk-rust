@@ -1,5 +1,7 @@
 # Historical Universe 自动 Catalog 与统一填充：完整迭代方案
 
+> 状态：2026-08-30 已完成。默认 provider 缺少 authoritative lifecycle/kind bounds 的能力以明确 fail-closed 收口；可执行路径要求 content-addressed authoritative artifacts 和 v3 pinned execution closure。
+
 ## 1. Objective
 
 - [verified] 在不改变现有 live/facade current-selector 语义的前提下，让 `tqsdk-cache fill --universe 'physical:all'` 能选择 provider 当前可发现的全部物理期货，并按 tick、minute、daily 各自的数据可得边界填充到用户 cutoff。
@@ -109,8 +111,8 @@ calendar/continuous/ranking ──┼──► plan_sha256 (v3)
 
 - [verified] 新 writer 只发 plan v3；v1/v2 reader 和 `verify()` 保留，已有回测继续可读。
 - [verified] v1 可 verify 不代表可 fill：共享 target resolver 对 v1 返回 typed `execution_ineligible_missing_targets`，而不是改变 v1 hash 或假装零请求成功。
-- [verified] v2 的 `physical_listing_starts` 继续按既有“authoritative caller-supplied start”解释；不允许把 observed first-data 回填进去。v2 可通过兼容 resolver fill，但必须重算并验证它能覆盖每个 physical add，且非空 membership 不能产生零 target。
-- [inferred] v3 plan 分开保存 `membership_timeline`、`fill_dependencies`、kind-specific availability/warmup、compiler identity、canonical spec、budgets 和所有 upstream hashes。
+- [verified] v2 的 bytes/hash/read/verify 语义保持兼容，但 CLI 默认不再把 caller-supplied listing start 当成已证明的 kind target；只有显式 `--allow-legacy-universe-plan` 才执行，并报告 `legacy_unproven=true`。
+- [verified] v3 plan 分开保存 `membership_timeline`、`fill_dependencies`、kind-specific exact targets、compiler identity、canonical spec、budgets 和所有 upstream hashes；execution closure 本身也被 identity 和 plan hash 固定。
 - [verified] 每次 load 都重算 canonical body hash，并逐级验证 `plan -> semantic catalog -> acquisition/proof`；unknown version、断链、同 hash 不同 bytes、乱序/重复 canonical content 全部 fail closed。
 
 ### 6.4 Membership 与 fill dependency compiler
@@ -182,14 +184,14 @@ calendar/continuous/ranking ──┼──► plan_sha256 (v3)
 1. [verified] 保留现有 interval/product underflow guards，新增 proof/scope/horizon gates。
 2. [inferred] v3 compiler分别生成 visible membership、continuous/index source dependencies和 per-kind availability/warmup。
 3. [inferred] 扩展预算到 symbols、membership changes、dependency intervals、remote requests和estimated bytes。
-4. [verified] 给 v2 建兼容 target adapter，不改 v2 bytes/hash；v1 只读不可 fill。
+4. [verified] 给 v2 建显式 opt-in 的 legacy target adapter，不改 v2 bytes/hash；v1 只读不可 fill；默认只执行 v3 pinned targets。
 
 停止条件：`cont-only`/`index-only` 不泄漏 physical membership；`active+cont+index` 同时存在且依赖闭合；main/top 无证据时拒绝；三种 kind target identity 可解释。
 
 ### Iteration 4 — Pinned plan 三类共享执行路径
 
-1. [verified] 先只接 pinned v2/v3，不接自动 catalog，以缩小风险。
-2. [inferred] tick/minute/daily统一 preflight、coverage inspection、lazy auth、scheduler、signal、report和terminal status；移除三个 timeline helper 的重复流程。
+1. [verified] 默认只接 proof-pinned v3；v2 必须显式 legacy opt-in，不接无证明自动 catalog。
+2. [verified] tick/minute/daily统一单次 plan load、artifact preflight、coverage inspection、lazy auth、scheduler、signal、report和terminal status；三个 timeline helper 的重复流程已移除。
 3. [verified] complete cache hit 全程不读取认证；remote failure/cancel不提交未 terminal coverage。
 
 停止条件：同一 fixture plan 在 tick/minute/daily 都产生可审计 dependency/target hash；complete/missing/interrupted/failed 四类结果、exit 0/1/130和报告均一致。
@@ -206,7 +208,7 @@ calendar/continuous/ranking ──┼──► plan_sha256 (v3)
 ### Iteration 6 — Strict `timeline(...)` 自动编译
 
 1. [verified] 接入 authoritative lifecycle adapter contract；公开 current source达不到 proof时输出 incomplete acquisition 的内存 hash/拟写路径（dry-run）或持久 artifact path（非 dry-run）后 fail closed。
-2. [inferred] proof通过时自动编译、persist v3 plan并立即通过同一 pinned executor执行；普通用户无需接触 JSON。
+2. [verified] data 层在 complete authoritative acquisition + matching semantic catalog 输入下编译并可 content-addressed persist v3 plan；默认 provider 无该 authority，因此 CLI 的 `--universe 'timeline(...)'` 明确要求先提供 pinned plan，不伪造“一步自动完成”。
 3. [verified] calendar exact bytes/range/timezone/normalization、continuous table exact bytes/segments、ranking artifact若被 selector使用，都进入 identity和覆盖 gate。
 
 停止条件：无 authoritative source时绝不生成 executable timeline；有 fixture/授权 source时，相同 pinned artifacts在完全离线环境重放得到相同 membership和target hashes。
@@ -217,6 +219,7 @@ calendar/continuous/ranking ──┼──► plan_sha256 (v3)
 2. [verified] 先跑 offline 全矩阵，再用显式环境变量执行真实 daily 全 catalog fill；通过后执行 minute 代表性样本和全部 catalog 的可续跑验证。
 3. [verified] 第二次相同 cutoff 以 CacheOnly/dry-run复查必须 `remote_used=false`、`rows_written=0`、coverage complete；所有失败 symbol有逐项报告而不是只看进程 exit。
 4. [verified] 提交前刷新 GitNexus并运行 `detect-changes --scope all`；partial/truncated/UNKNOWN必须继续查证。
+5. [verified] architecture reviewer 的收口项已逐项关闭：authoritative `complete=true`、acquisition/catalog fact equality、v3 embedded execution closure、single-read plan preflight、v2 explicit opt-in、missing-kind-boundary rejection、logical-series availability identity、ancestor symlink/fsync、三类共享 executor、显式 provider scope 与 incomplete metadata audit。
 
 停止条件：Definition of Done 全部满足；否则保持 feature gated/CLI不可见，不降低 proof或coverage标准。
 
@@ -226,7 +229,7 @@ calendar/continuous/ranking ──┼──► plan_sha256 (v3)
 
 - [verified] Parser：current selector byte-for-byte兼容；historical wrapper、canonicalization、nested/empty/unknown/main/top拒绝；relay/facade继续拒绝 historical spec。[universe_selector.rs](../../crates/tqsdk-data/tests/universe_selector.rs#L1)
 - [verified] Artifact：乱序、重复、metadata缺项、roster drift、revision mismatch、tamper、unknown version、断链、collision、并发 writer、crash injection、parent sync indeterminate、dry-run不写。
-- [verified] Plan：v1 read/verify + fill-ineligible；v2兼容；v3 hash chain；physical add/target closure；kind-specific availability不串用；budget在auth/write前失败。[historical_universe.rs](../../crates/tqsdk-data/tests/historical_universe.rs#L156)
+- [verified] Plan：v1 read/verify + fill-ineligible；v2仅显式 legacy opt-in；v3 artifact/hash/execution chain；physical add/target closure；kind-specific availability不串用；budget在auth/write前失败。[historical_universe.rs](../../crates/tqsdk-data/tests/historical_universe.rs#L156)
 - [verified] Membership：active add/remove、cont/index独立成员、cont-only/index-only不泄漏 physical、缺 continuous/ranking evidence拒绝、cutoff边界和合法空 horizon。
 - [verified] Executor：tick/minute/daily complete hit、remote miss、合法零行 terminal、零 target error、Ctrl-C、remote failure、report write failure、exit code、唯一 terminal progress。[cli.rs](../../crates/tqsdk-cache/tests/cli.rs#L2536)
 - [verified] Backtest：同一 timestamp membership先于 market data、退市后停止新开仓、上市后自动加入、continuous underlying切换、index native source、CacheOnly pinned artifact replay。[strategy_backtest.rs](../../crates/tqsdk-task/tests/strategy_backtest.rs#L120)
@@ -365,7 +368,7 @@ cargo run -p tqsdk-cache -- \
     "shared_current_universe_expression_unchanged": true,
     "new_plan_writer_version": 3,
     "legacy_plan_readers": [1, 2],
-    "legacy_plan_fill": {"v1": "ineligible", "v2": "compatible-with-target-gates"},
+  "legacy_plan_fill": {"v1": "ineligible", "v2": "explicit-opt-in-unproven"},
     "timeline_proof": "authoritative_lifecycle",
     "observed_proof": "provider_current_observed",
     "time_semantics": "effective-membership-not-as-known-vintage",
@@ -421,7 +424,7 @@ cargo run -p tqsdk-cache -- \
 1. [verified] 现有 current/static `UniverseExpression`、facade/live/relay和普通 `--universe` 行为无回归；historical syntax由独立 spec拥有。
 2. [verified] `physical:all` 能稳定采集 provider-current 全 physical roster，保存/报告 acquisition identity，按 kind-specific已证明边界填充到 cutoff；每个 skipped/failed symbol都有 typed reason。
 3. [verified] `timeline(...)` 只有 authoritative lifecycle、calendar、continuous/ranking和hash chain全部通过才生成 plan v3；默认公开源不足时留下诊断并 fail closed。
-4. [verified] plan v1/v2继续可读/可验证；v1 fill明确不可执行，v2在兼容 target gates后可执行；新 writer只发v3。
+4. [verified] plan v1/v2继续可读/可验证；v1 fill明确不可执行，v2只在显式 legacy opt-in 后执行并报告 unproven；新 writer只发v3，默认 CLI 只执行 v3。
 5. [verified] membership和hidden dependencies完全分开；`cont-only`/`index-only`不泄漏 physical，`active+cont+index`在回测时同步加入/移除且数据源可用。
 6. [verified] tick/minute/daily共享 target resolver和execution pipeline；报告、progress、cancel、exit、lazy auth、coverage reinspection语义一致。
 7. [verified] 非空 selection/plan绝不以零 target成功；合法 provider零行与无目标有不同typed outcome。

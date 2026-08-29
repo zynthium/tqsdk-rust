@@ -36,7 +36,7 @@
 - [Relay 内置只读历史查询 ADR](architecture/history-relay.md)：三 crate ownership、隔离、feature、迁移与发布门。
 - [Relay History HTTP v1](architecture/history-relay-http.md)：严格请求、all-or-nothing JSON、typed error、ETag 与 gzip。
 - [History Snapshot Manifest v1](architecture/history-snapshot-manifest.md)：结构共享、manifest identity、lease、发布/恢复/GC。
-- [历史 Universe Catalog](architecture/historical-universe-catalog.md)：observed/authoritative 证明、v3 identity DAG、kind-aware 起点与不可变 artifact。
+- [历史 Universe Catalog](architecture/historical-universe-catalog.md)：observed/authoritative 证明、v3 identity/execution DAG、kind-aware 固定目标与不可变 artifact。
 
 ## AI 助手读取顺序
 

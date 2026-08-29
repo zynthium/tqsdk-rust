@@ -7,8 +7,9 @@ use crate::{
     Result,
 };
 
-pub const PROVIDER_CURRENT_FUTURES_SOURCE_IDENTITY: &str = "tq-query:all-futures-metadata:v1";
-const SUPPORTED_PHYSICAL_FUTURES_EXCHANGES: &[&str] =
+pub const PROVIDER_CURRENT_FUTURES_SOURCE_IDENTITY: &str =
+    "tq-query:physical-futures:CFFEX,SHFE,DCE,CZCE,INE,GFEX:v2";
+pub const PROVIDER_CURRENT_PHYSICAL_FUTURES_EXCHANGES: &[&str] =
     &["CFFEX", "SHFE", "DCE", "CZCE", "INE", "GFEX"];
 
 /// Stable-roster provider-current futures catalog acquisition.
@@ -60,6 +61,7 @@ impl ProviderCurrentHistoricalCatalogAcquirer {
                 .collect::<Vec<_>>();
             self.query_metadata(&union).await?
         };
+        let complete = stable && infos.len() == roster_before.len();
         let contracts = infos
             .into_iter()
             .map(contract_from_symbol_info)
@@ -70,7 +72,7 @@ impl ProviderCurrentHistoricalCatalogAcquirer {
             "physical:all",
             requested_as_of_ns,
             observed_at_ns,
-            stable,
+            complete,
             roster_before,
             roster_after,
             contracts,
@@ -86,7 +88,8 @@ impl ProviderCurrentHistoricalCatalogAcquirer {
             let Some((exchange, contract)) = symbol.split_once('.') else {
                 return false;
             };
-            SUPPORTED_PHYSICAL_FUTURES_EXCHANGES.contains(&exchange) && !contract.contains('@')
+            PROVIDER_CURRENT_PHYSICAL_FUTURES_EXCHANGES.contains(&exchange)
+                && !contract.contains('@')
         });
         roster.sort();
         roster.dedup();
@@ -104,9 +107,14 @@ impl ProviderCurrentHistoricalCatalogAcquirer {
             .map(|info| info.instrument_id.as_str().to_string())
             .collect::<BTreeSet<_>>();
         let requested = symbols.iter().cloned().collect::<BTreeSet<_>>();
-        if returned != requested {
+        if returned.len() != infos.len() {
             return Err(validation(
-                "provider-current historical catalog metadata does not cover the full roster",
+                "provider-current metadata response contains duplicate symbols",
+            ));
+        }
+        if !returned.is_subset(&requested) {
+            return Err(validation(
+                "provider-current metadata response contains unexpected symbols",
             ));
         }
         Ok(infos)

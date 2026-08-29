@@ -192,11 +192,26 @@ impl HistoricalCatalogAcquisition {
             .iter()
             .map(|contract| contract.symbol.as_str())
             .collect::<BTreeSet<_>>();
-        if self
+        let roster_symbols = self
             .roster_before
             .iter()
             .chain(&self.roster_after)
-            .any(|symbol| !contract_symbols.contains(symbol.as_str()))
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if contract_symbols
+            .iter()
+            .any(|symbol| !roster_symbols.contains(symbol))
+        {
+            return Err(validation(
+                "historical catalog metadata contains a contract outside the observed rosters",
+            ));
+        }
+        if self.complete
+            && self
+                .roster_before
+                .iter()
+                .chain(&self.roster_after)
+                .any(|symbol| !contract_symbols.contains(symbol.as_str()))
         {
             return Err(validation(
                 "historical catalog roster contains a contract without metadata",
@@ -210,6 +225,11 @@ impl HistoricalCatalogAcquisition {
         if self.complete && self.roster_before.len() != self.contracts.len() {
             return Err(validation(
                 "complete historical acquisition requires metadata for the full roster",
+            ));
+        }
+        if self.proof == HistoricalCatalogProof::AuthoritativeLifecycle && !self.complete {
+            return Err(validation(
+                "authoritative historical acquisition must be complete",
             ));
         }
         if self.proof == HistoricalCatalogProof::AuthoritativeLifecycle
@@ -249,6 +269,10 @@ pub struct HistoricalSemanticCatalog {
     pub acquisition_sha256: String,
     pub canonical_universe: String,
     pub catalog: CatalogSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_availability_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub derived_first_available_data_ns: BTreeMap<String, BTreeMap<HistoricalDataKind, i64>>,
 }
 
 #[derive(Serialize)]
@@ -257,6 +281,10 @@ struct HistoricalSemanticCatalogBody<'a> {
     acquisition_sha256: &'a str,
     canonical_universe: &'a str,
     catalog: &'a CatalogSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    derived_availability_identity: Option<&'a str>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    derived_first_available_data_ns: &'a BTreeMap<String, BTreeMap<HistoricalDataKind, i64>>,
 }
 
 impl HistoricalSemanticCatalog {
@@ -277,10 +305,29 @@ impl HistoricalSemanticCatalog {
             acquisition_sha256: acquisition.acquisition_sha256.clone(),
             canonical_universe: canonical_universe.into(),
             catalog,
+            derived_availability_identity: None,
+            derived_first_available_data_ns: BTreeMap::new(),
         };
         artifact.normalize()?;
         artifact.semantic_catalog_sha256 = sha256_identity(&artifact.body_bytes()?);
+        artifact.validate_against_acquisition(acquisition)?;
         Ok(artifact)
+    }
+
+    /// Pins independently observed availability boundaries for logical
+    /// provider series such as `KQ.i@...` that are not physical contracts in
+    /// the acquisition roster.
+    pub fn with_derived_availability(
+        mut self,
+        identity: impl Into<String>,
+        first_available_data_ns: BTreeMap<String, BTreeMap<HistoricalDataKind, i64>>,
+    ) -> Result<Self> {
+        self.derived_availability_identity = Some(identity.into());
+        self.derived_first_available_data_ns = first_available_data_ns;
+        self.semantic_catalog_sha256.clear();
+        self.normalize()?;
+        self.semantic_catalog_sha256 = sha256_identity(&self.body_bytes()?);
+        Ok(self)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -305,6 +352,55 @@ impl HistoricalSemanticCatalog {
         Ok(())
     }
 
+    /// Proves that this semantic catalog is a lossless interpretation of its
+    /// complete authoritative acquisition, rather than an unrelated catalog
+    /// carrying only the acquisition hash.
+    pub fn validate_against_acquisition(
+        &self,
+        acquisition: &HistoricalCatalogAcquisition,
+    ) -> Result<()> {
+        self.validate()?;
+        acquisition.validate()?;
+        if acquisition.proof != HistoricalCatalogProof::AuthoritativeLifecycle
+            || !acquisition.complete
+        {
+            return Err(validation(
+                "semantic historical catalog requires a complete authoritative acquisition",
+            ));
+        }
+        if self.acquisition_sha256 != acquisition.acquisition_sha256 {
+            return Err(validation(
+                "historical semantic catalog acquisition link is broken",
+            ));
+        }
+
+        let acquired = acquisition
+            .contracts
+            .iter()
+            .map(|contract| (contract.symbol.as_str(), contract))
+            .collect::<BTreeMap<_, _>>();
+        if acquired.len() != self.catalog.contracts.len() {
+            return Err(validation(
+                "historical acquisition/catalog contract counts differ",
+            ));
+        }
+        for contract in &self.catalog.contracts {
+            let observed = acquired
+                .get(contract.physical_symbol.as_str())
+                .ok_or_else(|| validation("historical acquisition/catalog symbols differ"))?;
+            if observed.exchange_id != contract.exchange_id
+                || observed.product_id != contract.product_id
+                || observed.authoritative_lifecycle != contract.lifecycle
+            {
+                return Err(validation(format!(
+                    "historical acquisition/catalog facts differ for {}",
+                    contract.physical_symbol
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn normalize(&mut self) -> Result<()> {
         if self.format_version != HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION {
             return Err(validation(format!(
@@ -318,6 +414,28 @@ impl HistoricalSemanticCatalog {
             std::mem::take(&mut self.canonical_universe),
         )?;
         self.catalog.validate()?;
+        match (
+            self.derived_availability_identity.as_mut(),
+            self.derived_first_available_data_ns.is_empty(),
+        ) {
+            (Some(identity), false) => {
+                *identity = normalized("derived_availability_identity", std::mem::take(identity))?;
+            }
+            (None, true) => {}
+            _ => {
+                return Err(validation(
+                    "derived availability identity and boundaries must be supplied together",
+                ));
+            }
+        }
+        for (symbol, boundaries) in &self.derived_first_available_data_ns {
+            normalized("derived availability symbol", symbol.clone())?;
+            if boundaries.is_empty() || boundaries.values().any(|value| *value <= 0) {
+                return Err(validation(format!(
+                    "derived availability boundaries for {symbol} must be positive and non-empty"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -327,6 +445,8 @@ impl HistoricalSemanticCatalog {
             acquisition_sha256: &self.acquisition_sha256,
             canonical_universe: &self.canonical_universe,
             catalog: &self.catalog,
+            derived_availability_identity: self.derived_availability_identity.as_deref(),
+            derived_first_available_data_ns: &self.derived_first_available_data_ns,
         })?)
     }
 }
@@ -426,6 +546,7 @@ impl HistoricalUniverseArtifactStore {
         })?;
         let acquisition = self.load_acquisition(&identity.acquisition_sha256)?;
         let semantic = self.load_semantic_catalog(&identity.semantic_catalog_sha256)?;
+        semantic.validate_against_acquisition(&acquisition)?;
         if acquisition.proof != HistoricalCatalogProof::AuthoritativeLifecycle
             || acquisition.proof != identity.proof
         {
@@ -486,7 +607,7 @@ impl HistoricalUniverseArtifactStore {
 
     fn load<T: for<'de> Deserialize<'de>>(&self, family: &str, sha256: &str) -> Result<T> {
         let path = self.artifact_path(family, sha256)?;
-        reject_symlink_if_exists(&path)?;
+        reject_symlink_ancestors(&path)?;
         let mut bytes = Vec::new();
         File::open(path)?.read_to_end(&mut bytes)?;
         Ok(serde_json::from_slice(&bytes)?)
@@ -501,6 +622,7 @@ fn publish_locked(directory: &Path, final_path: &Path, bytes: &[u8]) -> Result<(
                 "historical artifact hash collision or existing corruption",
             ));
         }
+        File::open(directory)?.sync_all()?;
         return Ok(());
     }
 
@@ -525,14 +647,53 @@ fn publish_locked(directory: &Path, final_path: &Path, bytes: &[u8]) -> Result<(
 }
 
 fn ensure_directory_without_symlink(path: &Path) -> Result<()> {
-    reject_symlink_if_exists(path)?;
-    fs::create_dir_all(path)?;
-    reject_symlink_if_exists(path)?;
-    if !fs::metadata(path)?.is_dir() {
-        return Err(validation(format!(
-            "historical artifact path is not a directory: {}",
-            path.display()
-        )));
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(validation(format!(
+                    "historical artifact path must not contain a symlink: {}",
+                    current.display()
+                )));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(validation(format!(
+                    "historical artifact path is not a directory: {}",
+                    current.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current)?;
+                File::open(&current)?.sync_all()?;
+                if let Some(parent) = current.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    File::open(parent)?.sync_all()?;
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn reject_symlink_ancestors(path: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(validation(format!(
+                    "historical artifact path must not contain a symlink: {}",
+                    current.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(())
 }

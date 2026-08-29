@@ -159,11 +159,13 @@ pub use historical_fill_universe::{
 pub use historical_universe::{
     ActiveInterval, CatalogContract, CatalogSnapshot, DerivedView, DynamicUniverseScope,
     HistoricalCatalogProof, HistoricalUniverseFillTarget, HistoricalUniversePlan,
-    HistoricalUniversePlanV3Identity, HistoricalUniverseTimeline, UniverseBudget,
-    UniverseInstrumentId, UniverseMemberChange, UniverseTimelineBatch,
+    HistoricalUniversePlanV3Execution, HistoricalUniversePlanV3Identity,
+    HistoricalUniverseTimeline, UniverseBudget, UniverseInstrumentId, UniverseMemberChange,
+    UniverseTimelineBatch,
 };
 pub use historical_universe_acquisition::{
-    PROVIDER_CURRENT_FUTURES_SOURCE_IDENTITY, ProviderCurrentHistoricalCatalogAcquirer,
+    PROVIDER_CURRENT_FUTURES_SOURCE_IDENTITY, PROVIDER_CURRENT_PHYSICAL_FUTURES_EXCHANGES,
+    ProviderCurrentHistoricalCatalogAcquirer,
 };
 pub use historical_universe_artifact::{
     HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION, HISTORICAL_UNIVERSE_ARTIFACT_NAMESPACE,

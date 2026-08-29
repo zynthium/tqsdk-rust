@@ -6,9 +6,9 @@ use sha2::{Digest, Sha256};
 use crate::{
     CatalogContract, DataError, DerivedView, DynamicUniverseScope, HistoricalCatalogAcquisition,
     HistoricalCatalogProof, HistoricalDataKind, HistoricalFillUniverseSpec,
-    HistoricalSemanticCatalog, HistoricalUniversePlan, HistoricalUniversePlanV3Identity,
-    HistoricalUniverseTimeline, Result, UniverseBudget, UniverseExpression, UniverseInstrumentId,
-    UniverseMemberChange, UniverseSelectorKind,
+    HistoricalSemanticCatalog, HistoricalUniversePlan, HistoricalUniversePlanV3Execution,
+    HistoricalUniversePlanV3Identity, HistoricalUniverseTimeline, Result, UniverseBudget,
+    UniverseExpression, UniverseInstrumentId, UniverseMemberChange, UniverseSelectorKind,
 };
 
 pub const HISTORICAL_UNIVERSE_COMPILER_IDENTITY: &str = "tqsdk.historical-universe-compiler.v1";
@@ -65,7 +65,7 @@ pub fn compile_historical_universe_resolution(
     budget: UniverseBudget,
 ) -> Result<HistoricalUniverseResolution> {
     acquisition.validate()?;
-    semantic.validate()?;
+    semantic.validate_against_acquisition(acquisition)?;
     if acquisition.proof != HistoricalCatalogProof::AuthoritativeLifecycle {
         return Err(validation(
             "strict historical universe resolution requires authoritative lifecycle proof",
@@ -84,8 +84,6 @@ pub fn compile_historical_universe_resolution(
             "historical universe resolution end_ns must be greater than start_ns",
         ));
     }
-    validate_acquisition_matches_catalog(acquisition, &semantic.catalog)?;
-
     let selection = resolve_selection(expression, &semantic.catalog.contracts)?;
     if selection.physical_symbols.is_empty()
         && selection.continuous_products.is_empty()
@@ -112,7 +110,7 @@ pub fn compile_historical_universe_resolution(
 
     let dependencies =
         resolve_dependencies(&semantic.catalog.contracts, &selection, start_ns, end_ns)?;
-    let targets = resolve_kind_targets(acquisition, &dependencies, end_ns)?;
+    let targets = resolve_kind_targets(acquisition, semantic, &dependencies, end_ns)?;
     let visible_membership_sha256 = sha256_identity(&serde_json::to_vec(&timeline.batches)?);
     let dependency_set_sha256 = sha256_identity(&serde_json::to_vec(&dependencies)?);
     let resolved_targets_sha256 = targets
@@ -120,6 +118,13 @@ pub fn compile_historical_universe_resolution(
         .map(|(kind, targets)| Ok((*kind, sha256_identity(&serde_json::to_vec(targets)?))))
         .collect::<Result<BTreeMap<_, _>>>()?;
 
+    let execution = HistoricalUniversePlanV3Execution::new(
+        visible_membership_sha256.clone(),
+        dependency_set_sha256.clone(),
+        resolved_targets_sha256.clone(),
+        dependencies.clone(),
+        targets.clone(),
+    )?;
     let identity = HistoricalUniversePlanV3Identity::new(
         spec.to_string(),
         spec.canonicalization_identity(),
@@ -127,8 +132,9 @@ pub fn compile_historical_universe_resolution(
         semantic.semantic_catalog_sha256.clone(),
         HISTORICAL_UNIVERSE_COMPILER_IDENTITY,
         HistoricalCatalogProof::AuthoritativeLifecycle,
-    )?;
-    let plan = timeline.prepare_v3(budget, identity)?;
+    )?
+    .with_execution_sha256(execution.execution_sha256.clone())?;
+    let plan = timeline.prepare_v3(budget, identity, execution)?;
     Ok(HistoricalUniverseResolution {
         plan,
         visible_membership_sha256,
@@ -350,6 +356,7 @@ fn resolve_dependencies(
 
 fn resolve_kind_targets(
     acquisition: &HistoricalCatalogAcquisition,
+    semantic: &HistoricalSemanticCatalog,
     dependencies: &[HistoricalUniverseDependency],
     end_ns: i64,
 ) -> Result<BTreeMap<HistoricalDataKind, Vec<HistoricalUniverseKindTarget>>> {
@@ -370,7 +377,19 @@ fn resolve_kind_targets(
                 .get(dependency.source_symbol.as_str())
                 .and_then(|contract| contract.first_available_data_ns.get(&kind))
                 .copied()
-                .unwrap_or(dependency.listing_start_ns)
+                .or_else(|| {
+                    semantic
+                        .derived_first_available_data_ns
+                        .get(&dependency.source_symbol)
+                        .and_then(|boundaries| boundaries.get(&kind))
+                        .copied()
+                })
+                .ok_or_else(|| {
+                    validation(format!(
+                        "historical {kind:?} availability boundary is unproven for {}",
+                        dependency.source_symbol
+                    ))
+                })?
                 .max(dependency.listing_start_ns);
             if kind_start >= end_ns {
                 continue;
@@ -385,36 +404,6 @@ fn resolve_kind_targets(
         by_kind.insert(kind, targets);
     }
     Ok(by_kind)
-}
-
-fn validate_acquisition_matches_catalog(
-    acquisition: &HistoricalCatalogAcquisition,
-    catalog: &crate::CatalogSnapshot,
-) -> Result<()> {
-    let acquired = acquisition
-        .contracts
-        .iter()
-        .map(|contract| (contract.symbol.as_str(), contract))
-        .collect::<BTreeMap<_, _>>();
-    if acquired.len() != catalog.contracts.len() {
-        return Err(validation(
-            "historical acquisition/catalog contract count mismatch",
-        ));
-    }
-    for contract in &catalog.contracts {
-        let observed = acquired
-            .get(contract.physical_symbol.as_str())
-            .ok_or_else(|| validation("historical acquisition/catalog symbol mismatch"))?;
-        if observed.exchange_id != contract.exchange_id
-            || observed.product_id != contract.product_id
-            || observed.authoritative_lifecycle != contract.lifecycle
-        {
-            return Err(validation(
-                "historical acquisition/catalog lifecycle metadata mismatch",
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn sha256_identity(bytes: &[u8]) -> String {

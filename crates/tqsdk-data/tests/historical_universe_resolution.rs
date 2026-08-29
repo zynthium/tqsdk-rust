@@ -73,6 +73,28 @@ fn fixture() -> (HistoricalCatalogAcquisition, HistoricalSemanticCatalog) {
         "timeline(active:all;cont:all;index:all)",
         catalog,
     )
+    .unwrap()
+    .with_derived_availability(
+        "fixture-derived-availability:v1",
+        BTreeMap::from([
+            (
+                "KQ.i@SHFE.au".to_string(),
+                BTreeMap::from([
+                    (HistoricalDataKind::Tick, 101),
+                    (HistoricalDataKind::Minute, 102),
+                    (HistoricalDataKind::Daily, 103),
+                ]),
+            ),
+            (
+                "KQ.i@DCE.m".to_string(),
+                BTreeMap::from([
+                    (HistoricalDataKind::Tick, 151),
+                    (HistoricalDataKind::Minute, 152),
+                    (HistoricalDataKind::Daily, 153),
+                ]),
+            ),
+        ]),
+    )
     .unwrap();
     (acquisition, semantic)
 }
@@ -162,4 +184,99 @@ fn combined_selection_and_exclusions_preserve_visible_membership() {
     );
     assert!(resolution.plan.plan_version == 3);
     resolution.plan.verify().unwrap();
+}
+
+#[test]
+fn missing_kind_boundary_is_not_replaced_by_listing_time() {
+    let (acquisition, semantic) = fixture();
+    let mut contracts = acquisition.contracts.clone();
+    contracts
+        .iter_mut()
+        .find(|contract| contract.symbol == "SHFE.au2404")
+        .unwrap()
+        .first_available_data_ns
+        .remove(&HistoricalDataKind::Daily);
+    let incomplete_boundaries = HistoricalCatalogAcquisition::new(
+        acquisition.proof,
+        acquisition.source_identity.clone(),
+        acquisition.canonical_universe.clone(),
+        acquisition.requested_as_of_ns,
+        acquisition.observed_at_ns,
+        acquisition.complete,
+        acquisition.roster_before.clone(),
+        acquisition.roster_after.clone(),
+        contracts,
+    )
+    .unwrap();
+    let semantic = HistoricalSemanticCatalog::new(
+        &incomplete_boundaries,
+        semantic.canonical_universe,
+        semantic.catalog,
+    )
+    .unwrap();
+
+    let error = compile_historical_universe_resolution(
+        &incomplete_boundaries,
+        &semantic,
+        &HistoricalFillUniverseSpec::parse("timeline(cont:SHFE.au)").unwrap(),
+        100,
+        500,
+        UniverseBudget::new(20, 40).unwrap(),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Daily availability boundary is unproven")
+    );
+}
+
+#[test]
+fn logical_index_series_requires_pinned_availability_evidence() {
+    let (acquisition, semantic_with_evidence) = fixture();
+    let semantic = HistoricalSemanticCatalog::new(
+        &acquisition,
+        semantic_with_evidence.canonical_universe,
+        semantic_with_evidence.catalog,
+    )
+    .unwrap();
+    let error = compile_historical_universe_resolution(
+        &acquisition,
+        &semantic,
+        &HistoricalFillUniverseSpec::parse("timeline(index:SHFE.au)").unwrap(),
+        100,
+        500,
+        UniverseBudget::new(20, 40).unwrap(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("KQ.i@SHFE.au"));
+    assert!(error.to_string().contains("unproven"));
+}
+
+#[test]
+fn v3_plan_rejects_tampered_pinned_targets() {
+    let (acquisition, semantic) = fixture();
+    let mut plan = compile_historical_universe_resolution(
+        &acquisition,
+        &semantic,
+        &HistoricalFillUniverseSpec::parse("timeline(active:all)").unwrap(),
+        100,
+        500,
+        UniverseBudget::new(20, 40).unwrap(),
+    )
+    .unwrap()
+    .plan;
+    plan.v3_execution
+        .as_mut()
+        .unwrap()
+        .targets
+        .get_mut(&HistoricalDataKind::Minute)
+        .unwrap()[0]
+        .start_ns += 1;
+    assert!(
+        plan.verify()
+            .unwrap_err()
+            .to_string()
+            .contains("target hash mismatch")
+    );
 }

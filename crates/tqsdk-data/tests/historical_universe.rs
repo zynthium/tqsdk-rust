@@ -1,11 +1,13 @@
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tqsdk_data::{
     ActiveInterval, CatalogContract, CatalogSnapshot, DerivedView, DynamicUniverseScope,
-    HistoricalCatalogProof, HistoricalUniversePlanV3Identity, UniverseBudget, UniverseInstrumentId,
-    UniverseMemberChange,
+    HistoricalCatalogProof, HistoricalDataKind, HistoricalDependencyRole,
+    HistoricalUniverseDependency, HistoricalUniverseKindTarget, HistoricalUniversePlanV3Execution,
+    HistoricalUniversePlanV3Identity, HistoricalUniverseTimeline, UniverseBudget,
+    UniverseInstrumentId, UniverseMemberChange,
 };
 
 fn contract(symbol: &str, start_ns: i64, end_ns: i64) -> CatalogContract {
@@ -14,6 +16,57 @@ fn contract(symbol: &str, start_ns: i64, end_ns: i64) -> CatalogContract {
         "SHFE",
         "au",
         vec![ActiveInterval::new(start_ns, end_ns).unwrap()],
+    )
+    .unwrap()
+}
+
+fn execution_for(timeline: &HistoricalUniverseTimeline) -> HistoricalUniversePlanV3Execution {
+    let dependencies = vec![HistoricalUniverseDependency {
+        source_symbol: "SHFE.au2406".to_string(),
+        roles: BTreeSet::from([HistoricalDependencyRole::VisiblePhysical]),
+        listing_start_ns: 10,
+    }];
+    let targets = [
+        HistoricalDataKind::Tick,
+        HistoricalDataKind::Minute,
+        HistoricalDataKind::Daily,
+    ]
+    .into_iter()
+    .map(|kind| {
+        (
+            kind,
+            vec![HistoricalUniverseKindTarget {
+                source_symbol: "SHFE.au2406".to_string(),
+                start_ns: 10,
+                end_ns: 30,
+            }],
+        )
+    })
+    .collect::<BTreeMap<_, _>>();
+    let target_hashes = targets
+        .iter()
+        .map(|(kind, targets)| {
+            (
+                *kind,
+                format!(
+                    "sha256:{:x}",
+                    Sha256::digest(serde_json::to_vec(targets).unwrap())
+                ),
+            )
+        })
+        .collect();
+    HistoricalUniversePlanV3Execution::new(
+        format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&timeline.batches).unwrap())
+        ),
+        format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&dependencies).unwrap())
+        ),
+        target_hashes,
+        dependencies,
+        targets,
     )
     .unwrap()
 }
@@ -271,9 +324,14 @@ fn v3_plan_pins_authoritative_identity_without_changing_v2() {
     )
     .unwrap();
 
+    let execution = execution_for(&timeline);
+    let identity = identity
+        .with_execution_sha256(execution.execution_sha256.clone())
+        .unwrap();
+
     let plan = timeline
         .clone()
-        .prepare_v3(UniverseBudget::new(2, 2).unwrap(), identity)
+        .prepare_v3(UniverseBudget::new(2, 2).unwrap(), identity, execution)
         .unwrap();
     assert_eq!(plan.plan_version, 3);
     plan.verify().unwrap();
@@ -299,9 +357,17 @@ fn v3_plan_pins_authoritative_identity_without_changing_v2() {
         HistoricalCatalogProof::ProviderCurrentObserved,
     )
     .unwrap();
+    let observed_execution = execution_for(&timeline);
+    let observed_identity = observed_identity
+        .with_execution_sha256(observed_execution.execution_sha256.clone())
+        .unwrap();
     assert!(
         timeline
-            .prepare_v3(UniverseBudget::new(2, 2).unwrap(), observed_identity)
+            .prepare_v3(
+                UniverseBudget::new(2, 2).unwrap(),
+                observed_identity,
+                observed_execution,
+            )
             .unwrap_err()
             .to_string()
             .contains("authoritative lifecycle")

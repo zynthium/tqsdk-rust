@@ -3,7 +3,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::HistoricalDataKind;
 use crate::error::{DataError, Result};
+use crate::historical_universe_resolution::{
+    HistoricalUniverseDependency, HistoricalUniverseKindTarget,
+};
 
 /// Stable identity for an instrument visible in a historical universe.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -309,6 +313,8 @@ pub struct HistoricalUniversePlanV3Identity {
     pub compiler_identity: String,
     pub proof: HistoricalCatalogProof,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuous_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ranking_identity: Option<String>,
@@ -333,11 +339,18 @@ impl HistoricalUniversePlanV3Identity {
             semantic_catalog_sha256: semantic_catalog_sha256.into(),
             compiler_identity: normalized("compiler_identity", compiler_identity.into())?,
             proof,
+            execution_sha256: None,
             continuous_identity: None,
             ranking_identity: None,
         };
         identity.validate()?;
         Ok(identity)
+    }
+
+    pub fn with_execution_sha256(mut self, execution_sha256: impl Into<String>) -> Result<Self> {
+        self.execution_sha256 = Some(execution_sha256.into());
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -349,6 +362,9 @@ impl HistoricalUniversePlanV3Identity {
         normalized("compiler_identity", self.compiler_identity.clone())?;
         validate_sha256_identity("acquisition_sha256", &self.acquisition_sha256)?;
         validate_sha256_identity("semantic_catalog_sha256", &self.semantic_catalog_sha256)?;
+        if let Some(identity) = &self.execution_sha256 {
+            validate_sha256_identity("execution_sha256", identity)?;
+        }
         if let Some(identity) = &self.continuous_identity {
             validate_sha256_identity("continuous_identity", identity)?;
         }
@@ -356,6 +372,140 @@ impl HistoricalUniversePlanV3Identity {
             validate_sha256_identity("ranking_identity", identity)?;
         }
         Ok(())
+    }
+}
+
+/// Kind-aware dependency closure embedded in, and hashed by, a v3 plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoricalUniversePlanV3Execution {
+    pub execution_sha256: String,
+    pub visible_membership_sha256: String,
+    pub dependency_set_sha256: String,
+    pub resolved_targets_sha256: BTreeMap<HistoricalDataKind, String>,
+    pub dependencies: Vec<HistoricalUniverseDependency>,
+    pub targets: BTreeMap<HistoricalDataKind, Vec<HistoricalUniverseKindTarget>>,
+}
+
+#[derive(Serialize)]
+struct HistoricalUniversePlanV3ExecutionBody<'a> {
+    visible_membership_sha256: &'a str,
+    dependency_set_sha256: &'a str,
+    resolved_targets_sha256: &'a BTreeMap<HistoricalDataKind, String>,
+    dependencies: &'a [HistoricalUniverseDependency],
+    targets: &'a BTreeMap<HistoricalDataKind, Vec<HistoricalUniverseKindTarget>>,
+}
+
+impl HistoricalUniversePlanV3Execution {
+    pub fn new(
+        visible_membership_sha256: impl Into<String>,
+        dependency_set_sha256: impl Into<String>,
+        resolved_targets_sha256: BTreeMap<HistoricalDataKind, String>,
+        dependencies: Vec<HistoricalUniverseDependency>,
+        targets: BTreeMap<HistoricalDataKind, Vec<HistoricalUniverseKindTarget>>,
+    ) -> Result<Self> {
+        let mut execution = Self {
+            execution_sha256: String::new(),
+            visible_membership_sha256: visible_membership_sha256.into(),
+            dependency_set_sha256: dependency_set_sha256.into(),
+            resolved_targets_sha256,
+            dependencies,
+            targets,
+        };
+        execution.validate_body()?;
+        execution.execution_sha256 = format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&execution.body())?)
+        );
+        Ok(execution)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.validate_body()?;
+        let expected = format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&self.body())?)
+        );
+        if self.execution_sha256 != expected {
+            return Err(validation("historical universe v3 execution hash mismatch"));
+        }
+        Ok(())
+    }
+
+    fn validate_body(&self) -> Result<()> {
+        validate_sha256_identity("visible_membership_sha256", &self.visible_membership_sha256)?;
+        validate_sha256_identity("dependency_set_sha256", &self.dependency_set_sha256)?;
+        for identity in self.resolved_targets_sha256.values() {
+            validate_sha256_identity("resolved_targets_sha256", identity)?;
+        }
+        let kinds = [
+            HistoricalDataKind::Tick,
+            HistoricalDataKind::Minute,
+            HistoricalDataKind::Daily,
+        ];
+        if self.targets.len() != kinds.len()
+            || self.resolved_targets_sha256.len() != kinds.len()
+            || kinds.iter().any(|kind| {
+                !self.targets.contains_key(kind) || !self.resolved_targets_sha256.contains_key(kind)
+            })
+        {
+            return Err(validation(
+                "historical universe v3 requires exact tick/minute/daily target sets",
+            ));
+        }
+        if self
+            .dependencies
+            .windows(2)
+            .any(|pair| pair[0].source_symbol.as_str() >= pair[1].source_symbol.as_str())
+        {
+            return Err(validation(
+                "historical universe v3 dependencies must be sorted and unique",
+            ));
+        }
+        let dependency_symbols = self
+            .dependencies
+            .iter()
+            .map(|dependency| dependency.source_symbol.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected_dependencies = format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&self.dependencies)?)
+        );
+        if self.dependency_set_sha256 != expected_dependencies {
+            return Err(validation(
+                "historical universe v3 dependency hash mismatch",
+            ));
+        }
+        for (kind, targets) in &self.targets {
+            if targets
+                .windows(2)
+                .any(|pair| pair[0].source_symbol.as_str() >= pair[1].source_symbol.as_str())
+                || targets.iter().any(|target| {
+                    target.start_ns >= target.end_ns
+                        || !dependency_symbols.contains(target.source_symbol.as_str())
+                })
+            {
+                return Err(validation(format!(
+                    "historical universe v3 {kind:?} targets are invalid"
+                )));
+            }
+            let expected = format!("sha256:{:x}", Sha256::digest(serde_json::to_vec(targets)?));
+            if self.resolved_targets_sha256.get(kind) != Some(&expected) {
+                return Err(validation(format!(
+                    "historical universe v3 {kind:?} target hash mismatch"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn body(&self) -> HistoricalUniversePlanV3ExecutionBody<'_> {
+        HistoricalUniversePlanV3ExecutionBody {
+            visible_membership_sha256: &self.visible_membership_sha256,
+            dependency_set_sha256: &self.dependency_set_sha256,
+            resolved_targets_sha256: &self.resolved_targets_sha256,
+            dependencies: &self.dependencies,
+            targets: &self.targets,
+        }
     }
 }
 
@@ -368,6 +518,8 @@ pub struct HistoricalUniversePlan {
     pub budget: UniverseBudget,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub v3_identity: Option<HistoricalUniversePlanV3Identity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v3_execution: Option<HistoricalUniversePlanV3Execution>,
 }
 
 /// One physical history range required to warm a historical universe plan.
@@ -402,6 +554,7 @@ impl HistoricalUniverseTimeline {
             timeline: self,
             budget,
             v3_identity: None,
+            v3_execution: None,
         })
     }
 
@@ -409,12 +562,28 @@ impl HistoricalUniverseTimeline {
         self,
         budget: UniverseBudget,
         identity: HistoricalUniversePlanV3Identity,
+        execution: HistoricalUniversePlanV3Execution,
     ) -> Result<HistoricalUniversePlan> {
         self.validate()?;
         identity.validate()?;
+        execution.validate()?;
         if identity.proof != HistoricalCatalogProof::AuthoritativeLifecycle {
             return Err(validation(
                 "historical universe plan v3 requires authoritative lifecycle proof",
+            ));
+        }
+        if identity.execution_sha256.as_deref() != Some(&execution.execution_sha256) {
+            return Err(validation(
+                "historical universe plan v3 identity does not pin its execution",
+            ));
+        }
+        let expected_membership = format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&self.batches)?)
+        );
+        if execution.visible_membership_sha256 != expected_membership {
+            return Err(validation(
+                "historical universe plan v3 execution membership mismatch",
             ));
         }
         let changes: usize = self.batches.iter().map(|batch| batch.changes.len()).sum();
@@ -431,13 +600,14 @@ impl HistoricalUniverseTimeline {
                 budget.max_changes
             )));
         }
-        let bytes = serde_json::to_vec(&(3_u32, &self, budget, &identity))?;
+        let bytes = serde_json::to_vec(&(3_u32, &self, budget, &identity, &execution))?;
         Ok(HistoricalUniversePlan {
             plan_version: 3,
             plan_sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
             timeline: self,
             budget,
             v3_identity: Some(identity),
+            v3_execution: Some(execution),
         })
     }
 
@@ -493,7 +663,7 @@ impl HistoricalUniversePlan {
         UniverseBudget::new(self.budget.max_batches, self.budget.max_changes)?;
         let bytes = match self.plan_version {
             1 => {
-                if self.v3_identity.is_some() {
+                if self.v3_identity.is_some() || self.v3_execution.is_some() {
                     return Err(validation(
                         "historical universe plan v1 must not contain v3 identity",
                     ));
@@ -510,7 +680,7 @@ impl HistoricalUniversePlan {
                 ))?
             }
             2 => {
-                if self.v3_identity.is_some() {
+                if self.v3_identity.is_some() || self.v3_execution.is_some() {
                     return Err(validation(
                         "historical universe plan v2 must not contain v3 identity",
                     ));
@@ -553,7 +723,25 @@ impl HistoricalUniversePlan {
                 let identity = self.v3_identity.as_ref().ok_or_else(|| {
                     validation("historical universe plan v3 lacks identity chain")
                 })?;
+                let execution = self.v3_execution.as_ref().ok_or_else(|| {
+                    validation("historical universe plan v3 lacks execution closure")
+                })?;
                 identity.validate()?;
+                execution.validate()?;
+                if identity.execution_sha256.as_deref() != Some(&execution.execution_sha256) {
+                    return Err(validation(
+                        "historical universe plan v3 identity does not pin execution",
+                    ));
+                }
+                let expected_membership = format!(
+                    "sha256:{:x}",
+                    Sha256::digest(serde_json::to_vec(&self.timeline.batches)?)
+                );
+                if execution.visible_membership_sha256 != expected_membership {
+                    return Err(validation(
+                        "historical universe plan v3 membership hash mismatch",
+                    ));
+                }
                 if identity.proof != HistoricalCatalogProof::AuthoritativeLifecycle {
                     return Err(validation(
                         "historical universe plan v3 requires authoritative lifecycle proof",
@@ -591,7 +779,7 @@ impl HistoricalUniversePlan {
                         )));
                     }
                 }
-                serde_json::to_vec(&(3_u32, &self.timeline, self.budget, identity))?
+                serde_json::to_vec(&(3_u32, &self.timeline, self.budget, identity, execution))?
             }
             version => {
                 return Err(validation(format!(

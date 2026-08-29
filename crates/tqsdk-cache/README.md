@@ -17,19 +17,28 @@ session owner、后台守护进程、relay 或监控服务。完整合同见
 
 `fill --universe-plan PLAN.json` 接受 `tqsdk-data::HistoricalUniversePlan` 的 JSON，支持
 `--kind tick|minute|daily`。`--universe-timeline` 保留为 visible compatibility alias。计划本身
-提供精确 `[start_ns, end_ns)` 和每个物理合约的生命周期；v2/v3 从固定 listing start 补数，
-tick 回放仍按生命周期裁剪。minute/daily 共享 terminal/progress/cancel/report executor，tick 通过
-同一 coordinator 复用现有 coverage-aware facade adapter。`--dry-run` 强制 CacheOnly。
+提供精确 `[start_ns, end_ns)`、可见 membership、依赖闭包及 tick/minute/daily 各自的固定目标。
+默认只执行 proof/hash/artifact chain 完整的 v3；v2 仅在显式
+`--allow-legacy-universe-plan` 时兼容执行，报告固定标记 `legacy_unproven=true`，v1 不可执行。
+三种 kind 共用一次性 plan load、artifact preflight、terminal/progress/cancel/report executor；不会在
+执行阶段重新从 lifecycle 推导目标。`--dry-run` 强制 CacheOnly。
 
 历史自动表达式也放在 `--universe`：`physical:all` 会稳定查询前后 roster、完整 metadata 并
-生成 `provider_current_observed` acquisition。当前 provider 没有 authoritative listing 或
+生成 `provider_current_observed` acquisition，scope 固定为中国期货交易所
+`CFFEX,SHFE,DCE,CZCE,INE,GFEX`；缺 metadata 或 roster 漂移会保存 `complete=false` 审计制品。
+当前 provider 没有 authoritative listing 或
 kind-specific first-available bounds，因此该 lane 会以 `executable=false`/exit 1 fail closed；
 `--dry-run` 只返回拟写 artifact path，不创建 root/lock/temp。`timeline(...)` 需要 authoritative
 lifecycle artifact，必须先编译后通过 `--universe-plan` 执行。名称/到期日不会被当作上市证明。
 
 ```bash
 tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
-  --universe-plan historical-universe-plan.json --dry-run
+  --kind minute --universe-plan historical-universe-plan.json --dry-run
+
+# 只有迁移旧 v2 计划时才显式使用；输出会标记 legacy_unproven=true。
+tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
+  --kind minute --universe-plan legacy-v2-plan.json \
+  --allow-legacy-universe-plan --dry-run
 ```
 
 ## Cache family

@@ -71,7 +71,10 @@ server-history chart substrate，`tqsdk-task` 仅消费结果来安排 replay ev
 历史全合约/动态 membership 不复用 current universe grammar。`HistoricalFillUniverseSpec`
 接受 `physical:all` 或受限的 `timeline(...)`；前者只形成 provider-current observed 证明，后者的
 可执行 v3 plan 必须引用 authoritative lifecycle acquisition 与 semantic catalog。artifact 由
-`HistoricalUniverseArtifactStore` content-addressed 保存且加载时重验 hash；详细合同见
+`HistoricalUniverseArtifactStore` content-addressed 保存且加载时重验 hash。semantic catalog 必须
+逐合约匹配 complete authoritative acquisition；v3 同时固定 visible membership、dependency closure
+和 tick/minute/daily kind-specific targets。logical index series 的 availability 必须携带独立 source
+identity；缺 kind boundary 不会回退到 listing time。详细合同见
 [`historical-universe-catalog.md`](../../docs/architecture/historical-universe-catalog.md)。
 
 同一个 client 是 tick/minute/daily fill scheduling 的唯一 owner：默认 symbol batch size 1、concurrency 2、

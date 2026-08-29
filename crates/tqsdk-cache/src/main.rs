@@ -284,6 +284,13 @@ struct FillArgs {
         conflicts_with = "universe"
     )]
     universe_timeline: Option<PathBuf>,
+    /// Permit an unproven legacy v2 plan. V3 is required by default.
+    #[arg(
+        long,
+        requires = "universe_timeline",
+        help = "Permit a legacy v2 universe plan without pinned kind-specific targets"
+    )]
+    allow_legacy_universe_plan: bool,
     #[command(flatten)]
     days: FillDaysArgs,
     /// Resolve and inspect coverage without acquiring a fill lock or requesting remote data.
@@ -1522,9 +1529,9 @@ async fn fill(
         ));
     }
     if let Some(universe) = args.universe.as_deref()
-        && (universe == "physical:all" || universe.starts_with("timeline("))
+        && (universe.trim() == "physical:all" || universe.trim().starts_with("timeline("))
     {
-        let historical = tqsdk_data::HistoricalFillUniverseSpec::parse(universe)?;
+        let historical = tqsdk_data::HistoricalFillUniverseSpec::parse(universe.trim())?;
         return match historical {
             tqsdk_data::HistoricalFillUniverseSpec::ObservedPhysicalAll => {
                 fill_provider_current_physical_catalog(cache_dir, kind, market, args).await
@@ -1631,9 +1638,11 @@ async fn fill_provider_current_physical_catalog(
         "rows_written": 0,
         "requested_days": resolved.window,
         "historical_universe": {
-            "canonical": "physical:all",
-            "proof": "provider_current_observed",
-            "complete_roster": acquisition.complete,
+                "canonical": "physical:all",
+                "proof": "provider_current_observed",
+                "source_identity": acquisition.source_identity,
+                "scope_exchanges": tqsdk_data::PROVIDER_CURRENT_PHYSICAL_FUTURES_EXCHANGES,
+                "complete_roster": acquisition.complete,
             "contracts": acquisition.contracts.len(),
             "expired_contracts": acquisition.contracts.iter().filter(|contract| contract.expired).count(),
             "active_contracts": acquisition.contracts.iter().filter(|contract| !contract.expired).count(),
@@ -1675,11 +1684,7 @@ async fn fill_historical_universe_plan(
     let (_, preflight_cache_dir) = open_read_only_cache(cache_dir)?;
     tqsdk_data::HistoricalUniverseArtifactStore::new(preflight_cache_dir)
         .verify_plan_artifact_chain(&preflight_plan)?;
-    // Tick keeps its facade warmup adapter because it validates the existing tick coverage
-    // markers directly; minute/daily share the BacktestHistoryClient adapter below.
-    if matches!(kind, CacheKind::Tick) {
-        return fill_tick_historical_universe_plan(cache_dir, args, plan_path).await;
-    }
+
     if !matches!(market, MarketKind::Futures) {
         return Err(CliError::Usage(
             "--universe-timeline supports only --market futures".to_string(),
@@ -1708,12 +1713,12 @@ async fn fill_historical_universe_plan(
         ));
     }
 
-    let plan: tqsdk_data::HistoricalUniversePlan = serde_json::from_slice(&fs::read(&plan_path)?)?;
-    let targets = if matches!(kind, CacheKind::Tick) {
-        historical_tick_fill_targets(&plan)?
-    } else {
-        plan.physical_fill_targets()?
-    };
+    let plan = preflight_plan;
+    let (targets, legacy_unproven) = historical_universe_fill_targets(
+        &plan,
+        historical_data_kind(kind),
+        args.allow_legacy_universe_plan,
+    )?;
     if targets.is_empty() {
         return Err(CliError::Usage(
             "historical universe plan resolves no physical fill targets".to_string(),
@@ -1795,6 +1800,7 @@ async fn fill_historical_universe_plan(
                     "cache_dir": canonical_cache_dir,
                     "status": "failed",
                     "complete": false,
+                    "legacy_unproven": legacy_unproven,
                     "error": error.to_string(),
                     "universe_plan": {
                         "path": plan_path,
@@ -1854,6 +1860,7 @@ async fn fill_historical_universe_plan(
         "start_ns": plan.timeline.start_ns,
         "end_ns": plan.timeline.end_ns,
         "physical_symbols": requests.len(),
+        "target_count": requests.len(),
     });
     let value = json!({
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -1864,6 +1871,7 @@ async fn fill_historical_universe_plan(
         "dry_run": args.dry_run,
         "status": status,
         "complete": exit_code == 0,
+        "legacy_unproven": legacy_unproven,
         "remote_used": report.symbols().iter().any(|item| item.remote_used),
         "rows_written": report.rows_written(),
         "plan_sha256": plan.plan_sha256,
@@ -1877,43 +1885,45 @@ async fn fill_historical_universe_plan(
     Ok(CommandOutcome { value, exit_code })
 }
 
-fn historical_tick_fill_targets(
+fn historical_universe_fill_targets(
     plan: &tqsdk_data::HistoricalUniversePlan,
-) -> Result<Vec<tqsdk_data::HistoricalUniverseFillTarget>, DataError> {
+    kind: tqsdk_data::HistoricalDataKind,
+    allow_legacy: bool,
+) -> Result<(Vec<tqsdk_data::HistoricalUniverseFillTarget>, bool), DataError> {
     plan.verify()?;
-    if plan.plan_version < 2 {
-        return Err(DataError::Validation(
-            "historical universe fill requires plan v2 or later".to_string(),
-        ));
-    }
-    let mut ends = std::collections::BTreeMap::new();
-    for batch in &plan.timeline.batches {
-        for change in &batch.changes {
-            if let tqsdk_data::UniverseMemberChange::Remove {
-                instrument: tqsdk_data::UniverseInstrumentId::Physical { symbol },
-            } = change
-            {
-                ends.insert(symbol.clone(), batch.effective_ns);
-            }
+    match plan.plan_version {
+        3 => {
+            let execution = plan.v3_execution.as_ref().ok_or_else(|| {
+                DataError::Validation(
+                    "historical universe plan v3 lacks pinned execution targets".to_string(),
+                )
+            })?;
+            let targets = execution.targets.get(&kind).ok_or_else(|| {
+                DataError::Validation(format!(
+                    "historical universe plan v3 lacks pinned {kind:?} targets"
+                ))
+            })?;
+            Ok((
+                targets
+                    .iter()
+                    .map(|target| tqsdk_data::HistoricalUniverseFillTarget {
+                        symbol: target.source_symbol.clone(),
+                        start_ns: target.start_ns,
+                        end_ns: target.end_ns,
+                    })
+                    .collect(),
+                false,
+            ))
         }
+        2 if allow_legacy => Ok((plan.physical_fill_targets()?, true)),
+        2 => Err(DataError::Validation(
+            "legacy historical universe plan v2 is unproven; pass --allow-legacy-universe-plan to opt in"
+                .to_string(),
+        )),
+        version => Err(DataError::Validation(format!(
+            "historical universe fill requires plan v3; version {version} is unsupported"
+        ))),
     }
-    plan.timeline
-        .physical_listing_starts
-        .iter()
-        .map(|(symbol, start_ns)| {
-            let end_ns = ends.get(symbol).copied().unwrap_or(plan.timeline.end_ns);
-            if *start_ns >= end_ns {
-                return Err(DataError::Validation(format!(
-                    "historical universe tick target {symbol} has an empty range"
-                )));
-            }
-            Ok(tqsdk_data::HistoricalUniverseFillTarget {
-                symbol: symbol.clone(),
-                start_ns: *start_ns,
-                end_ns,
-            })
-        })
-        .collect()
 }
 
 async fn fill_daily(
@@ -1921,9 +1931,6 @@ async fn fill_daily(
     market: MarketKind,
     args: FillArgs,
 ) -> Result<CommandOutcome, CliError> {
-    if let Some(plan_path) = args.universe_timeline.clone() {
-        return fill_daily_historical_universe_plan(cache_dir, market, args, plan_path).await;
-    }
     let fill_config = history_fill_config(&args)?;
     if !matches!(market, MarketKind::Futures) {
         return Err(CliError::Usage(
@@ -2111,171 +2118,6 @@ async fn fill_daily(
     })
 }
 
-async fn fill_daily_historical_universe_plan(
-    cache_dir: Option<&Path>,
-    market: MarketKind,
-    args: FillArgs,
-    plan_path: PathBuf,
-) -> Result<CommandOutcome, CliError> {
-    if !matches!(market, MarketKind::Futures) {
-        return Err(CliError::Usage(
-            "--kind daily --universe-timeline supports only --market futures".to_string(),
-        ));
-    }
-    if !args.symbols.symbols.is_empty()
-        || args.days.start_day.is_some()
-        || args.days.end_day.is_some()
-        || args.days.last_trading_days.is_some()
-        || !matches!(args.days.calendar, CalendarMode::Auto)
-        || args.days.refresh_calendar
-        || args.include_open_day
-        || args.require_final
-        || args.repair_stale
-        || args.daily_slices
-        || args.report.is_some()
-    {
-        return Err(CliError::Usage(
-            "--universe-timeline supplies physical ranges; omit symbols, trading-day, repair, and report flags"
-                .to_string(),
-        ));
-    }
-    let plan: tqsdk_data::HistoricalUniversePlan = serde_json::from_slice(&fs::read(plan_path)?)?;
-    let targets = plan.physical_fill_targets()?;
-    let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
-    let mut builder = BacktestHistoryClient::builder(canonical_cache_dir.clone());
-    builder = builder.policy(if args.dry_run {
-        BacktestHistoryPolicy::CacheOnly
-    } else {
-        BacktestHistoryPolicy::RemoteOnMiss
-    });
-    if !args.dry_run {
-        builder = builder.auth_env();
-    }
-    let client = builder.build()?;
-    let requests = targets
-        .iter()
-        .enumerate()
-        .map(|(index, target)| {
-            BacktestHistoryRequest::kline(
-                u64::try_from(index).expect("symbol count fits request identifier"),
-                &target.symbol,
-                Duration::from_secs(24 * 60 * 60),
-                target.start_ns,
-                target.end_ns,
-            )
-        })
-        .collect::<Vec<_>>();
-    let report = client
-        .orchestrate_fill(
-            requests.clone(),
-            history_fill_config(&args)?,
-            BacktestHistoryFillCancellation::new(),
-            |_| {},
-        )
-        .await?;
-    let complete = matches!(report.status(), BacktestHistoryFillTerminalStatus::Complete);
-    Ok(CommandOutcome {
-        value: json!({
-            "schema_version": REPORT_SCHEMA_VERSION,
-            "command": "fill",
-            "cache_kind": "daily",
-            "market": market.as_str(),
-            "cache_dir": canonical_cache_dir,
-            "dry_run": args.dry_run,
-            "universe_timeline": {
-                "plan_sha256": plan.plan_sha256,
-                "catalog_id": plan.timeline.catalog_id,
-                "start_ns": plan.timeline.start_ns,
-                "end_ns": plan.timeline.end_ns,
-                "physical_symbols": requests.len(),
-            },
-            "complete": complete,
-            "remote_used": report.symbols().iter().any(|item| item.remote_used),
-            "rows_written": report.rows_written(),
-        }),
-        exit_code: if complete { 0 } else { 1 },
-    })
-}
-
-async fn fill_minute_historical_universe_plan(
-    cache_dir: Option<&Path>,
-    market: MarketKind,
-    args: FillArgs,
-    plan_path: PathBuf,
-) -> Result<CommandOutcome, CliError> {
-    if !matches!(market, MarketKind::Futures) || args.repair_stale {
-        return Err(CliError::Usage(
-            "--universe-timeline minute fill supports futures without --repair-stale".to_string(),
-        ));
-    }
-    if !args.symbols.symbols.is_empty()
-        || args.days.start_day.is_some()
-        || args.days.end_day.is_some()
-        || args.days.last_trading_days.is_some()
-        || !matches!(args.days.calendar, CalendarMode::Auto)
-        || args.days.refresh_calendar
-        || args.include_open_day
-        || args.require_final
-        || args.daily_slices
-        || args.report.is_some()
-    {
-        return Err(CliError::Usage(
-            "--universe-timeline supplies physical ranges; omit symbols, trading-day, and report flags"
-                .to_string(),
-        ));
-    }
-    let plan: tqsdk_data::HistoricalUniversePlan = serde_json::from_slice(&fs::read(plan_path)?)?;
-    let targets = plan.physical_fill_targets()?;
-    let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
-    let mut builder =
-        BacktestHistoryClient::builder(canonical_cache_dir.clone()).policy(if args.dry_run {
-            BacktestHistoryPolicy::CacheOnly
-        } else {
-            BacktestHistoryPolicy::RemoteOnMiss
-        });
-    if !args.dry_run {
-        builder = builder.auth_env();
-    }
-    let client = builder.build()?;
-    let requests = targets
-        .iter()
-        .enumerate()
-        .map(|(index, target)| {
-            BacktestHistoryRequest::kline(
-                u64::try_from(index).expect("symbol count fits request identifier"),
-                &target.symbol,
-                Duration::from_secs(60),
-                target.start_ns,
-                target.end_ns,
-            )
-        })
-        .collect::<Vec<_>>();
-    let report = client
-        .orchestrate_fill(
-            requests.clone(),
-            history_fill_config(&args)?,
-            BacktestHistoryFillCancellation::new(),
-            |_| {},
-        )
-        .await?;
-    let complete = matches!(report.status(), BacktestHistoryFillTerminalStatus::Complete);
-    Ok(CommandOutcome {
-        value: json!({
-            "schema_version": REPORT_SCHEMA_VERSION,
-            "command": "fill",
-            "cache_kind": "minute",
-            "market": market.as_str(),
-            "cache_dir": canonical_cache_dir,
-            "dry_run": args.dry_run,
-            "universe_timeline": {"plan_sha256": plan.plan_sha256, "catalog_id": plan.timeline.catalog_id, "start_ns": plan.timeline.start_ns, "end_ns": plan.timeline.end_ns, "physical_symbols": requests.len()},
-            "complete": complete,
-            "remote_used": report.symbols().iter().any(|item| item.remote_used),
-            "rows_written": report.rows_written(),
-        }),
-        exit_code: if complete { 0 } else { 1 },
-    })
-}
-
 fn daily_cache_statuses(
     cache_dir: &Path,
     symbols: &[String],
@@ -2302,9 +2144,6 @@ async fn fill_minute(
     market: MarketKind,
     args: FillArgs,
 ) -> Result<CommandOutcome, CliError> {
-    if let Some(plan_path) = args.universe_timeline.clone() {
-        return fill_minute_historical_universe_plan(cache_dir, market, args, plan_path).await;
-    }
     let config = fill_config(&args);
     if args.repair_stale && args.dry_run {
         return Err(CliError::Usage(
@@ -2634,9 +2473,6 @@ fn minute_cache_only_report(
 }
 
 async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOutcome, CliError> {
-    if let Some(plan_path) = args.universe_timeline.clone() {
-        return fill_tick_historical_universe_plan(cache_dir, args, plan_path).await;
-    }
     let allow_open_day = args.include_open_day || !args.require_final;
     let config = fill_config(&args);
     let symbols = normalized_symbols_allow_empty(args.symbols.symbols)?;
@@ -2887,74 +2723,6 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
             "report": report,
         }),
         exit_code: if complete { 0 } else { 1 },
-    })
-}
-
-async fn fill_tick_historical_universe_plan(
-    cache_dir: Option<&Path>,
-    args: FillArgs,
-    plan_path: PathBuf,
-) -> Result<CommandOutcome, CliError> {
-    if !args.symbols.symbols.is_empty() {
-        return Err(CliError::Usage(
-            "--universe-timeline cannot be combined with --symbol".to_string(),
-        ));
-    }
-    if args.days.start_day.is_some()
-        || args.days.end_day.is_some()
-        || args.days.last_trading_days.is_some()
-        || !matches!(args.days.calendar, CalendarMode::Auto)
-        || args.days.refresh_calendar
-        || args.include_open_day
-        || args.require_final
-    {
-        return Err(CliError::Usage(
-            "--universe-timeline supplies its exact range; omit trading-day and open-day flags"
-                .to_string(),
-        ));
-    }
-    if args.report.is_some() {
-        return Err(CliError::Usage(
-            "--report is not yet supported with --universe-timeline".to_string(),
-        ));
-    }
-
-    let bytes = fs::read(&plan_path)?;
-    let plan: tqsdk_data::HistoricalUniversePlan = serde_json::from_slice(&bytes)?;
-    let _targets = plan.physical_fill_targets()?;
-    let config = fill_config(&args);
-    let (cache, canonical_cache_dir) = if args.dry_run {
-        open_read_only_cache(cache_dir)?
-    } else {
-        open_cache(cache_dir)?
-    };
-    let mut builder = builder_with_environment_auth(false)?
-        .backtest(plan.timeline.start_ns, plan.timeline.end_ns)
-        .cache_store(cache)
-        .remote_fill_config(config)
-        .historical_universe_plan(plan.clone())?;
-    if args.dry_run {
-        builder = builder.cache_only();
-    }
-    if let Some(wait_secs) = args.lock_wait_secs {
-        builder = builder.remote_fill_lock_wait(Duration::from_secs(wait_secs));
-    }
-    let warmup = builder.warmup().await?;
-    Ok(CommandOutcome {
-        value: json!({
-            "schema_version": REPORT_SCHEMA_VERSION,
-            "command": "fill",
-            "kind": "tick",
-            "cache_dir": canonical_cache_dir,
-            "dry_run": args.dry_run,
-            "universe_timeline": plan_path,
-            "plan_sha256": plan.plan_sha256,
-            "catalog_id": plan.timeline.catalog_id,
-            "range": {"start_ns": plan.timeline.start_ns, "end_ns": plan.timeline.end_ns},
-            "transition_batches": plan.timeline.batches.len(),
-            "symbols_warmed": warmup.symbols.len(),
-        }),
-        exit_code: 0,
     })
 }
 
@@ -4790,9 +4558,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        CacheKind, CalendarMode, Cli, Command, FillDaysArgs, MigrateArgs, ProgressMode,
-        current_open_trading_day, fill_was_interrupted, migrate, persist_calendar_if_needed,
-        resolve_fill_window,
+        CacheKind, CalendarMode, Cli, Command, FillDaysArgs, MarketKind, MigrateArgs, ProgressMode,
+        current_open_trading_day, fill_historical_universe_plan, fill_was_interrupted,
+        historical_universe_fill_targets, migrate, persist_calendar_if_needed, resolve_fill_window,
     };
     use chrono::NaiveDate;
     use clap::Parser;
@@ -5144,6 +4912,158 @@ mod tests {
             args.universe_timeline,
             Some(PathBuf::from("fixture-plan.json"))
         );
+    }
+
+    #[test]
+    fn legacy_universe_plan_flag_requires_a_plan_path() {
+        let error = Cli::try_parse_from(["tqsdk-cache", "fill", "--allow-legacy-universe-plan"])
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let cli = Cli::try_parse_from([
+            "tqsdk-cache",
+            "fill",
+            "--universe-plan",
+            "fixture-plan.json",
+            "--allow-legacy-universe-plan",
+        ])
+        .unwrap();
+        let Command::Fill(args) = cli.command else {
+            panic!("expected fill command");
+        };
+        assert!(args.allow_legacy_universe_plan);
+    }
+
+    #[test]
+    fn legacy_v2_targets_require_explicit_opt_in() {
+        let scope = tqsdk_data::DynamicUniverseScope::all();
+        let plan = tqsdk_data::CatalogSnapshot::new(
+            "fixture-v2",
+            "calendar:fixture-v2",
+            true,
+            scope.clone(),
+            vec![
+                tqsdk_data::CatalogContract::new(
+                    "SHFE.au2406",
+                    "SHFE",
+                    "au",
+                    vec![tqsdk_data::ActiveInterval::new(10, 20).unwrap()],
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap()
+        .compile_timeline(1, 30, scope, [])
+        .unwrap()
+        .prepare(tqsdk_data::UniverseBudget::new(8, 16).unwrap())
+        .unwrap();
+
+        let error =
+            historical_universe_fill_targets(&plan, tqsdk_data::HistoricalDataKind::Minute, false)
+                .unwrap_err();
+        assert!(error.to_string().contains("--allow-legacy-universe-plan"));
+
+        let (targets, legacy_unproven) =
+            historical_universe_fill_targets(&plan, tqsdk_data::HistoricalDataKind::Minute, true)
+                .unwrap();
+        assert!(legacy_unproven);
+        assert_eq!(targets.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn v3_plan_dry_run_uses_verified_pinned_minute_targets() {
+        use std::collections::BTreeMap;
+
+        let root = std::env::temp_dir().join(format!(
+            "tqsdk-cache-v3-plan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let lifecycle = vec![tqsdk_data::ActiveInterval::new(100, 400).unwrap()];
+        let acquisition = tqsdk_data::HistoricalCatalogAcquisition::new(
+            tqsdk_data::HistoricalCatalogProof::AuthoritativeLifecycle,
+            "fixture-authoritative:v1",
+            "physical:all",
+            500,
+            600,
+            true,
+            vec!["SHFE.au2404".to_string()],
+            vec!["SHFE.au2404".to_string()],
+            vec![tqsdk_data::HistoricalAcquisitionContract {
+                symbol: "SHFE.au2404".to_string(),
+                exchange_id: "SHFE".to_string(),
+                product_id: "au".to_string(),
+                expired: true,
+                expire_datetime_ns: Some(400),
+                authoritative_lifecycle: lifecycle.clone(),
+                first_available_data_ns: BTreeMap::from([
+                    (tqsdk_data::HistoricalDataKind::Tick, 101),
+                    (tqsdk_data::HistoricalDataKind::Minute, 102),
+                    (tqsdk_data::HistoricalDataKind::Daily, 103),
+                ]),
+            }],
+        )
+        .unwrap();
+        let catalog = tqsdk_data::CatalogSnapshot::new(
+            "fixture-v3",
+            "calendar:fixture-v3",
+            true,
+            tqsdk_data::DynamicUniverseScope::all(),
+            vec![tqsdk_data::CatalogContract::new("SHFE.au2404", "SHFE", "au", lifecycle).unwrap()],
+        )
+        .unwrap();
+        let semantic = tqsdk_data::HistoricalSemanticCatalog::new(
+            &acquisition,
+            "timeline(active:all)",
+            catalog,
+        )
+        .unwrap();
+        let plan = tqsdk_data::compile_historical_universe_resolution(
+            &acquisition,
+            &semantic,
+            &tqsdk_data::HistoricalFillUniverseSpec::parse("timeline(active:all)").unwrap(),
+            100,
+            400,
+            tqsdk_data::UniverseBudget::new(8, 16).unwrap(),
+        )
+        .unwrap()
+        .plan;
+        let store = tqsdk_data::HistoricalUniverseArtifactStore::new(&root);
+        store.publish_acquisition(&acquisition).unwrap();
+        store.publish_semantic_catalog(&semantic).unwrap();
+        let plan_path = store.publish_plan(&plan).unwrap();
+
+        let cli = Cli::try_parse_from([
+            "tqsdk-cache",
+            "fill",
+            "--universe-plan",
+            plan_path.to_str().unwrap(),
+            "--dry-run",
+        ])
+        .unwrap();
+        let Command::Fill(args) = cli.command else {
+            panic!("expected fill command");
+        };
+        let outcome = fill_historical_universe_plan(
+            Some(&root),
+            CacheKind::Minute,
+            MarketKind::Futures,
+            args,
+            plan_path,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.value["plan_sha256"], plan.plan_sha256);
+        assert_eq!(outcome.value["legacy_unproven"], false);
+        assert_eq!(outcome.value["universe_timeline"]["target_count"], 1);
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

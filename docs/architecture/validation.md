@@ -191,7 +191,21 @@ raw timestamp / DIFF row-id 明细；完整合约级审计字段保留在 `/symb
 
 history cache / cache-backed backtest current focused validation:
 
-历史动态 universe 的最小验证还应包含：`cargo test -p tqsdk-data --test historical_universe`、`cargo test -p tqsdk-task --test strategy_backtest`、`cargo test -p tqsdk --lib` 与 `cargo test -p tqsdk-cache --test cli fill_tick_accepts_a_pinned_historical_universe_plan`。它们分别覆盖计划哈希/预算、同时间 replay revision、facade 生命周期裁剪，以及 CLI 的 CacheOnly plan warmup。
+历史动态 universe 的最小验证还应包含：
+
+```bash
+cargo test -p tqsdk-data --test historical_universe
+cargo test -p tqsdk-data --test historical_universe_artifact
+cargo test -p tqsdk-data --test historical_universe_resolution
+cargo test -p tqsdk-task --test strategy_backtest
+cargo test -p tqsdk --lib
+cargo test -p tqsdk-cache --bin tqsdk-cache
+```
+
+它们分别覆盖 v1/v2 hash compatibility 与 v3 execution pin、complete authoritative
+acquisition/semantic fact chain/content-addressed durability、membership/dependency/kind target
+resolution、同时间 replay revision、facade 生命周期裁剪，以及 CLI 的 v3 default、legacy 显式 opt-in、
+统一 CacheOnly/RemoteOnMiss 参数与 terminal path。
 
 ```bash
 rtk cargo test -p tqsdk-data --test history_series_single_file_store
