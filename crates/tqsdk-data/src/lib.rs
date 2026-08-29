@@ -56,6 +56,7 @@ mod greeks;
 mod historical_fill_universe;
 mod historical_universe;
 mod historical_universe_artifact;
+mod historical_universe_resolution;
 mod history_series_cache;
 mod integrity;
 mod live_quote;
@@ -164,6 +165,11 @@ pub use historical_universe_artifact::{
     HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION, HISTORICAL_UNIVERSE_ARTIFACT_NAMESPACE,
     HistoricalAcquisitionContract, HistoricalCatalogAcquisition, HistoricalDataKind,
     HistoricalSemanticCatalog, HistoricalUniverseArtifactStore,
+};
+pub use historical_universe_resolution::{
+    HISTORICAL_UNIVERSE_COMPILER_IDENTITY, HistoricalDependencyRole, HistoricalUniverseDependency,
+    HistoricalUniverseKindTarget, HistoricalUniverseResolution,
+    compile_historical_universe_resolution,
 };
 #[allow(deprecated)]
 pub use history_series_cache::SERIES_FILE_HISTORY_SERIES_FORMAT_ID;
