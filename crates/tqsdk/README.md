@@ -22,7 +22,7 @@ runtime contract；它只提供一个更容易开始的 facade：
 - `Tq::history()` helper
 - `tqsdk::advanced::*` 下钻到底层 crate
 
-历史动态合约集合不复用 `.universe(...)` 或 `main:all`/`cont:all`：后者始终是“当前”静态 selector。需要按回测时刻加入、退出物理合约时，调用 `.historical_universe_plan(plan)?`，其中 `plan` 由完整、版本化的 `CatalogSnapshot` 在离线阶段编译并以 SHA-256 固定。facade 会拒绝哈希或回测区间不匹配的计划；物理 tick 只读取生命周期相交的 cache range，timeline 与同时间行情在一个 replay revision 中可见。连续与指数代码仍是独立派生视图，只有显式声明的行情绑定才会读取它们的数据。
+历史动态合约集合不复用 `.universe(...)` 或 `main:all`/`cont:all`：后者始终是“当前”静态 selector。需要按回测时刻加入、退出物理合约时，调用 `.historical_universe_plan(plan)?`，其中 `plan` 由完整、版本化的 `CatalogSnapshot` 在离线阶段编译并以 SHA-256 固定。facade 会拒绝哈希或回测区间不匹配的计划；物理 tick 在回放时只读取生命周期相交的 cache range，计划 v2 的 warmup 会从其固定的上市起点补齐缓存，timeline 与同时间行情在一个 replay revision 中可见。连续与指数代码仍是独立派生视图，只有显式声明的行情绑定才会读取它们的数据。
 
 `.backtest(start_ns, end_ns)` 是默认 Python-style 策略回测入口。它默认使用
 `tqsdk-data` 共享 history cache root（`$HOME/.tqsdk/data_series_1`，可用

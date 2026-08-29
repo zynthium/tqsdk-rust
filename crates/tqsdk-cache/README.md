@@ -15,7 +15,7 @@ session owner、后台守护进程、relay 或监控服务。完整合同见
 
 ### 历史动态 universe tick fill
 
-`fill --universe-timeline PLAN.json` 接受 `tqsdk-data::HistoricalUniversePlan` 的 JSON。它只支持 `--kind tick`，不接受 `--symbol`、`--universe` 或 trading-day/open-day flags：计划本身提供精确 `[start_ns, end_ns)` 和每个物理合约的生命周期。CLI 在读取后校验 plan version、budget、timeline 和 SHA-256，再通过 facade warmup 仅检查/填充这些物理区间。`--dry-run` 强制 CacheOnly，不写入 cache；静态 `--universe` 的现有 current-selector 语义不变。
+`fill --universe-timeline PLAN.json` 接受 `tqsdk-data::HistoricalUniversePlan` 的 JSON。它只支持 `--kind tick`，不接受 `--symbol`、`--universe` 或 trading-day/open-day flags：计划本身提供精确 `[start_ns, end_ns)` 和每个物理合约的生命周期。CLI 在读取后校验 plan version、budget、timeline 和 SHA-256，再通过 facade warmup 检查/填充这些合约。计划 v2 会从每个物理合约的 `physical_listing_starts`（上市日）开始补数，到最后一个生效区间结束；实际回放读 tick 仍严格裁剪到生效区间。`--dry-run` 强制 CacheOnly，不写入 cache；静态 `--universe` 的现有 current-selector 语义不变。
 
 ```bash
 tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \

@@ -4,7 +4,7 @@
 
 ### 历史动态 universe
 
-`active:all`、`main:all`、`cont:all` 与 `--universe` 都是当前时刻的静态 selector，不能用于推断历史已退市或后来上市的物理合约。动态回放须由调用方提供完整 `CatalogSnapshot`，离线编译为带版本、calendar identity 与 SHA-256 的 `HistoricalUniversePlan`，并显式给出 `UniverseBudget`。`Tq::futures().backtest(start, end).historical_universe_plan(plan)?` 只接受区间完全相等且哈希有效的计划；CacheOnly/RemoteOnMiss 覆盖检查与实际读 tick 均裁剪到每个物理合约的生命周期。当前 `tqsdk-cache fill --universe` 仍保持静态语义，动态计划的下载可按计划中的物理 interval 分别 warmup，不能把 `cont:all` 当作全历史物理合约集合。
+`active:all`、`main:all`、`cont:all` 与 `--universe` 都是当前时刻的静态 selector，不能用于推断历史已退市或后来上市的物理合约。动态回放须由调用方提供完整 `CatalogSnapshot`，离线编译为带版本、calendar identity 与 SHA-256 的 `HistoricalUniversePlan`，并显式给出 `UniverseBudget`。`Tq::futures().backtest(start, end).historical_universe_plan(plan)?` 只接受区间完全相等且哈希有效的计划；实际读 tick 始终裁剪到每个物理合约的生命周期。计划 v2 额外固定每个物理合约的 `physical_listing_starts`：CacheOnly/RemoteOnMiss warmup 从该上市起点检查/补数，直到其最后一个生效区间结束，因此用户传入的回测开始日不会截断合约自身历史。v1 计划继续可读并保留首个生效批次起点，重新离线编译即可生成 v2。当前 `tqsdk-cache fill --universe` 仍保持静态语义，不能把 `cont:all` 当作全历史物理合约集合。
 
 计划已经通过 `prepare/warmup` 完成覆盖预检时，成员加入和同时间行情会以同一 `ReplayStep` revision 写入，并标记为 `ready`；不会创建运行期补数通道。动态 universe 中只能对 active 成员开仓。成员移除时若仍有仓位或未完成订单，回测立即失败；不会自动平仓、撤单或遗失状态。
 

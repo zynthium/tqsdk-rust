@@ -2443,10 +2443,21 @@ impl BacktestBuilder {
             .keys()
             .cloned()
             .collect::<BTreeSet<_>>();
+        let tick_cache_start_ns = self
+            .historical_universe_plan
+            .as_ref()
+            .and_then(|plan| {
+                plan.timeline
+                    .physical_listing_starts
+                    .values()
+                    .min()
+                    .copied()
+            })
+            .unwrap_or(self.start_ns);
         let mut tick_sources = resolve_backtest_tick_sources(
             cache_dir.as_path(),
             &planned.tick_symbols,
-            self.start_ns,
+            tick_cache_start_ns,
             self.end_ns,
         )
         .await?;
@@ -2454,11 +2465,14 @@ impl BacktestBuilder {
             resolve_backtest_synthetic_tick_sources(
                 cache_dir.as_path(),
                 &planned.synthetic_klines,
-                self.start_ns,
+                tick_cache_start_ns,
                 self.end_ns,
             )
             .await?,
         );
+        if let Some(plan) = &self.historical_universe_plan {
+            tick_sources = cache_fill_tick_sources_from_historical_listing(tick_sources, plan)?;
+        }
         let physical_ranges = physical_tick_ranges(&tick_sources);
         let mut logical_symbols = planned.tick_symbols.clone();
         logical_symbols.extend(minute_symbols.iter().cloned());
@@ -3627,6 +3641,80 @@ fn restrict_tick_sources_to_historical_universe(
     Ok(())
 }
 
+fn cache_fill_tick_sources_from_historical_listing(
+    sources: Vec<tqsdk_task::HistoryBacktestTickSource>,
+    plan: &tqsdk_data::HistoricalUniversePlan,
+) -> Result<Vec<tqsdk_task::HistoryBacktestTickSource>> {
+    let mut active_starts = BTreeMap::<String, i64>::new();
+    let mut ranges = BTreeMap::<String, Vec<(i64, i64)>>::new();
+    for batch in &plan.timeline.batches {
+        for change in &batch.changes {
+            match change {
+                tqsdk_data::UniverseMemberChange::Add {
+                    instrument: tqsdk_data::UniverseInstrumentId::Physical { symbol },
+                    ..
+                } => {
+                    let listing_start_ns = plan
+                        .timeline
+                        .physical_listing_starts
+                        .get(symbol)
+                        .copied()
+                        .unwrap_or(batch.effective_ns);
+                    if active_starts
+                        .insert(symbol.clone(), listing_start_ns)
+                        .is_some()
+                    {
+                        return Err(data_validation(format!(
+                            "historical universe adds already-active physical symbol {symbol}"
+                        )));
+                    }
+                }
+                tqsdk_data::UniverseMemberChange::Remove {
+                    instrument: tqsdk_data::UniverseInstrumentId::Physical { symbol },
+                } => {
+                    let start_ns = active_starts.remove(symbol).ok_or_else(|| {
+                        data_validation(format!(
+                            "historical universe removes inactive physical symbol {symbol}"
+                        ))
+                    })?;
+                    ranges
+                        .entry(symbol.clone())
+                        .or_default()
+                        .push((start_ns, batch.effective_ns));
+                }
+                _ => {}
+            }
+        }
+    }
+    for (symbol, start_ns) in active_starts {
+        ranges
+            .entry(symbol)
+            .or_default()
+            .push((start_ns, plan.timeline.end_ns));
+    }
+
+    Ok(sources
+        .into_iter()
+        .flat_map(|source| {
+            let Some(cache_ranges) = ranges.get(&source.cache_symbol) else {
+                return vec![source];
+            };
+            cache_ranges
+                .iter()
+                .filter_map(|(cache_start_ns, cache_end_ns)| {
+                    let start_ns = source.start_ns.max(*cache_start_ns);
+                    let end_ns = source.end_ns.min(*cache_end_ns);
+                    (start_ns < end_ns).then_some(tqsdk_task::HistoryBacktestTickSource {
+                        start_ns,
+                        end_ns,
+                        ..source.clone()
+                    })
+                })
+                .collect()
+        })
+        .collect())
+}
+
 async fn history_backtest_stream(
     cache_dir: &Path,
     start_ns: i64,
@@ -4548,7 +4636,8 @@ mod tests {
 
     use super::{
         BacktestTickCacheStatus, Error, PreparedBacktestInputs, ProvisionalOpenDayFill, Tq,
-        fill_requests_from_status, parse_env_value, provisional_fill_requests_from_status,
+        cache_fill_tick_sources_from_historical_listing, fill_requests_from_status,
+        parse_env_value, provisional_fill_requests_from_status,
         restrict_tick_sources_to_historical_universe,
     };
 
@@ -4604,6 +4693,48 @@ mod tests {
             vec![(10, 20)]
         );
         assert_eq!(inputs.synthetic_tick_sources, inputs.tick_sources);
+    }
+
+    #[test]
+    fn historical_universe_warmup_starts_physical_cache_fill_at_listing() {
+        let scope = DynamicUniverseScope::all();
+        let plan = CatalogSnapshot::new(
+            "fixture-v1",
+            "calendar-sha256:fixture",
+            true,
+            scope.clone(),
+            vec![
+                CatalogContract::new(
+                    "SHFE.au2406",
+                    "SHFE",
+                    "au",
+                    vec![ActiveInterval::new(0, 20).unwrap()],
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap()
+        .compile_timeline(10, 30, scope, [])
+        .unwrap()
+        .prepare(UniverseBudget::new(4, 4).unwrap())
+        .unwrap();
+        let sources = cache_fill_tick_sources_from_historical_listing(
+            vec![tqsdk_task::HistoryBacktestTickSource {
+                replay_symbol: "SHFE.au2406".to_string(),
+                cache_symbol: "SHFE.au2406".to_string(),
+                start_ns: 0,
+                end_ns: 30,
+            }],
+            &plan,
+        )
+        .unwrap();
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| (source.start_ns, source.end_ns))
+                .collect::<Vec<_>>(),
+            vec![(0, 20)]
+        );
     }
 
     #[test]

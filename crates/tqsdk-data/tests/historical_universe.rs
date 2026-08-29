@@ -1,3 +1,5 @@
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 use tqsdk_data::{
@@ -13,6 +15,33 @@ fn contract(symbol: &str, start_ns: i64, end_ns: i64) -> CatalogContract {
         vec![ActiveInterval::new(start_ns, end_ns).unwrap()],
     )
     .unwrap()
+}
+
+#[derive(Serialize)]
+struct LegacyTimeline<'a> {
+    catalog_id: &'a str,
+    catalog_sha256: &'a str,
+    calendar_identity: &'a str,
+    start_ns: i64,
+    end_ns: i64,
+    scope: &'a DynamicUniverseScope,
+    derived_views: &'a BTreeSet<DerivedView>,
+    batches: &'a [tqsdk_data::UniverseTimelineBatch],
+}
+
+impl<'a> From<&'a tqsdk_data::HistoricalUniverseTimeline> for LegacyTimeline<'a> {
+    fn from(timeline: &'a tqsdk_data::HistoricalUniverseTimeline) -> Self {
+        Self {
+            catalog_id: &timeline.catalog_id,
+            catalog_sha256: &timeline.catalog_sha256,
+            calendar_identity: &timeline.calendar_identity,
+            start_ns: timeline.start_ns,
+            end_ns: timeline.end_ns,
+            scope: &timeline.scope,
+            derived_views: &timeline.derived_views,
+            batches: &timeline.batches,
+        }
+    }
 }
 
 #[test]
@@ -140,6 +169,11 @@ fn prepared_plan_is_pinned_and_requires_an_explicit_budget() {
         .clone()
         .prepare(UniverseBudget::new(2, 2).unwrap())
         .unwrap();
+    assert_eq!(plan.plan_version, 2);
+    assert_eq!(
+        plan.timeline.physical_listing_starts.get("SHFE.au2406"),
+        Some(&10)
+    );
     assert!(plan.plan_sha256.starts_with("sha256:"));
     assert_eq!(plan.timeline, timeline);
     plan.verify().unwrap();
@@ -159,6 +193,29 @@ fn prepared_plan_is_pinned_and_requires_an_explicit_budget() {
             .to_string()
             .contains("exceeding budget")
     );
+}
+
+#[test]
+fn v1_plan_remains_verifiable_without_listing_starts() {
+    let scope = DynamicUniverseScope::all();
+    let mut plan = CatalogSnapshot::new(
+        "fixture-v1",
+        "calendar-sha256:abc",
+        true,
+        scope.clone(),
+        vec![contract("SHFE.au2406", 10, 20)],
+    )
+    .unwrap()
+    .compile_timeline(0, 30, scope, [])
+    .unwrap()
+    .prepare(UniverseBudget::new(2, 2).unwrap())
+    .unwrap();
+    let legacy_bytes =
+        serde_json::to_vec(&(1_u32, LegacyTimeline::from(&plan.timeline), plan.budget)).unwrap();
+    plan.plan_version = 1;
+    plan.timeline.physical_listing_starts.clear();
+    plan.plan_sha256 = format!("sha256:{:x}", Sha256::digest(legacy_bytes));
+    plan.verify().unwrap();
 }
 
 #[test]

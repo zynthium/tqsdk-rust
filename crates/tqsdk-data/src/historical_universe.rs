@@ -265,6 +265,10 @@ pub struct HistoricalUniverseTimeline {
     pub end_ns: i64,
     pub scope: DynamicUniverseScope,
     pub derived_views: BTreeSet<DerivedView>,
+    /// Earliest known timestamp for each physical contract represented here.
+    /// Cache warmup may begin there while replay remains membership-clipped.
+    #[serde(default)]
+    pub physical_listing_starts: BTreeMap<String, i64>,
     pub batches: Vec<UniverseTimelineBatch>,
 }
 
@@ -313,9 +317,9 @@ impl HistoricalUniverseTimeline {
                 budget.max_changes
             )));
         }
-        let bytes = serde_json::to_vec(&(1_u32, &self, budget))?;
+        let bytes = serde_json::to_vec(&(2_u32, &self, budget))?;
         Ok(HistoricalUniversePlan {
-            plan_version: 1,
+            plan_version: 2,
             plan_sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
             timeline: self,
             budget,
@@ -370,20 +374,94 @@ impl HistoricalUniverseTimeline {
 
 impl HistoricalUniversePlan {
     pub fn verify(&self) -> Result<()> {
-        if self.plan_version != 1 {
-            return Err(validation(format!(
-                "unsupported historical universe plan version {}",
-                self.plan_version
-            )));
-        }
         self.timeline.validate()?;
         UniverseBudget::new(self.budget.max_batches, self.budget.max_changes)?;
-        let bytes = serde_json::to_vec(&(self.plan_version, &self.timeline, self.budget))?;
+        let bytes = match self.plan_version {
+            1 => {
+                if !self.timeline.physical_listing_starts.is_empty() {
+                    return Err(validation(
+                        "historical universe plan v1 must not contain listing starts",
+                    ));
+                }
+                serde_json::to_vec(&(
+                    1_u32,
+                    HistoricalUniverseTimelineV1::from(&self.timeline),
+                    self.budget,
+                ))?
+            }
+            2 => {
+                let mut physical_adds = BTreeMap::new();
+                for batch in &self.timeline.batches {
+                    for change in &batch.changes {
+                        if let UniverseMemberChange::Add {
+                            instrument: UniverseInstrumentId::Physical { symbol },
+                            ..
+                        } = change
+                        {
+                            physical_adds
+                                .entry(symbol.as_str())
+                                .or_insert(batch.effective_ns);
+                        }
+                    }
+                }
+                if physical_adds.len() != self.timeline.physical_listing_starts.len() {
+                    return Err(validation(
+                        "historical universe plan v2 requires listing starts for every physical member",
+                    ));
+                }
+                for (symbol, first_add_ns) in physical_adds {
+                    let Some(listing_start_ns) = self.timeline.physical_listing_starts.get(symbol)
+                    else {
+                        return Err(validation(format!(
+                            "historical universe plan v2 lacks listing start for {symbol}"
+                        )));
+                    };
+                    if *listing_start_ns > first_add_ns {
+                        return Err(validation(format!(
+                            "historical universe listing start follows first membership for {symbol}"
+                        )));
+                    }
+                }
+                serde_json::to_vec(&(2_u32, &self.timeline, self.budget))?
+            }
+            version => {
+                return Err(validation(format!(
+                    "unsupported historical universe plan version {version}"
+                )));
+            }
+        };
         let expected = format!("sha256:{:x}", Sha256::digest(bytes));
         if self.plan_sha256 != expected {
             return Err(validation("historical universe plan hash mismatch"));
         }
         Ok(())
+    }
+}
+
+#[derive(Serialize)]
+struct HistoricalUniverseTimelineV1<'a> {
+    catalog_id: &'a str,
+    catalog_sha256: &'a str,
+    calendar_identity: &'a str,
+    start_ns: i64,
+    end_ns: i64,
+    scope: &'a DynamicUniverseScope,
+    derived_views: &'a BTreeSet<DerivedView>,
+    batches: &'a [UniverseTimelineBatch],
+}
+
+impl<'a> From<&'a HistoricalUniverseTimeline> for HistoricalUniverseTimelineV1<'a> {
+    fn from(timeline: &'a HistoricalUniverseTimeline) -> Self {
+        Self {
+            catalog_id: &timeline.catalog_id,
+            catalog_sha256: &timeline.catalog_sha256,
+            calendar_identity: &timeline.calendar_identity,
+            start_ns: timeline.start_ns,
+            end_ns: timeline.end_ns,
+            scope: &timeline.scope,
+            derived_views: &timeline.derived_views,
+            batches: &timeline.batches,
+        }
     }
 }
 
@@ -410,6 +488,7 @@ impl CatalogSnapshot {
         let derived_views = derived_views.into_iter().collect::<BTreeSet<_>>();
         let mut physical_events: BTreeMap<i64, Vec<UniverseMemberChange>> = BTreeMap::new();
         let mut product_deltas: BTreeMap<i64, BTreeMap<(String, String), i32>> = BTreeMap::new();
+        let mut physical_listing_starts = BTreeMap::new();
 
         for contract in self
             .contracts
@@ -420,6 +499,9 @@ impl CatalogSnapshot {
                 if !interval.intersects(start_ns, end_ns) {
                     continue;
                 }
+                physical_listing_starts
+                    .entry(contract.physical_symbol.clone())
+                    .or_insert(contract.lifecycle[0].start_ns);
                 let active_start = interval.start_ns.max(start_ns);
                 let active_end = interval.end_ns.min(end_ns);
                 let physical = UniverseInstrumentId::Physical {
@@ -501,6 +583,7 @@ impl CatalogSnapshot {
             end_ns,
             scope,
             derived_views,
+            physical_listing_starts,
             batches,
         })
     }
