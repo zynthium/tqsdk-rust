@@ -372,6 +372,13 @@ open http://127.0.0.1:7789/dashboard
 对早期监控的兼容；`market_data_ready` 表示上游已连通、合约集合已刷新成功，并且最近
 行情更新活跃时间没有超过默认 `30s` freshness 窗口。关键字段包括：
 
+响应还会增加顶层 `history` 对象；不启用 history listener 时它是稳定的 disabled object：
+`{"configured":false,"listener":false,"ready":false}`。
+`history.ready` 只表示 history listener 已启动且当前 generation 健康，不参与上述 market
+`ready` / `market_data_ready`。replacement reload 失败时 last-good generation 继续可用，
+`history.degraded=true`；当前 generation 检测到损坏后 `history.ready=false`，同一 snapshot id
+的后续 reload 不会把它恢复为健康，只有新的健康 generation 才会恢复 readiness。
+
 - `process_started`：relay engine 已启动。
 - `downstream_listening`：下游 market websocket 监听已可接入。
 - `upstream_connected` / `upstream_status`：兼容字段，表示上游是否已经进入可用行情状态；只有收到有效 tick 或 quote 后才会变为 `up` / `true`。
@@ -393,7 +400,11 @@ open http://127.0.0.1:7789/dashboard
 - `recent_invalid_rows_1m` / `current_decode_health`：最近 1 分钟坏行数和可恢复的当前解码健康状态。
 - `last_upstream_invalid_tick_row_error` / `last_invalid_row_unix_secs`：最近一条解码错误和时间。
 
-`/metrics` 返回 `RelayEngine::metrics_snapshot()` 的完整 JSON。
+`/metrics` 保留 `RelayEngine::metrics_snapshot()` 的全部顶层字段；启用 history listener 时额外
+增加低基数的 `history` 对象；不启用时同样返回上述 disabled object。该对象包含 listener/generation
+readiness，active/queued query，query 总量、总耗时及按 endpoint/status class/stable error code
+聚合的计数，buffer used/limit/high-water，compression queued/active/success/fallback/failure，以及
+reload attempt/success/failure/last code。symbol 只进入结构化 audit，不作为 metrics label。
 
 `/symbol-metrics` 返回合约级 telemetry 快照，当前健康集合固定为“当前上游 universe ∪
 当前下游订阅”。已经退出 universe 且当前未被订阅的历史 telemetry 不再进入当前健康；

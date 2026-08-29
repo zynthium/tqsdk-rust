@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::VecDeque;
 
 use serde::Serialize;
 
@@ -11,8 +13,11 @@ use crate::symbol_metrics::{
     SymbolTradingPhase, SymbolTradingPhaseSource,
 };
 
+#[cfg(test)]
 const DASHBOARD_TIMELINE_HISTORY_WINDOW_MILLIS: u64 = 300_000;
+#[cfg(test)]
 const DASHBOARD_TIMELINE_HISTORY_MIN_SAMPLE_INTERVAL_MILLIS: u64 = 2_000;
+#[cfg(test)]
 const DASHBOARD_TIMELINE_HISTORY_SAMPLE_LIMIT: usize = 180;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -216,11 +221,13 @@ pub struct DashboardTimelineHistory {
     pub samples: Vec<DashboardTimelineHistorySample>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct DashboardTimelineHistoryCache {
     samples: VecDeque<DashboardTimelineHistorySample>,
 }
 
+#[cfg(test)]
 impl Default for DashboardTimelineHistoryCache {
     fn default() -> Self {
         Self {
@@ -229,6 +236,7 @@ impl Default for DashboardTimelineHistoryCache {
     }
 }
 
+#[cfg(test)]
 impl DashboardTimelineHistoryCache {
     pub(crate) fn push(&mut self, sample: DashboardTimelineHistorySample) {
         let sampled_at = sample.sampled_at_unix_millis;
@@ -329,12 +337,6 @@ impl DashboardSnapshotInputs {
             events: self.events.clone(),
         };
         (dashboard, timeline_sample)
-    }
-
-    #[must_use]
-    pub(crate) fn timeline_history_sample(&self) -> DashboardTimelineHistorySample {
-        let global_page = self.symbol_metrics_snapshot(&SymbolMetricsQuery::default());
-        dashboard_timeline_history_sample(self.received_at_unix_millis, &global_page.symbols)
     }
 
     #[must_use]

@@ -13,6 +13,8 @@ use tokio::sync::{Mutex, oneshot};
 use tqsdk_data::BacktestHistorySnapshot;
 use tqsdk_relay::{RelayError, RelayResult};
 
+use super::observability::HistoryObservability;
+
 const RELOAD_INTERVAL: Duration = Duration::from_secs(5);
 
 /// One immutable generation and its generation-local integrity signal.
@@ -24,6 +26,7 @@ const RELOAD_INTERVAL: Duration = Duration::from_secs(5);
 pub(super) struct PinnedSnapshot {
     snapshot: Arc<BacktestHistorySnapshot>,
     unhealthy: Arc<AtomicBool>,
+    observability: Option<Arc<HistoryObservability>>,
 }
 
 impl PinnedSnapshot {
@@ -31,14 +34,22 @@ impl PinnedSnapshot {
         Self {
             snapshot,
             unhealthy: Arc::new(AtomicBool::new(false)),
+            observability: None,
         }
     }
 
     /// Marks this exact pinned generation unhealthy exactly once.
     pub(super) fn mark_corrupt(&self) -> bool {
-        self.unhealthy
+        let won = self
+            .unhealthy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+            .is_ok();
+        if won {
+            if let Some(observability) = &self.observability {
+                observability.note_corrupt(self.snapshot_id());
+            }
+        }
+        won
     }
 
     /// Whether this exact pinned generation has an integrity failure.
@@ -64,6 +75,7 @@ impl Deref for PinnedSnapshot {
 pub(super) struct SnapshotSlot {
     root: PathBuf,
     snapshot: RwLock<Option<PinnedSnapshot>>,
+    observability: RwLock<Option<Arc<HistoryObservability>>>,
     reload_gate: Mutex<()>,
 }
 
@@ -74,6 +86,7 @@ impl SnapshotSlot {
         Self {
             root,
             snapshot: RwLock::new(None),
+            observability: RwLock::new(None),
             reload_gate: Mutex::new(()),
         }
     }
@@ -87,20 +100,43 @@ impl SnapshotSlot {
             .clone()
     }
 
+    pub(super) fn attach_observability(&self, observability: Arc<HistoryObservability>) {
+        *self
+            .observability
+            .write()
+            .expect("history snapshot observability lock poisoned") = Some(observability);
+    }
+
     /// Opens `CURRENT` off the history runtime and atomically publishes it locally.
     ///
     /// On an open failure, no state is changed: callers continue to observe the
     /// prior generation, if one exists.
     pub(super) async fn reload(&self) -> RelayResult<PinnedSnapshot> {
+        let observability = self
+            .observability
+            .read()
+            .map_err(|_| {
+                RelayError::Internal("history snapshot observability lock poisoned".to_string())
+            })?
+            .clone();
+        if let Some(observability) = &observability {
+            observability.note_reload_attempt();
+        }
         let _reload_guard = self.reload_gate.lock().await;
         let root = self.root.clone();
         let opened = tokio::task::spawn_blocking(move || BacktestHistorySnapshot::open(root))
             .await
             .map_err(|error| {
+                if let Some(observability) = &observability {
+                    observability.note_reload_failure("snapshot_worker_failed");
+                }
                 RelayError::Internal(format!("history snapshot reload task failed: {error}"))
             })?
             .map(Arc::new)
             .map_err(|error| {
+                if let Some(observability) = &observability {
+                    observability.note_reload_failure("snapshot_open_failed");
+                }
                 RelayError::Transport(format!("history snapshot reload failed: {error}"))
             })?;
 
@@ -111,10 +147,17 @@ impl SnapshotSlot {
         if let Some(current) = current.as_ref()
             && current.snapshot_id() == opened.snapshot_id()
         {
+            if let Some(observability) = &observability {
+                observability.note_reload_unchanged(current.snapshot_id());
+            }
             return Ok(current.clone());
         }
-        let pinned = PinnedSnapshot::new(opened);
+        let mut pinned = PinnedSnapshot::new(opened);
+        pinned.observability = observability.clone();
         *current = Some(pinned.clone());
+        if let Some(observability) = &observability {
+            observability.note_reload_success(pinned.snapshot_id());
+        }
         Ok(pinned)
     }
 
@@ -150,6 +193,7 @@ mod tests {
     use tqsdk_data::BacktestHistorySnapshotManifestBuilder;
 
     use super::SnapshotSlot;
+    use crate::history::observability::{HistoryObservability, MemoryAuditSink};
 
     fn temp_root(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -199,20 +243,29 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let first_id = publish_empty_generation(&root, "2026-08-29T00:00:00Z");
         let slot = SnapshotSlot::new(root.clone());
-
+        let observability = Arc::new(HistoryObservability::with_audit(
+            false,
+            Arc::new(MemoryAuditSink::default()),
+        ));
+        observability.listener_started();
+        slot.attach_observability(observability.clone());
         let first = slot.reload().await.unwrap();
         assert_eq!(first.snapshot_id(), first_id);
+        assert!(observability.snapshot().ready);
         assert!(first.mark_corrupt());
         assert!(first.is_unhealthy());
+        assert!(!observability.snapshot().ready);
 
         let same_generation = slot.reload().await.unwrap();
         assert_eq!(same_generation.snapshot_id(), first_id);
         assert!(same_generation.is_unhealthy());
+        assert!(!observability.snapshot().ready);
 
         std::fs::write(root.join("CURRENT"), "s-missing\n").unwrap();
         assert!(slot.reload().await.is_err());
         assert_eq!(slot.current().unwrap().snapshot_id(), first_id);
         assert!(first.is_unhealthy());
+        assert!(observability.snapshot().degraded);
 
         let second_id = publish_empty_generation(&root, "2026-08-29T00:00:01Z");
         let second = slot.reload().await.unwrap();
@@ -220,6 +273,7 @@ mod tests {
         assert_ne!(first.snapshot_id(), second.snapshot_id());
         assert!(first.is_unhealthy());
         assert!(!second.is_unhealthy());
+        assert!(observability.snapshot().ready);
         assert!(second.mark_corrupt());
         assert!(!second.mark_corrupt());
 

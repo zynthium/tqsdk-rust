@@ -1,9 +1,12 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
+
 //! Optional market relay and cache service for `tqsdk-rust`.
 //!
 //! This crate is infrastructure. Existing SDK crates do not depend on it and
 //! direct-to-TQ behavior remains the default unless users explicitly point the
 //! market endpoint at a relay instance.
+
+extern crate self as tqsdk_relay;
 
 pub mod bootstrap;
 pub mod cache;
@@ -16,6 +19,7 @@ pub mod error;
 pub mod interest;
 pub mod kline;
 pub mod metrics_http;
+mod metrics_http_impl;
 pub mod observability;
 pub mod protocol;
 pub mod pump;

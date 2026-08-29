@@ -26,6 +26,7 @@ use tqsdk_relay::{RelayError, RelayResult};
 
 use super::affinity::HistoryAffinity;
 use super::codec::{HistoryColumn, HistoryRowCodec};
+use super::observability::{Gauge, HistoryObservability, RequestAudit};
 use super::snapshot::{PinnedSnapshot, SnapshotSlot};
 
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
@@ -59,11 +60,19 @@ struct HistoryState {
     buffers: Arc<ByteBudget>,
     scan_budget: Arc<SnapshotScanBudget>,
     compression: Option<Arc<CompressionPool>>,
+    observability: Arc<HistoryObservability>,
 }
 
 impl HistoryState {
-    fn new(snapshots: Arc<SnapshotSlot>, compression: Option<Arc<CompressionPool>>) -> Self {
-        let buffers = Arc::new(ByteBudget::new(GLOBAL_BUFFER_BYTES));
+    fn new(
+        snapshots: Arc<SnapshotSlot>,
+        compression: Option<Arc<CompressionPool>>,
+        observability: Arc<HistoryObservability>,
+    ) -> Self {
+        let buffers = Arc::new(ByteBudget::monitored(
+            GLOBAL_BUFFER_BYTES,
+            observability.clone(),
+        ));
         Self {
             snapshots,
             active: Arc::new(Semaphore::new(MAX_ACTIVE_REQUESTS)),
@@ -72,6 +81,7 @@ impl HistoryState {
             }),
             buffers,
             compression,
+            observability,
         }
     }
 }
@@ -81,9 +91,14 @@ pub(super) async fn serve_until(
     identity_header: String,
     snapshots: Arc<SnapshotSlot>,
     compression: Option<Arc<CompressionPool>>,
+    observability: Arc<HistoryObservability>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> RelayResult<()> {
-    let state = Arc::new(HistoryState::new(snapshots.clone(), compression));
+    let state = Arc::new(HistoryState::new(
+        snapshots.clone(),
+        compression,
+        observability,
+    ));
     let (reload_shutdown, reload_receiver) = oneshot::channel();
     let reload_task = tokio::spawn(snapshots.reload_loop(reload_receiver));
     let result = loop {
@@ -117,39 +132,45 @@ async fn serve_stream(
     let deadline = Instant::now() + TOTAL_TIMEOUT;
     let preparation_deadline = deadline - WRITE_GRACE;
     let read_deadline = (Instant::now() + READ_TIMEOUT).min(preparation_deadline);
+    let (data_id, request_id) = next_id();
+    let mut audit = state.observability.begin_request(request_id.clone());
     let request = match timeout_at(read_deadline, read_request(&mut stream)).await {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => {
-            return prepare_and_write(
+            audit.endpoint("invalid");
+            return prepare_and_write_audited(
                 &mut stream,
                 deadline,
                 error_response(
                     400,
                     "invalid_request",
                     &error.to_string(),
-                    next_id().1,
+                    request_id,
                     json!({}),
                 ),
                 None,
                 GzipNegotiation::default(),
                 &state,
+                audit,
             )
             .await;
         }
         Err(_) => {
-            return prepare_and_write(
+            audit.endpoint("invalid");
+            return prepare_and_write_audited(
                 &mut stream,
                 deadline,
                 error_response(
                     400,
                     "invalid_request",
                     "history request exceeded total timeout",
-                    next_id().1,
+                    request_id,
                     json!({}),
                 ),
                 None,
                 GzipNegotiation::default(),
                 &state,
+                audit,
             )
             .await;
         }
@@ -166,24 +187,34 @@ async fn serve_stream(
             accepts: accepts_gzip(headers),
             vary: state.compression.is_some(),
         });
-    let (data_id, request_id) = next_id();
-    let routed = timeout_at(
-        preparation_deadline,
-        route_request(
-            &request,
-            identity_header,
-            state.clone(),
-            data_id,
-            request_id.clone(),
-        ),
-    );
-    tokio::pin!(routed);
-    let response = tokio::select! {
-        result = &mut routed => match result {
-            Ok(response) => response,
-            Err(_) => error_response(504, "history_timeout", "history request exceeded total timeout", request_id.clone(), json!({})),
+    audit.endpoint(
+        match parse_request(&request).ok().map(|parsed| parsed.path) {
+            Some(SCHEMA_PATH) => "schema",
+            Some(QUERY_PATH) => "query",
+            Some(COVERAGE_PATH) => "coverage",
+            _ => "unknown",
         },
-        _ = wait_for_disconnect(&mut stream) => return Ok(()),
+    );
+    let response = {
+        let routed = timeout_at(
+            preparation_deadline,
+            route_request(
+                &request,
+                identity_header,
+                state.clone(),
+                data_id,
+                request_id.clone(),
+                &mut audit,
+            ),
+        );
+        tokio::pin!(routed);
+        tokio::select! {
+                result = &mut routed => match result {
+                    Ok(response) => response,
+                    Err(_) => error_response(504, "history_timeout", "history request exceeded total timeout", request_id.clone(), json!({})),
+                },
+                _ = wait_for_disconnect(&mut stream) => return Ok(()),
+        }
     };
     let prepared = match timeout_at(
         preparation_deadline,
@@ -192,7 +223,10 @@ async fn serve_stream(
     .await
     {
         Ok(Ok(prepared)) => prepared,
-        Ok(Err(error)) => return Err(error),
+        Ok(Err(error)) => {
+            audit.finish(500, Some("history_internal"), 0);
+            return Err(error);
+        }
         Err(_) => match timeout_at(
             deadline,
             prepare_response(
@@ -211,24 +245,45 @@ async fn serve_stream(
         .await
         {
             Ok(Ok(prepared)) => prepared,
-            Ok(Err(error)) => return Err(error),
-            Err(_) => return Ok(()),
+            Ok(Err(error)) => {
+                audit.finish(500, Some("history_internal"), 0);
+                return Err(error);
+            }
+            Err(_) => {
+                audit.finish(504, Some("history_timeout"), 0);
+                return Ok(());
+            }
         },
     };
+    let status = prepared.status;
+    let bytes = prepared.body.len();
+    let error_code = prepared.error_code;
     match timeout_at(deadline, write_prepared_response(&mut stream, prepared)).await {
-        Ok(result) => result,
-        Err(_) => Ok(()),
+        Ok(Ok(())) => {
+            audit.finish(status, error_code, bytes);
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            audit.finish(500, Some("write_failed"), 0);
+            Err(error)
+        }
+        Err(_) => {
+            audit.finish(504, Some("history_timeout"), 0);
+            Ok(())
+        }
     }
 }
 
-async fn prepare_and_write(
+async fn prepare_and_write_audited(
     stream: &mut TcpStream,
     deadline: Instant,
     response: Response,
     if_none_match: Option<&str>,
     gzip: GzipNegotiation,
     state: &HistoryState,
+    audit: RequestAudit,
 ) -> RelayResult<()> {
+    let audit = audit;
     let prepared = match timeout_at(
         deadline,
         prepare_response(response, if_none_match, gzip, state),
@@ -236,12 +291,32 @@ async fn prepare_and_write(
     .await
     {
         Ok(Ok(prepared)) => prepared,
-        Ok(Err(error)) => return Err(error),
-        Err(_) => return Ok(()),
+        Ok(Err(error)) => {
+            audit.finish(500, Some("history_internal"), 0);
+            return Err(error);
+        }
+        Err(_) => {
+            audit.finish(504, Some("history_timeout"), 0);
+            return Ok(());
+        }
     };
-    timeout_at(deadline, write_prepared_response(stream, prepared))
-        .await
-        .unwrap_or(Ok(()))
+    let status = prepared.status;
+    let error_code = prepared.error_code;
+    let bytes = prepared.body.len();
+    match timeout_at(deadline, write_prepared_response(stream, prepared)).await {
+        Ok(Ok(())) => {
+            audit.finish(status, error_code, bytes);
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            audit.finish(500, Some("write_failed"), 0);
+            Err(error)
+        }
+        Err(_) => {
+            audit.finish(504, Some("history_timeout"), 0);
+            Ok(())
+        }
+    }
 }
 
 async fn wait_for_disconnect(stream: &mut TcpStream) {
@@ -260,8 +335,10 @@ async fn route_request(
     state: Arc<HistoryState>,
     data_id: u64,
     request_id: String,
+    audit: &mut RequestAudit,
 ) -> Response {
     let Ok(parsed) = parse_request(request) else {
+        audit.endpoint("invalid");
         return error_response(
             400,
             "invalid_request",
@@ -278,6 +355,9 @@ async fn route_request(
             request_id,
             json!({}),
         );
+    }
+    if let Some(identity) = header_values(&parsed.headers, identity_header).first() {
+        audit.identity(identity);
     }
     if !is_known_path(parsed.path) {
         return error_response(
@@ -306,9 +386,29 @@ async fn route_request(
             return error_response(400, "invalid_request", message, request_id, json!({}));
         }
     };
+    audit.query(
+        None,
+        &data.symbol,
+        data.series_name(),
+        data.period.as_deref(),
+        (&data.start, &data.end),
+        data.columns
+            .iter()
+            .copied()
+            .map(HistoryColumn::canonical_name)
+            .collect(),
+    );
+    let queue_gauge = state.observability.request_queued();
     let admission = match timeout(QUEUE_TIMEOUT, state.active.clone().acquire_owned()).await {
-        Ok(Ok(permit)) => Arc::new(ActiveRequestPin { _permit: permit }),
+        Ok(Ok(permit)) => {
+            drop(queue_gauge);
+            Arc::new(ActiveRequestPin {
+                _permit: permit,
+                _gauge: Some(state.observability.request_active()),
+            })
+        }
         _ => {
+            drop(queue_gauge);
             return error_response(
                 429,
                 "history_overloaded",
@@ -338,11 +438,24 @@ async fn route_request(
             admission,
         );
     }
+    audit.query(
+        Some(snapshot.snapshot_id()),
+        &data.symbol,
+        data.series_name(),
+        data.period.as_deref(),
+        (&data.start, &data.end),
+        data.columns
+            .iter()
+            .copied()
+            .map(HistoryColumn::canonical_name)
+            .collect(),
+    );
     if parsed.path == COVERAGE_PATH {
         let series_name = data.series_name();
         return match snapshot.inspect(data.request).await {
             Ok(inspection) => {
                 let report = inspection.report();
+                audit.rows(0);
                 let mut body = Map::new();
                 body.insert("snapshot_id".into(), json!(snapshot.snapshot_id()));
                 body.insert("symbol".into(), json!(data.symbol));
@@ -369,7 +482,7 @@ async fn route_request(
             Err(error) => snapshot_error(error, &snapshot, request_id, admission),
         };
     }
-    query_response(snapshot, data, request_id, admission, &state).await
+    query_response(snapshot, data, request_id, admission, &state, audit).await
 }
 
 async fn query_response(
@@ -378,6 +491,7 @@ async fn query_response(
     request_id: String,
     admission: Arc<ActiveRequestPin>,
     state: &Arc<HistoryState>,
+    audit: &mut RequestAudit,
 ) -> Response {
     let codec = match HistoryRowCodec::new(data.series, data.columns) {
         Ok(value) => value,
@@ -500,6 +614,7 @@ async fn query_response(
                 held.push(json_permit);
             }
             Some(BacktestHistorySnapshotEvent::RequestCompleted(report)) => {
+                audit.rows(rows.len());
                 if report.rows != rows.len()
                     || !matches!(report.coverage.finality, BacktestHistoryFinality::Final)
                 {
@@ -958,6 +1073,7 @@ fn is_known_path(path: &str) -> bool {
 
 struct Response {
     status: u16,
+    error_code: Option<&'static str>,
     body: Value,
     request_id: String,
     admission: Option<Arc<ActiveRequestPin>>,
@@ -968,6 +1084,7 @@ impl Response {
     fn success(body: Value, request_id: String) -> Self {
         Self {
             status: 200,
+            error_code: None,
             body,
             request_id,
             admission: None,
@@ -982,6 +1099,7 @@ impl Response {
     ) -> Self {
         Self {
             status: 200,
+            error_code: None,
             body,
             request_id,
             admission: Some(admission),
@@ -997,6 +1115,7 @@ impl Response {
     ) -> Self {
         Self {
             status: 200,
+            error_code: None,
             body,
             request_id,
             admission: Some(admission),
@@ -1015,6 +1134,7 @@ fn error_response(
     let body_request_id = request_id.clone();
     Response {
         status,
+        error_code: Some(code),
         body: json!({"error": {
             "code": code,
             "message": message,
@@ -1148,12 +1268,12 @@ async fn prepare_response(
         })?;
         return Ok(PreparedResponse::unbudgeted(
             429,
+            fallback.error_code,
             body,
             None,
             false,
             gzip.vary,
             response.admission,
-            &state.buffers,
         ));
     };
     let mut body = Vec::with_capacity(body_len);
@@ -1199,16 +1319,17 @@ async fn prepare_response(
                             })?;
                         return Ok(PreparedResponse::unbudgeted(
                             500,
+                            fallback.error_code,
                             fallback_body,
                             None,
                             false,
                             gzip.vary,
                             response.admission,
-                            &state.buffers,
                         ));
                     }
                 },
                 Err((identity, permit)) => {
+                    state.observability.compression_fallback();
                     body = identity;
                     body_permit = permit;
                 }
@@ -1228,6 +1349,7 @@ async fn prepare_response(
     }
     Ok(PreparedResponse {
         status: response.status,
+        error_code: response.error_code,
         body,
         etag,
         gzip: content_encoding_gzip,
@@ -1321,6 +1443,7 @@ fn positive_http_qvalue(value: &str) -> bool {
 
 struct PreparedResponse {
     status: u16,
+    error_code: Option<&'static str>,
     body: Vec<u8>,
     etag: Option<String>,
     gzip: bool,
@@ -1332,23 +1455,23 @@ struct PreparedResponse {
 impl PreparedResponse {
     fn unbudgeted(
         status: u16,
+        error_code: Option<&'static str>,
         body: Vec<u8>,
         etag: Option<String>,
         gzip: bool,
         vary_accept_encoding: bool,
         admission: Option<Arc<ActiveRequestPin>>,
-        buffers: &Arc<ByteBudget>,
     ) -> Self {
         Self {
             status,
+            error_code,
             body,
             etag,
             gzip,
             vary_accept_encoding,
-            // The global budget is exhausted in this fallback path.  Keep a
-            // zero-byte permit so the prepared-object ownership contract
-            // remains uniform while emitting the small deterministic error.
-            _body_permit: buffers.try_reserve(0),
+            // The global budget was exhausted in this fallback path, so the
+            // small deterministic error is intentionally unbudgeted.
+            _body_permit: None,
             _admission: admission,
         }
     }
@@ -1360,6 +1483,7 @@ async fn write_prepared_response(
 ) -> RelayResult<()> {
     let PreparedResponse {
         status,
+        error_code: _,
         body,
         etag,
         gzip,
@@ -1411,6 +1535,7 @@ async fn write_prepared_response(
 
 struct ActiveRequestPin {
     _permit: OwnedSemaphorePermit,
+    _gauge: Option<Gauge>,
 }
 
 /// A deliberately small, dedicated compression pool.  It is not Tokio's
@@ -1421,6 +1546,7 @@ pub(super) struct CompressionPool {
     next: AtomicUsize,
     stopping: std::sync::atomic::AtomicBool,
     threads: Mutex<Vec<JoinHandle<()>>>,
+    observability: Mutex<Option<Arc<HistoryObservability>>>,
     #[cfg(test)]
     _parked_receivers: Mutex<Vec<mpsc::Receiver<CompressionJob>>>,
 }
@@ -1434,6 +1560,13 @@ impl std::fmt::Debug for CompressionPool {
 }
 
 impl CompressionPool {
+    pub(super) fn attach_observability(&self, observability: Arc<HistoryObservability>) {
+        *self
+            .observability
+            .lock()
+            .expect("history compression observability lock poisoned") = Some(observability);
+    }
+
     pub(super) fn spawn(affinity: HistoryAffinity) -> RelayResult<Arc<Self>> {
         Self::spawn_inner(Some(affinity))
     }
@@ -1457,6 +1590,7 @@ impl CompressionPool {
             next: AtomicUsize::new(0),
             stopping: std::sync::atomic::AtomicBool::new(false),
             threads: Mutex::new(Vec::new()),
+            observability: Mutex::new(None),
             _parked_receivers: Mutex::new(parked_receivers),
         })
     }
@@ -1474,6 +1608,7 @@ impl CompressionPool {
             next: AtomicUsize::new(0),
             stopping: std::sync::atomic::AtomicBool::new(false),
             threads: Mutex::new(Vec::with_capacity(GZIP_WORKERS)),
+            observability: Mutex::new(None),
             #[cfg(test)]
             _parked_receivers: Mutex::new(Vec::new()),
         });
@@ -1534,12 +1669,21 @@ impl CompressionPool {
         let Some(output_permit) = buffers.try_reserve(limit) else {
             return Err((body, identity_permit));
         };
+        let observability = self
+            .observability
+            .lock()
+            .expect("history compression observability lock poisoned")
+            .clone();
         let (complete, receiver) = oneshot::channel();
         let mut job = CompressionJob {
             body,
             identity_permit,
             _active_pin: active_pin,
             output_permit,
+            observability: observability.clone(),
+            queued_gauge: observability
+                .as_ref()
+                .map(|observability| observability.compression_queued()),
             complete,
             #[cfg(test)]
             before_compress: None,
@@ -1597,6 +1741,8 @@ struct CompressionJob {
     identity_permit: BytePermit,
     _active_pin: Option<Arc<ActiveRequestPin>>,
     output_permit: BytePermit,
+    observability: Option<Arc<HistoryObservability>>,
+    queued_gauge: Option<Gauge>,
     complete: oneshot::Sender<CompressionResult>,
     #[cfg(test)]
     before_compress: Option<(mpsc::SyncSender<()>, mpsc::Receiver<()>)>,
@@ -1635,10 +1781,16 @@ fn compress_job(job: CompressionJob) {
         identity_permit,
         _active_pin,
         output_permit,
+        observability,
+        queued_gauge,
         complete,
         #[cfg(test)]
         before_compress,
     } = job;
+    drop(queued_gauge);
+    let _active_gauge = observability
+        .as_ref()
+        .map(|observability| observability.compression_active());
     #[cfg(test)]
     if let Some((started, release)) = before_compress {
         let _ = started.send(());
@@ -1658,6 +1810,12 @@ fn compress_job(job: CompressionJob) {
             body,
             permit: identity_permit,
         });
+    if let Some(observability) = &observability {
+        match result {
+            CompressionResult::Gzip { .. } => observability.compression_success(),
+            CompressionResult::Identity { .. } => observability.compression_failure(),
+        }
+    }
     let _ = complete.send(result);
 }
 
@@ -1712,13 +1870,27 @@ impl BacktestHistorySnapshotResourceBudget for SnapshotScanBudget {
 struct ByteBudget {
     limit: usize,
     used: AtomicUsize,
+    high_water: AtomicUsize,
+    observability: Option<Arc<HistoryObservability>>,
 }
 
 impl ByteBudget {
+    #[cfg(test)]
     const fn new(limit: usize) -> Self {
         Self {
             limit,
             used: AtomicUsize::new(0),
+            high_water: AtomicUsize::new(0),
+            observability: None,
+        }
+    }
+
+    fn monitored(limit: usize, observability: Arc<HistoryObservability>) -> Self {
+        Self {
+            limit,
+            used: AtomicUsize::new(0),
+            high_water: AtomicUsize::new(0),
+            observability: Some(observability),
         }
     }
 
@@ -1734,6 +1906,8 @@ impl ByteBudget {
                 .compare_exchange_weak(used, next, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) => {
+                    self.high_water.fetch_max(next, Ordering::AcqRel);
+                    self.publish();
                     return Some(BytePermit {
                         budget: self.clone(),
                         bytes,
@@ -1741,6 +1915,16 @@ impl ByteBudget {
                 }
                 Err(current) => used = current,
             }
+        }
+    }
+
+    fn publish(&self) {
+        if let Some(observability) = &self.observability {
+            observability.note_buffers(
+                self.used.load(Ordering::Acquire),
+                self.limit,
+                self.high_water.load(Ordering::Acquire),
+            );
         }
     }
 }
@@ -1753,6 +1937,7 @@ struct BytePermit {
 impl Drop for BytePermit {
     fn drop(&mut self) {
         self.budget.used.fetch_sub(self.bytes, Ordering::AcqRel);
+        self.budget.publish();
     }
 }
 
@@ -1760,7 +1945,43 @@ impl Drop for BytePermit {
 mod tests {
     use tqsdk_data::BacktestHistoryField;
 
+    use super::super::observability::{HistoryObservability, MemoryAuditSink};
     use super::*;
+
+    #[tokio::test]
+    async fn malformed_request_is_audited_once() {
+        let sink = Arc::new(MemoryAuditSink::default());
+        let observability = Arc::new(HistoryObservability::with_audit(false, sink.clone()));
+        let state = Arc::new(HistoryState::new(
+            Arc::new(SnapshotSlot::new(std::env::temp_dir())),
+            None,
+            observability,
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_stream(stream, "x-history-identity", state)
+                .await
+                .unwrap();
+        });
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client.write_all(b"not HTTP\r\n\r\n").await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        server.await.unwrap();
+        assert!(
+            std::str::from_utf8(&response)
+                .unwrap()
+                .starts_with("HTTP/1.1 400")
+        );
+        assert_eq!(sink.len(), 1);
+        let records = sink.records();
+        assert_eq!(records[0].endpoint, "invalid");
+        assert_eq!(records[0].status, 400);
+        assert_eq!(records[0].error_code, Some("invalid_request"));
+        assert!(records[0].selected_representation_bytes > 0);
+    }
 
     #[test]
     fn schema_uses_typed_fields_and_declares_derived_tns() {
@@ -1873,6 +2094,7 @@ mod tests {
         let active = Arc::new(Semaphore::new(1));
         let active_pin = Arc::new(ActiveRequestPin {
             _permit: active.clone().try_acquire_owned().unwrap(),
+            _gauge: None,
         });
         let body = vec![5; GZIP_MIN_BYTES];
         let permit = budget.try_reserve(body.len()).unwrap();
@@ -1915,6 +2137,7 @@ mod tests {
         let active = Arc::new(Semaphore::new(1));
         let active_pin = Arc::new(ActiveRequestPin {
             _permit: active.clone().try_acquire_owned().unwrap(),
+            _gauge: None,
         });
         let (complete, receiver) = oneshot::channel();
         let (started_tx, started_rx) = mpsc::sync_channel(1);
@@ -1924,6 +2147,8 @@ mod tests {
             identity_permit,
             _active_pin: Some(active_pin),
             output_permit,
+            observability: None,
+            queued_gauge: None,
             complete,
             before_compress: Some((started_tx, release_rx)),
         };
@@ -1944,6 +2169,7 @@ mod tests {
         let state = HistoryState::new(
             Arc::new(SnapshotSlot::new(std::env::temp_dir())),
             Some(pool.clone()),
+            Arc::new(HistoryObservability::enabled(true)),
         );
         let plain = write_test_response(
             &state,

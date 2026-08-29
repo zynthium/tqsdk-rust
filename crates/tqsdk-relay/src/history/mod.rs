@@ -7,6 +7,7 @@
 mod affinity;
 mod codec;
 mod http;
+mod observability;
 mod snapshot;
 
 use std::fs;
@@ -138,9 +139,29 @@ pub(crate) struct HistoryServiceHandle {
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
     compression: Option<Arc<http::CompressionPool>>,
+    observability: Arc<observability::HistoryObservability>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MetricsOverlay {
+    observability: Arc<observability::HistoryObservability>,
+}
+
+impl crate::metrics_http_impl::HistoryMetrics for MetricsOverlay {
+    fn health(&self) -> serde_json::Value {
+        self.observability.json_snapshot()
+    }
+    fn metrics(&self) -> serde_json::Value {
+        self.observability.json_snapshot()
+    }
 }
 
 impl HistoryServiceHandle {
+    pub(crate) fn metrics_overlay(&self) -> MetricsOverlay {
+        MetricsOverlay {
+            observability: self.observability.clone(),
+        }
+    }
     /// Requests a graceful stop and waits until the listener thread is gone.
     pub(crate) fn shutdown(&self) -> RelayResult<()> {
         let sender = self
@@ -192,7 +213,14 @@ pub(crate) fn spawn(config: HistoryConfig) -> RelayResult<HistoryServiceHandle> 
         .clone()
         .map(http::CompressionPool::spawn)
         .transpose()?;
+    let observability = Arc::new(observability::HistoryObservability::enabled(
+        compression.is_some(),
+    ));
+    if let Some(compression) = &compression {
+        compression.attach_observability(observability.clone());
+    }
     let listener_compression = compression.clone();
+    let listener_observability = observability.clone();
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (startup_tx, startup_rx) = mpsc::sync_channel(1);
@@ -203,6 +231,7 @@ pub(crate) fn spawn(config: HistoryConfig) -> RelayResult<HistoryServiceHandle> 
             config,
             affinity,
             listener_compression,
+            listener_observability,
             shutdown_rx,
             startup_tx,
         )
@@ -243,6 +272,7 @@ pub(crate) fn spawn(config: HistoryConfig) -> RelayResult<HistoryServiceHandle> 
         shutdown: Mutex::new(Some(shutdown_tx)),
         thread: Mutex::new(Some(thread)),
         compression,
+        observability,
     })
 }
 
@@ -251,6 +281,7 @@ fn run_listener_thread(
     config: HistoryConfig,
     affinity: Option<HistoryAffinity>,
     compression: Option<Arc<http::CompressionPool>>,
+    observability: Arc<observability::HistoryObservability>,
     shutdown: oneshot::Receiver<()>,
     startup: mpsc::SyncSender<Result<(), String>>,
 ) {
@@ -292,6 +323,7 @@ fn run_listener_thread(
             return;
         }
     };
+    let runtime_observability = observability.clone();
     runtime.block_on(async move {
         for _ in 0..expected_workers {
             match worker_ready_rx.recv_timeout(STARTUP_TIMEOUT) {
@@ -318,6 +350,8 @@ fn run_listener_thread(
             }
         };
         let snapshots = Arc::new(snapshot::SnapshotSlot::new(config.root));
+        snapshots.attach_observability(runtime_observability.clone());
+        runtime_observability.listener_started();
         if startup.send(Ok(())).is_err() {
             return;
         }
@@ -332,6 +366,7 @@ fn run_listener_thread(
             config.identity_header,
             snapshots,
             compression,
+            runtime_observability.clone(),
             shutdown,
         )
         .await
@@ -339,6 +374,7 @@ fn run_listener_thread(
             eprintln!("history listener stopped with error: {error}");
         }
     });
+    observability.listener_stopped();
 }
 
 fn validate_history_root(root: &std::path::Path) -> RelayResult<()> {

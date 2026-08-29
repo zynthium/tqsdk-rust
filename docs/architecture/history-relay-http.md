@@ -223,6 +223,16 @@ active generation 首次检测到运行时损坏并赢得 relay-local atomic `he
 - audit 不使用 symbol 作为 metrics label，不写入 secret；
 - request id 由可信网关 header 或 relay 生成，并在成功 audit 与错误体中保持一致。
 
+每个已接收连接恰好产生一条结构化 audit。字段固定为 request id、trusted identity、stable
+endpoint、snapshot id、symbol、series、period、range、projected field list/count、rows、所选
+response representation 的实际写出 bytes、duration、HTTP status 与 stable error code。304、
+写失败、timeout 和 client cancellation 的实际写出 bytes 为 0；未知 path 只记录 stable
+`unknown` endpoint，不记录原始 path、原始 header、secret 或内部错误字符串。
+
+market `/health` 和 `/metrics` 的既有顶层字段不变；启用 history listener 时只增加嵌套
+`history` 对象。history readiness 独立于 market readiness。metrics 只使用 endpoint、status
+class 与 stable error code 等低基数维度；不得使用 symbol、identity、snapshot id 或 range 作为 label。
+
 ### Affinity 与 gzip 的具体规则
 
 当且仅当 `TQSDK_RELAY_MARKET_CPU_SET` 与 `TQSDK_RELAY_HISTORY_CPU_SET` 都存在、非空、
