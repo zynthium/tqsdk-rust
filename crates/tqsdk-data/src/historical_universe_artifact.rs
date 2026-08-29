@@ -1,0 +1,559 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use fs2::FileExt;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::{
+    ActiveInterval, CatalogSnapshot, DataError, HistoricalCatalogProof, HistoricalUniversePlan,
+    Result,
+};
+
+pub const HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION: u32 = 1;
+pub const HISTORICAL_UNIVERSE_ARTIFACT_NAMESPACE: &str = "historical-universe-v1";
+
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// History family whose first-available boundary was independently proven.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoricalDataKind {
+    Tick,
+    Minute,
+    Daily,
+}
+
+/// Provider facts for one physical futures contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoricalAcquisitionContract {
+    pub symbol: String,
+    pub exchange_id: String,
+    pub product_id: String,
+    pub expired: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expire_datetime_ns: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authoritative_lifecycle: Vec<ActiveInterval>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub first_available_data_ns: BTreeMap<HistoricalDataKind, i64>,
+}
+
+impl HistoricalAcquisitionContract {
+    fn normalize(&mut self) -> Result<()> {
+        self.symbol = normalized("symbol", std::mem::take(&mut self.symbol))?;
+        self.exchange_id = normalized("exchange_id", std::mem::take(&mut self.exchange_id))?;
+        self.product_id = normalized("product_id", std::mem::take(&mut self.product_id))?;
+        if self.authoritative_lifecycle.is_empty() {
+            return Ok(());
+        }
+        self.authoritative_lifecycle
+            .sort_by_key(|interval| interval.start_ns);
+        for (index, interval) in self.authoritative_lifecycle.iter().enumerate() {
+            if interval.start_ns >= interval.end_ns {
+                return Err(validation(format!(
+                    "historical lifecycle for {} has an empty interval",
+                    self.symbol
+                )));
+            }
+            if index > 0 && self.authoritative_lifecycle[index - 1].end_ns > interval.start_ns {
+                return Err(validation(format!(
+                    "historical lifecycle for {} overlaps",
+                    self.symbol
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Immutable record of provider observations used to build a semantic catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoricalCatalogAcquisition {
+    pub format_version: u32,
+    pub acquisition_sha256: String,
+    pub proof: HistoricalCatalogProof,
+    pub source_identity: String,
+    pub canonical_universe: String,
+    pub requested_as_of_ns: i64,
+    pub observed_at_ns: i64,
+    pub complete: bool,
+    pub roster_before: Vec<String>,
+    pub roster_after: Vec<String>,
+    pub contracts: Vec<HistoricalAcquisitionContract>,
+}
+
+#[derive(Serialize)]
+struct HistoricalCatalogAcquisitionBody<'a> {
+    format_version: u32,
+    proof: HistoricalCatalogProof,
+    source_identity: &'a str,
+    canonical_universe: &'a str,
+    requested_as_of_ns: i64,
+    observed_at_ns: i64,
+    complete: bool,
+    roster_before: &'a [String],
+    roster_after: &'a [String],
+    contracts: &'a [HistoricalAcquisitionContract],
+}
+
+impl HistoricalCatalogAcquisition {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        proof: HistoricalCatalogProof,
+        source_identity: impl Into<String>,
+        canonical_universe: impl Into<String>,
+        requested_as_of_ns: i64,
+        observed_at_ns: i64,
+        complete: bool,
+        roster_before: Vec<String>,
+        roster_after: Vec<String>,
+        contracts: Vec<HistoricalAcquisitionContract>,
+    ) -> Result<Self> {
+        let mut acquisition = Self {
+            format_version: HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION,
+            acquisition_sha256: String::new(),
+            proof,
+            source_identity: source_identity.into(),
+            canonical_universe: canonical_universe.into(),
+            requested_as_of_ns,
+            observed_at_ns,
+            complete,
+            roster_before,
+            roster_after,
+            contracts,
+        };
+        acquisition.normalize()?;
+        acquisition.acquisition_sha256 = sha256_identity(&acquisition.body_bytes()?);
+        Ok(acquisition)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let mut normalized = self.clone();
+        let claimed = normalized.acquisition_sha256.clone();
+        normalized.acquisition_sha256.clear();
+        normalized.normalize()?;
+        if self
+            != &(Self {
+                acquisition_sha256: claimed.clone(),
+                ..normalized.clone()
+            })
+        {
+            return Err(validation(
+                "historical catalog acquisition is not canonically ordered",
+            ));
+        }
+        let expected = sha256_identity(&normalized.body_bytes()?);
+        if claimed != expected {
+            return Err(validation("historical catalog acquisition hash mismatch"));
+        }
+        Ok(())
+    }
+
+    fn normalize(&mut self) -> Result<()> {
+        if self.format_version != HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION {
+            return Err(validation(format!(
+                "unsupported historical catalog acquisition version {}",
+                self.format_version
+            )));
+        }
+        self.source_identity =
+            normalized("source_identity", std::mem::take(&mut self.source_identity))?;
+        self.canonical_universe = normalized(
+            "canonical_universe",
+            std::mem::take(&mut self.canonical_universe),
+        )?;
+        if self.requested_as_of_ns <= 0 || self.observed_at_ns <= 0 {
+            return Err(validation(
+                "historical acquisition timestamps must be positive",
+            ));
+        }
+        normalize_roster(&mut self.roster_before)?;
+        normalize_roster(&mut self.roster_after)?;
+        for contract in &mut self.contracts {
+            contract.normalize()?;
+        }
+        self.contracts
+            .sort_by(|left, right| left.symbol.cmp(&right.symbol));
+        if self
+            .contracts
+            .windows(2)
+            .any(|pair| pair[0].symbol == pair[1].symbol)
+        {
+            return Err(validation(
+                "historical catalog acquisition contains duplicate contracts",
+            ));
+        }
+        let contract_symbols = self
+            .contracts
+            .iter()
+            .map(|contract| contract.symbol.as_str())
+            .collect::<BTreeSet<_>>();
+        if self
+            .roster_before
+            .iter()
+            .chain(&self.roster_after)
+            .any(|symbol| !contract_symbols.contains(symbol.as_str()))
+        {
+            return Err(validation(
+                "historical catalog roster contains a contract without metadata",
+            ));
+        }
+        if self.complete && self.roster_before != self.roster_after {
+            return Err(validation(
+                "complete historical acquisition requires stable before/after rosters",
+            ));
+        }
+        if self.complete && self.roster_before.len() != self.contracts.len() {
+            return Err(validation(
+                "complete historical acquisition requires metadata for the full roster",
+            ));
+        }
+        if self.proof == HistoricalCatalogProof::AuthoritativeLifecycle
+            && self
+                .contracts
+                .iter()
+                .any(|contract| contract.authoritative_lifecycle.is_empty())
+        {
+            return Err(validation(
+                "authoritative historical acquisition requires every contract lifecycle",
+            ));
+        }
+        Ok(())
+    }
+
+    fn body_bytes(&self) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(&HistoricalCatalogAcquisitionBody {
+            format_version: self.format_version,
+            proof: self.proof,
+            source_identity: &self.source_identity,
+            canonical_universe: &self.canonical_universe,
+            requested_as_of_ns: self.requested_as_of_ns,
+            observed_at_ns: self.observed_at_ns,
+            complete: self.complete,
+            roster_before: &self.roster_before,
+            roster_after: &self.roster_after,
+            contracts: &self.contracts,
+        })?)
+    }
+}
+
+/// Content-addressed semantic catalog used by a strict timeline compiler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoricalSemanticCatalog {
+    pub format_version: u32,
+    pub semantic_catalog_sha256: String,
+    pub acquisition_sha256: String,
+    pub canonical_universe: String,
+    pub catalog: CatalogSnapshot,
+}
+
+#[derive(Serialize)]
+struct HistoricalSemanticCatalogBody<'a> {
+    format_version: u32,
+    acquisition_sha256: &'a str,
+    canonical_universe: &'a str,
+    catalog: &'a CatalogSnapshot,
+}
+
+impl HistoricalSemanticCatalog {
+    pub fn new(
+        acquisition: &HistoricalCatalogAcquisition,
+        canonical_universe: impl Into<String>,
+        catalog: CatalogSnapshot,
+    ) -> Result<Self> {
+        acquisition.validate()?;
+        if acquisition.proof != HistoricalCatalogProof::AuthoritativeLifecycle {
+            return Err(validation(
+                "semantic historical catalog requires authoritative lifecycle proof",
+            ));
+        }
+        let mut artifact = Self {
+            format_version: HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION,
+            semantic_catalog_sha256: String::new(),
+            acquisition_sha256: acquisition.acquisition_sha256.clone(),
+            canonical_universe: canonical_universe.into(),
+            catalog,
+        };
+        artifact.normalize()?;
+        artifact.semantic_catalog_sha256 = sha256_identity(&artifact.body_bytes()?);
+        Ok(artifact)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let mut normalized = self.clone();
+        let claimed = normalized.semantic_catalog_sha256.clone();
+        normalized.semantic_catalog_sha256.clear();
+        normalized.normalize()?;
+        if self
+            != &(Self {
+                semantic_catalog_sha256: claimed.clone(),
+                ..normalized.clone()
+            })
+        {
+            return Err(validation(
+                "historical semantic catalog is not canonically encoded",
+            ));
+        }
+        let expected = sha256_identity(&normalized.body_bytes()?);
+        if claimed != expected {
+            return Err(validation("historical semantic catalog hash mismatch"));
+        }
+        Ok(())
+    }
+
+    fn normalize(&mut self) -> Result<()> {
+        if self.format_version != HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION {
+            return Err(validation(format!(
+                "unsupported historical semantic catalog version {}",
+                self.format_version
+            )));
+        }
+        validate_sha256("acquisition_sha256", &self.acquisition_sha256)?;
+        self.canonical_universe = normalized(
+            "canonical_universe",
+            std::mem::take(&mut self.canonical_universe),
+        )?;
+        self.catalog.validate()?;
+        Ok(())
+    }
+
+    fn body_bytes(&self) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(&HistoricalSemanticCatalogBody {
+            format_version: self.format_version,
+            acquisition_sha256: &self.acquisition_sha256,
+            canonical_universe: &self.canonical_universe,
+            catalog: &self.catalog,
+        })?)
+    }
+}
+
+/// Data-owned immutable artifact reader/publisher.
+#[derive(Debug, Clone)]
+pub struct HistoricalUniverseArtifactStore {
+    cache_dir: PathBuf,
+}
+
+impl HistoricalUniverseArtifactStore {
+    /// Creates a handle without touching the filesystem. This makes dry-run callers safe.
+    pub fn new(cache_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            cache_dir: cache_dir.into(),
+        }
+    }
+
+    pub fn namespace_dir(&self) -> PathBuf {
+        self.cache_dir.join(HISTORICAL_UNIVERSE_ARTIFACT_NAMESPACE)
+    }
+
+    pub fn acquisition_path(&self, sha256: &str) -> Result<PathBuf> {
+        self.artifact_path("acquisitions", sha256)
+    }
+
+    pub fn semantic_catalog_path(&self, sha256: &str) -> Result<PathBuf> {
+        self.artifact_path("catalogs", sha256)
+    }
+
+    pub fn plan_path(&self, sha256: &str) -> Result<PathBuf> {
+        self.artifact_path("plans", sha256)
+    }
+
+    pub fn publish_acquisition(
+        &self,
+        acquisition: &HistoricalCatalogAcquisition,
+    ) -> Result<PathBuf> {
+        acquisition.validate()?;
+        self.publish(
+            "acquisitions",
+            &acquisition.acquisition_sha256,
+            &serde_json::to_vec(acquisition)?,
+        )
+    }
+
+    pub fn load_acquisition(&self, sha256: &str) -> Result<HistoricalCatalogAcquisition> {
+        let value: HistoricalCatalogAcquisition = self.load("acquisitions", sha256)?;
+        value.validate()?;
+        if value.acquisition_sha256 != sha256 {
+            return Err(validation("historical acquisition path/hash mismatch"));
+        }
+        Ok(value)
+    }
+
+    pub fn publish_semantic_catalog(&self, catalog: &HistoricalSemanticCatalog) -> Result<PathBuf> {
+        catalog.validate()?;
+        self.publish(
+            "catalogs",
+            &catalog.semantic_catalog_sha256,
+            &serde_json::to_vec(catalog)?,
+        )
+    }
+
+    pub fn load_semantic_catalog(&self, sha256: &str) -> Result<HistoricalSemanticCatalog> {
+        let value: HistoricalSemanticCatalog = self.load("catalogs", sha256)?;
+        value.validate()?;
+        if value.semantic_catalog_sha256 != sha256 {
+            return Err(validation("historical catalog path/hash mismatch"));
+        }
+        Ok(value)
+    }
+
+    pub fn publish_plan(&self, plan: &HistoricalUniversePlan) -> Result<PathBuf> {
+        plan.verify()?;
+        self.publish("plans", &plan.plan_sha256, &serde_json::to_vec(plan)?)
+    }
+
+    pub fn load_plan(&self, sha256: &str) -> Result<HistoricalUniversePlan> {
+        let value: HistoricalUniversePlan = self.load("plans", sha256)?;
+        value.verify()?;
+        if value.plan_sha256 != sha256 {
+            return Err(validation("historical universe plan path/hash mismatch"));
+        }
+        Ok(value)
+    }
+
+    fn artifact_path(&self, family: &str, sha256: &str) -> Result<PathBuf> {
+        validate_sha256("artifact sha256", sha256)?;
+        Ok(self
+            .namespace_dir()
+            .join(family)
+            .join(format!("{}.json", &sha256["sha256:".len()..])))
+    }
+
+    fn publish(&self, family: &str, sha256: &str, bytes: &[u8]) -> Result<PathBuf> {
+        let final_path = self.artifact_path(family, sha256)?;
+        let family_dir = final_path
+            .parent()
+            .ok_or_else(|| validation("historical artifact path has no parent"))?;
+        ensure_directory_without_symlink(&self.cache_dir)?;
+        ensure_directory_without_symlink(&self.namespace_dir())?;
+        ensure_directory_without_symlink(family_dir)?;
+
+        let lock_path = self.namespace_dir().join(".publish.lock");
+        reject_symlink_if_exists(&lock_path)?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        lock.lock_exclusive()?;
+        let result = publish_locked(family_dir, &final_path, bytes);
+        let unlock_result = FileExt::unlock(&lock);
+        if let Err(error) = unlock_result {
+            return Err(DataError::Io(error));
+        }
+        result?;
+        Ok(final_path)
+    }
+
+    fn load<T: for<'de> Deserialize<'de>>(&self, family: &str, sha256: &str) -> Result<T> {
+        let path = self.artifact_path(family, sha256)?;
+        reject_symlink_if_exists(&path)?;
+        let mut bytes = Vec::new();
+        File::open(path)?.read_to_end(&mut bytes)?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+}
+
+fn publish_locked(directory: &Path, final_path: &Path, bytes: &[u8]) -> Result<()> {
+    reject_symlink_if_exists(final_path)?;
+    if final_path.exists() {
+        if fs::read(final_path)? != bytes {
+            return Err(validation(
+                "historical artifact hash collision or existing corruption",
+            ));
+        }
+        return Ok(());
+    }
+
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temp_path = directory.join(format!(".publish-{}-{sequence}.tmp", std::process::id()));
+    reject_symlink_if_exists(&temp_path)?;
+    let publish_result = (|| -> Result<()> {
+        let mut temp = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)?;
+        temp.write_all(bytes)?;
+        temp.sync_all()?;
+        fs::rename(&temp_path, final_path)?;
+        File::open(directory)?.sync_all()?;
+        Ok(())
+    })();
+    if publish_result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    publish_result
+}
+
+fn ensure_directory_without_symlink(path: &Path) -> Result<()> {
+    reject_symlink_if_exists(path)?;
+    fs::create_dir_all(path)?;
+    reject_symlink_if_exists(path)?;
+    if !fs::metadata(path)?.is_dir() {
+        return Err(validation(format!(
+            "historical artifact path is not a directory: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn reject_symlink_if_exists(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(validation(format!(
+            "historical artifact path must not be a symlink: {}",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn normalize_roster(roster: &mut [String]) -> Result<()> {
+    for symbol in roster.iter_mut() {
+        *symbol = normalized("roster symbol", std::mem::take(symbol))?;
+    }
+    roster.sort();
+    if roster.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(validation(
+            "historical catalog roster contains duplicate symbols",
+        ));
+    }
+    Ok(())
+}
+
+fn normalized(field: &str, value: String) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(validation(format!("historical artifact {field} is empty")));
+    }
+    if trimmed != value {
+        return Err(validation(format!(
+            "historical artifact {field} must already be normalized"
+        )));
+    }
+    Ok(value)
+}
+
+fn validate_sha256(field: &str, value: &str) -> Result<()> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(validation(format!("{field} must use sha256 identity")));
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(validation(format!("{field} must contain 64 hex digits")));
+    }
+    Ok(())
+}
+
+fn sha256_identity(bytes: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+fn validation(message: impl Into<String>) -> DataError {
+    DataError::Validation(message.into())
+}

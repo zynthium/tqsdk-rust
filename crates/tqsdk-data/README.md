@@ -68,6 +68,12 @@ fill、进程内 single-flight、跨进程 per-series fill lease、shared cache-
 与 K 线聚合；`tqsdk-session` 仅提供 Tick/60s/native-1d
 server-history chart substrate，`tqsdk-task` 仅消费结果来安排 replay event。
 
+历史全合约/动态 membership 不复用 current universe grammar。`HistoricalFillUniverseSpec`
+接受 `physical:all` 或受限的 `timeline(...)`；前者只形成 provider-current observed 证明，后者的
+可执行 v3 plan 必须引用 authoritative lifecycle acquisition 与 semantic catalog。artifact 由
+`HistoricalUniverseArtifactStore` content-addressed 保存且加载时重验 hash；详细合同见
+[`historical-universe-catalog.md`](../../docs/architecture/historical-universe-catalog.md)。
+
 同一个 client 是 tick/minute/daily fill scheduling 的唯一 owner：默认 symbol batch size 1、concurrency 2、
 idle timeout 60 秒、无 batch timeout；batch size/concurrency 都只接受 `1..=4`。它统一产生 planning、
 batch、telemetry、terminal progress，facade 与 CLI 不再各自实现调度。

@@ -216,6 +216,9 @@ rtk cargo test -p tqsdk-cache --test cli repair_locks
 rtk cargo clippy -p tqsdk-cache --all-targets -- -D warnings
 rtk cargo clippy -p tqsdk-data --all-targets -- -D warnings
 rtk cargo test -p tqsdk-data --test universe_selector
+rtk cargo test -p tqsdk-data --test historical_fill_universe
+rtk cargo test -p tqsdk-data --test historical_universe
+rtk cargo test -p tqsdk-data --test historical_universe_artifact
 rtk cargo test -p tqsdk-task --test history_tick_replay
 rtk cargo test -p tqsdk-task --test history_backtest_replay
 rtk cargo test -p tqsdk-task --test minute_kline_aggregate

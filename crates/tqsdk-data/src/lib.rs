@@ -53,7 +53,9 @@ mod download;
 mod error;
 mod export;
 mod greeks;
+mod historical_fill_universe;
 mod historical_universe;
+mod historical_universe_artifact;
 mod history_series_cache;
 mod integrity;
 mod live_quote;
@@ -149,10 +151,19 @@ pub use download::{
 pub use error::{DataError, Result};
 pub use export::{KlineCsvExportSummary, TickCsvExportSummary};
 pub use greeks::{OptionGreeksRequest, OptionGreeksResult, OptionGreeksRow};
+pub use historical_fill_universe::{
+    HISTORICAL_FILL_UNIVERSE_CANONICALIZATION, HistoricalFillUniverseSpec,
+};
 pub use historical_universe::{
     ActiveInterval, CatalogContract, CatalogSnapshot, DerivedView, DynamicUniverseScope,
-    HistoricalUniverseFillTarget, HistoricalUniversePlan, HistoricalUniverseTimeline,
-    UniverseBudget, UniverseInstrumentId, UniverseMemberChange, UniverseTimelineBatch,
+    HistoricalCatalogProof, HistoricalUniverseFillTarget, HistoricalUniversePlan,
+    HistoricalUniversePlanV3Identity, HistoricalUniverseTimeline, UniverseBudget,
+    UniverseInstrumentId, UniverseMemberChange, UniverseTimelineBatch,
+};
+pub use historical_universe_artifact::{
+    HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION, HISTORICAL_UNIVERSE_ARTIFACT_NAMESPACE,
+    HistoricalAcquisitionContract, HistoricalCatalogAcquisition, HistoricalDataKind,
+    HistoricalSemanticCatalog, HistoricalUniverseArtifactStore,
 };
 #[allow(deprecated)]
 pub use history_series_cache::SERIES_FILE_HISTORY_SERIES_FORMAT_ID;

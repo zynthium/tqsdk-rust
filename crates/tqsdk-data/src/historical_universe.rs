@@ -292,12 +292,82 @@ impl UniverseBudget {
 }
 
 /// Reusable, identity-pinned offline preparation result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoricalCatalogProof {
+    ProviderCurrentObserved,
+    AuthoritativeLifecycle,
+}
+
+/// Identity chain required by historical universe plan v3.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoricalUniversePlanV3Identity {
+    pub canonical_universe: String,
+    pub canonicalization_identity: String,
+    pub acquisition_sha256: String,
+    pub semantic_catalog_sha256: String,
+    pub compiler_identity: String,
+    pub proof: HistoricalCatalogProof,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuous_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ranking_identity: Option<String>,
+}
+
+impl HistoricalUniversePlanV3Identity {
+    pub fn new(
+        canonical_universe: impl Into<String>,
+        canonicalization_identity: impl Into<String>,
+        acquisition_sha256: impl Into<String>,
+        semantic_catalog_sha256: impl Into<String>,
+        compiler_identity: impl Into<String>,
+        proof: HistoricalCatalogProof,
+    ) -> Result<Self> {
+        let identity = Self {
+            canonical_universe: normalized("canonical_universe", canonical_universe.into())?,
+            canonicalization_identity: normalized(
+                "canonicalization_identity",
+                canonicalization_identity.into(),
+            )?,
+            acquisition_sha256: acquisition_sha256.into(),
+            semantic_catalog_sha256: semantic_catalog_sha256.into(),
+            compiler_identity: normalized("compiler_identity", compiler_identity.into())?,
+            proof,
+            continuous_identity: None,
+            ranking_identity: None,
+        };
+        identity.validate()?;
+        Ok(identity)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        normalized("canonical_universe", self.canonical_universe.clone())?;
+        normalized(
+            "canonicalization_identity",
+            self.canonicalization_identity.clone(),
+        )?;
+        normalized("compiler_identity", self.compiler_identity.clone())?;
+        validate_sha256_identity("acquisition_sha256", &self.acquisition_sha256)?;
+        validate_sha256_identity("semantic_catalog_sha256", &self.semantic_catalog_sha256)?;
+        if let Some(identity) = &self.continuous_identity {
+            validate_sha256_identity("continuous_identity", identity)?;
+        }
+        if let Some(identity) = &self.ranking_identity {
+            validate_sha256_identity("ranking_identity", identity)?;
+        }
+        Ok(())
+    }
+}
+
+/// Reusable, identity-pinned offline preparation result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoricalUniversePlan {
     pub plan_version: u32,
     pub plan_sha256: String,
     pub timeline: HistoricalUniverseTimeline,
     pub budget: UniverseBudget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v3_identity: Option<HistoricalUniversePlanV3Identity>,
 }
 
 /// One physical history range required to warm a historical universe plan.
@@ -331,6 +401,43 @@ impl HistoricalUniverseTimeline {
             plan_sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
             timeline: self,
             budget,
+            v3_identity: None,
+        })
+    }
+
+    pub fn prepare_v3(
+        self,
+        budget: UniverseBudget,
+        identity: HistoricalUniversePlanV3Identity,
+    ) -> Result<HistoricalUniversePlan> {
+        self.validate()?;
+        identity.validate()?;
+        if identity.proof != HistoricalCatalogProof::AuthoritativeLifecycle {
+            return Err(validation(
+                "historical universe plan v3 requires authoritative lifecycle proof",
+            ));
+        }
+        let changes: usize = self.batches.iter().map(|batch| batch.changes.len()).sum();
+        if self.batches.len() > budget.max_batches {
+            return Err(validation(format!(
+                "historical universe requires {} batches, exceeding budget {}",
+                self.batches.len(),
+                budget.max_batches
+            )));
+        }
+        if changes > budget.max_changes {
+            return Err(validation(format!(
+                "historical universe requires {changes} changes, exceeding budget {}",
+                budget.max_changes
+            )));
+        }
+        let bytes = serde_json::to_vec(&(3_u32, &self, budget, &identity))?;
+        Ok(HistoricalUniversePlan {
+            plan_version: 3,
+            plan_sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+            timeline: self,
+            budget,
+            v3_identity: Some(identity),
         })
     }
 
@@ -386,6 +493,11 @@ impl HistoricalUniversePlan {
         UniverseBudget::new(self.budget.max_batches, self.budget.max_changes)?;
         let bytes = match self.plan_version {
             1 => {
+                if self.v3_identity.is_some() {
+                    return Err(validation(
+                        "historical universe plan v1 must not contain v3 identity",
+                    ));
+                }
                 if !self.timeline.physical_listing_starts.is_empty() {
                     return Err(validation(
                         "historical universe plan v1 must not contain listing starts",
@@ -398,6 +510,11 @@ impl HistoricalUniversePlan {
                 ))?
             }
             2 => {
+                if self.v3_identity.is_some() {
+                    return Err(validation(
+                        "historical universe plan v2 must not contain v3 identity",
+                    ));
+                }
                 let mut physical_adds = BTreeMap::new();
                 for batch in &self.timeline.batches {
                     for change in &batch.changes {
@@ -431,6 +548,50 @@ impl HistoricalUniversePlan {
                     }
                 }
                 serde_json::to_vec(&(2_u32, &self.timeline, self.budget))?
+            }
+            3 => {
+                let identity = self.v3_identity.as_ref().ok_or_else(|| {
+                    validation("historical universe plan v3 lacks identity chain")
+                })?;
+                identity.validate()?;
+                if identity.proof != HistoricalCatalogProof::AuthoritativeLifecycle {
+                    return Err(validation(
+                        "historical universe plan v3 requires authoritative lifecycle proof",
+                    ));
+                }
+                let mut physical_adds = BTreeMap::new();
+                for batch in &self.timeline.batches {
+                    for change in &batch.changes {
+                        if let UniverseMemberChange::Add {
+                            instrument: UniverseInstrumentId::Physical { symbol },
+                            ..
+                        } = change
+                        {
+                            physical_adds
+                                .entry(symbol.as_str())
+                                .or_insert(batch.effective_ns);
+                        }
+                    }
+                }
+                if physical_adds.len() != self.timeline.physical_listing_starts.len() {
+                    return Err(validation(
+                        "historical universe plan v3 requires starts for every physical member",
+                    ));
+                }
+                for (symbol, first_add_ns) in physical_adds {
+                    let Some(listing_start_ns) = self.timeline.physical_listing_starts.get(symbol)
+                    else {
+                        return Err(validation(format!(
+                            "historical universe plan v3 lacks listing start for {symbol}"
+                        )));
+                    };
+                    if *listing_start_ns > first_add_ns {
+                        return Err(validation(format!(
+                            "historical universe listing start follows first membership for {symbol}"
+                        )));
+                    }
+                }
+                serde_json::to_vec(&(3_u32, &self.timeline, self.budget, identity))?
             }
             version => {
                 return Err(validation(format!(
@@ -666,6 +827,16 @@ fn derived_instrument(view: DerivedView, product: &(String, String)) -> Universe
             product_id: product.1.clone(),
         },
     }
+}
+
+fn validate_sha256_identity(name: &str, value: &str) -> Result<()> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(validation(format!("{name} must use a sha256: prefix")));
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(validation(format!("{name} must contain 64 hex digits")));
+    }
+    Ok(())
 }
 
 fn normalized(name: &str, value: String) -> Result<String> {

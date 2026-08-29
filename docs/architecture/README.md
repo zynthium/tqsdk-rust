@@ -410,6 +410,7 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
 | relay 本地 CacheOnly history 架构 ADR | [history-relay.md](history-relay.md) |
 | relay history HTTP v1 wire contract | [history-relay-http.md](history-relay-http.md) |
 | history snapshot manifest / publish / lease contract | [history-snapshot-manifest.md](history-snapshot-manifest.md) |
+| 历史 universe catalog / proof / artifact contract | [historical-universe-catalog.md](historical-universe-catalog.md) |
 | 回测 tick / canonical-minute 缓存 CLI | [backtest-tick-cache-cli.md](backtest-tick-cache-cli.md) |
 | 回测 Tick 持久缓存预热、检查和严格本地回放 | [backtest-tick-cache-operations.md](backtest-tick-cache-operations.md) |
 | 未来 facade / adapter 的验收基线 | [validation.md](validation.md) |
@@ -455,6 +456,7 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
 13. [Relay 内置只读历史查询 ADR](history-relay.md)
 14. [Relay History HTTP v1 Contract](history-relay-http.md)
 15. [History Snapshot Manifest v1](history-snapshot-manifest.md)
+16. [历史 Universe Catalog 与填充合同](historical-universe-catalog.md)
 16. [验收与测试矩阵](validation.md)
 14. [wait facade](api-wait.md)
 15. [task facade](api-task.md)

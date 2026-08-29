@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 
 use tqsdk_data::{
     ActiveInterval, CatalogContract, CatalogSnapshot, DerivedView, DynamicUniverseScope,
-    UniverseBudget, UniverseInstrumentId, UniverseMemberChange,
+    HistoricalCatalogProof, HistoricalUniversePlanV3Identity, UniverseBudget, UniverseInstrumentId,
+    UniverseMemberChange,
 };
 
 fn contract(symbol: &str, start_ns: i64, end_ns: i64) -> CatalogContract {
@@ -245,6 +246,66 @@ fn v2_fill_targets_start_at_listing_and_end_at_plan_end() {
     assert_eq!(targets[0].symbol, "SHFE.au2406");
     assert_eq!(targets[0].start_ns, 10);
     assert_eq!(targets[0].end_ns, 30);
+}
+
+#[test]
+fn v3_plan_pins_authoritative_identity_without_changing_v2() {
+    let scope = DynamicUniverseScope::all();
+    let timeline = CatalogSnapshot::new(
+        "fixture-v1",
+        "calendar-sha256:abc",
+        true,
+        scope.clone(),
+        vec![contract("SHFE.au2406", 10, 20)],
+    )
+    .unwrap()
+    .compile_timeline(0, 30, scope, [])
+    .unwrap();
+    let identity = HistoricalUniversePlanV3Identity::new(
+        "timeline(active:all)",
+        "tqsdk.historical-fill-universe.v1",
+        format!("sha256:{}", "a".repeat(64)),
+        format!("sha256:{}", "b".repeat(64)),
+        "tqsdk.historical-universe.compiler.v3",
+        HistoricalCatalogProof::AuthoritativeLifecycle,
+    )
+    .unwrap();
+
+    let plan = timeline
+        .clone()
+        .prepare_v3(UniverseBudget::new(2, 2).unwrap(), identity)
+        .unwrap();
+    assert_eq!(plan.plan_version, 3);
+    plan.verify().unwrap();
+    assert!(plan.v3_identity.is_some());
+    assert_eq!(plan.physical_fill_targets().unwrap().len(), 1);
+    let mut tampered = plan.clone();
+    tampered.v3_identity.as_mut().unwrap().acquisition_sha256 =
+        format!("sha256:{}", "e".repeat(64));
+    assert!(
+        tampered
+            .verify()
+            .unwrap_err()
+            .to_string()
+            .contains("hash mismatch")
+    );
+
+    let observed_identity = HistoricalUniversePlanV3Identity::new(
+        "timeline(active:all)",
+        "tqsdk.historical-fill-universe.v1",
+        format!("sha256:{}", "c".repeat(64)),
+        format!("sha256:{}", "d".repeat(64)),
+        "tqsdk.historical-universe.compiler.v3",
+        HistoricalCatalogProof::ProviderCurrentObserved,
+    )
+    .unwrap();
+    assert!(
+        timeline
+            .prepare_v3(UniverseBudget::new(2, 2).unwrap(), observed_identity)
+            .unwrap_err()
+            .to_string()
+            .contains("authoritative lifecycle")
+    );
 }
 
 #[test]
