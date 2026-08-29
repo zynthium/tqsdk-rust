@@ -43,7 +43,7 @@ fixed header 与 embedded logical symbol；daily `doctor` 完整解码每个文�
 `metadata-refresh` 不使用 cache family，保留默认 `--kind tick` 且只支持 `--market futures`。它接受一个
 logical symbol 和 RFC 3339 半开窗口，显式以 `BacktestHistoryMaintenanceClient` 调用官方 metadata source。
 CLI 在 exclusive root remote-fill gate 内写入 immutable snapshot；它不写 Tick/Minute rows，也不放宽
-`CacheOnly` 的 metadata coverage 校验。显式维护成功后原子推进 active pointer；旧 immutable snapshot
+`CacheOnly` 的 metadata coverage 校验。具体物理合约的 native daily 请求不依赖 session 或物理映射，因此会忽略覆盖较窄的 retained sidecar；`KQ.*@` 合成标的、tick 与 canonical-minute 仍按完整 metadata fail-closed。显式维护成功后原子推进 active pointer；旧 immutable snapshot
 继续按 content hash 保留，供已绑定旧 cache partition 的 reader 使用。
 
 `query` 不使用 `--kind`：它以 `--series tick|kline` 表达所需 rows，并可同时读取 Tick 与

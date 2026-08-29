@@ -39,7 +39,7 @@ header 与 embedded logical symbol，`doctor` 完整解码 `.tqdk` 并校验 che
 同时包含三类缓存。
 `metadata-refresh` 不属于 cache family；保留默认 `--kind tick`，只支持 `--market futures`。
 它显式调用官方 metadata source，在 exclusive root remote-fill lock 内保存 immutable sidecar；不会改写
-`.tqbn` 或 minute 文件。新 snapshot 覆盖请求窗口即可供 `CacheOnly` 解析；若已有更宽、兼容的 active
+`.tqbn` 或 minute 文件。新 snapshot 覆盖请求窗口即可供 `CacheOnly` 解析；具体物理合约的 native daily fill 会忽略覆盖较窄的 retained sidecar，`KQ.*@`/tick/minute 仍要求完整 metadata。若已有更宽、兼容的 active
 snapshot，显式维护仍原子推进 active pointer；旧 snapshot 按 content hash 保留，可供已绑定旧 cache
 partition 的 reader 使用。
 

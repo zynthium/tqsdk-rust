@@ -847,10 +847,13 @@ async fn plan_request_for_execution(
     let requested_range = (request.start_ns, request.end_ns);
     let active_metadata = BacktestHistoryMetadataCache::open_read_only(config.cache_dir.as_path())
         .load_active(request.symbol.as_str())?;
-    let selected_metadata = if matches!(
-        classify_request(&request)?,
-        PlannedBaseSource::CanonicalMinute
-    ) {
+    let base_source = classify_request(&request)?;
+    let is_synthetic_symbol = request.symbol.starts_with("KQ.");
+    let requires_metadata =
+        !matches!(base_source, PlannedBaseSource::CanonicalDaily) || is_synthetic_symbol;
+    let selected_metadata = if !requires_metadata {
+        None
+    } else if matches!(base_source, PlannedBaseSource::CanonicalMinute) {
         resolve_minute_cache_metadata_snapshot(
             config.cache_dir.as_path(),
             request.symbol.as_str(),
@@ -863,10 +866,9 @@ async fn plan_request_for_execution(
     let metadata_needs_refresh = selected_metadata
         .as_ref()
         .is_some_and(|snapshot| !metadata_snapshot_covers_range(snapshot, requested_range));
-    let is_main_continuous = request.symbol.starts_with("KQ.m@");
-
-    if config.policy == BacktestHistoryPolicy::RemoteOnMiss
-        && (metadata_needs_refresh || (is_main_continuous && active_metadata.is_none()))
+    if requires_metadata
+        && config.policy == BacktestHistoryPolicy::RemoteOnMiss
+        && (metadata_needs_refresh || (is_synthetic_symbol && active_metadata.is_none()))
     {
         ensure_metadata_for_remote_miss(
             config.cache_dir.as_path(),
@@ -880,7 +882,10 @@ async fn plan_request_for_execution(
     }
 
     let fallback_plan = plan_request(config.cache_dir.as_path(), request.clone())?;
-    if config.policy != BacktestHistoryPolicy::RemoteOnMiss || active_metadata.is_some() {
+    if !requires_metadata
+        || config.policy != BacktestHistoryPolicy::RemoteOnMiss
+        || active_metadata.is_some()
+    {
         return Ok(fallback_plan);
     }
 

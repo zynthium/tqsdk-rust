@@ -127,6 +127,12 @@ pub(crate) fn plan_request(
             )?
         }
     };
+    // A native daily request for a concrete symbol uses a single server-side
+    // series, so its retained sidecar only binds existing cache partitions; it
+    // does not limit the downloadable range. Synthetic KQ.*@ symbols still
+    // require their persisted dated mapping.
+    let is_physical_native_daily = matches!(base_source, PlannedBaseSource::CanonicalDaily)
+        && !request.symbol.starts_with("KQ.");
     if request.symbol.starts_with("KQ.m@") && metadata.is_none() {
         return Err(DataError::InvalidState(
             "KQ.m backtest history requires a persisted metadata sidecar",
@@ -177,10 +183,12 @@ pub(crate) fn plan_request(
             )
         }
     };
-    if !segments_cover_range(
-        physical_segments.as_slice(),
-        (request.start_ns, effective_end_ns),
-    ) {
+    if !is_physical_native_daily
+        && !segments_cover_range(
+            physical_segments.as_slice(),
+            (request.start_ns, effective_end_ns),
+        )
+    {
         return Err(DataError::InvalidState(
             "backtest history metadata does not cover the requested range",
         ));
@@ -695,6 +703,51 @@ mod tests {
         .unwrap();
 
         assert_eq!(plan.snapshot_hash, retained.snapshot_hash);
+    }
+
+    #[test]
+    fn daily_physical_plan_ignores_a_narrow_metadata_sidecar() {
+        let root = temp_dir("daily-physical-narrow-metadata");
+        let symbol = "CFFEX.T2609";
+        let requested_start_ns = utc_ns(2020, 1, 1, 0, 0, 0);
+        let requested_end_ns = utc_ns(2026, 8, 20, 0, 0, 0);
+        let retained = BacktestHistoryMetadataCache::open(&root)
+            .unwrap()
+            .store_snapshot(BacktestHistoryMetadataSnapshot {
+                schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+                market_kind: BacktestHistoryMarketKind::Futures,
+                logical_symbol: symbol.to_string(),
+                captured_at_ns: requested_end_ns,
+                trading_days: vec![trading_day("2026-08-17", true, requested_end_ns)],
+                session: KlineSessionTemplate::cst_trading_day(),
+                physical_segments: vec![BacktestHistoryPhysicalSegment {
+                    physical_symbol: symbol.to_string(),
+                    start_ns: utc_ns(2026, 8, 1, 0, 0, 0),
+                    end_ns: requested_end_ns,
+                }],
+                snapshot_hash: String::new(),
+            })
+            .unwrap();
+
+        let plan = plan_request(
+            &root,
+            BacktestHistoryRequest::kline(
+                1,
+                symbol,
+                Duration::from_secs(24 * 60 * 60),
+                requested_start_ns,
+                requested_end_ns,
+            )
+            .validate()
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(plan.snapshot_hash, retained.snapshot_hash);
+        assert_eq!(
+            plan.source_slices[0].range,
+            (requested_start_ns, requested_end_ns)
+        );
     }
 
     #[test]
