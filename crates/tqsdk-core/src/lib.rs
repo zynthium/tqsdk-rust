@@ -66,7 +66,8 @@ pub use domain_event::{DomainEvent, MarketEvent, TradeEvent, collect_domain_even
 pub use error::{ContractError, ContractErrorKind, Result, RetryHint};
 pub use events::{
     AuthEvent, FieldMutation, InputPayload, InternalEvent, IoEvent, MutationSource,
-    NormalizedMutation, ReplayEvent, RuntimeInput, TimerEvent,
+    NormalizedMutation, ReplayEvent, ReplayUniverseBatch, ReplayUniverseChange, RuntimeInput,
+    TimerEvent,
 };
 pub use ids::{
     AccountId, AuthId, ChartId, CommandId, CursorId, NotificationId, OrderId, ProtocolDomain,

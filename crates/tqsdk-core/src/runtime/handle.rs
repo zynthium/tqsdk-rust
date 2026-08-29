@@ -328,6 +328,52 @@ impl RuntimeHandle {
         self.record_mutations(mutations, vec![ProtocolDomain::Market], caused_by, scope)
     }
 
+    /// Record an already-normalized local replay step.
+    ///
+    /// The only accepted sources are `MarketDiff` and `ReplayStep`, allowing a
+    /// task-level historical-universe transition and the accompanying market
+    /// mutations to advance one shared revision without widening ordinary
+    /// market ingestion.
+    #[doc(hidden)]
+    pub fn ingest_presorted_replay_step_mutations<I>(
+        &self,
+        mutations: I,
+        caused_by: Vec<CommandId>,
+        scope: CommitScope,
+    ) -> Result<Option<SharedCommitResult>>
+    where
+        I: IntoIterator<Item = NormalizedMutation>,
+    {
+        let mutations = mutations.into_iter().collect::<Vec<_>>();
+        if mutations.is_empty() {
+            return Ok(None);
+        }
+        if mutations.iter().any(|mutation| {
+            !matches!(
+                mutation.source,
+                MutationSource::MarketDiff | MutationSource::ReplayStep
+            )
+        }) {
+            return Err(ContractError::validation(
+                "presorted replay-step mutations must use MarketDiff or ReplayStep source",
+            ));
+        }
+        let mut domains = Vec::with_capacity(2);
+        if mutations
+            .iter()
+            .any(|mutation| mutation.source == MutationSource::ReplayStep)
+        {
+            domains.push(ProtocolDomain::Replay);
+        }
+        if mutations
+            .iter()
+            .any(|mutation| mutation.source == MutationSource::MarketDiff)
+        {
+            domains.push(ProtocolDomain::Market);
+        }
+        self.record_mutations(mutations, domains, caused_by, scope)
+    }
+
     fn ingest_market_quote_fields_inner<I>(
         &self,
         quotes: I,
