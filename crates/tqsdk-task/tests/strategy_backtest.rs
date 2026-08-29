@@ -1,5 +1,6 @@
 use chrono::NaiveDate;
-use tqsdk_core::{Kline, Quote, Symbol, Tick};
+use tqsdk_core::{Kline, Quote, Runtime, Symbol, Tick};
+use tqsdk_data::{ActiveInterval, CatalogContract, CatalogSnapshot, DynamicUniverseScope};
 use tqsdk_session::{InstrumentClass, InstrumentSpec};
 use tqsdk_task::TaskError;
 use tqsdk_task::backtest::{StrategyBacktest, StrategyBacktestDailyReturnWindow};
@@ -113,6 +114,51 @@ async fn strategy_backtest_tracks_symbols_from_replay_without_quote_preset() {
     let final_position = &summary.final_positions()[0];
     assert_eq!(final_position.exchange_id, "SHFE");
     assert_eq!(final_position.instrument_id, "rb2501");
+}
+
+#[tokio::test]
+async fn strategy_backtest_commits_historical_universe_with_same_timestamp_market_data() {
+    let scope = DynamicUniverseScope::all();
+    let catalog = CatalogSnapshot::new(
+        "fixture-catalog",
+        "calendar:fixture",
+        true,
+        scope.clone(),
+        vec![
+            CatalogContract::new(
+                "SHFE.rb2501",
+                "SHFE",
+                "rb",
+                vec![ActiveInterval::new(1_000, 2_000).unwrap()],
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let timeline = catalog.compile_timeline(1_000, 2_000, scope, []).unwrap();
+    let replay =
+        ReplayMarketSource::new(vec![quote_event("SHFE.rb2501", 1_000, 100.0, 10, 99.0, 8)]);
+    let mut backtest = StrategyBacktest::builder(replay)
+        .historical_universe(timeline)
+        .build()
+        .await
+        .unwrap();
+
+    let ctx = backtest.next().await.unwrap().unwrap();
+    let snapshot = ctx.task_host().api().session().handle().latest_snapshot();
+    assert_eq!(
+        snapshot.get([
+            "replay",
+            "local-backtest-universe",
+            "universe",
+            "effective_ns",
+        ]),
+        Some(&serde_json::json!(1_000))
+    );
+    assert_eq!(
+        snapshot.get(["quotes", "SHFE.rb2501", "last_price"]),
+        Some(&serde_json::json!(100.0))
+    );
 }
 
 #[tokio::test]

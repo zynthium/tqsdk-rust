@@ -1,10 +1,14 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::time::Duration;
 
 use serde_json::{Number, Value};
-use tqsdk_core::{FieldMutation, Kline, NormalizedMutation, Quote, Tick};
+use tqsdk_core::{
+    FieldMutation, Kline, NormalizedMutation, Quote, ReplaySessionId, ReplayUniverseBatch,
+    ReplayUniverseChange, Tick,
+};
+use tqsdk_data::{HistoricalUniverseTimeline, UniverseMemberChange, UniverseTimelineBatch};
 
 use crate::backtest_stream::{BacktestMarketStream, ReplayMarketStream};
 use crate::replay::{ReplayMarketEvent, ReplayMarketPayload, ReplayMarketSource, ReplayStepMeta};
@@ -39,6 +43,7 @@ pub struct StrategyBacktestBuilder {
     ticks: Vec<ReplayTickSpec>,
     price_ticks: HashMap<String, f64>,
     default_price_tick: Option<f64>,
+    historical_universe: Option<HistoricalUniverseTimeline>,
 }
 
 /// Local Python-compatible strategy backtest host.
@@ -55,6 +60,8 @@ pub struct StrategyBacktest {
     tick_subscriptions: HashMap<String, BacktestTickSubscription>,
     default_price_tick: Option<f64>,
     summary: StrategyBacktestSummary,
+    universe_batches: VecDeque<UniverseTimelineBatch>,
+    universe_session_id: ReplaySessionId,
 }
 
 /// Metadata for the market event that produced a backtest context.
@@ -79,6 +86,7 @@ pub struct StrategyBacktestContext<'a> {
 #[derive(Debug, Default)]
 struct ReplayStepBatch {
     market_mutations: Vec<NormalizedMutation>,
+    replay_mutations: Vec<NormalizedMutation>,
     latest_quotes: Vec<(String, ReplayStepQuote)>,
     sim_report: TqSimStepReport,
 }
@@ -125,6 +133,7 @@ impl StrategyBacktest {
         };
         let event_time_ns = event.event_time_ns();
         let mut batch = ReplayStepBatch::default();
+        self.ingest_universe_batches_at(event_time_ns, &mut batch)?;
         self.ingest_replay_event(&event, &mut batch)?;
         let backtest_event = StrategyBacktestEvent::from_replay_event(event);
 
@@ -218,6 +227,7 @@ impl StrategyBacktest {
     fn ingest_replay_batch(&mut self, batch: ReplayStepBatch) -> Result<TqSimStepReport> {
         let ReplayStepBatch {
             market_mutations,
+            replay_mutations,
             latest_quotes,
             sim_report,
         } = batch;
@@ -225,6 +235,7 @@ impl StrategyBacktest {
         ingest_presorted_replay_market_mutations(
             self.strategy.task_host(),
             market_mutations,
+            replay_mutations,
             quote_fields,
         )?;
         self.sim
@@ -248,6 +259,62 @@ impl StrategyBacktest {
                 }
             })
             .collect()
+    }
+
+    fn ingest_universe_batches_at(
+        &mut self,
+        event_time_ns: i64,
+        batch: &mut ReplayStepBatch,
+    ) -> Result<()> {
+        if self
+            .universe_batches
+            .front()
+            .is_some_and(|universe| universe.effective_ns < event_time_ns)
+        {
+            return Err(TaskError::InvalidState(
+                "historical universe transition has no market event at its effective timestamp",
+            ));
+        }
+        while self
+            .universe_batches
+            .front()
+            .is_some_and(|universe| universe.effective_ns == event_time_ns)
+        {
+            let universe = self
+                .universe_batches
+                .pop_front()
+                .expect("front was checked above");
+            let changes = universe
+                .changes
+                .into_iter()
+                .map(|change| match change {
+                    UniverseMemberChange::Add {
+                        instrument,
+                        provenance,
+                    } => ReplayUniverseChange {
+                        instrument: instrument.symbol(),
+                        active: true,
+                        readiness: None,
+                        provenance: Some(provenance),
+                    },
+                    UniverseMemberChange::Remove { instrument } => ReplayUniverseChange {
+                        instrument: instrument.symbol(),
+                        active: false,
+                        readiness: None,
+                        provenance: None,
+                    },
+                })
+                .collect();
+            batch.replay_mutations.push(
+                ReplayUniverseBatch {
+                    session_id: self.universe_session_id.clone(),
+                    effective_ns: universe.effective_ns,
+                    changes,
+                }
+                .into_normalized_mutation(),
+            );
+        }
+        Ok(())
     }
 
     fn record_summary_step(&mut self, event_time_ns: i64, sim_report: &TqSimStepReport) {
@@ -359,6 +426,7 @@ impl StrategyBacktestBuilder {
             ticks: Vec::new(),
             price_ticks: HashMap::new(),
             default_price_tick: None,
+            historical_universe: None,
         }
     }
 
@@ -371,6 +439,13 @@ impl StrategyBacktestBuilder {
     #[must_use]
     pub fn sim(mut self, sim: TqSim) -> Self {
         self.sim = sim;
+        self
+    }
+
+    /// Attach a pinned historical membership timeline to this local backtest.
+    #[must_use]
+    pub fn historical_universe(mut self, timeline: HistoricalUniverseTimeline) -> Self {
+        self.historical_universe = Some(timeline);
         self
     }
 
@@ -456,6 +531,7 @@ impl StrategyBacktestBuilder {
             ticks,
             price_ticks,
             default_price_tick,
+            historical_universe,
         } = self;
         validate_price_ticks(&price_ticks)?;
         validate_default_price_tick(default_price_tick)?;
@@ -508,6 +584,10 @@ impl StrategyBacktestBuilder {
             tick_subscriptions,
             default_price_tick,
             summary,
+            universe_batches: historical_universe
+                .map(|timeline| timeline.batches.into())
+                .unwrap_or_default(),
+            universe_session_id: ReplaySessionId::new("local-backtest-universe"),
         })
     }
 }

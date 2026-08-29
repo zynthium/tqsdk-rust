@@ -156,17 +156,29 @@ pub(crate) fn backtest_market_mutations(
 pub(crate) fn ingest_presorted_replay_market_mutations(
     host: &TaskHost,
     mut market_mutations: Vec<NormalizedMutation>,
+    mut replay_mutations: Vec<NormalizedMutation>,
     quote_fields: Vec<(String, Vec<FieldMutation>)>,
 ) -> Result<()> {
     market_mutations.extend(quote_field_mutations(quote_fields));
-    if market_mutations.is_empty() {
+    if market_mutations.is_empty() && replay_mutations.is_empty() {
         return Ok(());
     }
 
-    host.api()
-        .session()
-        .handle()
-        .ingest_presorted_market_mutations(market_mutations, vec![], CommitScope::ReplayStep)?;
+    let handle = host.api().session().handle();
+    if replay_mutations.is_empty() {
+        handle.ingest_presorted_market_mutations(
+            market_mutations,
+            vec![],
+            CommitScope::ReplayStep,
+        )?;
+    } else {
+        replay_mutations.extend(market_mutations);
+        handle.ingest_presorted_replay_step_mutations(
+            replay_mutations,
+            vec![],
+            CommitScope::ReplayStep,
+        )?;
+    }
     Ok(())
 }
 
