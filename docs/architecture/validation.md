@@ -126,6 +126,8 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | publisher role-aware clone/import、prewarm、strict inspect + real query smoke、publish crash/recover、rollback/scrub、tombstone/lease-aware GC | `crates/tqsdk-cache/tests/snapshot_cli.rs` |
 | HTTP grammar、JSON、error、ETag、gzip、limits/cancel | `crates/tqsdk-relay/tests/history_http.rs` |
 | dedicated runtime、market-lock isolation、reload、generation health | `crates/tqsdk-relay/tests/history_runtime.rs` |
+| readiness/reload/query/buffer/compression metrics、单条结构化 audit | `crates/tqsdk-relay/src/history/observability.rs`、`crates/tqsdk-relay/src/metrics_http_impl.rs` 单元测试 |
+| market send-to-downstream p99、顺序/无丢失、gzip/fallback 证据 | `crates/tqsdk-relay/tests/history_isolation_gate.rs` ignored same-spec candidate gate |
 
 还必须验证 `cargo check -p tqsdk-relay --no-default-features` 和
 `cargo check -p tqsdk-relay --no-default-features --features history`，证明 history 只传播本地
@@ -133,6 +135,15 @@ reader feature。生产同规格干扰门要求 8 并发 history、512 MiB budge
 无丢失/乱序/异常断连，market p99 增量不超过 `max(1 ms, 10%)`。完整合同见
 [history-relay.md](history-relay.md)、[history-relay-http.md](history-relay-http.md) 与
 [history-snapshot-manifest.md](history-snapshot-manifest.md)。
+
+本地 candidate gate 必须显式提供两组可用且互斥的 CPU set；测试输出是候选机证据，不得代替
+生产同规格门槛结论：
+
+```bash
+TQSDK_RELAY_ISOLATION_GATE_MARKET_CPU_SET=<market-cpus> \
+TQSDK_RELAY_ISOLATION_GATE_HISTORY_CPU_SET=<history-cpus> \
+cargo test -p tqsdk-relay --test history_isolation_gate -- --ignored --nocapture
+```
 
 修改 relay dashboard、dashboard UI 或 symbol telemetry 时，补充运行：
 
