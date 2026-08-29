@@ -10,9 +10,10 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use tokio::sync::{Mutex, oneshot};
-use tqsdk_data::BacktestHistorySnapshot;
+use tqsdk_data::{BacktestHistorySnapshot, BacktestHistorySnapshotError};
 use tqsdk_relay::{RelayError, RelayResult};
 
+use super::affinity::HistoryAffinity;
 use super::observability::HistoryObservability;
 
 const RELOAD_INTERVAL: Duration = Duration::from_secs(5);
@@ -71,24 +72,42 @@ impl Deref for PinnedSnapshot {
 ///
 /// The history root is validated as absolute before the history runtime starts.
 /// A failed reload deliberately leaves the previous immutable [`Arc`] intact.
-#[derive(Debug)]
 pub(super) struct SnapshotSlot {
     root: PathBuf,
+    affinity: Option<HistoryAffinity>,
     snapshot: RwLock<Option<PinnedSnapshot>>,
     observability: RwLock<Option<Arc<HistoryObservability>>>,
     reload_gate: Mutex<()>,
+    #[cfg(test)]
+    test_worker_binder: Option<SnapshotWorkerBinder>,
 }
 
 impl SnapshotSlot {
+    #[cfg(test)]
     #[must_use]
     pub(super) fn new(root: PathBuf) -> Self {
+        Self::new_with_affinity(root, None)
+    }
+
+    #[must_use]
+    pub(super) fn new_with_affinity(root: PathBuf, affinity: Option<HistoryAffinity>) -> Self {
         assert!(root.is_absolute(), "history snapshot root must be absolute");
         Self {
             root,
+            affinity,
             snapshot: RwLock::new(None),
             observability: RwLock::new(None),
             reload_gate: Mutex::new(()),
+            #[cfg(test)]
+            test_worker_binder: None,
         }
+    }
+
+    #[cfg(test)]
+    fn new_with_test_worker_binder(root: PathBuf, binder: SnapshotWorkerBinder) -> Self {
+        let mut slot = Self::new(root);
+        slot.test_worker_binder = Some(binder);
+        slot
     }
 
     /// Returns a lease-pinning clone of the currently loaded generation.
@@ -124,21 +143,48 @@ impl SnapshotSlot {
         }
         let _reload_guard = self.reload_gate.lock().await;
         let root = self.root.clone();
-        let opened = tokio::task::spawn_blocking(move || BacktestHistorySnapshot::open(root))
-            .await
-            .map_err(|error| {
+        let affinity = self.affinity.clone();
+        #[cfg(test)]
+        let test_worker_binder = self.test_worker_binder.clone();
+        let opened = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(binder) = test_worker_binder {
+                binder().map_err(SnapshotWorkerError::Affinity)?;
+            } else if let Some(affinity) = affinity {
+                affinity
+                    .bind_current()
+                    .map_err(SnapshotWorkerError::Affinity)?;
+            }
+            #[cfg(not(test))]
+            if let Some(affinity) = affinity {
+                affinity
+                    .bind_current()
+                    .map_err(SnapshotWorkerError::Affinity)?;
+            }
+            BacktestHistorySnapshot::open(root).map_err(SnapshotWorkerError::Open)
+        })
+        .await
+        .map_err(|error| {
+            if let Some(observability) = &observability {
+                observability.note_reload_failure("snapshot_worker_failed");
+            }
+            RelayError::Internal(format!("history snapshot reload task failed: {error}"))
+        })?
+        .map(Arc::new)
+        .map_err(|error| match error {
+            SnapshotWorkerError::Affinity(error) => {
                 if let Some(observability) = &observability {
-                    observability.note_reload_failure("snapshot_worker_failed");
+                    observability.note_reload_failure("snapshot_affinity_failed");
                 }
-                RelayError::Internal(format!("history snapshot reload task failed: {error}"))
-            })?
-            .map(Arc::new)
-            .map_err(|error| {
+                error
+            }
+            SnapshotWorkerError::Open(error) => {
                 if let Some(observability) = &observability {
                     observability.note_reload_failure("snapshot_open_failed");
                 }
                 RelayError::Transport(format!("history snapshot reload failed: {error}"))
-            })?;
+            }
+        })?;
 
         let mut current = self
             .snapshot
@@ -182,15 +228,34 @@ impl SnapshotSlot {
     }
 }
 
+impl std::fmt::Debug for SnapshotSlot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SnapshotSlot")
+            .field("root", &self.root)
+            .field("affinity", &self.affinity)
+            .finish_non_exhaustive()
+    }
+}
+
+enum SnapshotWorkerError {
+    Affinity(RelayError),
+    Open(BacktestHistorySnapshotError),
+}
+
+#[cfg(test)]
+type SnapshotWorkerBinder = Arc<dyn Fn() -> RelayResult<()> + Send + Sync>;
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use chrono::{DateTime, Utc};
     use tqsdk_data::BacktestHistorySnapshotManifestBuilder;
+    use tqsdk_relay::RelayError;
 
     use super::SnapshotSlot;
     use crate::history::observability::{HistoryObservability, MemoryAuditSink};
@@ -276,6 +341,54 @@ mod tests {
         assert!(observability.snapshot().ready);
         assert!(second.mark_corrupt());
         assert!(!second.mark_corrupt());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reload_worker_binding_failure_preserves_last_good_generation() {
+        let root = temp_root("reload-worker-affinity");
+        std::fs::create_dir_all(&root).unwrap();
+        let first_id = publish_empty_generation(&root, "2026-08-29T00:00:00Z");
+        let permits_binding = Arc::new(AtomicBool::new(true));
+        let binding_calls = Arc::new(AtomicUsize::new(0));
+        let binder_permitted = Arc::clone(&permits_binding);
+        let binder_calls = Arc::clone(&binding_calls);
+        let slot = SnapshotSlot::new_with_test_worker_binder(
+            root.clone(),
+            Arc::new(move || {
+                binder_calls.fetch_add(1, Ordering::AcqRel);
+                if binder_permitted.load(Ordering::Acquire) {
+                    Ok(())
+                } else {
+                    Err(RelayError::invalid_config(
+                        "test history worker affinity failure",
+                    ))
+                }
+            }),
+        );
+        let observability = Arc::new(HistoryObservability::with_audit(
+            false,
+            Arc::new(MemoryAuditSink::default()),
+        ));
+        observability.listener_started();
+        slot.attach_observability(observability.clone());
+
+        assert_eq!(slot.reload().await.unwrap().snapshot_id(), first_id);
+        let replacement_id = publish_empty_generation(&root, "2026-08-29T00:00:01Z");
+        permits_binding.store(false, Ordering::Release);
+
+        assert!(matches!(
+            slot.reload().await,
+            Err(RelayError::InvalidConfig(_))
+        ));
+        assert_eq!(binding_calls.load(Ordering::Acquire), 2);
+        assert_eq!(slot.current().unwrap().snapshot_id(), first_id);
+        assert_ne!(slot.current().unwrap().snapshot_id(), replacement_id);
+        let snapshot = observability.snapshot();
+        assert!(snapshot.ready);
+        assert!(snapshot.degraded);
+        assert_eq!(snapshot.reload_last_code, "snapshot_affinity_failed");
 
         std::fs::remove_dir_all(root).unwrap();
     }

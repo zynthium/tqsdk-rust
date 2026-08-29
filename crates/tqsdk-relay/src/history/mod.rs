@@ -349,7 +349,10 @@ fn run_listener_thread(
                 return;
             }
         };
-        let snapshots = Arc::new(snapshot::SnapshotSlot::new(config.root));
+        let snapshots = Arc::new(snapshot::SnapshotSlot::new_with_affinity(
+            config.root,
+            affinity,
+        ));
         snapshots.attach_observability(runtime_observability.clone());
         runtime_observability.listener_started();
         if startup.send(Ok(())).is_err() {
