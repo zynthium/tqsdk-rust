@@ -414,6 +414,41 @@ impl HistoricalUniverseArtifactStore {
         Ok(value)
     }
 
+    /// Verifies the complete content-addressed identity chain for an executable plan.
+    /// Legacy v1/v2 plans have no external chain and retain their original verification.
+    pub fn verify_plan_artifact_chain(&self, plan: &HistoricalUniversePlan) -> Result<()> {
+        plan.verify()?;
+        if plan.plan_version < 3 {
+            return Ok(());
+        }
+        let identity = plan.v3_identity.as_ref().ok_or_else(|| {
+            validation("historical universe plan v3 lacks artifact identity chain")
+        })?;
+        let acquisition = self.load_acquisition(&identity.acquisition_sha256)?;
+        let semantic = self.load_semantic_catalog(&identity.semantic_catalog_sha256)?;
+        if acquisition.proof != HistoricalCatalogProof::AuthoritativeLifecycle
+            || acquisition.proof != identity.proof
+        {
+            return Err(validation(
+                "historical universe plan proof does not match authoritative acquisition",
+            ));
+        }
+        if semantic.acquisition_sha256 != acquisition.acquisition_sha256 {
+            return Err(validation(
+                "historical universe semantic catalog acquisition link is broken",
+            ));
+        }
+        if plan.timeline.catalog_id != semantic.catalog.catalog_id
+            || plan.timeline.catalog_sha256 != semantic.catalog.content_sha256()
+            || plan.timeline.calendar_identity != semantic.catalog.calendar_identity
+        {
+            return Err(validation(
+                "historical universe plan timeline does not match its semantic catalog",
+            ));
+        }
+        Ok(())
+    }
+
     fn artifact_path(&self, family: &str, sha256: &str) -> Result<PathBuf> {
         validate_sha256("artifact sha256", sha256)?;
         Ok(self

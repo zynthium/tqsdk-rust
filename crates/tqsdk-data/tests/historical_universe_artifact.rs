@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use tqsdk_data::{
     ActiveInterval, CatalogContract, CatalogSnapshot, HistoricalAcquisitionContract,
     HistoricalCatalogAcquisition, HistoricalCatalogProof, HistoricalDataKind,
-    HistoricalSemanticCatalog, HistoricalUniverseArtifactStore,
+    HistoricalSemanticCatalog, HistoricalUniverseArtifactStore, HistoricalUniversePlanV3Identity,
+    UniverseBudget,
 };
 
 fn contract(symbol: &str, start_ns: i64, end_ns: i64) -> HistoricalAcquisitionContract {
@@ -191,5 +192,66 @@ fn content_addressed_store_round_trips_and_rejects_collision() {
             .to_string()
             .contains("collision")
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn v3_plan_chain_requires_present_and_matching_authoritative_artifacts() {
+    let root = std::env::temp_dir().join(format!("tqsdk-historical-chain-{}", std::process::id()));
+    if root.exists() {
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    let acquisition = acquisition(HistoricalCatalogProof::AuthoritativeLifecycle);
+    let snapshot = CatalogSnapshot::new(
+        "fixture-v3",
+        "calendar:fixture-v3",
+        true,
+        tqsdk_data::DynamicUniverseScope::all(),
+        vec![
+            CatalogContract::new(
+                "SHFE.au2404",
+                "SHFE",
+                "au",
+                vec![ActiveInterval::new(100, 400).unwrap()],
+            )
+            .unwrap(),
+            CatalogContract::new(
+                "SHFE.au2406",
+                "SHFE",
+                "au",
+                vec![ActiveInterval::new(200, 500).unwrap()],
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let semantic =
+        HistoricalSemanticCatalog::new(&acquisition, "timeline(active:all)", snapshot.clone())
+            .unwrap();
+    let identity = HistoricalUniversePlanV3Identity::new(
+        "timeline(active:all)",
+        "tqsdk.historical-fill-universe.v1",
+        acquisition.acquisition_sha256.clone(),
+        semantic.semantic_catalog_sha256.clone(),
+        "fixture-compiler:v1",
+        HistoricalCatalogProof::AuthoritativeLifecycle,
+    )
+    .unwrap();
+    let plan = snapshot
+        .compile_timeline(100, 500, tqsdk_data::DynamicUniverseScope::all(), [])
+        .unwrap()
+        .prepare_v3(UniverseBudget::new(8, 16).unwrap(), identity)
+        .unwrap();
+    let store = HistoricalUniverseArtifactStore::new(&root);
+    assert!(store.verify_plan_artifact_chain(&plan).is_err());
+    store.publish_acquisition(&acquisition).unwrap();
+    assert!(store.verify_plan_artifact_chain(&plan).is_err());
+    store.publish_semantic_catalog(&semantic).unwrap();
+    store.verify_plan_artifact_chain(&plan).unwrap();
+
+    let mut mismatched = plan.clone();
+    mismatched.timeline.catalog_id = "unrelated".to_string();
+    mismatched.plan_sha256 = String::new();
+    assert!(store.verify_plan_artifact_chain(&mismatched).is_err());
     std::fs::remove_dir_all(root).unwrap();
 }

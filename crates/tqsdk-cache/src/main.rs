@@ -1670,6 +1670,11 @@ async fn fill_historical_universe_plan(
     args: FillArgs,
     plan_path: PathBuf,
 ) -> Result<CommandOutcome, CliError> {
+    let preflight_plan: tqsdk_data::HistoricalUniversePlan =
+        serde_json::from_slice(&fs::read(&plan_path)?)?;
+    let (_, preflight_cache_dir) = open_read_only_cache(cache_dir)?;
+    tqsdk_data::HistoricalUniverseArtifactStore::new(preflight_cache_dir)
+        .verify_plan_artifact_chain(&preflight_plan)?;
     // Tick keeps its facade warmup adapter because it validates the existing tick coverage
     // markers directly; minute/daily share the BacktestHistoryClient adapter below.
     if matches!(kind, CacheKind::Tick) {
