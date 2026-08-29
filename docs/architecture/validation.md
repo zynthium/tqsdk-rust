@@ -600,3 +600,9 @@ cargo test -p tqsdk-session instrument_spec_normalizes_contract_metadata_from_sy
    普通 integration test 或 live smoke 的替代品。
 7. async 测试默认使用 `#[tokio::test(flavor = "current_thread")]`，除非测试明确需要
    Tokio 多线程 runtime。需要多线程时，应在测试附近保留原因。
+
+history HTTP 验证还必须覆盖 paired CPU-set fail-fast、实际 worker affinity 握手、64 KiB
+threshold、gzip level 1、两 worker 有界 try admission 与池满 identity fallback，以及
+identity/gzip ETag、304、`Vary`、q=0 和 timeout（压缩计入 10 s）。512 MiB 检查应覆盖
+scan、JSON 和 compression buffers。生产同规格性能 gate 仍是待实测验收项，不得由单元测试
+或 affinity 配置本身宣称通过。

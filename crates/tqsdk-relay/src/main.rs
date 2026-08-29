@@ -25,6 +25,10 @@ async fn run() -> Result<(), RelayError> {
     let config = RelayConfig::from_env()?;
     #[cfg(feature = "history")]
     let history_config = history::HistoryConfig::from_env()?;
+    #[cfg(feature = "history")]
+    if let Some(history_config) = &history_config {
+        history_config.bind_market_current()?;
+    }
 
     if config.dry_run {
         #[cfg(feature = "server")]

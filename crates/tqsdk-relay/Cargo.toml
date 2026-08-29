@@ -18,6 +18,7 @@ server = ["dep:yawc", "tqsdk-core/websocket-transport"]
 
 [dependencies]
 chrono.workspace = true
+core_affinity.workspace = true
 futures.workspace = true
 include_dir.workspace = true
 serde.workspace = true

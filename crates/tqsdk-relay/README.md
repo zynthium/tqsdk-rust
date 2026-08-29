@@ -563,3 +563,20 @@ pnpm run test:e2e
 cd ../../..
 cargo test -p tqsdk-relay --test binary_smoke relay_binary_serves_embedded_dashboard_assets
 ```
+
+#### History CPU affinity and gzip
+
+The optional history compression path is enabled only when both CPU-set variables are
+present and non-empty: `TQSDK_RELAY_MARKET_CPU_SET` reserves CPUs for the market current
+thread, and `TQSDK_RELAY_HISTORY_CPU_SET` reserves CPUs for the history supervisor, Tokio
+workers, and gzip workers. When both are absent, affinity and gzip are disabled and
+identity responses remain available. A single-sided, empty, malformed, duplicate,
+unavailable, overlapping, or unapplied set is a startup error (fail-fast).
+
+Startup confirms binding for the market current thread, history supervisor, every history
+Tokio worker, and exactly two dedicated gzip workers. Gzip uses level 1 for responses at
+least 64 KiB; the bounded pool uses non-blocking try admission and returns identity when
+full. Negotiated responses carry `Vary: Accept-Encoding`; identity and gzip have separate
+strong ETags, with 304 matching the selected representation. The 10-second deadline
+includes compression, and the 512 MiB history budget includes scan, JSON, and compression
+buffers. These settings do not by themselves prove the production performance gate.

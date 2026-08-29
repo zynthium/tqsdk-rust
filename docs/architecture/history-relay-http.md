@@ -222,3 +222,20 @@ active generation 首次检测到运行时损坏并赢得 relay-local atomic `he
   blocking scan 全部结束；
 - audit 不使用 symbol 作为 metrics label，不写入 secret；
 - request id 由可信网关 header 或 relay 生成，并在成功 audit 与错误体中保持一致。
+
+### Affinity 与 gzip 的具体规则
+
+当且仅当 `TQSDK_RELAY_MARKET_CPU_SET` 与 `TQSDK_RELAY_HISTORY_CPU_SET` 都存在、非空、
+互斥且启动时实际绑定成功时，history 启用 gzip；两者均缺失则只提供 identity。单边、
+空、无效、重复、不可用、重叠或绑定失败均 fail-fast。market current thread、history
+supervisor、所有 history Tokio workers 与两个 dedicated gzip workers 都必须完成绑定
+握手后才报告 ready。
+
+gzip 使用 level 1，响应体至少 64 KiB 才进入恰好两个 worker 的专用有界池。提交使用
+non-blocking try admission；池满时直接发送 identity，不等待压缩。压缩和 JSON buffer
+都计入 512 MiB daemon-global budget；10 s total deadline 覆盖 query、序列化、压缩和写出。
+
+若服务启用了 gzip 协商，identity 与 gzip 响应均带 `Vary: Accept-Encoding`。ETag 对所选
+representation 的精确 bytes 计算，因此两者不同；`If-None-Match` 只匹配所选 representation，
+返回 304 且保留该 representation 的 `Content-Encoding`/`Vary` 等 headers。未明确接受 gzip
+（包括 q=0）时发送 identity。

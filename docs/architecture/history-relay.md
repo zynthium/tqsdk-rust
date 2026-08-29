@@ -168,3 +168,16 @@ CPU affinity 只能减少 scheduler 竞争；通过上述 measured gate 后才�
 - 默认 CORS；
 - generation pin query parameter；
 - relay 侧 snapshot GC。
+
+### Affinity 与压缩配置
+
+二进制使用 `TQSDK_RELAY_MARKET_CPU_SET` 和 `TQSDK_RELAY_HISTORY_CPU_SET` 配置 CPU
+集合。两者均缺失时不启用 affinity/gzip；任一单边、空值、无效、重复、不可用、重叠或
+实际绑定失败都必须 fail-fast。启动握手必须确认 market current thread、history
+supervisor、每个 history Tokio worker 以及两个专用 gzip worker 均已成功绑定。
+
+gzip 使用两个专用 worker、level 1 和 64 KiB threshold。提交采用有界、非阻塞 try
+admission；池满立即返回 identity。响应协商带 `Vary: Accept-Encoding`，ETag 在选定的
+identity/gzip 精确 bytes 上分别计算为 strong ETag，304 保留所选 representation 的
+headers。10 s total timeout 包含压缩，512 MiB daemon budget 包含 scan、JSON 与压缩
+buffer。生产同规格 gate 仍需单独实测，CPU affinity 不是该 gate 的替代品。

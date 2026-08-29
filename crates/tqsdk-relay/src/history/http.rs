@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
@@ -21,6 +24,7 @@ use tqsdk_data::{
 };
 use tqsdk_relay::{RelayError, RelayResult};
 
+use super::affinity::HistoryAffinity;
 use super::codec::{HistoryColumn, HistoryRowCodec};
 use super::snapshot::{PinnedSnapshot, SnapshotSlot};
 
@@ -32,10 +36,15 @@ const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const JSON_CELL_ALLOCATION_BYTES: usize = 128;
 const GLOBAL_BUFFER_BYTES: usize = 512 * 1024 * 1024;
 const MAX_ACTIVE_REQUESTS: usize = 8;
-const READ_TIMEOUT: Duration = Duration::from_secs(2);
 const QUEUE_TIMEOUT: Duration = Duration::from_millis(100);
+const READ_TIMEOUT: Duration = Duration::from_secs(2);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_GRACE: Duration = Duration::from_secs(1);
+const GZIP_MIN_BYTES: usize = 64 * 1024;
+const GZIP_WORKERS: usize = 2;
+const GZIP_QUEUE_PER_WORKER: usize = 2;
+const GZIP_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+const GZIP_OUTPUT_OVERHEAD: usize = 64 * 1024;
 const SCHEMA_PATH: &str = "/v1/history/schema";
 const QUERY_PATH: &str = "/v1/history/query";
 const COVERAGE_PATH: &str = "/v1/history/coverage";
@@ -49,10 +58,11 @@ struct HistoryState {
     active: Arc<Semaphore>,
     buffers: Arc<ByteBudget>,
     scan_budget: Arc<SnapshotScanBudget>,
+    compression: Option<Arc<CompressionPool>>,
 }
 
 impl HistoryState {
-    fn new(snapshots: Arc<SnapshotSlot>) -> Self {
+    fn new(snapshots: Arc<SnapshotSlot>, compression: Option<Arc<CompressionPool>>) -> Self {
         let buffers = Arc::new(ByteBudget::new(GLOBAL_BUFFER_BYTES));
         Self {
             snapshots,
@@ -61,6 +71,7 @@ impl HistoryState {
                 buffers: buffers.clone(),
             }),
             buffers,
+            compression,
         }
     }
 }
@@ -69,9 +80,10 @@ pub(super) async fn serve_until(
     listener: TcpListener,
     identity_header: String,
     snapshots: Arc<SnapshotSlot>,
+    compression: Option<Arc<CompressionPool>>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> RelayResult<()> {
-    let state = Arc::new(HistoryState::new(snapshots.clone()));
+    let state = Arc::new(HistoryState::new(snapshots.clone(), compression));
     let (reload_shutdown, reload_receiver) = oneshot::channel();
     let reload_task = tokio::spawn(snapshots.reload_loop(reload_receiver));
     let result = loop {
@@ -102,11 +114,15 @@ async fn serve_stream(
     identity_header: &str,
     state: Arc<HistoryState>,
 ) -> RelayResult<()> {
-    let request = match timeout(READ_TIMEOUT, read_request(&mut stream)).await {
+    let deadline = Instant::now() + TOTAL_TIMEOUT;
+    let preparation_deadline = deadline - WRITE_GRACE;
+    let read_deadline = (Instant::now() + READ_TIMEOUT).min(preparation_deadline);
+    let request = match timeout_at(read_deadline, read_request(&mut stream)).await {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => {
-            return write_response(
+            return prepare_and_write(
                 &mut stream,
+                deadline,
                 error_response(
                     400,
                     "invalid_request",
@@ -115,36 +131,44 @@ async fn serve_stream(
                     json!({}),
                 ),
                 None,
+                GzipNegotiation::default(),
                 &state,
             )
             .await;
         }
         Err(_) => {
-            return write_response(
+            return prepare_and_write(
                 &mut stream,
+                deadline,
                 error_response(
                     400,
                     "invalid_request",
-                    "request read timed out",
+                    "history request exceeded total timeout",
                     next_id().1,
                     json!({}),
                 ),
                 None,
+                GzipNegotiation::default(),
                 &state,
             )
             .await;
         }
     };
-    let if_none_match = parse_request(&request).ok().and_then(|parsed| {
-        header_values(&parsed.headers, "if-none-match")
+    let parsed_headers = parse_request(&request).ok().map(|parsed| parsed.headers);
+    let if_none_match = parsed_headers.as_ref().and_then(|headers| {
+        header_values(headers, "if-none-match")
             .first()
             .map(|value| (*value).to_owned())
     });
+    let gzip = parsed_headers
+        .as_ref()
+        .map_or(GzipNegotiation::default(), |headers| GzipNegotiation {
+            accepts: accepts_gzip(headers),
+            vary: state.compression.is_some(),
+        });
     let (data_id, request_id) = next_id();
-    let deadline = Instant::now() + TOTAL_TIMEOUT;
-    let route_deadline = deadline - WRITE_GRACE;
     let routed = timeout_at(
-        route_deadline,
+        preparation_deadline,
         route_request(
             &request,
             identity_header,
@@ -157,19 +181,67 @@ async fn serve_stream(
     let response = tokio::select! {
         result = &mut routed => match result {
             Ok(response) => response,
-            Err(_) => error_response(504, "history_timeout", "history request exceeded total timeout", request_id, json!({})),
+            Err(_) => error_response(504, "history_timeout", "history request exceeded total timeout", request_id.clone(), json!({})),
         },
         _ = wait_for_disconnect(&mut stream) => return Ok(()),
     };
-    match timeout_at(
-        deadline,
-        write_response(&mut stream, response, if_none_match.as_deref(), &state),
+    let prepared = match timeout_at(
+        preparation_deadline,
+        prepare_response(response, if_none_match.as_deref(), gzip, &state),
     )
     .await
     {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(error)) => return Err(error),
+        Err(_) => match timeout_at(
+            deadline,
+            prepare_response(
+                error_response(
+                    504,
+                    "history_timeout",
+                    "history request exceeded total timeout",
+                    request_id,
+                    json!({}),
+                ),
+                None,
+                gzip,
+                &state,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Ok(()),
+        },
+    };
+    match timeout_at(deadline, write_prepared_response(&mut stream, prepared)).await {
         Ok(result) => result,
         Err(_) => Ok(()),
     }
+}
+
+async fn prepare_and_write(
+    stream: &mut TcpStream,
+    deadline: Instant,
+    response: Response,
+    if_none_match: Option<&str>,
+    gzip: GzipNegotiation,
+    state: &HistoryState,
+) -> RelayResult<()> {
+    let prepared = match timeout_at(
+        deadline,
+        prepare_response(response, if_none_match, gzip, state),
+    )
+    .await
+    {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(error)) => return Err(error),
+        Err(_) => return Ok(()),
+    };
+    timeout_at(deadline, write_prepared_response(stream, prepared))
+        .await
+        .unwrap_or(Ok(()))
 }
 
 async fn wait_for_disconnect(stream: &mut TcpStream) {
@@ -1045,12 +1117,12 @@ fn next_id() -> (u64, String) {
     (id, format!("r-{id}"))
 }
 
-async fn write_response(
-    stream: &mut TcpStream,
+async fn prepare_response(
     mut response: Response,
     if_none_match: Option<&str>,
+    gzip: GzipNegotiation,
     state: &HistoryState,
-) -> RelayResult<()> {
+) -> RelayResult<PreparedResponse> {
     let mut body_len = encoded_json_len(&response.body)?;
     if response.status == 200 && body_len > MAX_RESPONSE_BYTES {
         let request_id = response.request_id.clone();
@@ -1063,7 +1135,7 @@ async fn write_response(
         );
         body_len = encoded_json_len(&response.body)?;
     }
-    let Some(body_permit) = state.buffers.try_reserve(body_len) else {
+    let Some(mut body_permit) = state.buffers.try_reserve(body_len) else {
         let fallback = error_response(
             429,
             "history_overloaded",
@@ -1074,12 +1146,75 @@ async fn write_response(
         let body = serde_json::to_vec(&fallback.body).map_err(|error| {
             RelayError::Internal(format!("history JSON encode failed: {error}"))
         })?;
-        return write_bytes(stream, 429, &body, None).await;
+        return Ok(PreparedResponse::unbudgeted(
+            429,
+            body,
+            None,
+            false,
+            gzip.vary,
+            response.admission,
+            &state.buffers,
+        ));
     };
     let mut body = Vec::with_capacity(body_len);
     serde_json::to_writer(&mut body, &response.body)
         .map_err(|error| RelayError::Internal(format!("history JSON encode failed: {error}")))?;
     debug_assert_eq!(body.len(), body_len);
+    let mut content_encoding_gzip = false;
+    if response.status == 200 && body.len() >= GZIP_MIN_BYTES && gzip.accepts {
+        if let Some(compression) = &state.compression {
+            match compression.try_compress(
+                body,
+                body_permit,
+                response.admission.clone(),
+                &state.buffers,
+            ) {
+                Ok(receiver) => match receiver.await {
+                    Ok(CompressionResult::Gzip {
+                        body: compressed,
+                        permit,
+                    }) => {
+                        body = compressed;
+                        body_permit = permit;
+                        content_encoding_gzip = true;
+                    }
+                    Ok(CompressionResult::Identity {
+                        body: identity,
+                        permit,
+                    }) => {
+                        body = identity;
+                        body_permit = permit;
+                    }
+                    Err(_) => {
+                        let fallback = error_response(
+                            500,
+                            "history_internal",
+                            "history gzip worker stopped before completing response",
+                            response.request_id.clone(),
+                            json!({}),
+                        );
+                        let fallback_body =
+                            serde_json::to_vec(&fallback.body).map_err(|error| {
+                                RelayError::Internal(format!("history JSON encode failed: {error}"))
+                            })?;
+                        return Ok(PreparedResponse::unbudgeted(
+                            500,
+                            fallback_body,
+                            None,
+                            false,
+                            gzip.vary,
+                            response.admission,
+                            &state.buffers,
+                        ));
+                    }
+                },
+                Err((identity, permit)) => {
+                    body = identity;
+                    body_permit = permit;
+                }
+            }
+        }
+    }
     let mut etag = None;
     if response.status == 200 {
         let mut digest = Sha1::new();
@@ -1091,9 +1226,15 @@ async fn write_response(
         }
         etag = Some(selected);
     }
-    let result = write_bytes(stream, response.status, &body, etag.as_deref()).await;
-    drop(body_permit);
-    result
+    Ok(PreparedResponse {
+        status: response.status,
+        body,
+        etag,
+        gzip: content_encoding_gzip,
+        vary_accept_encoding: gzip.vary,
+        _body_permit: Some(body_permit),
+        _admission: response.admission,
+    })
 }
 
 fn encoded_json_len(value: &Value) -> RelayResult<usize> {
@@ -1129,12 +1270,103 @@ fn etag_matches(header: &str, selected: &str) -> bool {
         .any(|candidate| candidate == "*" || candidate == selected)
 }
 
-async fn write_bytes(
-    stream: &mut TcpStream,
+#[derive(Clone, Copy, Default)]
+struct GzipNegotiation {
+    accepts: bool,
+    vary: bool,
+}
+
+fn accepts_gzip(headers: &[(&str, &str)]) -> bool {
+    let mut explicit_gzip = false;
+    for value in header_values(headers, "accept-encoding") {
+        for coding in value.split(',') {
+            let mut pieces = coding.split(';');
+            let is_gzip = pieces
+                .next()
+                .is_some_and(|name| name.trim().eq_ignore_ascii_case("gzip"));
+            if !is_gzip {
+                continue;
+            }
+            explicit_gzip = true;
+            let mut quality = None;
+            for parameter in pieces {
+                if let Some((name, value)) = parameter.trim().split_once('=')
+                    && name.trim().eq_ignore_ascii_case("q")
+                    && quality.replace(value.trim()).is_some()
+                {
+                    return false;
+                }
+            }
+            if !quality.is_none_or(positive_http_qvalue) {
+                return false;
+            }
+        }
+    }
+    explicit_gzip
+}
+
+fn positive_http_qvalue(value: &str) -> bool {
+    let Some((whole, fraction)) = value.split_once('.') else {
+        return value == "1";
+    };
+    if fraction.len() > 3 || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    match whole {
+        "0" => fraction.bytes().any(|byte| byte != b'0'),
+        "1" => fraction.bytes().all(|byte| byte == b'0'),
+        _ => false,
+    }
+}
+
+struct PreparedResponse {
     status: u16,
-    body: &[u8],
-    etag: Option<&str>,
+    body: Vec<u8>,
+    etag: Option<String>,
+    gzip: bool,
+    vary_accept_encoding: bool,
+    _body_permit: Option<BytePermit>,
+    _admission: Option<Arc<ActiveRequestPin>>,
+}
+
+impl PreparedResponse {
+    fn unbudgeted(
+        status: u16,
+        body: Vec<u8>,
+        etag: Option<String>,
+        gzip: bool,
+        vary_accept_encoding: bool,
+        admission: Option<Arc<ActiveRequestPin>>,
+        buffers: &Arc<ByteBudget>,
+    ) -> Self {
+        Self {
+            status,
+            body,
+            etag,
+            gzip,
+            vary_accept_encoding,
+            // The global budget is exhausted in this fallback path.  Keep a
+            // zero-byte permit so the prepared-object ownership contract
+            // remains uniform while emitting the small deterministic error.
+            _body_permit: buffers.try_reserve(0),
+            _admission: admission,
+        }
+    }
+}
+
+async fn write_prepared_response(
+    stream: &mut TcpStream,
+    prepared: PreparedResponse,
 ) -> RelayResult<()> {
+    let PreparedResponse {
+        status,
+        body,
+        etag,
+        gzip,
+        vary_accept_encoding,
+        _body_permit,
+        _admission,
+    } = prepared;
     let reason = match status {
         200 => "OK",
         304 => "Not Modified",
@@ -1155,6 +1387,12 @@ async fn write_bytes(
     if let Some(etag) = etag {
         headers.push_str(&format!("ETag: {etag}\r\n"));
     }
+    if gzip {
+        headers.push_str("Content-Encoding: gzip\r\n");
+    }
+    if vary_accept_encoding {
+        headers.push_str("Vary: Accept-Encoding\r\n");
+    }
     headers.push_str("\r\n");
     stream
         .write_all(headers.as_bytes())
@@ -1163,7 +1401,7 @@ async fn write_bytes(
             RelayError::Transport(format!("history response headers failed: {error}"))
         })?;
     stream
-        .write_all(body)
+        .write_all(&body)
         .await
         .map_err(|error| RelayError::Transport(format!("history response body failed: {error}")))?;
     stream.shutdown().await.map_err(|error| {
@@ -1173,6 +1411,290 @@ async fn write_bytes(
 
 struct ActiveRequestPin {
     _permit: OwnedSemaphorePermit,
+}
+
+/// A deliberately small, dedicated compression pool.  It is not Tokio's
+/// blocking pool: each worker binds before accepting work and owns every byte
+/// permit for the complete lifetime of a compression job.
+pub(super) struct CompressionPool {
+    queues: Mutex<Option<Vec<SyncSender<CompressionJob>>>>,
+    next: AtomicUsize,
+    stopping: std::sync::atomic::AtomicBool,
+    threads: Mutex<Vec<JoinHandle<()>>>,
+    #[cfg(test)]
+    _parked_receivers: Mutex<Vec<mpsc::Receiver<CompressionJob>>>,
+}
+
+impl std::fmt::Debug for CompressionPool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CompressionPool")
+            .finish_non_exhaustive()
+    }
+}
+
+impl CompressionPool {
+    pub(super) fn spawn(affinity: HistoryAffinity) -> RelayResult<Arc<Self>> {
+        Self::spawn_inner(Some(affinity))
+    }
+
+    #[cfg(test)]
+    fn spawn_for_test() -> RelayResult<Arc<Self>> {
+        Self::spawn_inner(None)
+    }
+
+    #[cfg(test)]
+    fn saturated_for_test() -> Arc<Self> {
+        let mut queues = Vec::with_capacity(GZIP_WORKERS);
+        let mut parked_receivers = Vec::with_capacity(GZIP_WORKERS);
+        for _ in 0..GZIP_WORKERS {
+            let (sender, receiver) = mpsc::sync_channel(GZIP_QUEUE_PER_WORKER);
+            queues.push(sender);
+            parked_receivers.push(receiver);
+        }
+        Arc::new(Self {
+            queues: Mutex::new(Some(queues)),
+            next: AtomicUsize::new(0),
+            stopping: std::sync::atomic::AtomicBool::new(false),
+            threads: Mutex::new(Vec::new()),
+            _parked_receivers: Mutex::new(parked_receivers),
+        })
+    }
+
+    fn spawn_inner(affinity: Option<HistoryAffinity>) -> RelayResult<Arc<Self>> {
+        let mut queues = Vec::with_capacity(GZIP_WORKERS);
+        let mut receivers = Vec::with_capacity(GZIP_WORKERS);
+        for _ in 0..GZIP_WORKERS {
+            let (sender, receiver) = mpsc::sync_channel(GZIP_QUEUE_PER_WORKER);
+            queues.push(sender);
+            receivers.push(receiver);
+        }
+        let pool = Arc::new(Self {
+            queues: Mutex::new(Some(queues)),
+            next: AtomicUsize::new(0),
+            stopping: std::sync::atomic::AtomicBool::new(false),
+            threads: Mutex::new(Vec::with_capacity(GZIP_WORKERS)),
+            #[cfg(test)]
+            _parked_receivers: Mutex::new(Vec::new()),
+        });
+        let (ready_tx, ready_rx) = mpsc::sync_channel(GZIP_WORKERS);
+        for (worker, receiver) in receivers.into_iter().enumerate() {
+            let worker_pool = pool.clone();
+            let worker_affinity = affinity.clone();
+            let ready = ready_tx.clone();
+            let thread = match thread::Builder::new()
+                .name(format!("tqsdk-history-gzip-{worker}"))
+                .spawn(move || compression_worker(receiver, worker_pool, worker_affinity, ready))
+            {
+                Ok(thread) => thread,
+                Err(error) => {
+                    let _ = pool.shutdown();
+                    return Err(RelayError::Internal(format!(
+                        "history gzip worker spawn failed: {error}"
+                    )));
+                }
+            };
+            pool.threads
+                .lock()
+                .map_err(|_| RelayError::Internal("history gzip lock poisoned".to_string()))?
+                .push(thread);
+        }
+        drop(ready_tx);
+        for _ in 0..GZIP_WORKERS {
+            match ready_rx.recv_timeout(GZIP_STARTUP_TIMEOUT) {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    let _ = pool.shutdown();
+                    return Err(RelayError::invalid_config(error));
+                }
+                Err(error) => {
+                    let _ = pool.shutdown();
+                    return Err(RelayError::Internal(format!(
+                        "history gzip workers did not become ready: {error}"
+                    )));
+                }
+            }
+        }
+        Ok(pool)
+    }
+
+    fn try_compress(
+        &self,
+        body: Vec<u8>,
+        identity_permit: BytePermit,
+        active_pin: Option<Arc<ActiveRequestPin>>,
+        buffers: &Arc<ByteBudget>,
+    ) -> Result<oneshot::Receiver<CompressionResult>, (Vec<u8>, BytePermit)> {
+        if self.stopping.load(Ordering::Acquire) {
+            return Err((body, identity_permit));
+        }
+        let Some(limit) = gzip_output_upper_bound(body.len()) else {
+            return Err((body, identity_permit));
+        };
+        let Some(output_permit) = buffers.try_reserve(limit) else {
+            return Err((body, identity_permit));
+        };
+        let (complete, receiver) = oneshot::channel();
+        let mut job = CompressionJob {
+            body,
+            identity_permit,
+            _active_pin: active_pin,
+            output_permit,
+            complete,
+            #[cfg(test)]
+            before_compress: None,
+        };
+        let Ok(queues) = self.queues.lock() else {
+            return Err((job.body, job.identity_permit));
+        };
+        let Some(queues) = queues.as_ref() else {
+            return Err((job.body, job.identity_permit));
+        };
+        if self.stopping.load(Ordering::Acquire) {
+            return Err((job.body, job.identity_permit));
+        }
+        let start = self.next.fetch_add(1, Ordering::Relaxed) % queues.len();
+        for offset in 0..queues.len() {
+            let index = (start + offset) % queues.len();
+            match queues[index].try_send(job) {
+                Ok(()) => return Ok(receiver),
+                Err(TrySendError::Full(returned)) | Err(TrySendError::Disconnected(returned)) => {
+                    job = returned;
+                }
+            }
+        }
+        Err((job.body, job.identity_permit))
+    }
+
+    pub(super) fn shutdown(&self) -> RelayResult<()> {
+        let mut queues = self
+            .queues
+            .lock()
+            .map_err(|_| RelayError::Internal("history gzip queue lock poisoned".to_string()))?;
+        self.stopping.store(true, Ordering::Release);
+        drop(queues.take());
+        drop(queues);
+        #[cfg(test)]
+        self._parked_receivers
+            .lock()
+            .map_err(|_| RelayError::Internal("history gzip test queue lock poisoned".to_string()))?
+            .clear();
+        let mut threads = self
+            .threads
+            .lock()
+            .map_err(|_| RelayError::Internal("history gzip lock poisoned".to_string()))?;
+        for thread in threads.drain(..) {
+            thread.join().map_err(|_| {
+                RelayError::Internal("history gzip worker panicked during shutdown".to_string())
+            })?;
+        }
+        Ok(())
+    }
+}
+
+struct CompressionJob {
+    body: Vec<u8>,
+    identity_permit: BytePermit,
+    _active_pin: Option<Arc<ActiveRequestPin>>,
+    output_permit: BytePermit,
+    complete: oneshot::Sender<CompressionResult>,
+    #[cfg(test)]
+    before_compress: Option<(mpsc::SyncSender<()>, mpsc::Receiver<()>)>,
+}
+
+enum CompressionResult {
+    Gzip { body: Vec<u8>, permit: BytePermit },
+    Identity { body: Vec<u8>, permit: BytePermit },
+}
+
+fn compression_worker(
+    receiver: mpsc::Receiver<CompressionJob>,
+    pool: Arc<CompressionPool>,
+    affinity: Option<HistoryAffinity>,
+    ready: mpsc::SyncSender<Result<(), String>>,
+) {
+    if let Err(error) = affinity.map_or(Ok(()), |affinity| affinity.bind_current()) {
+        let _ = ready.send(Err(error.to_string()));
+        return;
+    }
+    if ready.send(Ok(())).is_err() {
+        return;
+    }
+    loop {
+        match receiver.recv() {
+            Ok(job) if pool.stopping.load(Ordering::Acquire) => drop(job),
+            Ok(job) => compress_job(job),
+            Err(_) => return,
+        }
+    }
+}
+
+fn compress_job(job: CompressionJob) {
+    let CompressionJob {
+        body,
+        identity_permit,
+        _active_pin,
+        output_permit,
+        complete,
+        #[cfg(test)]
+        before_compress,
+    } = job;
+    #[cfg(test)]
+    if let Some((started, release)) = before_compress {
+        let _ = started.send(());
+        let _ = release.recv();
+    }
+    let maximum = output_permit.bytes;
+    let mut encoder =
+        flate2::write::GzEncoder::new(BoundedBytes::new(maximum), flate2::Compression::fast());
+    let result = encoder
+        .write_all(&body)
+        .and_then(|()| encoder.finish())
+        .map(|output| CompressionResult::Gzip {
+            body: output.bytes,
+            permit: output_permit,
+        })
+        .unwrap_or(CompressionResult::Identity {
+            body,
+            permit: identity_permit,
+        });
+    let _ = complete.send(result);
+}
+
+struct BoundedBytes {
+    bytes: Vec<u8>,
+    maximum: usize,
+}
+
+impl BoundedBytes {
+    fn new(maximum: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(maximum),
+            maximum,
+        }
+    }
+}
+
+impl Write for BoundedBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let next = self
+            .bytes
+            .len()
+            .checked_add(bytes.len())
+            .filter(|next| *next <= self.maximum)
+            .ok_or_else(|| std::io::Error::other("history gzip output exceeds reserved bound"))?;
+        debug_assert!(next <= self.maximum);
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn gzip_output_upper_bound(input: usize) -> Option<usize> {
+    input.checked_add(GZIP_OUTPUT_OVERHEAD)
 }
 
 struct SnapshotScanBudget {
@@ -1295,5 +1817,246 @@ mod tests {
         assert!(budget.try_reserve(5).is_none());
         drop(scan);
         assert!(budget.try_reserve(10).is_some());
+    }
+
+    #[test]
+    fn gzip_requires_explicit_positive_accept_encoding() {
+        assert!(accepts_gzip(&[("Accept-Encoding", "br, gzip")]));
+        assert!(accepts_gzip(&[("Accept-Encoding", "gzip; q=0.1")]));
+        assert!(accepts_gzip(&[("Accept-Encoding", "gzip; q=1.000")]));
+        assert!(accepts_gzip(&[("Accept-Encoding", "gzip; q=0.001")]));
+        assert!(!accepts_gzip(&[("Accept-Encoding", "gzip; q=0")]));
+        assert!(!accepts_gzip(&[("Accept-Encoding", "gzip; q=0.0")]));
+        assert!(!accepts_gzip(&[("Accept-Encoding", "gzip; q=2")]));
+        assert!(!accepts_gzip(&[("Accept-Encoding", "gzip; q=1.001")]));
+        assert!(!accepts_gzip(&[("Accept-Encoding", "gzip; q=1e0")]));
+        assert!(!accepts_gzip(&[("Accept-Encoding", "gzip; q=0.0001")]));
+        assert!(!accepts_gzip(&[
+            ("Accept-Encoding", "gzip; q=1"),
+            ("Accept-Encoding", "gzip; q=0"),
+        ]));
+        assert!(!accepts_gzip(&[("Accept-Encoding", "br, *")]));
+        assert!(!accepts_gzip(&[]));
+    }
+
+    #[test]
+    fn saturated_compression_pool_immediately_returns_identity_and_keeps_its_permit() {
+        let pool = CompressionPool::saturated_for_test();
+        let budget = Arc::new(ByteBudget::new(2 * 1024 * 1024));
+        let mut receivers = Vec::new();
+        for _ in 0..GZIP_WORKERS * GZIP_QUEUE_PER_WORKER {
+            let body = vec![7; 32];
+            let permit = budget.try_reserve(body.len()).unwrap();
+            match pool.try_compress(body, permit, None, &budget) {
+                Ok(receiver) => receivers.push(receiver),
+                Err(_) => panic!("empty compression queue must accept the job"),
+            }
+        }
+        let body = vec![9; 32];
+        let permit = budget.try_reserve(body.len()).unwrap();
+        let (identity, identity_permit) = match pool.try_compress(body, permit, None, &budget) {
+            Ok(_) => panic!("full compression queues must not wait or enqueue"),
+            Err(identity) => identity,
+        };
+        assert_eq!(identity, vec![9; 32]);
+        assert!(budget.used.load(Ordering::Acquire) >= identity_permit.bytes);
+        drop(identity_permit);
+        drop(receivers);
+        drop(pool);
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn compression_shutdown_releases_queued_guards_and_rejects_new_jobs() {
+        let pool = CompressionPool::saturated_for_test();
+        let budget = Arc::new(ByteBudget::new(2 * 1024 * 1024));
+        let active = Arc::new(Semaphore::new(1));
+        let active_pin = Arc::new(ActiveRequestPin {
+            _permit: active.clone().try_acquire_owned().unwrap(),
+        });
+        let body = vec![5; GZIP_MIN_BYTES];
+        let permit = budget.try_reserve(body.len()).unwrap();
+        let mut receiver = match pool.try_compress(body, permit, Some(active_pin), &budget) {
+            Ok(receiver) => receiver,
+            Err(_) => panic!("empty compression queue must accept the job"),
+        };
+
+        assert!(active.clone().try_acquire_owned().is_err());
+        assert!(budget.used.load(Ordering::Acquire) > 0);
+        pool.shutdown().unwrap();
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+        assert!(active.clone().try_acquire_owned().is_ok());
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+
+        let body = vec![7; GZIP_MIN_BYTES];
+        let permit = budget.try_reserve(body.len()).unwrap();
+        let (identity, identity_permit) = match pool.try_compress(body, permit, None, &budget) {
+            Err(identity) => identity,
+            Ok(_) => panic!("stopped compression pool must return identity immediately"),
+        };
+        assert_eq!(identity, vec![7; GZIP_MIN_BYTES]);
+        assert_eq!(budget.used.load(Ordering::Acquire), identity_permit.bytes);
+        drop(identity_permit);
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn dropped_compression_receiver_keeps_guards_until_worker_finishes() {
+        let budget = Arc::new(ByteBudget::new(2 * 1024 * 1024));
+        let body = vec![3; GZIP_MIN_BYTES];
+        let identity_permit = budget.try_reserve(body.len()).unwrap();
+        let output_permit = budget
+            .try_reserve(gzip_output_upper_bound(body.len()).unwrap())
+            .unwrap();
+        let active = Arc::new(Semaphore::new(1));
+        let active_pin = Arc::new(ActiveRequestPin {
+            _permit: active.clone().try_acquire_owned().unwrap(),
+        });
+        let (complete, receiver) = oneshot::channel();
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let job = CompressionJob {
+            body,
+            identity_permit,
+            _active_pin: Some(active_pin),
+            output_permit,
+            complete,
+            before_compress: Some((started_tx, release_rx)),
+        };
+        let worker = thread::spawn(move || compress_job(job));
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        drop(receiver);
+        assert!(active.clone().try_acquire_owned().is_err());
+        assert!(budget.used.load(Ordering::Acquire) > 0);
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(active.clone().try_acquire_owned().is_ok());
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn http_writer_selects_distinct_gzip_representation_etag() {
+        let pool = CompressionPool::spawn_for_test().unwrap();
+        let state = HistoryState::new(
+            Arc::new(SnapshotSlot::new(std::env::temp_dir())),
+            Some(pool.clone()),
+        );
+        let plain = write_test_response(
+            &state,
+            GzipNegotiation {
+                accepts: false,
+                vary: true,
+            },
+            None,
+            "x".repeat(GZIP_MIN_BYTES),
+        )
+        .await;
+        let plain_etag = test_header(&plain, "etag").unwrap();
+        assert_eq!(
+            test_header(&plain, "vary"),
+            Some("Accept-Encoding".to_string())
+        );
+        let gzip = write_test_response(
+            &state,
+            GzipNegotiation {
+                accepts: true,
+                vary: true,
+            },
+            None,
+            "x".repeat(GZIP_MIN_BYTES),
+        )
+        .await;
+        assert_eq!(
+            test_header(&gzip, "content-encoding"),
+            Some("gzip".to_string())
+        );
+        assert_eq!(
+            test_header(&gzip, "vary"),
+            Some("Accept-Encoding".to_string())
+        );
+        let gzip_etag = test_header(&gzip, "etag").unwrap();
+        assert_ne!(plain_etag, gzip_etag);
+        let compressed = test_body(&gzip);
+        let mut decoder = flate2::read::GzDecoder::new(compressed);
+        let mut decoded = String::new();
+        std::io::Read::read_to_string(&mut decoder, &mut decoded).unwrap();
+        assert_eq!(
+            decoded,
+            serde_json::to_string(&Value::String("x".repeat(GZIP_MIN_BYTES))).unwrap()
+        );
+        let not_modified = write_test_response(
+            &state,
+            GzipNegotiation {
+                accepts: true,
+                vary: true,
+            },
+            Some(&gzip_etag),
+            "x".repeat(GZIP_MIN_BYTES),
+        )
+        .await;
+        assert!(test_head(&not_modified).starts_with("HTTP/1.1 304 Not Modified\r\n"));
+        assert_eq!(
+            test_header(&not_modified, "content-encoding"),
+            Some("gzip".to_string())
+        );
+        assert!(test_body(&not_modified).is_empty());
+        pool.shutdown().unwrap();
+    }
+
+    async fn write_test_response(
+        state: &HistoryState,
+        gzip: GzipNegotiation,
+        if_none_match: Option<&str>,
+        text: String,
+    ) -> Vec<u8> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let reader = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            let mut output = Vec::new();
+            stream.read_to_end(&mut output).await.unwrap();
+            output
+        });
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let prepared = prepare_response(
+            Response::success(Value::String(text), "test".to_string()),
+            if_none_match,
+            gzip,
+            state,
+        )
+        .await
+        .unwrap();
+        write_prepared_response(&mut stream, prepared)
+            .await
+            .unwrap();
+        reader.await.unwrap()
+    }
+
+    fn test_header(response: &[u8], expected: &str) -> Option<String> {
+        test_head(response).split("\r\n").skip(1).find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case(expected)
+                .then(|| value.trim().to_string())
+        })
+    }
+
+    fn test_head(response: &[u8]) -> &str {
+        let marker = response
+            .windows(4)
+            .position(|bytes| bytes == b"\r\n\r\n")
+            .unwrap();
+        std::str::from_utf8(&response[..marker + 4]).unwrap()
+    }
+
+    fn test_body(response: &[u8]) -> &[u8] {
+        let marker = response
+            .windows(4)
+            .position(|bytes| bytes == b"\r\n\r\n")
+            .unwrap();
+        &response[marker + 4..]
     }
 }

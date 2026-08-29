@@ -4,6 +4,7 @@
 //! a [`tqsdk_relay::RelayServer`].  History is a separate runtime sibling of
 //! the market relay, not an alternate market-data path.
 
+mod affinity;
 mod codec;
 mod http;
 mod snapshot;
@@ -11,12 +12,15 @@ mod snapshot;
 use std::fs;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
 use tqsdk_relay::{RelayError, RelayResult};
+
+use self::affinity::{CpuAffinityConfig, HistoryAffinity};
 
 const ENV_HISTORY_LISTEN: &str = "TQSDK_RELAY_HISTORY_LISTEN";
 const ENV_HISTORY_ROOT: &str = "TQSDK_RELAY_HISTORY_ROOT";
@@ -31,6 +35,7 @@ pub(crate) struct HistoryConfig {
     root: PathBuf,
     identity_header: String,
     runtime_threads: usize,
+    affinity: Option<CpuAffinityConfig>,
 }
 
 impl HistoryConfig {
@@ -43,10 +48,11 @@ impl HistoryConfig {
         let listen = get(ENV_HISTORY_LISTEN);
         let root = get(ENV_HISTORY_ROOT);
         let identity_header = get(ENV_HISTORY_IDENTITY_HEADER);
+        let affinity = CpuAffinityConfig::from_env_values(&mut get)?;
 
-        match (listen, root, identity_header) {
-            (None, None, None) => Ok(None),
-            (Some(listen), Some(root), Some(identity_header)) => Self::new(
+        match (listen, root, identity_header, affinity) {
+            (None, None, None, None) => Ok(None),
+            (Some(listen), Some(root), Some(identity_header), affinity) => Self::new_with_affinity(
                 listen.parse().map_err(|error| {
                     RelayError::invalid_config(format!(
                         "{ENV_HISTORY_LISTEN} must be a socket address: {error}"
@@ -55,6 +61,7 @@ impl HistoryConfig {
                 PathBuf::from(root),
                 identity_header,
                 DEFAULT_RUNTIME_THREADS,
+                affinity,
             )
             .map(Some),
             _ => Err(RelayError::invalid_config(
@@ -63,17 +70,29 @@ impl HistoryConfig {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn new(
         listen: SocketAddr,
         root: PathBuf,
         identity_header: String,
         runtime_threads: usize,
     ) -> RelayResult<Self> {
+        Self::new_with_affinity(listen, root, identity_header, runtime_threads, None)
+    }
+
+    fn new_with_affinity(
+        listen: SocketAddr,
+        root: PathBuf,
+        identity_header: String,
+        runtime_threads: usize,
+        affinity: Option<CpuAffinityConfig>,
+    ) -> RelayResult<Self> {
         let config = Self {
             listen,
             root,
             identity_header,
             runtime_threads,
+            affinity,
         };
         config.validate()?;
         Ok(config)
@@ -98,6 +117,19 @@ impl HistoryConfig {
         }
         Ok(())
     }
+
+    pub(crate) fn bind_market_current(&self) -> RelayResult<()> {
+        if let Some(affinity) = &self.affinity {
+            affinity.bind_market_current()?;
+        }
+        Ok(())
+    }
+
+    fn history_affinity(&self) -> Option<HistoryAffinity> {
+        self.affinity
+            .as_ref()
+            .map(CpuAffinityConfig::history_binder)
+    }
 }
 
 /// Owns the isolated history runtime and its bound listener.
@@ -105,6 +137,7 @@ impl HistoryConfig {
 pub(crate) struct HistoryServiceHandle {
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    compression: Option<Arc<http::CompressionPool>>,
 }
 
 impl HistoryServiceHandle {
@@ -129,6 +162,9 @@ impl HistoryServiceHandle {
                 RelayError::Internal("history runtime thread panicked during shutdown".to_string())
             })?;
         }
+        if let Some(compression) = &self.compression {
+            compression.shutdown()?;
+        }
         Ok(())
     }
 }
@@ -151,24 +187,52 @@ pub(crate) fn spawn(config: HistoryConfig) -> RelayResult<HistoryServiceHandle> 
     listener.set_nonblocking(true).map_err(|error| {
         RelayError::Transport(format!("history listener setup failed: {error}"))
     })?;
+    let affinity = config.history_affinity();
+    let compression = affinity
+        .clone()
+        .map(http::CompressionPool::spawn)
+        .transpose()?;
+    let listener_compression = compression.clone();
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (startup_tx, startup_rx) = mpsc::sync_channel(1);
     let thread_name = format!("tqsdk-history-{}", config.listen.port());
-    let thread = thread::Builder::new()
-        .name(thread_name)
-        .spawn(move || run_listener_thread(listener, config, shutdown_rx, startup_tx))
-        .map_err(|error| RelayError::Internal(format!("history thread spawn failed: {error}")))?;
+    let thread = match thread::Builder::new().name(thread_name).spawn(move || {
+        run_listener_thread(
+            listener,
+            config,
+            affinity,
+            listener_compression,
+            shutdown_rx,
+            startup_tx,
+        )
+    }) {
+        Ok(thread) => thread,
+        Err(error) => {
+            if let Some(compression) = &compression {
+                let _ = compression.shutdown();
+            }
+            return Err(RelayError::Internal(format!(
+                "history thread spawn failed: {error}"
+            )));
+        }
+    };
 
     match startup_rx.recv_timeout(STARTUP_TIMEOUT) {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             let _ = thread.join();
+            if let Some(compression) = &compression {
+                let _ = compression.shutdown();
+            }
             return Err(RelayError::Internal(error));
         }
         Err(error) => {
             let _ = shutdown_tx.send(());
             let _ = thread.join();
+            if let Some(compression) = &compression {
+                let _ = compression.shutdown();
+            }
             return Err(RelayError::Internal(format!(
                 "history runtime did not become ready: {error}"
             )));
@@ -178,20 +242,48 @@ pub(crate) fn spawn(config: HistoryConfig) -> RelayResult<HistoryServiceHandle> 
     Ok(HistoryServiceHandle {
         shutdown: Mutex::new(Some(shutdown_tx)),
         thread: Mutex::new(Some(thread)),
+        compression,
     })
 }
 
 fn run_listener_thread(
     listener: TcpListener,
     config: HistoryConfig,
+    affinity: Option<HistoryAffinity>,
+    compression: Option<Arc<http::CompressionPool>>,
     shutdown: oneshot::Receiver<()>,
     startup: mpsc::SyncSender<Result<(), String>>,
 ) {
+    if let Some(affinity) = &affinity {
+        if let Err(error) = affinity.bind_current() {
+            let _ = startup.send(Err(error.to_string()));
+            return;
+        }
+    }
+    let worker_affinity = affinity.clone();
+    let expected_workers = config.runtime_threads;
+    let (worker_ready_tx, worker_ready_rx) = mpsc::sync_channel(expected_workers);
+    let startup_workers_remaining = Arc::new(AtomicUsize::new(expected_workers));
+    let startup_workers = startup_workers_remaining.clone();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.runtime_threads)
         .enable_io()
         .enable_time()
         .thread_name("tqsdk-history-worker")
+        .on_thread_start(move || {
+            let result = worker_affinity
+                .as_ref()
+                .map_or(Ok(()), HistoryAffinity::bind_current)
+                .map_err(|error| error.to_string());
+            if startup_workers
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                let _ = worker_ready_tx.try_send(result);
+            }
+        })
         .build()
     {
         Ok(runtime) => runtime,
@@ -201,6 +293,23 @@ fn run_listener_thread(
         }
     };
     runtime.block_on(async move {
+        for _ in 0..expected_workers {
+            match worker_ready_rx.recv_timeout(STARTUP_TIMEOUT) {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    let _ = startup.send(Err(format!(
+                        "history runtime worker CPU affinity failed: {error}"
+                    )));
+                    return;
+                }
+                Err(error) => {
+                    let _ = startup.send(Err(format!(
+                        "history runtime workers did not become ready: {error}"
+                    )));
+                    return;
+                }
+            }
+        }
         let listener = match tokio::net::TcpListener::from_std(listener) {
             Ok(listener) => listener,
             Err(error) => {
@@ -218,8 +327,14 @@ fn run_listener_thread(
                 eprintln!("history snapshot unavailable at startup: {error}");
             }
         });
-        if let Err(error) =
-            http::serve_until(listener, config.identity_header, snapshots, shutdown).await
+        if let Err(error) = http::serve_until(
+            listener,
+            config.identity_header,
+            snapshots,
+            compression,
+            shutdown,
+        )
+        .await
         {
             eprintln!("history listener stopped with error: {error}");
         }
