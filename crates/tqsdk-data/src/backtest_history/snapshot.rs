@@ -18,7 +18,7 @@ use super::snapshot_manifest::{
 };
 use super::{
     BacktestHistoryClient, BacktestHistoryFailureReasons, BacktestHistoryRun,
-    classify_snapshot_failure,
+    BacktestHistorySnapshotQueryResources, classify_snapshot_failure,
 };
 use crate::DataError;
 
@@ -255,6 +255,10 @@ impl BacktestHistorySnapshot {
         }
         let client = BacktestHistoryClient::builder(manifest.cache_dir())
             .policy(BacktestHistoryPolicy::CacheOnly)
+            // Snapshot queries are intentionally one request per run. Keeping
+            // the logical concurrency at one also fixes the bounded event
+            // queue at two entries for daemon memory accounting.
+            .logical_concurrency(1)
             .build()
             .map_err(|error| {
                 BacktestHistorySnapshotError::new(
@@ -361,22 +365,49 @@ impl BacktestHistorySnapshot {
         &self,
         request: BacktestHistoryRequest,
     ) -> Result<BacktestHistorySnapshotRun, BacktestHistorySnapshotError> {
+        self.query_inner(request, None).await
+    }
+
+    /// Starts a cache-only query pinned to this immutable generation using a
+    /// caller-shared, non-blocking scan allocation budget.
+    pub async fn query_with_resources(
+        &self,
+        request: BacktestHistoryRequest,
+        resources: BacktestHistorySnapshotQueryResources,
+    ) -> Result<BacktestHistorySnapshotRun, BacktestHistorySnapshotError> {
+        self.query_inner(request, Some(resources)).await
+    }
+
+    async fn query_inner(
+        &self,
+        request: BacktestHistoryRequest,
+        resources: Option<BacktestHistorySnapshotQueryResources>,
+    ) -> Result<BacktestHistorySnapshotRun, BacktestHistorySnapshotError> {
         let inspection = self.inspect(request.clone()).await?;
         let request_id = inspection.report().request_id;
         let symbol = inspection.report().symbol.clone();
-        let run = self
-            .client
-            .query_with_lifecycle_pin(request, self.manifest.lifecycle_pin())
-            .await
-            .map_err(|error| {
-                let (reason, message) = map_planning_error(error);
-                BacktestHistorySnapshotError::new(
-                    reason,
-                    Some(request_id),
-                    Some(symbol.clone()),
-                    message,
-                )
-            })?;
+        let lifecycle_pin = self.manifest.lifecycle_pin();
+        let run = match resources {
+            Some(resources) => {
+                self.client
+                    .query_with_lifecycle_pin_and_resources(request, lifecycle_pin, resources)
+                    .await
+            }
+            None => {
+                self.client
+                    .query_with_lifecycle_pin(request, lifecycle_pin)
+                    .await
+            }
+        }
+        .map_err(|error| {
+            let (reason, message) = map_planning_error(error);
+            BacktestHistorySnapshotError::new(
+                reason,
+                Some(request_id),
+                Some(symbol.clone()),
+                message,
+            )
+        })?;
         Ok(BacktestHistorySnapshotRun::new(run, request_id, symbol))
     }
 }
@@ -493,10 +524,201 @@ fn map_source_error(error: DataError) -> (BacktestHistoryFailureReason, String) 
 }
 
 #[cfg(test)]
-mod tests {
+mod resource_tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use super::*;
+    use crate::{DailyKlineCache, DailyKlineCacheSnapshot};
+
+    struct RejectingBudget;
+
+    impl super::super::BacktestHistorySnapshotResourceBudget for RejectingBudget {
+        fn try_reserve(
+            &self,
+            _bytes: usize,
+        ) -> Option<super::super::BacktestHistorySnapshotResourceReservation> {
+            None
+        }
+    }
+
+    struct AllowingBudget;
+
+    impl super::super::BacktestHistorySnapshotResourceBudget for AllowingBudget {
+        fn try_reserve(
+            &self,
+            _bytes: usize,
+        ) -> Option<super::super::BacktestHistorySnapshotResourceReservation> {
+            Some(super::super::BacktestHistorySnapshotResourceReservation::new(()))
+        }
+    }
+
+    pub(super) struct TrackingBudget {
+        pub(super) used: Arc<AtomicUsize>,
+    }
+
+    impl super::super::BacktestHistorySnapshotResourceBudget for TrackingBudget {
+        fn try_reserve(
+            &self,
+            bytes: usize,
+        ) -> Option<super::super::BacktestHistorySnapshotResourceReservation> {
+            self.used.fetch_add(bytes, Ordering::AcqRel);
+            Some(
+                super::super::BacktestHistorySnapshotResourceReservation::new(TrackedReservation {
+                    used: Arc::clone(&self.used),
+                    bytes,
+                }),
+            )
+        }
+    }
+
+    struct TrackedReservation {
+        used: Arc<AtomicUsize>,
+        bytes: usize,
+    }
+
+    impl Drop for TrackedReservation {
+        fn drop(&mut self) {
+            self.used.fetch_sub(self.bytes, Ordering::AcqRel);
+        }
+    }
+
+    struct ActivePin(Arc<AtomicBool>);
+
+    impl Drop for ActivePin {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_resources_reject_before_daily_reader_allocates_and_release_after_failure() {
+        let cache_dir = std::env::temp_dir().join(format!(
+            "tqsdk-snapshot-scan-resources-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let symbol = "SHFE.au2612";
+        let start_ns = 1_704_153_600_000_000_000_i64;
+        let end_ns = start_ns + 86_400_000_000_000;
+        DailyKlineCache::open(&cache_dir)
+            .unwrap()
+            .store_final_range(
+                symbol,
+                start_ns,
+                end_ns,
+                &DailyKlineCacheSnapshot::cst_v1(),
+                &[],
+            )
+            .unwrap();
+        let client = BacktestHistoryClient::builder(&cache_dir)
+            .policy(BacktestHistoryPolicy::CacheOnly)
+            .build()
+            .unwrap();
+        let daily_reader_opens = Arc::new(AtomicUsize::new(0));
+        let resources = BacktestHistorySnapshotQueryResources::new(Arc::new(RejectingBudget), ())
+            .with_daily_reader_open_probe(Arc::clone(&daily_reader_opens));
+
+        let run = client
+            .query_with_resources(
+                BacktestHistoryRequest::kline(
+                    1,
+                    symbol,
+                    Duration::from_secs(86_400),
+                    start_ns,
+                    end_ns,
+                ),
+                resources.clone(),
+            )
+            .await
+            .unwrap();
+        let snapshot_run = BacktestHistorySnapshotRun::new(run, 1, symbol.to_string());
+        let error = snapshot_run.collect().await.unwrap_err();
+
+        assert!(matches!(
+            error.reason(),
+            BacktestHistoryFailureReason::ResponseTooLarge { limit_bytes: 0, .. }
+        ));
+        assert_eq!(daily_reader_opens.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn active_pin_outlives_dropped_run_until_detached_blocking_scan_exits() {
+        let cache_dir = std::env::temp_dir().join(format!(
+            "tqsdk-snapshot-active-pin-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let symbol = "SHFE.au2612";
+        let start_ns = 1_704_153_600_000_000_000_i64;
+        let end_ns = start_ns + 86_400_000_000_000;
+        DailyKlineCache::open(&cache_dir)
+            .unwrap()
+            .store_final_range(
+                symbol,
+                start_ns,
+                end_ns,
+                &DailyKlineCacheSnapshot::cst_v1(),
+                &[],
+            )
+            .unwrap();
+        let client = BacktestHistoryClient::builder(&cache_dir)
+            .policy(BacktestHistoryPolicy::CacheOnly)
+            .build()
+            .unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let resources = BacktestHistorySnapshotQueryResources::new(
+            Arc::new(AllowingBudget),
+            ActivePin(Arc::clone(&dropped)),
+        );
+        let lifecycle_pin: super::super::BacktestHistoryLifecyclePin = Arc::new(());
+        let (gate, entered) =
+            crate::backtest_history::store_worker::BlockingScanTestGate::install();
+        let run = client
+            .query_with_lifecycle_pin_and_resources(
+                BacktestHistoryRequest::kline(
+                    1,
+                    symbol,
+                    Duration::from_secs(86_400),
+                    start_ns,
+                    end_ns,
+                ),
+                lifecycle_pin,
+                resources,
+            )
+            .await
+            .unwrap();
+        tokio::task::spawn_blocking(move || entered.recv_timeout(Duration::from_secs(1)))
+            .await
+            .unwrap()
+            .expect("blocking scan must enter test gate");
+        drop(run);
+        assert!(!dropped.load(Ordering::Acquire));
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !dropped.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("active pin must drop after detached blocking scan exits");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use super::resource_tests::TrackingBudget;
     use super::*;
     use crate::backtest_history::store_worker::BlockingScanTestGate;
     use crate::{DailyKlineCache, DailyKlineCacheSnapshot};
@@ -553,6 +775,87 @@ mod tests {
         let error = snapshot_run.collect().await.unwrap_err();
         assert_eq!(error.reason(), &BacktestHistoryFailureReason::Internal);
 
+        let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    #[tokio::test]
+    async fn projected_rows_stay_budgeted_after_delivery_until_run_drop() {
+        let cache_dir = std::env::temp_dir().join(format!(
+            "tqsdk-snapshot-projected-row-budget-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let symbol = "SHFE.au2612";
+        let start_ns = 1_704_153_600_000_000_000_i64;
+        let end_ns = start_ns + 86_400_000_000_000;
+        DailyKlineCache::open(&cache_dir)
+            .unwrap()
+            .store_final_range(
+                symbol,
+                start_ns,
+                end_ns,
+                &DailyKlineCacheSnapshot::cst_v1(),
+                &[tqsdk_core::Kline {
+                    id: 1,
+                    datetime: start_ns,
+                    close: 1.0,
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+        let client = BacktestHistoryClient::builder(&cache_dir)
+            .policy(BacktestHistoryPolicy::CacheOnly)
+            .build()
+            .unwrap();
+        let used = Arc::new(AtomicUsize::new(0));
+        let resources = BacktestHistorySnapshotQueryResources::new(
+            Arc::new(TrackingBudget {
+                used: Arc::clone(&used),
+            }),
+            (),
+        );
+        let mut run = client
+            .query_with_resources(
+                BacktestHistoryRequest::kline(
+                    1,
+                    symbol,
+                    Duration::from_secs(86_400),
+                    start_ns,
+                    end_ns,
+                ),
+                resources,
+            )
+            .await
+            .unwrap();
+
+        let chunk = match run.next().await {
+            Some(BacktestHistoryEvent::Chunk(chunk)) => chunk,
+            Some(BacktestHistoryEvent::RequestCompleted(_)) => {
+                panic!("query completed before delivering its projected row")
+            }
+            Some(BacktestHistoryEvent::RequestFailed(failure)) => {
+                panic!("query failed before delivering its projected row: {failure:?}")
+            }
+            None => panic!("query ended before delivering its projected row"),
+        };
+        assert_eq!(chunk.rows.len(), 1);
+        drop(chunk);
+        assert!(
+            used.load(Ordering::Acquire) > 0,
+            "delivered projected rows must remain charged to the run"
+        );
+
+        drop(run);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while used.load(Ordering::Acquire) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the run must release projected-row reservations");
         let _ = std::fs::remove_dir_all(cache_dir);
     }
 }

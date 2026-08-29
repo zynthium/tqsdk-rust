@@ -393,6 +393,73 @@ impl DailyKlineCache {
             .collect())
     }
 
+    /// Conservative peak allocation bound for one read-only daily scan.
+    ///
+    /// This reads only file metadata. It deliberately accounts for the encoded
+    /// payload, decoded rows, and the filtered result coexisting while a bounded
+    /// scan is being constructed.
+    pub(crate) fn read_range_allocation_upper_bound(
+        &self,
+        symbol: impl AsRef<str>,
+    ) -> Result<usize> {
+        let symbol = symbol.as_ref();
+        validate_symbol(symbol)?;
+        daily_read_allocation_upper_bound(self.symbol_file_path(symbol).as_path())
+    }
+
+    /// Reads a complete final-covered range only when its conservative peak
+    /// allocation upper bound fits `max_allocation_bytes`.
+    ///
+    /// Unlike [`Self::read_range`], this path never starts full-file allocation
+    /// before establishing the supplied bound.
+    pub(crate) fn read_range_bounded(
+        &self,
+        symbol: impl AsRef<str>,
+        range_start_ns: i64,
+        range_end_ns: i64,
+        snapshot: &DailyKlineCacheSnapshot,
+        max_allocation_bytes: usize,
+    ) -> Result<Vec<Kline>> {
+        let symbol = symbol.as_ref();
+        validate_symbol(symbol)?;
+        if range_start_ns >= range_end_ns {
+            return Err(DataError::Validation(
+                "daily kline cache range must have positive width".to_string(),
+            ));
+        }
+        let path = self.symbol_file_path(symbol);
+        let file = load_file_bounded(
+            self.root_dir.as_path(),
+            path.as_path(),
+            symbol,
+            snapshot,
+            max_allocation_bytes,
+        )?
+        .ok_or_else(|| {
+            DataError::InvalidState("daily kline cache coverage disappeared during read")
+        })?;
+        let cached_ranges =
+            intersect_ranges(file.coverage.as_slice(), (range_start_ns, range_end_ns));
+        if !missing_ranges(cached_ranges.as_slice(), (range_start_ns, range_end_ns)).is_empty() {
+            return Err(DataError::InvalidState(
+                "daily kline cache coverage incomplete",
+            ));
+        }
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(file.rows.len())
+            .map_err(|_| DataError::CollectLimitExceeded {
+                limit_bytes: max_allocation_bytes,
+                attempted_bytes: daily_read_allocation_upper_bound(path.as_path())
+                    .unwrap_or(usize::MAX),
+            })?;
+        rows.extend(
+            file.rows
+                .into_iter()
+                .filter(|row| row.datetime >= range_start_ns && row.datetime < range_end_ns),
+        );
+        Ok(rows)
+    }
+
     /// Reads and validates one symbol file without modifying it.
     pub fn diagnose(&self, symbol: impl AsRef<str>) -> Result<DailyKlineCacheDiagnosticReport> {
         let symbol = symbol.as_ref();
@@ -607,9 +674,111 @@ fn load_file(
     Ok(Some(file))
 }
 
+fn load_file_bounded(
+    cache_dir: &Path,
+    path: &Path,
+    expected_symbol: &str,
+    expected_snapshot: &DailyKlineCacheSnapshot,
+    max_allocation_bytes: usize,
+) -> Result<Option<DailyFile>> {
+    match fs::metadata(path) {
+        Ok(metadata) => {
+            if !metadata.is_file() {
+                return Err(DataError::InvalidResponse(
+                    "daily kline cache path is not a regular file".to_string(),
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let file = load_file_unchecked_with_limit(path, Some(max_allocation_bytes))?;
+    if file.symbol != expected_symbol {
+        return Err(DataError::InvalidResponse(
+            "daily kline cache symbol does not match file path".to_string(),
+        ));
+    }
+    if !minute_cache_snapshots_are_compatible(
+        cache_dir,
+        expected_symbol,
+        &file.snapshot,
+        expected_snapshot,
+        file.coverage.as_slice(),
+    )? {
+        return Err(DataError::InvalidResponse(
+            "daily kline cache metadata snapshot mismatch".to_string(),
+        ));
+    }
+    Ok(Some(file))
+}
+
+fn daily_read_allocation_upper_bound(path: &Path) -> Result<usize> {
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(DataError::InvalidResponse(
+            "daily kline cache path is not a regular file".to_string(),
+        ));
+    }
+    let file_bytes = usize::try_from(metadata.len()).map_err(|_| {
+        DataError::InvalidResponse("daily kline cache file length overflows usize".to_string())
+    })?;
+    daily_read_allocation_upper_bound_for_file_bytes(file_bytes)
+}
+
+fn daily_read_allocation_upper_bound_for_file_bytes(file_bytes: usize) -> Result<usize> {
+    let max_rows = file_bytes
+        .saturating_sub(FILE_HEADER_BYTES)
+        .checked_div(KLINE_ROW_BYTES)
+        .unwrap_or(0);
+    file_bytes
+        .checked_mul(4)
+        .and_then(|bound| {
+            max_rows
+                .checked_mul(std::mem::size_of::<Kline>())
+                .and_then(|rows| rows.checked_mul(2))
+                .and_then(|rows| bound.checked_add(rows))
+        })
+        .ok_or_else(|| {
+            DataError::InvalidResponse(
+                "daily kline cache allocation upper bound overflows usize".to_string(),
+            )
+        })
+}
+
 fn load_file_unchecked(path: &Path) -> Result<DailyFile> {
+    load_file_unchecked_with_limit(path, None)
+}
+
+fn load_file_unchecked_with_limit(
+    path: &Path,
+    max_allocation_bytes: Option<usize>,
+) -> Result<DailyFile> {
+    let file_bytes = usize::try_from(fs::metadata(path)?.len()).map_err(|_| {
+        DataError::InvalidResponse("daily kline cache file length overflows usize".to_string())
+    })?;
+    let allocation_upper_bound = daily_read_allocation_upper_bound_for_file_bytes(file_bytes)?;
+    if max_allocation_bytes.is_some_and(|limit| allocation_upper_bound > limit) {
+        return Err(DataError::CollectLimitExceeded {
+            limit_bytes: max_allocation_bytes.unwrap_or(usize::MAX),
+            attempted_bytes: allocation_upper_bound,
+        });
+    }
     let mut bytes = Vec::new();
-    File::open(path)?.read_to_end(&mut bytes)?;
+    bytes
+        .try_reserve_exact(file_bytes)
+        .map_err(|_| DataError::CollectLimitExceeded {
+            limit_bytes: max_allocation_bytes.unwrap_or(file_bytes),
+            attempted_bytes: allocation_upper_bound,
+        })?;
+    bytes.resize(file_bytes, 0);
+    let mut input = File::open(path)?;
+    input.read_exact(bytes.as_mut_slice())?;
+    let mut trailing = [0_u8; 1];
+    if input.read(&mut trailing)? != 0 {
+        return Err(DataError::InvalidResponse(
+            "daily kline cache file changed during bounded read".to_string(),
+        ));
+    }
     if bytes.len() < FILE_HEADER_BYTES {
         return Err(DataError::InvalidResponse(
             "daily kline cache file is shorter than header".to_string(),
@@ -851,6 +1020,54 @@ fn intersect_ranges(ranges: &[(i64, i64)], requested: (i64, i64)) -> Vec<(i64, i
             (start_ns < end_ns).then_some((start_ns, end_ns))
         })
         .collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod bounded_read_tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[test]
+    fn bounded_read_rejects_before_full_file_decode_and_file_size_overflow_cannot_bypass_it() {
+        let cache_dir = std::env::temp_dir().join(format!(
+            "tqsdk-daily-bounded-read-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cache = DailyKlineCache::open(&cache_dir).unwrap();
+        let symbol = "SHFE.au2612";
+        let start_ns = 1_704_153_600_000_000_000_i64;
+        let end_ns = start_ns + DAILY_KLINE_DURATION_NS;
+        cache
+            .store_final_range(
+                symbol,
+                start_ns,
+                end_ns,
+                &DailyKlineCacheSnapshot::cst_v1(),
+                &[],
+            )
+            .unwrap();
+        let upper = cache.read_range_allocation_upper_bound(symbol).unwrap();
+        let error = cache
+            .read_range_bounded(
+                symbol,
+                start_ns,
+                end_ns,
+                &DailyKlineCacheSnapshot::cst_v1(),
+                upper.saturating_sub(1),
+            )
+            .unwrap_err();
+        assert!(matches!(error, DataError::CollectLimitExceeded { .. }));
+        assert!(matches!(
+            daily_read_allocation_upper_bound_for_file_bytes(usize::MAX),
+            Err(DataError::InvalidResponse(_))
+        ));
+    }
 }
 
 fn missing_ranges(cached: &[(i64, i64)], requested: (i64, i64)) -> Vec<(i64, i64)> {

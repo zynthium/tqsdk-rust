@@ -278,6 +278,8 @@ Python-compatible mmap 缓存；旧 binary/mmap history cache 已从 public surf
 - `BacktestHistoryRequest` / `BacktestHistoryPolicy`
 - `BacktestHistoryEvent` / `BacktestHistoryRun` / `BacktestHistoryBatchReport`
 - `BacktestHistoryRequestFailure`（既有 query 兼容面）/ `BacktestHistoryFailureReason`（strict snapshot seam typed failure）
+- `BacktestHistorySnapshot` / `BacktestHistorySnapshotRun` / `BacktestHistorySnapshotQueryResources`
+- `BacktestHistorySnapshotResourceBudget` / `BacktestHistorySnapshotResourceReservation`（daemon-owned scan budget 与 opaque RAII guard）
 - `BacktestHistoryMetadataCache` / `BacktestHistoryMaintenanceClient`
 - `DailyKlineCache` / `DailyKlineCoverage` / `DailyKlineCacheStatus` /
   `DailyKlineCacheDiagnosticReport` / `DailyKlineCachePurgeReport`

@@ -14,6 +14,8 @@ use std::sync::{MutexGuard, OnceLock, mpsc as std_mpsc};
 use tokio::sync::{Semaphore, mpsc};
 use tqsdk_core::{Kline, Tick};
 
+use super::BacktestHistorySnapshotQueryResources;
+use super::snapshot_resources::BacktestHistorySnapshotResourceReservation;
 use crate::backtest_tick_cache::BacktestTickCache;
 use crate::client::TickDataSeriesRequest;
 use crate::daily_kline_cache::{DailyKlineCache, DailyKlineCacheSnapshot};
@@ -228,11 +230,46 @@ impl Drop for BytePermit {
     }
 }
 
+fn chunk_allocation_upper_bound(target_bytes: usize, row_bytes: usize) -> Result<usize, DataError> {
+    let rows = target_bytes
+        .checked_add(row_bytes.saturating_sub(1))
+        .and_then(|bytes| bytes.checked_div(row_bytes))
+        .unwrap_or(usize::MAX)
+        .max(1);
+    let vector_capacity =
+        rows.checked_next_power_of_two()
+            .ok_or_else(|| DataError::CollectLimitExceeded {
+                limit_bytes: target_bytes,
+                attempted_bytes: usize::MAX,
+            })?;
+    vector_capacity
+        .checked_add(rows)
+        .and_then(|rows| rows.checked_mul(row_bytes))
+        .ok_or(DataError::CollectLimitExceeded {
+            limit_bytes: target_bytes,
+            attempted_bytes: usize::MAX,
+        })
+}
+
+fn reserve_scan_chunk(
+    resources: Option<&BacktestHistorySnapshotQueryResources>,
+    allocation_upper_bound: usize,
+) -> std::result::Result<Option<BacktestHistorySnapshotResourceReservation>, StoreScanFailure> {
+    resources
+        .map(|resources| {
+            resources
+                .try_reserve_for_scan(allocation_upper_bound)
+                .map_err(StoreScanFailure::from_error)
+        })
+        .transpose()
+}
+
 /// Immutable source rows retained behind a shared byte permit.
 #[derive(Debug)]
 pub(crate) struct StoreChunk {
     pub(crate) rows: StoreRows,
     _buffer_permit: BytePermit,
+    _scan_reservation: Option<BacktestHistorySnapshotResourceReservation>,
 }
 
 impl StoreChunk {
@@ -240,12 +277,14 @@ impl StoreChunk {
         rows: Vec<Tick>,
         budget: &SymbolBufferBudget,
         cancellation: &AtomicBool,
+        scan_reservation: Option<BacktestHistorySnapshotResourceReservation>,
     ) -> Option<Self> {
         let bytes = rows.capacity().saturating_mul(size_of::<Tick>());
         let _buffer_permit = budget.acquire_blocking(bytes, cancellation)?;
         Some(Self {
             rows: StoreRows::Ticks(Arc::from(rows)),
             _buffer_permit,
+            _scan_reservation: scan_reservation,
         })
     }
 
@@ -253,12 +292,14 @@ impl StoreChunk {
         rows: Vec<Kline>,
         budget: &SymbolBufferBudget,
         cancellation: &AtomicBool,
+        scan_reservation: Option<BacktestHistorySnapshotResourceReservation>,
     ) -> Option<Self> {
         let bytes = rows.capacity().saturating_mul(size_of::<Kline>());
         let _buffer_permit = budget.acquire_blocking(bytes, cancellation)?;
         Some(Self {
             rows: StoreRows::CanonicalMinutes(Arc::from(rows)),
             _buffer_permit,
+            _scan_reservation: scan_reservation,
         })
     }
 
@@ -266,12 +307,14 @@ impl StoreChunk {
         rows: Vec<Kline>,
         budget: &SymbolBufferBudget,
         cancellation: &AtomicBool,
+        scan_reservation: Option<BacktestHistorySnapshotResourceReservation>,
     ) -> Option<Self> {
         let bytes = rows.capacity().saturating_mul(size_of::<Kline>());
         let _buffer_permit = budget.acquire_blocking(bytes, cancellation)?;
         Some(Self {
             rows: StoreRows::CanonicalDaily(Arc::from(rows)),
             _buffer_permit,
+            _scan_reservation: scan_reservation,
         })
     }
 }
@@ -339,6 +382,7 @@ pub(crate) struct TickScanSpec {
     pub(crate) permits: Arc<Semaphore>,
     pub(crate) buffer_budget: SymbolBufferBudget,
     pub(crate) lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
+    pub(crate) resources: Option<BacktestHistorySnapshotQueryResources>,
 }
 
 pub(crate) struct MinuteScanSpec {
@@ -351,6 +395,7 @@ pub(crate) struct MinuteScanSpec {
     pub(crate) permits: Arc<Semaphore>,
     pub(crate) buffer_budget: SymbolBufferBudget,
     pub(crate) lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
+    pub(crate) resources: Option<BacktestHistorySnapshotQueryResources>,
 }
 
 pub(crate) struct DailyScanSpec {
@@ -362,6 +407,7 @@ pub(crate) struct DailyScanSpec {
     pub(crate) permits: Arc<Semaphore>,
     pub(crate) buffer_budget: SymbolBufferBudget,
     pub(crate) lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
+    pub(crate) resources: Option<BacktestHistorySnapshotQueryResources>,
 }
 
 /// Starts the selected source reader without occupying a Tokio worker while
@@ -386,6 +432,7 @@ fn spawn_tick_scan(spec: TickScanSpec) -> mpsc::Receiver<StoreScanMessage> {
         permits,
         buffer_budget,
         lifecycle_pin,
+        resources,
     } = spec;
     #[cfg(test)]
     TICK_SCAN_OPENS.fetch_add(1, Ordering::AcqRel);
@@ -406,6 +453,7 @@ fn spawn_tick_scan(spec: TickScanSpec) -> mpsc::Receiver<StoreScanMessage> {
         let blocking_sender = sender.clone();
         let blocking_cancellation = Arc::clone(&cancellation);
         let blocking_lifecycle_pin = scan_lifecycle_pin.clone();
+        let blocking_resources = resources;
         let join = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             if blocking_lifecycle_pin.is_some() {
@@ -413,6 +461,25 @@ fn spawn_tick_scan(spec: TickScanSpec) -> mpsc::Receiver<StoreScanMessage> {
             }
             let _lifecycle_pin = blocking_lifecycle_pin;
             let _permit = permit;
+            let scan_allocation_upper_bound =
+                match chunk_allocation_upper_bound(target_bytes, size_of::<Tick>()) {
+                    Ok(bound) => bound,
+                    Err(error) => {
+                        let _ = blocking_sender.blocking_send(StoreScanMessage::Failed(
+                            StoreScanFailure::from_error(error),
+                        ));
+                        return;
+                    }
+                };
+            let mut next_scan_reservation = Some(
+                match reserve_scan_chunk(blocking_resources.as_ref(), scan_allocation_upper_bound) {
+                    Ok(reservation) => reservation,
+                    Err(error) => {
+                        let _ = blocking_sender.blocking_send(StoreScanMessage::Failed(error));
+                        return;
+                    }
+                },
+            );
             let cache = BacktestTickCache::open_read_only(&cache_dir);
             let request = TickDataSeriesRequest::new(symbol, range.0, range.1);
             let mut reader = match cache.open_history_query_reader(request, provisional_as_of_ns) {
@@ -428,6 +495,19 @@ fn spawn_tick_scan(spec: TickScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 if blocking_cancellation.load(Ordering::Acquire) {
                     return;
                 }
+                let scan_reservation = match next_scan_reservation.take() {
+                    Some(reservation) => reservation,
+                    None => match reserve_scan_chunk(
+                        blocking_resources.as_ref(),
+                        scan_allocation_upper_bound,
+                    ) {
+                        Ok(reservation) => reservation,
+                        Err(error) => {
+                            let _ = blocking_sender.blocking_send(StoreScanMessage::Failed(error));
+                            return;
+                        }
+                    },
+                };
                 let rows = match reader.next_tick_chunk(target_bytes) {
                     Ok(rows) => rows,
                     Err(error) => {
@@ -440,8 +520,12 @@ fn spawn_tick_scan(spec: TickScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 if rows.is_empty() {
                     return;
                 }
-                let Some(chunk) = StoreChunk::ticks(rows, &buffer_budget, &blocking_cancellation)
-                else {
+                let Some(chunk) = StoreChunk::ticks(
+                    rows,
+                    &buffer_budget,
+                    &blocking_cancellation,
+                    scan_reservation,
+                ) else {
                     return;
                 };
                 if blocking_sender
@@ -478,6 +562,7 @@ fn spawn_minute_scan(spec: MinuteScanSpec) -> mpsc::Receiver<StoreScanMessage> {
         permits,
         buffer_budget,
         lifecycle_pin,
+        resources,
     } = spec;
     #[cfg(test)]
     MINUTE_SCAN_OPENS.fetch_add(1, Ordering::AcqRel);
@@ -498,6 +583,7 @@ fn spawn_minute_scan(spec: MinuteScanSpec) -> mpsc::Receiver<StoreScanMessage> {
         let blocking_sender = sender.clone();
         let blocking_cancellation = Arc::clone(&cancellation);
         let blocking_lifecycle_pin = scan_lifecycle_pin.clone();
+        let blocking_resources = resources;
         let join = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             if blocking_lifecycle_pin.is_some() {
@@ -505,6 +591,25 @@ fn spawn_minute_scan(spec: MinuteScanSpec) -> mpsc::Receiver<StoreScanMessage> {
             }
             let _lifecycle_pin = blocking_lifecycle_pin;
             let _permit = permit;
+            let scan_allocation_upper_bound =
+                match chunk_allocation_upper_bound(target_bytes, size_of::<Kline>()) {
+                    Ok(bound) => bound,
+                    Err(error) => {
+                        let _ = blocking_sender.blocking_send(StoreScanMessage::Failed(
+                            StoreScanFailure::from_error(error),
+                        ));
+                        return;
+                    }
+                };
+            let mut next_scan_reservation = Some(
+                match reserve_scan_chunk(blocking_resources.as_ref(), scan_allocation_upper_bound) {
+                    Ok(reservation) => reservation,
+                    Err(error) => {
+                        let _ = blocking_sender.blocking_send(StoreScanMessage::Failed(error));
+                        return;
+                    }
+                },
+            );
             let cache = MinuteKlineCache::open_read_only(&cache_dir);
             let mut reader = match cache.open_reader(symbol, range.0, range.1, &snapshot) {
                 Ok(reader) => reader,
@@ -519,6 +624,19 @@ fn spawn_minute_scan(spec: MinuteScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 if blocking_cancellation.load(Ordering::Acquire) {
                     return;
                 }
+                let scan_reservation = match next_scan_reservation.take() {
+                    Some(reservation) => reservation,
+                    None => match reserve_scan_chunk(
+                        blocking_resources.as_ref(),
+                        scan_allocation_upper_bound,
+                    ) {
+                        Ok(reservation) => reservation,
+                        Err(error) => {
+                            let _ = blocking_sender.blocking_send(StoreScanMessage::Failed(error));
+                            return;
+                        }
+                    },
+                };
                 let rows = match reader.next_kline_chunk(target_bytes) {
                     Ok(rows) => rows,
                     Err(error) => {
@@ -531,9 +649,12 @@ fn spawn_minute_scan(spec: MinuteScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 if rows.is_empty() {
                     return;
                 }
-                let Some(chunk) =
-                    StoreChunk::canonical_minutes(rows, &buffer_budget, &blocking_cancellation)
-                else {
+                let Some(chunk) = StoreChunk::canonical_minutes(
+                    rows,
+                    &buffer_budget,
+                    &blocking_cancellation,
+                    scan_reservation,
+                ) else {
                     return;
                 };
                 if blocking_sender
@@ -569,6 +690,7 @@ fn spawn_daily_scan(spec: DailyScanSpec) -> mpsc::Receiver<StoreScanMessage> {
         permits,
         buffer_budget,
         lifecycle_pin,
+        resources,
     } = spec;
     let (sender, receiver) = mpsc::channel(2);
     tokio::spawn(async move {
@@ -587,6 +709,7 @@ fn spawn_daily_scan(spec: DailyScanSpec) -> mpsc::Receiver<StoreScanMessage> {
         let blocking_sender = sender.clone();
         let blocking_cancellation = Arc::clone(&cancellation);
         let blocking_lifecycle_pin = scan_lifecycle_pin.clone();
+        let blocking_resources = resources;
         let join = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             if blocking_lifecycle_pin.is_some() {
@@ -597,9 +720,35 @@ fn spawn_daily_scan(spec: DailyScanSpec) -> mpsc::Receiver<StoreScanMessage> {
             if blocking_cancellation.load(Ordering::Acquire) {
                 return;
             }
-            let rows = match DailyKlineCache::open_read_only(&cache_dir)
-                .read_range(symbol, range.0, range.1, &snapshot)
-            {
+            let cache = DailyKlineCache::open_read_only(&cache_dir);
+            let allocation_upper_bound = match cache.read_range_allocation_upper_bound(&symbol) {
+                Ok(bound) => bound,
+                Err(error) => {
+                    let _ = blocking_sender.blocking_send(StoreScanMessage::Failed(
+                        StoreScanFailure::from_error(error),
+                    ));
+                    return;
+                }
+            };
+            let scan_reservation =
+                match reserve_scan_chunk(blocking_resources.as_ref(), allocation_upper_bound) {
+                    Ok(reservation) => reservation,
+                    Err(error) => {
+                        let _ = blocking_sender.blocking_send(StoreScanMessage::Failed(error));
+                        return;
+                    }
+                };
+            #[cfg(test)]
+            if let Some(resources) = blocking_resources.as_ref() {
+                resources.record_daily_reader_open();
+            }
+            let rows = match cache.read_range_bounded(
+                symbol,
+                range.0,
+                range.1,
+                &snapshot,
+                allocation_upper_bound,
+            ) {
                 Ok(rows) => rows,
                 Err(error) => {
                     let _ = blocking_sender.blocking_send(StoreScanMessage::Failed(
@@ -611,9 +760,12 @@ fn spawn_daily_scan(spec: DailyScanSpec) -> mpsc::Receiver<StoreScanMessage> {
             if rows.is_empty() {
                 return;
             }
-            let Some(chunk) =
-                StoreChunk::canonical_daily(rows, &buffer_budget, &blocking_cancellation)
-            else {
+            let Some(chunk) = StoreChunk::canonical_daily(
+                rows,
+                &buffer_budget,
+                &blocking_cancellation,
+                scan_reservation,
+            ) else {
                 return;
             };
             let _ = blocking_sender.blocking_send(StoreScanMessage::Chunk(Arc::new(chunk)));

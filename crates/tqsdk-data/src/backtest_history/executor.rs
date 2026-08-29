@@ -35,6 +35,10 @@ use super::store_worker::{
     SymbolBufferBudget, TickScanSpec, spawn_scan,
 };
 use super::telemetry::TelemetryHub;
+use super::{
+    BacktestHistoryEventEnvelope, BacktestHistoryRunReservations,
+    BacktestHistorySnapshotResourceReservation,
+};
 
 const MAX_SOURCE_CHUNK_BYTES: usize = 1024 * 1024;
 const REQUEST_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -48,16 +52,22 @@ pub(crate) enum BacktestHistoryExecutionMode {
 pub(crate) struct BacktestHistoryExecutionState {
     lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
     failure_reasons: super::BacktestHistoryFailureReasons,
+    resources: Option<super::BacktestHistorySnapshotQueryResources>,
+    event_reservations: BacktestHistoryRunReservations,
 }
 
 impl BacktestHistoryExecutionState {
     pub(crate) fn new(
         lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
         failure_reasons: super::BacktestHistoryFailureReasons,
+        resources: Option<super::BacktestHistorySnapshotQueryResources>,
+        event_reservations: BacktestHistoryRunReservations,
     ) -> Self {
         Self {
             lifecycle_pin,
             failure_reasons,
+            resources,
+            event_reservations,
         }
     }
 }
@@ -82,6 +92,7 @@ struct BaseScanSpec {
     blocking_permits: Arc<Semaphore>,
     buffer_budget: SymbolBufferBudget,
     lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
+    resources: Option<super::BacktestHistorySnapshotQueryResources>,
 }
 
 #[derive(Clone)]
@@ -89,12 +100,14 @@ struct SharedScanRegistry {
     entries: Arc<Mutex<Vec<SharedScanEntry>>>,
     budgets: Arc<Mutex<Vec<(String, SymbolBufferBudget)>>>,
     lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
+    resources: Option<super::BacktestHistorySnapshotQueryResources>,
 }
 
 #[derive(Clone)]
 struct SharedScanEntry {
     key: BaseScanKey,
     state: Arc<Mutex<SharedScanState>>,
+    resources: Option<super::BacktestHistorySnapshotQueryResources>,
 }
 
 enum SharedScanState {
@@ -109,11 +122,15 @@ struct SharedScanSubscription {
 }
 
 impl SharedScanRegistry {
-    fn new(lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>) -> Self {
+    fn new(
+        lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
+        resources: Option<super::BacktestHistorySnapshotQueryResources>,
+    ) -> Self {
         Self {
             entries: Arc::new(Mutex::new(Vec::new())),
             budgets: Arc::new(Mutex::new(Vec::new())),
             lifecycle_pin,
+            resources,
         }
     }
 
@@ -140,6 +157,7 @@ impl SharedScanRegistry {
                 blocking_permits,
                 buffer_budget: budget,
                 lifecycle_pin: self.lifecycle_pin.clone(),
+                resources: self.resources.clone(),
             });
         }
 
@@ -189,6 +207,7 @@ impl SharedScanRegistry {
                 blocking_permits,
                 buffer_budget: budget,
                 lifecycle_pin: self.lifecycle_pin.clone(),
+                resources: self.resources.clone(),
             });
         }
 
@@ -200,6 +219,7 @@ impl SharedScanRegistry {
                     sender,
                 },
             ]))),
+            resources: self.resources.clone(),
         };
         entries.push(entry.clone());
         drop(entries);
@@ -277,6 +297,7 @@ async fn run_shared_scan(
             blocking_permits: Arc::clone(&blocking_permits),
             buffer_budget: buffer_budget.clone(),
             lifecycle_pin: lifecycle_pin.clone(),
+            resources: entry.resources.clone(),
         });
         while let Some(message) = source.recv().await {
             match message {
@@ -336,6 +357,7 @@ fn spawn_base_scan(spec: BaseScanSpec) -> mpsc::Receiver<StoreScanMessage> {
             permits: spec.blocking_permits,
             buffer_budget: spec.buffer_budget,
             lifecycle_pin: spec.lifecycle_pin,
+            resources: spec.resources,
         })),
         PlannedBaseSource::CanonicalMinute => {
             spawn_scan(StoreScanSpec::CanonicalMinute(MinuteScanSpec {
@@ -348,6 +370,7 @@ fn spawn_base_scan(spec: BaseScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 permits: spec.blocking_permits,
                 buffer_budget: spec.buffer_budget,
                 lifecycle_pin: spec.lifecycle_pin,
+                resources: spec.resources,
             }))
         }
         PlannedBaseSource::CanonicalDaily => {
@@ -360,6 +383,7 @@ fn spawn_base_scan(spec: BaseScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 permits: spec.blocking_permits,
                 buffer_budget: spec.buffer_budget,
                 lifecycle_pin: spec.lifecycle_pin,
+                resources: spec.resources,
             }))
         }
     }
@@ -382,7 +406,7 @@ fn chunk_intersects_range(chunk: &super::store_worker::StoreChunk, range: (i64, 
 pub(crate) async fn execute_batch(
     config: Arc<BacktestHistoryClientConfig>,
     requests: Vec<ValidatedBacktestHistoryRequest>,
-    event_sender: mpsc::Sender<BacktestHistoryEvent>,
+    event_sender: mpsc::Sender<BacktestHistoryEventEnvelope>,
     telemetry: TelemetryHub,
     cancellation: Arc<AtomicBool>,
     mode: BacktestHistoryExecutionMode,
@@ -391,10 +415,12 @@ pub(crate) async fn execute_batch(
     let BacktestHistoryExecutionState {
         lifecycle_pin,
         failure_reasons,
+        resources,
+        event_reservations,
     } = execution_state;
     let logical_permits = Arc::new(Semaphore::new(config.logical_concurrency));
     let blocking_permits = Arc::new(Semaphore::new(config.blocking_workers));
-    let scan_registry = SharedScanRegistry::new(lifecycle_pin);
+    let scan_registry = SharedScanRegistry::new(lifecycle_pin, resources.clone());
     let mut tasks = JoinSet::new();
     for request in requests {
         let config = Arc::clone(&config);
@@ -405,6 +431,8 @@ pub(crate) async fn execute_batch(
         let blocking_permits = Arc::clone(&blocking_permits);
         let scan_registry = scan_registry.clone();
         let failure_reasons = Arc::clone(&failure_reasons);
+        let resources = resources.clone();
+        let event_reservations = event_reservations.clone();
         tasks.spawn(async move {
             let request_id = request.request_id;
             let symbol = request.symbol.clone();
@@ -427,6 +455,8 @@ pub(crate) async fn execute_batch(
                         chunk_bytes,
                         mode,
                         failure_reasons,
+                        resources,
+                        event_reservations,
                     };
                     run_request(context, request).await
                 }
@@ -499,7 +529,10 @@ async fn run_request(
     match result {
         Ok((report, emitted_rows)) => {
             let _ = event_sender
-                .send(BacktestHistoryEvent::RequestCompleted(report.clone()))
+                .send(BacktestHistoryEventEnvelope::new(
+                    BacktestHistoryEvent::RequestCompleted(report.clone()),
+                    None,
+                ))
                 .await;
             let completed_rows = if mode == BacktestHistoryExecutionMode::MaterializeCache {
                 report.rows
@@ -541,7 +574,10 @@ async fn run_request(
                 emitted_rows: execution.emitted_rows,
             };
             let _ = event_sender
-                .send(BacktestHistoryEvent::RequestFailed(failure.clone()))
+                .send(BacktestHistoryEventEnvelope::new(
+                    BacktestHistoryEvent::RequestFailed(failure.clone()),
+                    None,
+                ))
                 .await;
             telemetry.emit_terminal(BacktestHistoryTelemetryEvent {
                 request_id: Some(failure.request_id),
@@ -564,10 +600,47 @@ struct ExecutionFailure {
     emitted_rows: usize,
 }
 
+struct ReservedProjectedRows<T> {
+    rows: Vec<T>,
+    reservation: Option<BacktestHistorySnapshotResourceReservation>,
+}
+
+impl<T> ReservedProjectedRows<T> {
+    fn with_capacity(
+        capacity: usize,
+        resources: Option<&super::BacktestHistorySnapshotQueryResources>,
+    ) -> Result<Self> {
+        let reservation = resources
+            .map(|resources| resources.try_reserve_for_projected_rows::<T>(capacity))
+            .transpose()?;
+        Ok(Self {
+            rows: Vec::with_capacity(capacity),
+            reservation,
+        })
+    }
+
+    fn into_parts(self) -> (Vec<T>, Option<BacktestHistorySnapshotResourceReservation>) {
+        (self.rows, self.reservation)
+    }
+}
+
+fn projected_kline_capacity(chunk_bytes: usize) -> usize {
+    let row_bytes = std::mem::size_of::<Kline>();
+    let requested_rows = chunk_bytes
+        .saturating_add(row_bytes.saturating_sub(1))
+        .checked_div(row_bytes)
+        .unwrap_or(usize::MAX)
+        .saturating_add(1)
+        .max(1);
+    requested_rows
+        .checked_next_power_of_two()
+        .unwrap_or(usize::MAX)
+}
+
 #[derive(Clone)]
 struct RequestExecutionContext {
     config: Arc<BacktestHistoryClientConfig>,
-    event_sender: mpsc::Sender<BacktestHistoryEvent>,
+    event_sender: mpsc::Sender<BacktestHistoryEventEnvelope>,
     telemetry: TelemetryHub,
     cancellation: Arc<AtomicBool>,
     blocking_permits: Arc<Semaphore>,
@@ -575,6 +648,8 @@ struct RequestExecutionContext {
     chunk_bytes: usize,
     mode: BacktestHistoryExecutionMode,
     failure_reasons: super::BacktestHistoryFailureReasons,
+    resources: Option<super::BacktestHistorySnapshotQueryResources>,
+    event_reservations: BacktestHistoryRunReservations,
 }
 
 async fn execute_request(
@@ -679,6 +754,34 @@ async fn execute_request(
             0,
         ));
     }
+
+    // A derived Kline request can own one producer buffer while the bounded
+    // event queue holds two completed buffers and the consumer encodes one
+    // delivered buffer. Retain that conservative four-buffer reservation
+    // before any `Vec<Kline>` allocation, then keep it for the whole public
+    // run so a slow encoder cannot create an unaccounted allocation window.
+    let _derived_output_reservation = if plan.duration_ns.is_some() {
+        if let Some(resources) = context.resources.as_ref() {
+            let rows = projected_kline_capacity(context.chunk_bytes).saturating_mul(4);
+            let reservation = resources
+                .try_reserve_for_projected_rows::<Kline>(rows)
+                .map_err(|error| ExecutionFailure {
+                    error,
+                    emitted_rows: 0,
+                })?;
+            let reservation = Arc::new(reservation);
+            context
+                .event_reservations
+                .retain(BacktestHistorySnapshotResourceReservation::new(Arc::clone(
+                    &reservation,
+                )));
+            Some(reservation)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     let emitted_rows = match plan.base_source {
         PlannedBaseSource::Tick => execute_tick_plan(context, &plan).await,
@@ -916,19 +1019,28 @@ async fn execute_tick_plan(
                                 "backtest history request was cancelled",
                             ));
                         }
-                        let mut rows = tick_rows_for_slice(
+                        let mut projected = tick_rows_for_slice(
                             message,
                             slice,
                             &context.failure_reasons,
                             plan.request_id,
+                            context.resources.as_ref(),
                         )?;
-                        rows.retain(|row| {
+                        projected.rows.retain(|row| {
                             row.datetime >= plan.requested_range.0
                                 && row.datetime < plan.effective_end_ns
                         });
+                        let (rows, reservation) = projected.into_parts();
                         emitted_rows = emitted_rows.saturating_add(
-                            send_tick_chunk(event_sender, plan, rows, telemetry, emitted_rows)
-                                .await?,
+                            send_tick_chunk_with_reservation(
+                                event_sender,
+                                plan,
+                                rows,
+                                reservation,
+                                telemetry,
+                                emitted_rows,
+                            )
+                            .await?,
                         );
                     }
                 }
@@ -960,9 +1072,10 @@ async fn execute_tick_plan(
                             slice,
                             &context.failure_reasons,
                             plan.request_id,
+                            context.resources.as_ref(),
                         )?;
-                        for row in rows {
-                            if let Some(update) = aggregator.update(&row)?
+                        for row in &rows.rows {
+                            if let Some(update) = aggregator.update(row)?
                                 && let Some(closed) = update.closed
                                 && should_emit_kline(&closed, plan, duration_ns)?
                             {
@@ -1043,22 +1156,25 @@ async fn execute_minute_plan(
                             "backtest history request was cancelled",
                         ));
                     }
-                    let mut rows = minute_rows_for_slice(
+                    let mut projected = minute_rows_for_slice(
                         message,
                         slice,
                         &context.failure_reasons,
                         plan.request_id,
+                        context.resources.as_ref(),
                     )?;
-                    rows.retain(|row| {
+                    projected.rows.retain(|row| {
                         row.datetime >= plan.requested_range.0
                             && row.datetime < plan.effective_end_ns
                     });
+                    let (rows, reservation) = projected.into_parts();
                     emitted_rows = emitted_rows.saturating_add(
-                        send_kline_chunk(
+                        send_kline_chunk_with_reservation(
                             event_sender,
                             plan,
                             duration_ns,
                             rows,
+                            reservation,
                             telemetry,
                             emitted_rows,
                         )
@@ -1091,9 +1207,10 @@ async fn execute_minute_plan(
                     slice,
                     &context.failure_reasons,
                     plan.request_id,
+                    context.resources.as_ref(),
                 )?;
-                for row in rows {
-                    if let Some(update) = aggregator.update(&row)?
+                for row in &rows.rows {
+                    if let Some(update) = aggregator.update(row)?
                         && let Some(closed) = update.closed
                         && should_emit_kline(&closed, plan, duration_ns)?
                     {
@@ -1169,16 +1286,18 @@ async fn execute_daily_plan(
                             "backtest history request was cancelled",
                         ));
                     }
-                    for row in daily_rows_for_slice(
+                    let projected = daily_rows_for_slice(
                         message,
                         slice,
                         &context.failure_reasons,
                         plan.request_id,
-                    )? {
+                        context.resources.as_ref(),
+                    )?;
+                    for row in &projected.rows {
                         if row.datetime >= plan.requested_range.0
                             && row.datetime < plan.effective_end_ns
                         {
-                            output.push(row);
+                            output.push(row.clone());
                         }
                     }
                     if estimated_kline_bytes(output.len()) >= context.chunk_bytes {
@@ -1213,13 +1332,15 @@ async fn execute_daily_plan(
                             "backtest history request was cancelled",
                         ));
                     }
-                    for row in daily_rows_for_slice(
+                    let projected = daily_rows_for_slice(
                         message,
                         slice,
                         &context.failure_reasons,
                         plan.request_id,
-                    )? {
-                        if let Some(closed) = aggregator.update(&row)?
+                        context.resources.as_ref(),
+                    )?;
+                    for row in &projected.rows {
+                        if let Some(closed) = aggregator.update(row)?
                             && should_emit_daily_kline(&closed, plan, duration_ns)?
                         {
                             output.push(closed);
@@ -1273,7 +1394,8 @@ fn tick_rows_for_slice(
     slice: &super::planner::PlannedSourceSlice,
     failure_reasons: &super::BacktestHistoryFailureReasons,
     request_id: u64,
-) -> Result<Vec<Tick>> {
+    resources: Option<&super::BacktestHistorySnapshotQueryResources>,
+) -> Result<ReservedProjectedRows<Tick>> {
     match message {
         StoreScanMessage::Failed(failure) => Err(record_store_scan_failure(
             failure_reasons,
@@ -1282,13 +1404,16 @@ fn tick_rows_for_slice(
         )),
         StoreScanMessage::Chunk(chunk) => match &chunk.rows {
             StoreRows::Ticks(rows) => {
-                let mut rows = rows
-                    .iter()
-                    .filter(|row| row.datetime >= slice.range.0 && row.datetime < slice.range.1)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                rows.sort_by_key(|row| (row.datetime, slice.physical_rank, row.id));
-                Ok(rows)
+                let mut projected = ReservedProjectedRows::with_capacity(rows.len(), resources)?;
+                projected.rows.extend(
+                    rows.iter()
+                        .filter(|row| row.datetime >= slice.range.0 && row.datetime < slice.range.1)
+                        .cloned(),
+                );
+                projected
+                    .rows
+                    .sort_by_key(|row| (row.datetime, slice.physical_rank, row.id));
+                Ok(projected)
             }
             StoreRows::CanonicalMinutes(_) | StoreRows::CanonicalDaily(_) => Err(
                 DataError::InvalidState("Tick cache reader returned a canonical-minute chunk"),
@@ -1302,7 +1427,8 @@ fn minute_rows_for_slice(
     slice: &super::planner::PlannedSourceSlice,
     failure_reasons: &super::BacktestHistoryFailureReasons,
     request_id: u64,
-) -> Result<Vec<Kline>> {
+    resources: Option<&super::BacktestHistorySnapshotQueryResources>,
+) -> Result<ReservedProjectedRows<Kline>> {
     match message {
         StoreScanMessage::Failed(failure) => Err(record_store_scan_failure(
             failure_reasons,
@@ -1311,13 +1437,14 @@ fn minute_rows_for_slice(
         )),
         StoreScanMessage::Chunk(chunk) => match &chunk.rows {
             StoreRows::CanonicalMinutes(rows) => {
-                let mut rows = rows
-                    .iter()
-                    .filter(|row| row.datetime >= slice.range.0 && row.datetime < slice.range.1)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                rows.sort_by_key(|row| (row.datetime, row.id));
-                Ok(rows)
+                let mut projected = ReservedProjectedRows::with_capacity(rows.len(), resources)?;
+                projected.rows.extend(
+                    rows.iter()
+                        .filter(|row| row.datetime >= slice.range.0 && row.datetime < slice.range.1)
+                        .cloned(),
+                );
+                projected.rows.sort_by_key(|row| (row.datetime, row.id));
+                Ok(projected)
             }
             StoreRows::Ticks(_) | StoreRows::CanonicalDaily(_) => Err(DataError::InvalidState(
                 "canonical-minute cache reader returned a Tick chunk",
@@ -1331,7 +1458,8 @@ fn daily_rows_for_slice(
     slice: &super::planner::PlannedSourceSlice,
     failure_reasons: &super::BacktestHistoryFailureReasons,
     request_id: u64,
-) -> Result<Vec<Kline>> {
+    resources: Option<&super::BacktestHistorySnapshotQueryResources>,
+) -> Result<ReservedProjectedRows<Kline>> {
     match message {
         StoreScanMessage::Failed(failure) => Err(record_store_scan_failure(
             failure_reasons,
@@ -1340,13 +1468,14 @@ fn daily_rows_for_slice(
         )),
         StoreScanMessage::Chunk(chunk) => match &chunk.rows {
             StoreRows::CanonicalDaily(rows) => {
-                let mut rows = rows
-                    .iter()
-                    .filter(|row| row.datetime >= slice.range.0 && row.datetime < slice.range.1)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                rows.sort_by_key(|row| (row.datetime, row.id));
-                Ok(rows)
+                let mut projected = ReservedProjectedRows::with_capacity(rows.len(), resources)?;
+                projected.rows.extend(
+                    rows.iter()
+                        .filter(|row| row.datetime >= slice.range.0 && row.datetime < slice.range.1)
+                        .cloned(),
+                );
+                projected.rows.sort_by_key(|row| (row.datetime, row.id));
+                Ok(projected)
             }
             StoreRows::Ticks(_) | StoreRows::CanonicalMinutes(_) => Err(DataError::InvalidState(
                 "native daily cache reader returned wrong source rows",
@@ -1367,10 +1496,11 @@ fn record_store_scan_failure(
     DataError::InvalidResponse(failure.message)
 }
 
-async fn send_tick_chunk(
-    event_sender: &mpsc::Sender<BacktestHistoryEvent>,
+async fn send_tick_chunk_with_reservation(
+    event_sender: &mpsc::Sender<BacktestHistoryEventEnvelope>,
     plan: &PlannedBacktestHistoryRequest,
     rows: Vec<Tick>,
+    reservation: Option<BacktestHistorySnapshotResourceReservation>,
     telemetry: &TelemetryHub,
     emitted_rows: usize,
 ) -> Result<usize> {
@@ -1379,11 +1509,14 @@ async fn send_tick_chunk(
     }
     let count = rows.len();
     event_sender
-        .send(BacktestHistoryEvent::Chunk(BacktestHistoryChunk {
-            request_id: plan.request_id,
-            symbol: plan.symbol.clone(),
-            rows: BacktestHistoryRows::Ticks(rows),
-        }))
+        .send(BacktestHistoryEventEnvelope::new(
+            BacktestHistoryEvent::Chunk(BacktestHistoryChunk {
+                request_id: plan.request_id,
+                symbol: plan.symbol.clone(),
+                rows: BacktestHistoryRows::Ticks(rows),
+            }),
+            reservation,
+        ))
         .await
         .map_err(|_| DataError::InvalidState("backtest history event consumer was dropped"))?;
     telemetry.emit(BacktestHistoryTelemetryEvent {
@@ -1397,10 +1530,31 @@ async fn send_tick_chunk(
 }
 
 async fn send_kline_chunk(
-    event_sender: &mpsc::Sender<BacktestHistoryEvent>,
+    event_sender: &mpsc::Sender<BacktestHistoryEventEnvelope>,
     plan: &PlannedBacktestHistoryRequest,
     duration_ns: i64,
     rows: Vec<Kline>,
+    telemetry: &TelemetryHub,
+    emitted_rows: usize,
+) -> Result<usize> {
+    send_kline_chunk_with_reservation(
+        event_sender,
+        plan,
+        duration_ns,
+        rows,
+        None,
+        telemetry,
+        emitted_rows,
+    )
+    .await
+}
+
+async fn send_kline_chunk_with_reservation(
+    event_sender: &mpsc::Sender<BacktestHistoryEventEnvelope>,
+    plan: &PlannedBacktestHistoryRequest,
+    duration_ns: i64,
+    rows: Vec<Kline>,
+    reservation: Option<BacktestHistorySnapshotResourceReservation>,
     telemetry: &TelemetryHub,
     emitted_rows: usize,
 ) -> Result<usize> {
@@ -1409,11 +1563,14 @@ async fn send_kline_chunk(
     }
     let count = rows.len();
     event_sender
-        .send(BacktestHistoryEvent::Chunk(BacktestHistoryChunk {
-            request_id: plan.request_id,
-            symbol: plan.symbol.clone(),
-            rows: BacktestHistoryRows::Klines { duration_ns, rows },
-        }))
+        .send(BacktestHistoryEventEnvelope::new(
+            BacktestHistoryEvent::Chunk(BacktestHistoryChunk {
+                request_id: plan.request_id,
+                symbol: plan.symbol.clone(),
+                rows: BacktestHistoryRows::Klines { duration_ns, rows },
+            }),
+            reservation,
+        ))
         .await
         .map_err(|_| DataError::InvalidState("backtest history event consumer was dropped"))?;
     telemetry.emit(BacktestHistoryTelemetryEvent {

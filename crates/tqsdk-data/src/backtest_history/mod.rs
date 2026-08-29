@@ -9,6 +9,7 @@ mod request;
 mod schema;
 mod snapshot;
 mod snapshot_manifest;
+mod snapshot_resources;
 mod store_worker;
 mod telemetry;
 
@@ -61,6 +62,11 @@ pub use snapshot_manifest::{
     BacktestHistorySnapshotFileDisposition, BacktestHistorySnapshotFileRole,
     BacktestHistorySnapshotManifestArtifact, BacktestHistorySnapshotManifestBuilder,
     classify_backtest_history_snapshot_cache_path,
+};
+use snapshot_resources::BacktestHistoryRunReservations;
+pub use snapshot_resources::{
+    BacktestHistorySnapshotQueryResources, BacktestHistorySnapshotResourceBudget,
+    BacktestHistorySnapshotResourceReservation,
 };
 pub use telemetry::BacktestHistoryTelemetryStream;
 
@@ -157,6 +163,38 @@ impl BacktestHistoryClient {
         )
     }
 
+    pub(crate) async fn query_with_lifecycle_pin_and_resources(
+        &self,
+        request: BacktestHistoryRequest,
+        lifecycle_pin: BacktestHistoryLifecyclePin,
+        resources: BacktestHistorySnapshotQueryResources,
+    ) -> Result<BacktestHistoryRun> {
+        let validated = validate_requests([request])?;
+        self.start_run_with_resources(
+            validated,
+            BacktestHistoryExecutionMode::Query,
+            None,
+            Some(lifecycle_pin),
+            Some(resources),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn query_with_resources(
+        &self,
+        request: BacktestHistoryRequest,
+        resources: BacktestHistorySnapshotQueryResources,
+    ) -> Result<BacktestHistoryRun> {
+        let validated = validate_requests([request])?;
+        self.start_run_with_resources(
+            validated,
+            BacktestHistoryExecutionMode::Query,
+            None,
+            None,
+            Some(resources),
+        )
+    }
+
     /// Opens a terminal-event/telemetry run that only establishes durable
     /// cache coverage and never scans rows back from disk.
     #[doc(hidden)]
@@ -218,6 +256,17 @@ impl BacktestHistoryClient {
         root_gate: Option<Arc<BacktestTickCacheOperationLock>>,
         lifecycle_pin: Option<BacktestHistoryLifecyclePin>,
     ) -> Result<BacktestHistoryRun> {
+        self.start_run_with_resources(requests, mode, root_gate, lifecycle_pin, None)
+    }
+
+    fn start_run_with_resources(
+        &self,
+        requests: Vec<ValidatedBacktestHistoryRequest>,
+        mode: BacktestHistoryExecutionMode,
+        root_gate: Option<Arc<BacktestTickCacheOperationLock>>,
+        lifecycle_pin: Option<BacktestHistoryLifecyclePin>,
+        resources: Option<BacktestHistorySnapshotQueryResources>,
+    ) -> Result<BacktestHistoryRun> {
         let root_gate = match self.config.policy {
             BacktestHistoryPolicy::CacheOnly => None,
             BacktestHistoryPolicy::RemoteOnMiss => {
@@ -243,7 +292,10 @@ impl BacktestHistoryClient {
             .map(|request| (request.request_id, (request.kind, request.duration_ns)))
             .collect();
         let event_capacity = self.config.logical_concurrency.saturating_mul(2).max(1);
-        let (event_sender, event_receiver) = mpsc::channel(event_capacity);
+        let (event_sender, event_receiver) =
+            mpsc::channel::<BacktestHistoryEventEnvelope>(event_capacity);
+        let event_reservations = BacktestHistoryRunReservations::default();
+        let task_event_reservations = event_reservations.clone();
         let telemetry = telemetry::TelemetryHub::new();
         let report = Arc::new(Mutex::new(BacktestHistoryBatchReport::default()));
         let report_for_task = Arc::clone(&report);
@@ -262,7 +314,12 @@ impl BacktestHistoryClient {
                 telemetry_for_task.clone(),
                 cancellation_for_task,
                 mode,
-                BacktestHistoryExecutionState::new(lifecycle_pin, failure_reasons_for_task),
+                BacktestHistoryExecutionState::new(
+                    lifecycle_pin,
+                    failure_reasons_for_task,
+                    resources,
+                    task_event_reservations,
+                ),
             )
             .await;
             telemetry_for_task.close();
@@ -282,6 +339,7 @@ impl BacktestHistoryClient {
             telemetry: Some(telemetry.stream()),
             cancellation,
             failure_reasons,
+            event_reservations,
         })
     }
 }
@@ -307,7 +365,7 @@ fn validate_requests(
 
 /// Stream of rows and terminal outcomes for one query or batch.
 pub struct BacktestHistoryRun {
-    events: mpsc::Receiver<BacktestHistoryEvent>,
+    events: mpsc::Receiver<BacktestHistoryEventEnvelope>,
     coordinator: Option<JoinHandle<BacktestHistoryBatchReport>>,
     report: Arc<Mutex<BacktestHistoryBatchReport>>,
     request_kinds: BTreeMap<BacktestHistoryRequestId, (BacktestHistoryKind, Option<i64>)>,
@@ -315,11 +373,13 @@ pub struct BacktestHistoryRun {
     telemetry: Option<BacktestHistoryTelemetryStream>,
     cancellation: Arc<AtomicBool>,
     failure_reasons: BacktestHistoryFailureReasons,
+    event_reservations: BacktestHistoryRunReservations,
 }
 
 impl Drop for BacktestHistoryRun {
     fn drop(&mut self) {
         self.cancellation.store(true, Ordering::Release);
+        self.event_reservations.close();
     }
 }
 
@@ -331,7 +391,10 @@ impl BacktestHistoryRun {
     /// Receives the next chunk or terminal event without requiring a stream
     /// extension trait import.
     pub async fn next(&mut self) -> Option<BacktestHistoryEvent> {
-        self.events.recv().await
+        self.events
+            .recv()
+            .await
+            .map(|event| event.into_public(&self.event_reservations))
     }
 
     /// Takes the independent best-effort telemetry stream, if it has not
@@ -502,10 +565,39 @@ impl BacktestHistoryRun {
     }
 }
 
+/// Private event transport retaining a daemon reservation while an event is
+/// queued. The public run promotes it to run-owned storage on delivery.
+pub(crate) struct BacktestHistoryEventEnvelope {
+    event: BacktestHistoryEvent,
+    reservation: Option<BacktestHistorySnapshotResourceReservation>,
+}
+
+impl BacktestHistoryEventEnvelope {
+    pub(crate) fn new(
+        event: BacktestHistoryEvent,
+        reservation: Option<BacktestHistorySnapshotResourceReservation>,
+    ) -> Self {
+        Self { event, reservation }
+    }
+
+    fn into_public(
+        self,
+        run_reservations: &BacktestHistoryRunReservations,
+    ) -> BacktestHistoryEvent {
+        if let Some(reservation) = self.reservation {
+            run_reservations.retain(reservation);
+        }
+        self.event
+    }
+}
+
 impl Stream for BacktestHistoryRun {
     type Item = BacktestHistoryEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.events).poll_recv(context)
+        let reservations = self.event_reservations.clone();
+        Pin::new(&mut self.events)
+            .poll_recv(context)
+            .map(|event| event.map(|event| event.into_public(&reservations)))
     }
 }
