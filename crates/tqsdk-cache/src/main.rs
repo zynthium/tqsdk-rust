@@ -1508,9 +1508,9 @@ async fn fill(
     market: MarketKind,
     args: FillArgs,
 ) -> Result<CommandOutcome, CliError> {
-    if args.universe_timeline.is_some() && !matches!(kind, CacheKind::Tick) {
+    if args.universe_timeline.is_some() && !matches!(kind, CacheKind::Tick | CacheKind::Daily) {
         return Err(CliError::Usage(
-            "--universe-timeline currently supports only --kind tick fill".to_string(),
+            "--universe-timeline supports only --kind tick or daily fill".to_string(),
         ));
     }
     match kind {
@@ -1532,6 +1532,9 @@ async fn fill_daily(
     market: MarketKind,
     args: FillArgs,
 ) -> Result<CommandOutcome, CliError> {
+    if let Some(plan_path) = args.universe_timeline.clone() {
+        return fill_daily_historical_universe_plan(cache_dir, market, args, plan_path).await;
+    }
     let fill_config = history_fill_config(&args)?;
     if !matches!(market, MarketKind::Futures) {
         return Err(CliError::Usage(
@@ -1716,6 +1719,94 @@ async fn fill_daily(
         } else {
             1
         },
+    })
+}
+
+async fn fill_daily_historical_universe_plan(
+    cache_dir: Option<&Path>,
+    market: MarketKind,
+    args: FillArgs,
+    plan_path: PathBuf,
+) -> Result<CommandOutcome, CliError> {
+    if !matches!(market, MarketKind::Futures) {
+        return Err(CliError::Usage(
+            "--kind daily --universe-timeline supports only --market futures".to_string(),
+        ));
+    }
+    if !args.symbols.symbols.is_empty()
+        || args.days.start_day.is_some()
+        || args.days.end_day.is_some()
+        || args.days.last_trading_days.is_some()
+        || !matches!(args.days.calendar, CalendarMode::Auto)
+        || args.days.refresh_calendar
+        || args.include_open_day
+        || args.require_final
+        || args.repair_stale
+        || args.daily_slices
+        || args.report.is_some()
+    {
+        return Err(CliError::Usage(
+            "--universe-timeline supplies physical ranges; omit symbols, trading-day, repair, and report flags"
+                .to_string(),
+        ));
+    }
+    let plan: tqsdk_data::HistoricalUniversePlan = serde_json::from_slice(&fs::read(plan_path)?)?;
+    plan.verify()?;
+    let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
+    let mut builder = BacktestHistoryClient::builder(canonical_cache_dir.clone());
+    builder = builder.policy(if args.dry_run {
+        BacktestHistoryPolicy::CacheOnly
+    } else {
+        BacktestHistoryPolicy::RemoteOnMiss
+    });
+    if !args.dry_run {
+        builder = builder.auth_env();
+    }
+    let client = builder.build()?;
+    let requests = plan
+        .timeline
+        .physical_listing_starts
+        .iter()
+        .enumerate()
+        .map(|(index, (symbol, start_ns))| {
+            BacktestHistoryRequest::kline(
+                u64::try_from(index).expect("symbol count fits request identifier"),
+                symbol,
+                Duration::from_secs(24 * 60 * 60),
+                *start_ns,
+                plan.timeline.end_ns,
+            )
+        })
+        .collect::<Vec<_>>();
+    let report = client
+        .orchestrate_fill(
+            requests.clone(),
+            history_fill_config(&args)?,
+            BacktestHistoryFillCancellation::new(),
+            |_| {},
+        )
+        .await?;
+    let complete = matches!(report.status(), BacktestHistoryFillTerminalStatus::Complete);
+    Ok(CommandOutcome {
+        value: json!({
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "command": "fill",
+            "cache_kind": "daily",
+            "market": market.as_str(),
+            "cache_dir": canonical_cache_dir,
+            "dry_run": args.dry_run,
+            "universe_timeline": {
+                "plan_sha256": plan.plan_sha256,
+                "catalog_id": plan.timeline.catalog_id,
+                "start_ns": plan.timeline.start_ns,
+                "end_ns": plan.timeline.end_ns,
+                "physical_symbols": requests.len(),
+            },
+            "complete": complete,
+            "remote_used": report.symbols().iter().any(|item| item.remote_used),
+            "rows_written": report.rows_written(),
+        }),
+        exit_code: if complete { 0 } else { 1 },
     })
 }
 
