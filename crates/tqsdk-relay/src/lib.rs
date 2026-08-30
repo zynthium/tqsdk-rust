@@ -36,7 +36,7 @@ pub use bootstrap::{BootstrapQueue, BootstrapRequest};
 pub use cache::MarketCache;
 pub use config::{
     BootstrapConfig, DailyRefreshTime, FuturesUniverseRefreshSchedule, RelayConfig,
-    UpstreamInsListLimits, next_daily_refresh_delay,
+    RelayRuntimeConfig, UpstreamInsListLimits, next_daily_refresh_delay,
 };
 pub use dashboard_read_model::{
     DashboardSnapshot, DashboardSnapshotInputs, DashboardSymbolMetricsSnapshot, DashboardSymbolRow,
@@ -59,9 +59,14 @@ pub use protocol::{
 pub use pump::{pump_available, pump_once};
 #[cfg(feature = "server")]
 pub use runtime::{
-    connect_configured_upstream, resolve_configured_upstream_tick_chart,
-    resolve_configured_upstream_tick_charts, spawn_configured_upstream_pump,
+    connect_configured_upstream, connect_configured_upstream_with_runtime_config,
+    resolve_configured_upstream_tick_chart,
+    resolve_configured_upstream_tick_chart_with_runtime_config,
+    resolve_configured_upstream_tick_charts,
+    resolve_configured_upstream_tick_charts_with_runtime_config, spawn_configured_upstream_pump,
     spawn_configured_upstream_pump_with_retry_interval,
+    spawn_configured_upstream_pump_with_runtime_config,
+    spawn_configured_upstream_pump_with_runtime_config_and_retry_interval,
 };
 pub use server::RelayServer;
 pub use symbol_metrics::{

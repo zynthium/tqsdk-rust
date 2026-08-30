@@ -1207,7 +1207,9 @@ async fn configured_upstream_source_subscribes_universe_expression_symbols() {
 
 #[tokio::test]
 async fn configured_upstream_source_subscribes_universe_v2_snapshot_symbols() {
-    use tqsdk_relay::{RelayConfig, connect_configured_upstream};
+    use tqsdk_relay::{
+        RelayConfig, RelayRuntimeConfig, connect_configured_upstream_with_runtime_config,
+    };
     use websocket_support::TestWebSocketServer;
 
     let server = TestWebSocketServer::spawn(|mut socket| {
@@ -1215,30 +1217,30 @@ async fn configured_upstream_source_subscribes_universe_v2_snapshot_symbols() {
         socket.send_close().unwrap();
     })
     .unwrap();
-    let config = RelayConfig {
+    let config = RelayRuntimeConfig::new(RelayConfig {
         upstream_market_url: server.url("/market"),
         ..RelayConfig::default()
-    }
+    })
     .with_futures_universe("snapshot(symbol:SHFE.au2602,DCE.m2609)")
     .unwrap();
 
-    let _source = connect_configured_upstream(&config).await.unwrap().unwrap();
+    let _source = connect_configured_upstream_with_runtime_config(&config)
+        .await
+        .unwrap()
+        .unwrap();
     server.join();
 }
 
 #[tokio::test]
 async fn configured_upstream_rejects_typed_timeline_before_network() {
-    use tqsdk_relay::{RelayConfig, UniverseSpec, connect_configured_upstream};
+    use tqsdk_relay::{RelayConfig, RelayRuntimeConfig, UniverseSpec};
 
-    let config = RelayConfig {
+    let error = RelayRuntimeConfig::new(RelayConfig {
         upstream_market_url: "ws://127.0.0.1:1/should-not-connect".to_string(),
-        futures_universe_spec: Some(UniverseSpec::parse_v2("timeline(contract:all)").unwrap()),
         ..RelayConfig::default()
-    };
-    let error = match connect_configured_upstream(&config).await {
-        Ok(_) => panic!("typed timeline must fail before opening a WebSocket"),
-        Err(error) => error,
-    };
+    })
+    .with_futures_universe_spec(UniverseSpec::parse_v2("timeline(contract:all)").unwrap())
+    .unwrap_err();
     assert!(error.to_string().contains("snapshot-only entry point"));
 }
 
@@ -1421,7 +1423,8 @@ async fn configured_upstream_pump_retries_after_startup_connect_failure() {
 #[tokio::test]
 async fn configured_upstream_refresh_failure_keeps_existing_source_live() {
     use tqsdk_relay::{
-        RelayServer, RelaySourceStatus, spawn_configured_upstream_pump_with_retry_interval,
+        RelayRuntimeConfig, RelayServer, RelaySourceStatus,
+        spawn_configured_upstream_pump_with_runtime_config_and_retry_interval,
     };
     use websocket_support::TestWebSocketServer;
 
@@ -1500,18 +1503,18 @@ async fn configured_upstream_refresh_failure_keeps_existing_source_live() {
             .as_nanos()
     ));
     std::fs::write(&universe_file, "SHFE.au2602\n").unwrap();
-    let config = RelayConfig {
+    let config = RelayRuntimeConfig::new(RelayConfig {
         upstream_market_url: upstream.url("/market"),
-        futures_universe_symbol_files: vec![universe_file.clone()],
         futures_universe_refresh: FuturesUniverseRefreshSchedule::daily(refresh_time_after(
             Duration::from_secs(4),
         )),
         ..RelayConfig::default()
-    };
+    })
+    .universe_symbol_file(universe_file.clone());
     let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
     let server = RelayServer::new(engine.clone());
 
-    let shutdown = spawn_configured_upstream_pump_with_retry_interval(
+    let shutdown = spawn_configured_upstream_pump_with_runtime_config_and_retry_interval(
         &config,
         server,
         Duration::from_millis(20),

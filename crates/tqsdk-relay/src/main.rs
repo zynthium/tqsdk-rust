@@ -4,9 +4,12 @@ use std::sync::{Arc, Mutex};
 
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use tqsdk_relay::{RelayConfig, RelayEngine, RelayError, RelayServer, RelayStartupReport};
+use tqsdk_relay::{RelayEngine, RelayError, RelayRuntimeConfig, RelayServer, RelayStartupReport};
 #[cfg(feature = "server")]
-use tqsdk_relay::{resolve_configured_upstream_tick_charts, spawn_configured_upstream_pump};
+use tqsdk_relay::{
+    resolve_configured_upstream_tick_charts_with_runtime_config,
+    spawn_configured_upstream_pump_with_runtime_config,
+};
 
 #[cfg(feature = "history")]
 mod history;
@@ -22,7 +25,8 @@ async fn main() {
 }
 
 async fn run() -> Result<(), RelayError> {
-    let config = RelayConfig::from_env()?;
+    let runtime_config = RelayRuntimeConfig::from_env()?;
+    let config = runtime_config.relay_config();
     #[cfg(feature = "history")]
     let history_config = history::HistoryConfig::from_env()?;
     #[cfg(feature = "history")]
@@ -32,9 +36,17 @@ async fn run() -> Result<(), RelayError> {
 
     if config.dry_run {
         #[cfg(feature = "server")]
-        let charts = resolve_configured_upstream_tick_charts(&config).await?;
+        let charts =
+            resolve_configured_upstream_tick_charts_with_runtime_config(&runtime_config).await?;
         #[cfg(not(feature = "server"))]
         let charts = {
+            if runtime_config.futures_universe_spec().is_some()
+                || !runtime_config.futures_universe_symbol_files().is_empty()
+            {
+                return Err(RelayError::invalid_config(
+                    "Universe V2 and @file sources require the relay server feature",
+                ));
+            }
             if let Some(expression) = config.futures_universe_expression.as_ref() {
                 let symbols =
                     tqsdk_relay::universe::resolve_static_symbols_with_expression(expression)?;
@@ -45,7 +57,7 @@ async fn run() -> Result<(), RelayError> {
         };
         println!(
             "{}",
-            RelayStartupReport::from_config_and_charts(&config, &charts).log_line()
+            RelayStartupReport::from_runtime_config_and_charts(&runtime_config, &charts).log_line()
         );
         return Ok(());
     }
@@ -57,7 +69,8 @@ async fn run() -> Result<(), RelayError> {
     let startup_charts = Vec::new();
     eprintln!(
         "{}",
-        RelayStartupReport::from_config_and_charts(&config, &startup_charts).log_line()
+        RelayStartupReport::from_runtime_config_and_charts(&runtime_config, &startup_charts)
+            .log_line()
     );
     let server =
         RelayServer::with_outbound_capacity(engine.clone(), config.outbound_channel_capacity);
@@ -82,10 +95,11 @@ async fn run() -> Result<(), RelayError> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (metrics_shutdown_tx, metrics_shutdown_rx) = oneshot::channel();
     #[cfg(feature = "server")]
-    let upstream_shutdown = spawn_configured_upstream_pump(&config, server.clone()).await?;
+    let upstream_shutdown =
+        spawn_configured_upstream_pump_with_runtime_config(&runtime_config, server.clone()).await?;
     #[cfg(not(feature = "server"))]
     let upstream_shutdown = {
-        if config.has_upstream_futures_source() {
+        if runtime_config.has_upstream_futures_source() {
             return Err(RelayError::invalid_config(
                 "tqsdk-relay server feature is required for upstream websocket",
             ));

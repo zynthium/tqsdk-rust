@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use crate::config::{FuturesUniverseRefreshSchedule, RelayConfig};
+use crate::config::{FuturesUniverseRefreshSchedule, RelayConfig, RelayRuntimeConfig};
 use crate::upstream::{UpstreamTickChart, upstream_subscription_ins_list_chars};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -83,6 +83,39 @@ impl RelayStartupReport {
                 .upstream_ins_list_limits
                 .suggested_shards(upstream_ins_list_chars),
         }
+    }
+
+    #[must_use]
+    pub fn from_runtime_config_and_charts(
+        config: &RelayRuntimeConfig,
+        charts: &[UpstreamTickChart],
+    ) -> Self {
+        let mut report = Self::from_config_and_charts(config.relay_config(), charts);
+        let has_files = !config.futures_universe_symbol_files().is_empty();
+        if let Some(spec) = config.futures_universe_spec() {
+            report.upstream_source = if has_files {
+                "universe-v2+files"
+            } else {
+                "universe-v2"
+            }
+            .to_string();
+            report.futures_universe_expression = Some(spec.canonical_text().to_string());
+            report.futures_universe_include_clauses = Some(spec.includes().len());
+            report.futures_universe_exclude_clauses =
+                Some(spec.excludes().len() + spec.global_filters().len());
+        } else if has_files {
+            report.upstream_source = if config.relay_config().futures_universe_expression.is_some()
+            {
+                "universe-expression+files"
+            } else {
+                "universe-files"
+            }
+            .to_string();
+        }
+        report.futures_universe_final_symbols = config
+            .has_upstream_futures_source()
+            .then(|| charts.iter().map(|chart| chart.symbols().len()).sum());
+        report
     }
 
     #[must_use]

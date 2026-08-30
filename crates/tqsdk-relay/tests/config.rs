@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use tqsdk_relay::{
     BootstrapConfig, DailyRefreshTime, FuturesUniverseRefreshSchedule, RelayConfig, RelayError,
-    UniverseExpression, UniverseMode, UniverseSpec, UpstreamInsListLimits,
+    RelayRuntimeConfig, UniverseExpression, UniverseMode, UniverseSpec, UpstreamInsListLimits,
     next_daily_refresh_delay,
 };
 
@@ -40,6 +40,30 @@ fn default_config_is_memory_only_and_local() {
     assert!(config.disk_cache_dir.is_none());
     assert!(config.best_effort_duration_tag);
     assert!(config.validate().is_ok());
+}
+
+#[test]
+fn legacy_exhaustive_relay_config_literal_remains_source_compatible() {
+    let config = RelayConfig {
+        upstream_market_url: "wss://example.invalid/market".to_string(),
+        upstream_auth_user: None,
+        upstream_auth_pass: None,
+        downstream_listen: "127.0.0.1:17788".to_string(),
+        metrics_listen: "127.0.0.1:17789".to_string(),
+        futures_universe_refresh: FuturesUniverseRefreshSchedule::default(),
+        futures_metadata_batch_size: 500,
+        futures_universe_expression: None,
+        upstream_ins_list_limits: UpstreamInsListLimits::default(),
+        upstream_tick_view_width: 10_000,
+        tick_ring_capacity: 200_000,
+        kline_ring_capacity: 10_000,
+        outbound_channel_capacity: 1_024,
+        disk_cache_dir: None,
+        bootstrap: BootstrapConfig::default(),
+        best_effort_duration_tag: true,
+        dry_run: false,
+    };
+    config.validate().unwrap();
 }
 
 #[test]
@@ -137,41 +161,38 @@ fn config_loads_futures_universe_expression_from_env() {
 
 #[test]
 fn config_loads_universe_v2_snapshot_and_rejects_timeline() {
-    let config = RelayConfig::from_env_vars(|key| match key {
+    let config = RelayRuntimeConfig::from_env_vars(|key| match key {
         "TQSDK_RELAY_FUTURES_UNIVERSE" => Some("snapshot(contract:all;continuous:all)".to_string()),
         _ => None,
     })
     .unwrap();
-    assert!(config.futures_universe_expression.is_none());
+    assert!(config.relay_config().futures_universe_expression.is_none());
     assert_eq!(
-        config.futures_universe_spec.as_ref().unwrap().mode(),
+        config.futures_universe_spec().unwrap().mode(),
         UniverseMode::Snapshot
     );
     assert!(config.has_upstream_futures_source());
 
-    let error = RelayConfig::from_env_vars(|key| match key {
+    let error = RelayRuntimeConfig::from_env_vars(|key| match key {
         "TQSDK_RELAY_FUTURES_UNIVERSE" => Some("timeline(contract:all)".to_string()),
         _ => None,
     })
     .unwrap_err();
     assert!(error.to_string().contains("snapshot-only entry point"));
 
-    let typed = RelayConfig::default()
+    let typed = RelayRuntimeConfig::default()
         .with_futures_universe_spec(UniverseSpec::parse_v2("symbol:SHFE.au2602").unwrap())
         .unwrap();
     assert_eq!(
-        typed.futures_universe_spec.as_ref().unwrap().mode(),
+        typed.futures_universe_spec().unwrap().mode(),
         UniverseMode::Snapshot
     );
 
-    let direct_timeline = RelayConfig {
-        futures_universe_spec: Some(UniverseSpec::parse_v2("timeline(contract:all)").unwrap()),
-        ..RelayConfig::default()
-    };
+    let direct_timeline = RelayRuntimeConfig::default()
+        .with_futures_universe_spec(UniverseSpec::parse_v2("timeline(contract:all)").unwrap())
+        .unwrap_err();
     assert!(
         direct_timeline
-            .validate()
-            .unwrap_err()
             .to_string()
             .contains("snapshot-only entry point")
     );
