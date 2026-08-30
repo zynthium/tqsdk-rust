@@ -280,3 +280,63 @@ fn v3_plan_rejects_tampered_pinned_targets() {
             .contains("target hash mismatch")
     );
 }
+
+#[test]
+fn legacy_exact_physical_exclusion_still_removes_the_product_continuous_view() {
+    let (acquisition, semantic) = fixture();
+    let error = compile_historical_universe_resolution(
+        &acquisition,
+        &semantic,
+        &HistoricalFillUniverseSpec::parse("timeline(cont:SHFE.au;!symbol:SHFE.au2406)").unwrap(),
+        100,
+        500,
+        UniverseBudget::new(20, 40).unwrap(),
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("historical universe selector resolves no visible members"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn legacy_later_continuous_include_survives_an_earlier_product_exclusion() {
+    let (acquisition, semantic) = fixture();
+    let resolution = compile_historical_universe_resolution(
+        &acquisition,
+        &semantic,
+        &HistoricalFillUniverseSpec::parse("timeline(!product:SHFE.au;cont:SHFE.au)").unwrap(),
+        100,
+        500,
+        UniverseBudget::new(20, 40).unwrap(),
+    )
+    .unwrap();
+
+    assert!(resolution.plan.timeline.batches.iter().all(|batch| {
+        batch.changes.iter().all(|change| match change {
+            UniverseMemberChange::Add { instrument, .. }
+            | UniverseMemberChange::Remove { instrument } => {
+                matches!(instrument, UniverseInstrumentId::Continuous { .. })
+            }
+        })
+    }));
+    assert_eq!(resolution.dependencies.len(), 2);
+    assert!(resolution.dependencies.iter().all(|dependency| {
+        dependency.source_symbol.starts_with("SHFE.au")
+            && dependency
+                .roles
+                .contains(&HistoricalDependencyRole::ContinuousUnderlying)
+    }));
+    assert_eq!(
+        resolution
+            .plan
+            .v3_identity
+            .as_ref()
+            .unwrap()
+            .canonical_universe,
+        "timeline(!product:SHFE.au;cont:SHFE.au)"
+    );
+}
