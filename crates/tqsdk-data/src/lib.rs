@@ -59,6 +59,7 @@ mod historical_universe_acquisition;
 mod historical_universe_artifact;
 mod historical_universe_resolution;
 mod historical_universe_v4;
+mod historical_universe_v4_resolution;
 mod history_series_cache;
 mod integrity;
 mod live_quote;
@@ -176,7 +177,7 @@ pub use historical_universe_artifact::{
     HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION, HISTORICAL_UNIVERSE_ARTIFACT_NAMESPACE,
     HistoricalAcquisitionContract, HistoricalCatalogAcquisition, HistoricalDailyObservation,
     HistoricalDailyObservationStatus, HistoricalDataKind, HistoricalSemanticCatalog,
-    HistoricalUniverseArtifactStore,
+    HistoricalUniverseArtifactStore, HistoricalUniversePublishedPlanSet,
 };
 pub use historical_universe_resolution::{
     HISTORICAL_UNIVERSE_COMPILER_IDENTITY, HistoricalDependencyRole, HistoricalUniverseDependency,
@@ -186,6 +187,13 @@ pub use historical_universe_resolution::{
 pub use historical_universe_v4::{
     HistoricalUniversePlanArtifact, HistoricalUniversePlanV4, HistoricalUniversePlanV4Execution,
     HistoricalUniversePlanV4Identity, HistoricalUniversePlanV4IdentityBuilder,
+};
+pub use historical_universe_v4_resolution::{
+    HISTORICAL_UNIVERSE_CONTINUOUS_ID, HISTORICAL_UNIVERSE_V3_PROJECTION_CANONICALIZER_ID,
+    HISTORICAL_UNIVERSE_V3_PROJECTION_COMPILER_ID, HistoricalPlanWritePolicy,
+    HistoricalRankedMembership, HistoricalRankingCapabilities, HistoricalUniversePlanWriteSet,
+    HistoricalUniverseResolutionV4, HistoricalUniverseV4Error, TimelineCapabilities,
+    compile_historical_universe_resolution_v4,
 };
 #[allow(deprecated)]
 pub use history_series_cache::SERIES_FILE_HISTORY_SERIES_FORMAT_ID;

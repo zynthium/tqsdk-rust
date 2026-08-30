@@ -10,7 +10,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     ActiveInterval, CatalogContract, CatalogSnapshot, DataError, DynamicUniverseScope,
-    HistoricalCatalogProof, HistoricalUniversePlan, HistoricalUniversePlanArtifact, Result,
+    HistoricalCatalogProof, HistoricalUniversePlan, HistoricalUniversePlanArtifact,
+    HistoricalUniversePlanWriteSet, Result,
 };
 
 pub const HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION: u32 = 1;
@@ -763,6 +764,38 @@ pub struct HistoricalUniverseArtifactStore {
     cache_dir: PathBuf,
 }
 
+/// Paths published by one successful V4 + V3 rollback dual write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HistoricalUniversePublishedPlanSet {
+    v4_path: PathBuf,
+    rollback_v3_path: PathBuf,
+    v4_plan_sha256: String,
+    rollback_v3_plan_sha256: String,
+}
+
+impl HistoricalUniversePublishedPlanSet {
+    #[must_use]
+    pub fn v4_path(&self) -> &Path {
+        &self.v4_path
+    }
+
+    #[must_use]
+    pub fn rollback_v3_path(&self) -> &Path {
+        &self.rollback_v3_path
+    }
+
+    #[must_use]
+    pub fn v4_plan_sha256(&self) -> &str {
+        &self.v4_plan_sha256
+    }
+
+    #[must_use]
+    pub fn rollback_v3_plan_sha256(&self) -> &str {
+        &self.rollback_v3_plan_sha256
+    }
+}
+
 impl HistoricalUniverseArtifactStore {
     /// Creates a handle without touching the filesystem. This makes dry-run callers safe.
     pub fn new(cache_dir: impl Into<PathBuf>) -> Self {
@@ -854,6 +887,23 @@ impl HistoricalUniverseArtifactStore {
                 &artifact.canonical_json_bytes()?,
             ),
         }
+    }
+
+    /// Publishes the V3 rollback first and V4 second. A failure may leave only
+    /// an immutable content-addressed orphan; no mutable active pointer exists.
+    pub fn publish_plan_write_set(
+        &self,
+        write_set: &HistoricalUniversePlanWriteSet,
+    ) -> Result<HistoricalUniversePublishedPlanSet> {
+        let rollback_v3_path = self.publish_plan(write_set.rollback_v3())?;
+        let v4_path = self
+            .publish_plan_artifact(&HistoricalUniversePlanArtifact::V4(write_set.v4().clone()))?;
+        Ok(HistoricalUniversePublishedPlanSet {
+            v4_path,
+            rollback_v3_path,
+            v4_plan_sha256: write_set.v4().plan_sha256().to_string(),
+            rollback_v3_plan_sha256: write_set.rollback_v3().plan_sha256.clone(),
+        })
     }
 
     /// Loads V1-V4 by the flat top-level `plan_version` discriminator.
