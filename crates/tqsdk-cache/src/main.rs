@@ -276,6 +276,19 @@ struct FillArgs {
     /// Futures universe expression resolved by the SDK; may be combined with --symbol.
     #[arg(long, value_name = "EXPRESSION")]
     universe: Option<String>,
+
+    /// Read exact symbols from a UTF-8 file. Repeat to combine files with a
+    /// Universe V2 expression; files are expanded before any provider access.
+    #[arg(long = "universe-file", value_name = "PATH")]
+    universe_files: Vec<PathBuf>,
+
+    /// Historical Universe V2 artifact rollout policy.
+    #[arg(
+        long,
+        default_value_t = tqsdk_data::HistoricalPlanWritePolicy::LegacyOnly,
+        value_name = "POLICY"
+    )]
+    historical_plan_write_policy: tqsdk_data::HistoricalPlanWritePolicy,
     /// Legacy compatibility input. New fills prepare plans internally from
     /// `--universe`.
     #[arg(
@@ -1517,6 +1530,200 @@ fn inspect(
     })
 }
 
+#[derive(Debug)]
+enum ProviderHistoricalUniverseInput {
+    Legacy(tqsdk_data::HistoricalFillUniverseSpec),
+    V2(tqsdk_data::ExpandedUniverseInput),
+}
+
+enum CompiledProviderHistoricalPlan {
+    Legacy(Box<tqsdk_data::HistoricalUniversePlan>),
+    V2(Box<tqsdk_data::HistoricalUniversePlanWriteSet>),
+}
+
+impl ProviderHistoricalUniverseInput {
+    fn canonical(&self) -> String {
+        match self {
+            Self::Legacy(spec) => spec.to_string(),
+            Self::V2(input) => input
+                .spec()
+                .expect("historical V2 input always has a specification")
+                .canonical_text()
+                .to_string(),
+        }
+    }
+
+    const fn language(&self) -> &'static str {
+        match self {
+            Self::Legacy(_) => "legacy-v1",
+            Self::V2(_) => "v2",
+        }
+    }
+
+    fn normalized_ast_sha256(&self) -> Option<&str> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::V2(input) => input
+                .spec()
+                .map(tqsdk_data::UniverseSpec::canonical_ast_hash),
+        }
+    }
+
+    fn input_sources_sha256(&self) -> Option<&str> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::V2(input) => input.input_sources_sha256(),
+        }
+    }
+}
+
+fn prepare_provider_historical_universe(
+    args: &FillArgs,
+    value: &str,
+) -> Result<ProviderHistoricalUniverseInput, CliError> {
+    let dispatch = tqsdk_data::parse_historical_universe_compatible(value)
+        .map_err(|error| CliError::Usage(error.to_string()))?;
+    match dispatch {
+        tqsdk_data::HistoricalUniverseDispatch::Legacy { spec, .. } => {
+            if !args.universe_files.is_empty() {
+                return Err(CliError::Usage(
+                    "--universe-file with historical fill requires a Universe V2 timeline expression"
+                        .to_string(),
+                ));
+            }
+            Ok(ProviderHistoricalUniverseInput::Legacy(spec))
+        }
+        tqsdk_data::HistoricalUniverseDispatch::V2 { spec, .. } => {
+            if spec.mode() != tqsdk_data::UniverseMode::Timeline {
+                return Err(CliError::Usage(
+                    "historical provider fill requires timeline(...) Universe V2 mode".to_string(),
+                ));
+            }
+            args.historical_plan_write_policy
+                .ensure_v2_timeline_enabled()
+                .map_err(|error| CliError::Usage(error.to_string()))?;
+            if let Some(selector) = spec.includes().iter().find(|selector| {
+                matches!(
+                    selector.view(),
+                    tqsdk_data::UniverseView::Main | tqsdk_data::UniverseView::Top(_)
+                )
+            }) {
+                return Err(CliError::Usage(
+                    tqsdk_data::HistoricalUniverseV4Error::UnsupportedTimelineRanking {
+                        view: selector.view(),
+                    }
+                    .to_string(),
+                ));
+            }
+            let input = tqsdk_data::UniverseInput::from_spec(spec)
+                .universe_symbol_files(args.universe_files.iter().cloned())
+                .expand()
+                .map_err(|error| CliError::Usage(error.to_string()))?;
+            Ok(ProviderHistoricalUniverseInput::V2(input))
+        }
+        _ => unreachable!("historical universe dispatch is non-exhaustive"),
+    }
+}
+
+async fn prepare_current_fill_universe(
+    args: &mut FillArgs,
+    market: MarketKind,
+) -> Result<(), CliError> {
+    let dispatch = args
+        .universe
+        .as_deref()
+        .map(tqsdk_data::parse_snapshot_universe_compatible)
+        .transpose()
+        .map_err(|error| CliError::Usage(error.to_string()))?;
+
+    match dispatch {
+        Some(tqsdk_data::SnapshotUniverseDispatch::Legacy { .. }) => {
+            if !args.universe_files.is_empty() {
+                let expanded = tqsdk_data::UniverseInput::new(None)
+                    .universe_symbol_files(args.universe_files.iter().cloned())
+                    .expand()
+                    .map_err(|error| CliError::Usage(error.to_string()))?;
+                args.symbols
+                    .symbols
+                    .extend(expanded.expanded_symbols().iter().cloned());
+            }
+        }
+        Some(tqsdk_data::SnapshotUniverseDispatch::V2 { spec, .. }) => {
+            let input = tqsdk_data::UniverseInput::from_spec(spec)
+                .universe_symbol_files(args.universe_files.iter().cloned())
+                .expand()
+                .map_err(|error| CliError::Usage(error.to_string()))?;
+            let requires_provider = input.spec().is_some_and(|spec| {
+                spec.includes()
+                    .iter()
+                    .any(|selector| selector.view() != tqsdk_data::UniverseView::Symbol)
+            });
+            let compiled = if requires_provider {
+                if !matches!(market, MarketKind::Futures) {
+                    return Err(CliError::Usage(
+                        "Universe V2 futures views require --market futures".to_string(),
+                    ));
+                }
+                let user = std::env::var("TQ_AUTH_USER").map_err(|_| {
+                    CliError::Usage(
+                        "dynamic Universe V2 fill requires TQ_AUTH_USER and TQ_AUTH_PASS"
+                            .to_string(),
+                    )
+                })?;
+                let pass = std::env::var("TQ_AUTH_PASS").map_err(|_| {
+                    CliError::Usage(
+                        "dynamic Universe V2 fill requires TQ_AUTH_USER and TQ_AUTH_PASS"
+                            .to_string(),
+                    )
+                })?;
+                let client = tqsdk_data::session_client_builder_for_futures_discovery(&user, &pass)
+                    .build()
+                    .map_err(tqsdk::Error::from)?;
+                let mut resolver = tqsdk_data::SessionFuturesUniverseResolver::new(client);
+                if input.spec().is_some_and(|spec| {
+                    spec.includes().iter().any(|selector| {
+                        matches!(selector.view(), tqsdk_data::UniverseView::Top(limit) if limit > 1)
+                    })
+                }) {
+                    let activity_client = tqsdk_session::SessionClientBuilder::new(user, pass)
+                        .futures_market()
+                        .build()
+                        .map_err(tqsdk::Error::from)?;
+                    resolver = resolver.with_activity_client(activity_client);
+                }
+                tqsdk_data::resolve_futures_universe_v2(&input, &mut resolver).await?
+            } else {
+                tqsdk_data::compile_static_futures_universe_v2(&input)?
+            };
+            args.symbols.symbols.extend(
+                compiled
+                    .candidates()
+                    .iter()
+                    .map(|candidate| candidate.symbol().to_string()),
+            );
+            args.universe = None;
+        }
+        None => {
+            if !args.universe_files.is_empty() {
+                let input = tqsdk_data::UniverseInput::new(None)
+                    .universe_symbol_files(args.universe_files.iter().cloned())
+                    .expand()
+                    .map_err(|error| CliError::Usage(error.to_string()))?;
+                let compiled = tqsdk_data::compile_static_futures_universe_v2(&input)?;
+                args.symbols.symbols.extend(
+                    compiled
+                        .candidates()
+                        .iter()
+                        .map(|candidate| candidate.symbol().to_string()),
+                );
+            }
+        }
+        Some(_) => unreachable!("snapshot universe dispatch is non-exhaustive"),
+    }
+    args.universe_files.clear();
+    Ok(())
+}
+
 async fn fill(
     cache_dir: Option<&Path>,
     kind: CacheKind,
@@ -1533,12 +1740,19 @@ async fn fill(
     if let Some(universe) = args.universe.as_deref()
         && (universe.trim() == "physical:all" || universe.trim().starts_with("timeline("))
     {
-        let historical = tqsdk_data::HistoricalFillUniverseSpec::parse(universe.trim())?;
+        let historical = prepare_provider_historical_universe(&args, universe.trim())?;
         return fill_provider_history_universe(cache_dir, kind, market, args, historical).await;
     }
     if let Some(plan_path) = args.universe_timeline.clone() {
+        if !args.universe_files.is_empty() {
+            return Err(CliError::Usage(
+                "legacy --universe-plan cannot be combined with --universe-file".to_string(),
+            ));
+        }
         return fill_historical_universe_plan(cache_dir, kind, market, args, plan_path, None).await;
     }
+    let mut args = args;
+    prepare_current_fill_universe(&mut args, market).await?;
     match kind {
         CacheKind::Tick if args.repair_stale => Err(CliError::Usage(
             "--repair-stale is supported only for --kind minute fill".to_string(),
@@ -1558,7 +1772,7 @@ async fn fill_provider_history_universe(
     kind: CacheKind,
     market: MarketKind,
     args: FillArgs,
-    historical: tqsdk_data::HistoricalFillUniverseSpec,
+    historical: ProviderHistoricalUniverseInput,
 ) -> Result<CommandOutcome, CliError> {
     if !matches!(market, MarketKind::Futures) {
         return Err(CliError::Usage(
@@ -1644,8 +1858,12 @@ async fn fill_provider_history_universe(
         "rows_written": 0,
         "requested_days": resolved.window,
         "historical_universe": {
-            "canonical": historical.to_string(),
-                "proof": "provider_current_observed",
+            "canonical": historical.canonical(),
+            "language": historical.language(),
+            "normalized_ast_sha256": historical.normalized_ast_sha256(),
+            "input_sources_sha256": historical.input_sources_sha256(),
+            "write_policy": args.historical_plan_write_policy.to_string(),
+            "proof": "provider_current_observed",
                 "source_identity": acquisition.source_identity,
                 "scope_exchanges": tqsdk_data::PROVIDER_CURRENT_PHYSICAL_FUTURES_EXCHANGES,
                 "complete_roster": acquisition.complete,
@@ -1674,7 +1892,7 @@ struct ProviderHistoryFillContext {
     kind: CacheKind,
     market: MarketKind,
     args: FillArgs,
-    historical: tqsdk_data::HistoricalFillUniverseSpec,
+    historical: ProviderHistoricalUniverseInput,
     resolved: ResolvedFillWindow,
     acquisition: tqsdk_data::HistoricalCatalogAcquisition,
     auth_user: String,
@@ -1901,25 +2119,50 @@ async fn bootstrap_provider_history_and_fill(
         &acquisition,
         tqsdk_data::PROVIDER_DAILY_MEMBERSHIP_CALENDAR_IDENTITY,
     )?;
-    let spec = match historical {
-        tqsdk_data::HistoricalFillUniverseSpec::ObservedPhysicalAll => {
-            tqsdk_data::HistoricalFillUniverseSpec::parse("timeline(active:all)")?
-        }
-        timeline @ tqsdk_data::HistoricalFillUniverseSpec::Timeline(_) => timeline,
-    };
     let contract_count = semantic.catalog.contracts.len().max(1);
     let budget = tqsdk_data::UniverseBudget::new(
         contract_count.saturating_mul(4),
         contract_count.saturating_mul(8),
     )?;
-    let resolution = tqsdk_data::compile_historical_universe_resolution(
-        &acquisition,
-        &semantic,
-        &spec,
-        resolved.window.start_ns,
-        resolved.window.end_ns,
-        budget,
-    )?;
+    let compiled_plan = match historical {
+        ProviderHistoricalUniverseInput::Legacy(historical) => {
+            let spec = match historical {
+                tqsdk_data::HistoricalFillUniverseSpec::ObservedPhysicalAll => {
+                    tqsdk_data::HistoricalFillUniverseSpec::parse("timeline(active:all)")?
+                }
+                timeline @ tqsdk_data::HistoricalFillUniverseSpec::Timeline(_) => timeline,
+            };
+            let resolution = tqsdk_data::compile_historical_universe_resolution(
+                &acquisition,
+                &semantic,
+                &spec,
+                resolved.window.start_ns,
+                resolved.window.end_ns,
+                budget,
+            )?;
+            CompiledProviderHistoricalPlan::Legacy(Box::new(resolution.plan))
+        }
+        ProviderHistoricalUniverseInput::V2(input) => {
+            let spec = input
+                .spec()
+                .expect("historical V2 input always has a specification");
+            let resolution = tqsdk_data::compile_historical_universe_resolution_v4(
+                &(&acquisition, &semantic),
+                spec,
+                input.expanded_symbols(),
+                resolved.window.start_ns,
+                resolved.window.end_ns,
+                budget,
+                None,
+            )
+            .map_err(|error| DataError::Validation(error.to_string()))?
+            .with_input_sources_sha256(input.input_sources_sha256().map(str::to_owned));
+            let write_set = resolution
+                .prepare_write_set(args.historical_plan_write_policy)
+                .map_err(|error| DataError::Validation(error.to_string()))?;
+            CompiledProviderHistoricalPlan::V2(Box::new(write_set))
+        }
+    };
     if cancellation.is_cancelled() {
         return Err(DataError::InvalidState("provider history preparation cancelled").into());
     }
@@ -1931,8 +2174,30 @@ async fn bootstrap_provider_history_and_fill(
     if cancellation.is_cancelled() {
         return Err(DataError::InvalidState("provider history preparation cancelled").into());
     }
-    let plan_path = store.publish_plan(&resolution.plan)?;
-    store.verify_plan_artifact_chain(&resolution.plan)?;
+    let (plan_path, artifact_report) = match compiled_plan {
+        CompiledProviderHistoricalPlan::Legacy(plan) => {
+            let plan_path = store.publish_plan(&plan)?;
+            store.verify_plan_artifact_chain(&plan)?;
+            (plan_path, None)
+        }
+        CompiledProviderHistoricalPlan::V2(write_set) => {
+            let published = store.publish_plan_write_set(&write_set)?;
+            let artifact = tqsdk_data::HistoricalUniversePlanArtifact::V4(write_set.v4().clone());
+            store.verify_plan_artifact_chain_artifact(&artifact)?;
+            let report = json!({
+                "plan_version": write_set.v4().plan_version(),
+                "plan_sha256": published.v4_plan_sha256(),
+                "plan_path": published.v4_path(),
+                "rollback_plan_version": write_set.rollback_v3().plan_version,
+                "rollback_v3_plan_sha256": published.rollback_v3_plan_sha256(),
+                "rollback_v3_plan_path": published.rollback_v3_path(),
+                "normalized_ast_sha256": write_set.v4().identity().normalized_ast_sha256(),
+                "input_sources_sha256": write_set.v4().identity().input_sources_sha256(),
+                "write_policy": args.historical_plan_write_policy.to_string(),
+            });
+            (published.rollback_v3_path().to_path_buf(), Some(report))
+        }
+    };
 
     args.days.start_day = None;
     args.days.end_day = None;
@@ -1950,6 +2215,9 @@ async fn bootstrap_provider_history_and_fill(
     )
     .await?;
     if let Some(object) = outcome.value.as_object_mut() {
+        if let Some(artifact_report) = artifact_report {
+            object.insert("historical_universe_artifacts".to_string(), artifact_report);
+        }
         object.insert(
             "provider_daily_membership".to_string(),
             json!({
