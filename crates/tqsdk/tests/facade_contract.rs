@@ -13,10 +13,14 @@ use tqsdk_core::{
     RuntimeHandle, RuntimeInput, Symbol, Tick,
 };
 use tqsdk_data::{
-    BACKTEST_HISTORY_METADATA_SCHEMA_VERSION, BacktestHistoryMarketKind,
+    ActiveInterval, BACKTEST_HISTORY_METADATA_SCHEMA_VERSION, BacktestHistoryMarketKind,
     BacktestHistoryMetadataCache, BacktestHistoryMetadataSnapshot, BacktestHistoryPhysicalSegment,
-    BacktestHistoryTradingDay, KlineSessionTemplate, MinuteKlineCache, MinuteKlineCacheSnapshot,
-    TickDataSeriesRequest,
+    BacktestHistoryTradingDay, CatalogContract, CatalogSnapshot, DynamicUniverseScope,
+    HistoricalAcquisitionContract, HistoricalCatalogAcquisition, HistoricalCatalogProof,
+    HistoricalDataKind, HistoricalPlanWritePolicy, HistoricalSemanticCatalog,
+    HistoricalUniverseArtifactStore, HistoricalUniversePlanArtifact, KlineSessionTemplate,
+    MinuteKlineCache, MinuteKlineCacheSnapshot, TickDataSeriesRequest, UniverseBudget,
+    UniverseSpec, compile_historical_universe_resolution_v4,
 };
 use tqsdk_session::testing::ManualSession;
 use tqsdk_task::{MinuteKlineAggregator, MinuteKlineSessionTemplate};
@@ -40,6 +44,7 @@ fn prelude_exposes_default_strategy_surface() {
     let _: Option<RecordTicksReport> = None;
     let _: Option<BacktestRemoteFillInspectionProgress> = None;
     let _: Option<BacktestRemoteFillTelemetry> = None;
+    let _: Option<tqsdk::advanced::data::UniverseSpec> = None;
 }
 
 #[tokio::test]
@@ -502,6 +507,222 @@ async fn facade_quotes_universe_accepts_static_selector_expression() {
         .unwrap();
 
     assert_eq!(quotes.symbols().collect::<Vec<_>>(), vec![symbol]);
+}
+
+#[tokio::test]
+async fn facade_quotes_universe_accepts_static_v2_and_rejects_timeline_preflight() {
+    let symbol = "SHFE.rb2601";
+    let mut tq = Tq::from_api(manual_tq_api());
+
+    let quotes = tq
+        .quotes_universe(format!("snapshot(symbol:{symbol})"))
+        .await
+        .unwrap();
+    assert_eq!(quotes.symbols().collect::<Vec<_>>(), vec![symbol]);
+
+    let quotes = tq
+        .quotes_universe_spec(UniverseSpec::parse_v2(&format!("symbol:{symbol}")).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(quotes.symbols().collect::<Vec<_>>(), vec![symbol]);
+
+    let error = match tq.quotes_universe("timeline(contract:all)").await {
+        Ok(_) => panic!("timeline must be rejected by snapshot-only quotes entry point"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("snapshot-only entry point"));
+
+    let error = match tq
+        .quotes_universe_spec(UniverseSpec::parse_v2("timeline(contract:all)").unwrap())
+        .await
+    {
+        Ok(_) => panic!("typed timeline must be rejected by snapshot-only quotes entry point"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("snapshot-only entry point"));
+}
+
+#[tokio::test]
+async fn facade_backtest_accepts_static_v2_snapshot() {
+    let symbol = "SHFE.rb2501";
+    let cache_dir = temp_cache_dir();
+    BacktestTickCache::open(&cache_dir)
+        .unwrap()
+        .store_ticks(symbol, 1_000, 3_000, [tick(1, 1_000, 100.0)])
+        .unwrap();
+
+    let prepared = Tq::futures()
+        .backtest(1_000, 3_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .universe("snapshot(symbol:SHFE.rb2501)")
+        .unwrap()
+        .cache_only()
+        .prepare()
+        .await
+        .unwrap();
+
+    assert_eq!(prepared.data_report().resolved_symbols, 1);
+    assert_eq!(prepared.tick_sources()[0].replay_symbol, symbol);
+
+    let typed = Tq::futures()
+        .backtest(1_000, 3_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .universe_spec(UniverseSpec::parse_v2("symbol:SHFE.rb2501").unwrap())
+        .unwrap()
+        .cache_only()
+        .prepare()
+        .await
+        .unwrap();
+    assert_eq!(typed.tick_sources()[0].replay_symbol, symbol);
+
+    let error = match Tq::futures()
+        .backtest(1_000, 3_000)
+        .universe_spec(UniverseSpec::parse_v2("timeline(contract:all)").unwrap())
+    {
+        Ok(_) => panic!("typed timeline must be rejected by snapshot-only backtest entry point"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("snapshot-only entry point"));
+}
+
+fn facade_v4_artifact(
+    cache_dir: &std::path::Path,
+    symbol: &str,
+    start_ns: i64,
+    tick_start_ns: i64,
+    end_ns: i64,
+) -> HistoricalUniversePlanArtifact {
+    let canonical_universe = "timeline(contract:all)";
+    let acquisition = HistoricalCatalogAcquisition::new(
+        HistoricalCatalogProof::AuthoritativeLifecycle,
+        "fixture:facade-v4",
+        canonical_universe,
+        end_ns,
+        end_ns + 1,
+        true,
+        vec![symbol.to_string()],
+        vec![symbol.to_string()],
+        vec![HistoricalAcquisitionContract {
+            symbol: symbol.to_string(),
+            exchange_id: "SHFE".to_string(),
+            product_id: "au".to_string(),
+            expired: true,
+            expire_datetime_ns: Some(end_ns),
+            authoritative_lifecycle: vec![ActiveInterval::new(start_ns, end_ns).unwrap()],
+            first_available_data_ns: BTreeMap::from([
+                (HistoricalDataKind::Tick, tick_start_ns),
+                (HistoricalDataKind::Minute, tick_start_ns + 10),
+                (HistoricalDataKind::Daily, tick_start_ns + 20),
+            ]),
+        }],
+    )
+    .unwrap();
+    let catalog = CatalogSnapshot::new(
+        "fixture-facade-v4",
+        "calendar:fixture-facade-v4",
+        true,
+        DynamicUniverseScope::all(),
+        vec![
+            CatalogContract::new(
+                symbol,
+                "SHFE",
+                "au",
+                vec![ActiveInterval::new(start_ns, end_ns).unwrap()],
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let semantic =
+        HistoricalSemanticCatalog::new(&acquisition, canonical_universe, catalog).unwrap();
+    let spec = UniverseSpec::parse_v2(canonical_universe).unwrap();
+    let capabilities = (&acquisition, &semantic);
+    let resolution = compile_historical_universe_resolution_v4(
+        &capabilities,
+        &spec,
+        &[],
+        start_ns,
+        end_ns,
+        UniverseBudget::new(8, 16).unwrap(),
+        None,
+    )
+    .unwrap();
+    let write_set = resolution
+        .prepare_write_set(HistoricalPlanWritePolicy::V4WithV3Rollback)
+        .unwrap();
+    let store = HistoricalUniverseArtifactStore::new(cache_dir);
+    store.publish_acquisition(&acquisition).unwrap();
+    store.publish_semantic_catalog(&semantic).unwrap();
+    store.publish_plan_write_set(&write_set).unwrap();
+    HistoricalUniversePlanArtifact::V4(write_set.v4().clone())
+}
+
+#[tokio::test]
+async fn facade_backtest_v4_artifact_verifies_chain_range_and_tick_boundary() {
+    let symbol = "SHFE.au2406";
+    let start_ns = 1_000;
+    let tick_start_ns = 1_500;
+    let end_ns = 3_000;
+    let cache_dir = temp_cache_dir();
+    BacktestTickCache::open(&cache_dir)
+        .unwrap()
+        .store_ticks(symbol, tick_start_ns, end_ns, [tick(1, 2_000, 100.0)])
+        .unwrap();
+    let artifact = facade_v4_artifact(&cache_dir, symbol, start_ns, tick_start_ns, end_ns);
+
+    let mut invalid_wire = serde_json::to_value(&artifact).unwrap();
+    invalid_wire["plan_sha256"] =
+        json!("sha256:0000000000000000000000000000000000000000000000000000000000000000");
+    assert!(serde_json::from_value::<HistoricalUniversePlanArtifact>(invalid_wire).is_err());
+
+    let range_error = match Tq::futures()
+        .backtest(start_ns + 1, end_ns)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .historical_universe_artifact(artifact.clone())
+    {
+        Ok(_) => panic!("V4 artifact range mismatch must fail before preparation"),
+        Err(error) => error,
+    };
+    assert!(range_error.to_string().contains("range must exactly match"));
+
+    let prepared = Tq::futures()
+        .backtest(start_ns, end_ns)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .historical_universe_artifact(artifact.clone())
+        .unwrap()
+        .cache_only()
+        .prepare()
+        .await
+        .unwrap();
+    assert_eq!(prepared.tick_sources().len(), 1);
+    assert_eq!(prepared.tick_sources()[0].replay_symbol, symbol);
+    assert_eq!(prepared.tick_sources()[0].start_ns, tick_start_ns);
+    assert_eq!(prepared.tick_sources()[0].end_ns, end_ns);
+    drop(prepared);
+
+    let missing_chain_dir = temp_cache_dir();
+    let chain_error = match Tq::futures()
+        .backtest(start_ns, end_ns)
+        .cache_dir(&missing_chain_dir)
+        .unwrap()
+        .historical_universe_artifact(artifact)
+        .unwrap()
+        .cache_only()
+        .prepare()
+        .await
+    {
+        Ok(_) => panic!("V4 artifact without its pinned chain must fail"),
+        Err(error) => error,
+    };
+    let chain_message = chain_error.to_string();
+    assert!(chain_message.contains("No such file"), "{chain_message}");
+
+    let _ = std::fs::remove_dir_all(cache_dir);
+    let _ = std::fs::remove_dir_all(missing_chain_dir);
 }
 
 #[tokio::test]
@@ -1100,6 +1321,43 @@ async fn facade_market_cache_policy_records_static_universe() {
         .expect("static universe market cache policy should start recording");
 
     assert_eq!(report.symbols, vec![symbol.to_string()]);
+}
+
+#[tokio::test]
+async fn facade_market_cache_policy_records_static_v2_and_rejects_timeline() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let policy = MarketCachePolicy::new(&cache_dir)
+        .record_universe(format!("snapshot(symbol:{symbol})"))
+        .unwrap();
+    assert!(policy.universe_expression().is_none());
+    assert!(policy.universe_spec().is_some());
+
+    let typed_policy = MarketCachePolicy::new(&cache_dir)
+        .record_universe_spec(UniverseSpec::parse_v2(&format!("symbol:{symbol}")).unwrap())
+        .unwrap();
+    assert_eq!(
+        typed_policy.universe_spec().unwrap().canonical_text(),
+        format!("symbol:{symbol}")
+    );
+
+    let error = MarketCachePolicy::new(&cache_dir)
+        .record_universe_spec(UniverseSpec::parse_v2("timeline(contract:all)").unwrap())
+        .unwrap_err();
+    assert!(error.to_string().contains("snapshot-only entry point"));
+
+    let mut tq = Tq::from_api(manual_tq_api());
+    let report = tq
+        .start_market_cache(policy)
+        .await
+        .unwrap()
+        .expect("static V2 market cache policy should start recording");
+    assert_eq!(report.symbols, vec![symbol.to_string()]);
+
+    let error = MarketCachePolicy::new(&cache_dir)
+        .record_universe("timeline(contract:all)")
+        .unwrap_err();
+    assert!(error.to_string().contains("snapshot-only entry point"));
 }
 
 #[tokio::test]

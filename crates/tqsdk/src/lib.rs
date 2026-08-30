@@ -70,8 +70,8 @@ pub mod advanced {
             HistoricalContUnderlyingRow, HistoricalContUnderlyingSegment, KlineDataSeries,
             KlineDataSeriesRequest, LiveTickCacheWriter, MinuteKlineCache,
             MinuteKlineCachePurgeReport, MinuteKlineCacheSnapshot, MinuteKlineCacheStatus,
-            TickDataSeries, TickDataSeriesRequest, TradingCalendarRow,
-            historical_cont_underlying_segments,
+            TickDataSeries, TickDataSeriesRequest, TradingCalendarRow, UniverseInput, UniverseMode,
+            UniverseSpec, UniverseSymbolFile, historical_cont_underlying_segments,
         };
     }
 
@@ -738,6 +738,26 @@ impl Tq {
                 push_unique_string(&mut symbols, symbol);
             }
         }
+        if policy.universe_spec.is_some() || !policy.universe_symbol_files.is_empty() {
+            let input = tqsdk_data::UniverseInput::new(policy.universe_spec.clone())
+                .universe_symbol_files(policy.universe_symbol_files.iter().cloned())
+                .expand()
+                .map_err(|error| data_validation(error.to_string()))?;
+            let requires_provider = universe_v2_requires_provider(&input);
+            let compiled = if requires_provider {
+                if !matches!(self.inner, TqInner::Live(_)) {
+                    return Err(data_validation(
+                        "dynamic market-cache Universe V2 requires live/session mode",
+                    ));
+                }
+                resolve_universe_v2_with_session(&input, self.session().clone()).await?
+            } else {
+                tqsdk_data::compile_static_futures_universe_v2(&input)?
+            };
+            for candidate in compiled.candidates() {
+                push_unique_string(&mut symbols, candidate.symbol().to_string());
+            }
+        }
         Ok(symbols)
     }
 
@@ -760,18 +780,59 @@ impl Tq {
         &mut self,
         expression: impl AsRef<str>,
     ) -> Result<tqsdk_wait::QuoteSet> {
-        let expression = tqsdk_data::UniverseExpression::parse(expression.as_ref())?;
-        let symbols = if expression.is_static_symbol_only() {
-            tqsdk_data::resolve_static_symbols_with_expression(&expression)?
-        } else {
-            if !matches!(self.inner, TqInner::Live(_)) {
-                return Err(data_validation(
-                    "dynamic quotes_universe expression requires live/session mode",
-                ));
+        let symbols = match tqsdk_data::parse_snapshot_universe_compatible(expression.as_ref())
+            .map_err(|error| data_validation(error.to_string()))?
+        {
+            tqsdk_data::SnapshotUniverseDispatch::Legacy { expression, .. } => {
+                if expression.is_static_symbol_only() {
+                    tqsdk_data::resolve_static_symbols_with_expression(&expression)?
+                } else {
+                    if !matches!(self.inner, TqInner::Live(_)) {
+                        return Err(data_validation(
+                            "dynamic quotes_universe expression requires live/session mode",
+                        ));
+                    }
+                    resolve_universe_with_session(&expression, self.session().clone()).await?
+                }
             }
-            resolve_universe_with_session(&expression, self.session().clone()).await?
+            tqsdk_data::SnapshotUniverseDispatch::V2 { spec, .. } => {
+                return self.quotes_universe_spec(spec).await;
+            }
+            _ => unreachable!("snapshot universe dispatch is non-exhaustive"),
         };
         self.quotes(symbols).await
+    }
+
+    /// Subscribe quotes selected by an already parsed Universe V2 snapshot.
+    pub async fn quotes_universe_spec(
+        &mut self,
+        spec: tqsdk_data::UniverseSpec,
+    ) -> Result<tqsdk_wait::QuoteSet> {
+        if spec.mode() != tqsdk_data::UniverseMode::Snapshot {
+            return Err(data_validation(
+                "quotes_universe_spec is a snapshot-only entry point",
+            ));
+        }
+        let input = tqsdk_data::UniverseInput::from_spec(spec)
+            .expand()
+            .map_err(|error| data_validation(error.to_string()))?;
+        let compiled = if universe_v2_requires_provider(&input) {
+            if !matches!(self.inner, TqInner::Live(_)) {
+                return Err(data_validation(
+                    "dynamic quotes_universe Universe V2 requires live/session mode",
+                ));
+            }
+            resolve_universe_v2_with_session(&input, self.session().clone()).await?
+        } else {
+            tqsdk_data::compile_static_futures_universe_v2(&input)?
+        };
+        self.quotes(
+            compiled
+                .candidates()
+                .iter()
+                .map(|candidate| candidate.symbol().to_string()),
+        )
+        .await
     }
 
     #[must_use]
@@ -924,6 +985,8 @@ pub struct MarketCachePolicy {
     cache_dir: PathBuf,
     tick_symbols: Vec<String>,
     universe_expression: Option<tqsdk_data::UniverseExpression>,
+    universe_spec: Option<tqsdk_data::UniverseSpec>,
+    universe_symbol_files: Vec<PathBuf>,
 }
 
 impl MarketCachePolicy {
@@ -933,6 +996,8 @@ impl MarketCachePolicy {
             cache_dir: cache_dir.into(),
             tick_symbols: Vec::new(),
             universe_expression: None,
+            universe_spec: None,
+            universe_symbol_files: Vec::new(),
         }
     }
 
@@ -949,6 +1014,16 @@ impl MarketCachePolicy {
     #[must_use]
     pub fn universe_expression(&self) -> Option<&tqsdk_data::UniverseExpression> {
         self.universe_expression.as_ref()
+    }
+
+    #[must_use]
+    pub fn universe_spec(&self) -> Option<&tqsdk_data::UniverseSpec> {
+        self.universe_spec.as_ref()
+    }
+
+    #[must_use]
+    pub fn universe_symbol_file_paths(&self) -> &[PathBuf] {
+        &self.universe_symbol_files
     }
 
     #[must_use]
@@ -971,9 +1046,49 @@ impl MarketCachePolicy {
 
     /// Record tick cache rows for symbols resolved from a futures universe expression.
     pub fn record_universe(mut self, expression: impl AsRef<str>) -> Result<Self> {
-        self.universe_expression =
-            Some(tqsdk_data::UniverseExpression::parse(expression.as_ref())?);
+        match tqsdk_data::parse_snapshot_universe_compatible(expression.as_ref())
+            .map_err(|error| data_validation(error.to_string()))?
+        {
+            tqsdk_data::SnapshotUniverseDispatch::Legacy { expression, .. } => {
+                self.universe_expression = Some(expression);
+                self.universe_spec = None;
+            }
+            tqsdk_data::SnapshotUniverseDispatch::V2 { spec, .. } => {
+                self.universe_expression = None;
+                self.universe_spec = Some(spec);
+            }
+            _ => unreachable!("snapshot universe dispatch is non-exhaustive"),
+        }
         Ok(self)
+    }
+
+    /// Record tick rows for an already parsed Universe V2 snapshot.
+    pub fn record_universe_spec(mut self, spec: tqsdk_data::UniverseSpec) -> Result<Self> {
+        if spec.mode() != tqsdk_data::UniverseMode::Snapshot {
+            return Err(data_validation(
+                "record_universe_spec is a snapshot-only entry point",
+            ));
+        }
+        self.universe_expression = None;
+        self.universe_spec = Some(spec);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn universe_symbol_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.universe_symbol_files.push(path.into());
+        self
+    }
+
+    #[must_use]
+    pub fn universe_symbol_files<I, P>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.universe_symbol_files
+            .extend(paths.into_iter().map(Into::into));
+        self
     }
 
     #[must_use]
@@ -986,6 +1101,8 @@ impl MarketCachePolicy {
                 .map(|symbol| symbol.symbol.clone())
                 .collect(),
             universe_expression: None,
+            universe_spec: None,
+            universe_symbol_files: Vec::new(),
         }
     }
 }
@@ -1010,7 +1127,10 @@ pub struct BacktestBuilder {
     kline_specs: Vec<BacktestKlineSpec>,
     tick_specs: Vec<BacktestTickSpec>,
     universe_expression: Option<tqsdk_data::UniverseExpression>,
+    universe_spec: Option<tqsdk_data::UniverseSpec>,
+    universe_symbol_files: Vec<PathBuf>,
     historical_universe_plan: Option<tqsdk_data::HistoricalUniversePlan>,
+    historical_universe_artifact: Option<tqsdk_data::HistoricalUniversePlanArtifact>,
     warmup_batch_size: usize,
     remote_fill_config: Option<BacktestRemoteFillConfig>,
     remote_fill_progress: Option<BacktestRemoteFillProgressHandler>,
@@ -1852,6 +1972,36 @@ impl BacktestBuilder {
                 push_unique_string(&mut self.symbols, symbol);
             }
         }
+        if policy.universe_spec.is_some() || !policy.universe_symbol_files.is_empty() {
+            let input = tqsdk_data::UniverseInput::new(policy.universe_spec.clone())
+                .universe_symbol_files(policy.universe_symbol_files.iter().cloned())
+                .expand()
+                .map_err(|error| data_validation(error.to_string()))?;
+            let compiled = resolve_backtest_universe_v2(&input, self.base.auth.as_ref()).await?;
+            for candidate in compiled.candidates() {
+                push_unique_string(&mut self.symbols, candidate.symbol().to_string());
+            }
+        }
+        Ok(())
+    }
+
+    async fn apply_configured_universe(&mut self) -> Result<()> {
+        if let Some(expression) = &self.universe_expression {
+            let resolved = resolve_backtest_universe(expression, self.base.auth.as_ref()).await?;
+            for symbol in resolved {
+                push_unique_string(&mut self.symbols, symbol);
+            }
+        }
+        if self.universe_spec.is_some() || !self.universe_symbol_files.is_empty() {
+            let input = tqsdk_data::UniverseInput::new(self.universe_spec.clone())
+                .universe_symbol_files(self.universe_symbol_files.iter().cloned())
+                .expand()
+                .map_err(|error| data_validation(error.to_string()))?;
+            let compiled = resolve_backtest_universe_v2(&input, self.base.auth.as_ref()).await?;
+            for candidate in compiled.candidates() {
+                push_unique_string(&mut self.symbols, candidate.symbol().to_string());
+            }
+        }
         Ok(())
     }
 
@@ -1861,6 +2011,19 @@ impl BacktestBuilder {
         }
         let cache = tqsdk_data::BacktestTickCache::open(tqsdk_data::default_history_cache_dir())?;
         self.cache = Some(cache);
+        Ok(())
+    }
+
+    fn verify_historical_universe_artifact_chain(&self) -> Result<()> {
+        let Some(artifact) = &self.historical_universe_artifact else {
+            return Ok(());
+        };
+        let cache = self
+            .cache
+            .as_ref()
+            .ok_or_else(|| data_validation("historical universe artifact requires a cache root"))?;
+        tqsdk_data::HistoricalUniverseArtifactStore::new(cache.cache_dir())
+            .verify_plan_artifact_chain_artifact(artifact)?;
         Ok(())
     }
 
@@ -2309,12 +2472,8 @@ impl BacktestBuilder {
         self.validate_cache_market_kind()?;
         self.apply_market_cache_policy().await?;
         self.apply_default_cache_if_needed()?;
-        if let Some(expression) = &self.universe_expression {
-            let resolved = resolve_backtest_universe(expression, self.base.auth.as_ref()).await?;
-            for symbol in resolved {
-                push_unique_string(&mut self.symbols, symbol);
-            }
-        }
+        self.verify_historical_universe_artifact_chain()?;
+        self.apply_configured_universe().await?;
         if self.symbols.is_empty() && self.tick_specs.is_empty() && self.kline_specs.is_empty() {
             return Err(data_validation(
                 "cache-backed backtest requires at least one symbol in phase 1",
@@ -2444,14 +2603,17 @@ impl BacktestBuilder {
             .cloned()
             .collect::<BTreeSet<_>>();
         let tick_cache_start_ns = self
-            .historical_universe_plan
+            .historical_universe_artifact
             .as_ref()
-            .and_then(|plan| {
-                plan.timeline
-                    .physical_listing_starts
-                    .values()
-                    .min()
-                    .copied()
+            .and_then(historical_universe_v4_tick_start)
+            .or_else(|| {
+                self.historical_universe_plan.as_ref().and_then(|plan| {
+                    plan.timeline
+                        .physical_listing_starts
+                        .values()
+                        .min()
+                        .copied()
+                })
             })
             .unwrap_or(self.start_ns);
         let mut tick_sources = resolve_backtest_tick_sources(
@@ -2470,7 +2632,11 @@ impl BacktestBuilder {
             )
             .await?,
         );
-        if let Some(plan) = &self.historical_universe_plan {
+        if let Some(tqsdk_data::HistoricalUniversePlanArtifact::V4(plan)) =
+            &self.historical_universe_artifact
+        {
+            tick_sources = cache_fill_tick_sources_from_historical_v4_targets(tick_sources, plan)?;
+        } else if let Some(plan) = &self.historical_universe_plan {
             tick_sources = cache_fill_tick_sources_from_historical_listing(tick_sources, plan)?;
         }
         let physical_ranges = physical_tick_ranges(&tick_sources);
@@ -2891,9 +3057,54 @@ impl BacktestBuilder {
                 "backtest universe selectors are futures-only; declare stock symbols explicitly",
             ));
         }
-        self.universe_expression =
-            Some(tqsdk_data::UniverseExpression::parse(expression.as_ref())?);
+        match tqsdk_data::parse_snapshot_universe_compatible(expression.as_ref())
+            .map_err(|error| data_validation(error.to_string()))?
+        {
+            tqsdk_data::SnapshotUniverseDispatch::Legacy { expression, .. } => {
+                self.universe_expression = Some(expression);
+                self.universe_spec = None;
+            }
+            tqsdk_data::SnapshotUniverseDispatch::V2 { spec, .. } => {
+                self.universe_expression = None;
+                self.universe_spec = Some(spec);
+            }
+            _ => unreachable!("snapshot universe dispatch is non-exhaustive"),
+        }
         Ok(self)
+    }
+
+    /// Add futures symbols selected by an already parsed Universe V2 snapshot.
+    pub fn universe_spec(mut self, spec: tqsdk_data::UniverseSpec) -> Result<Self> {
+        if self.base.market_kind != FacadeMarketKind::Futures {
+            return Err(data_validation(
+                "backtest universe selectors are futures-only; declare stock symbols explicitly",
+            ));
+        }
+        if spec.mode() != tqsdk_data::UniverseMode::Snapshot {
+            return Err(data_validation(
+                "backtest universe_spec is a snapshot-only entry point",
+            ));
+        }
+        self.universe_expression = None;
+        self.universe_spec = Some(spec);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn universe_symbol_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.universe_symbol_files.push(path.into());
+        self
+    }
+
+    #[must_use]
+    pub fn universe_symbol_files<I, P>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.universe_symbol_files
+            .extend(paths.into_iter().map(Into::into));
+        self
     }
 
     /// Apply an offline-prepared, hash-pinned historical membership timeline.
@@ -2926,18 +3137,43 @@ impl BacktestBuilder {
         Ok(self)
     }
 
+    /// Apply a V1-V4 artifact. The referenced acquisition/catalog/rollback
+    /// chain is verified against the selected cache root before preparation.
+    pub fn historical_universe_artifact(
+        self,
+        artifact: tqsdk_data::HistoricalUniversePlanArtifact,
+    ) -> Result<Self> {
+        artifact.verify()?;
+        let mut builder = match &artifact {
+            tqsdk_data::HistoricalUniversePlanArtifact::Legacy(plan) => {
+                self.historical_universe_plan(plan.clone())?
+            }
+            tqsdk_data::HistoricalUniversePlanArtifact::V4(plan) => {
+                let runtime_plan = plan.timeline().clone().prepare(plan.budget())?;
+                let mut builder = self.historical_universe_plan(runtime_plan)?;
+                for batch in &plan.timeline().batches {
+                    for change in &batch.changes {
+                        if let tqsdk_data::UniverseMemberChange::Add { instrument, .. } = change {
+                            push_unique_string(&mut builder.symbols, instrument.symbol());
+                        }
+                    }
+                }
+                builder
+            }
+            _ => unreachable!("historical universe artifact is non-exhaustive"),
+        };
+        builder.historical_universe_artifact = Some(artifact);
+        Ok(builder)
+    }
+
     /// Validate cache coverage and prepare the local replay inputs.
     pub async fn prepare(mut self) -> Result<PreparedBacktest> {
         self.validate_range()?;
         self.validate_cache_market_kind()?;
         self.apply_market_cache_policy().await?;
         self.apply_default_cache_if_needed()?;
-        if let Some(expression) = &self.universe_expression {
-            let resolved = resolve_backtest_universe(expression, self.base.auth.as_ref()).await?;
-            for symbol in resolved {
-                push_unique_string(&mut self.symbols, symbol);
-            }
-        }
+        self.verify_historical_universe_artifact_chain()?;
+        self.apply_configured_universe().await?;
         if self.symbols.is_empty() && self.tick_specs.is_empty() && self.kline_specs.is_empty() {
             return Err(data_validation(
                 "cache-backed backtest requires at least one symbol in phase 1",
@@ -2974,7 +3210,11 @@ impl BacktestBuilder {
             None
         };
         let mut prepared_inputs = self.resolved_prepared_inputs().await?;
-        if let Some(plan) = &self.historical_universe_plan {
+        if let Some(tqsdk_data::HistoricalUniversePlanArtifact::V4(plan)) =
+            &self.historical_universe_artifact
+        {
+            restrict_tick_sources_to_historical_universe_v4(&mut prepared_inputs, plan)?;
+        } else if let Some(plan) = &self.historical_universe_plan {
             restrict_tick_sources_to_historical_universe(&mut prepared_inputs, plan)?;
         }
         if (!prepared_inputs.minute_klines.is_empty() || !prepared_inputs.daily_klines.is_empty())
@@ -3525,7 +3765,11 @@ impl PreparedBacktest {
             }
         };
 
-        if let Some(plan) = &builder.historical_universe_plan {
+        if let Some(tqsdk_data::HistoricalUniversePlanArtifact::V4(plan)) =
+            &builder.historical_universe_artifact
+        {
+            restrict_tick_sources_to_historical_universe_v4(&mut inputs, plan)?;
+        } else if let Some(plan) = &builder.historical_universe_plan {
             restrict_tick_sources_to_historical_universe(&mut inputs, plan)?;
         }
         let BacktestBuilder {
@@ -3538,7 +3782,10 @@ impl PreparedBacktest {
             kline_specs,
             tick_specs,
             universe_expression: _,
+            universe_spec: _,
+            universe_symbol_files: _,
             historical_universe_plan,
+            historical_universe_artifact: _,
             warmup_batch_size: _,
             remote_fill_config: _,
             remote_fill_progress: _,
@@ -3639,6 +3886,158 @@ fn restrict_tick_sources_to_historical_universe(
         .flat_map(&restrict_source)
         .collect();
     Ok(())
+}
+
+fn historical_universe_v4_tick_start(
+    artifact: &tqsdk_data::HistoricalUniversePlanArtifact,
+) -> Option<i64> {
+    let tqsdk_data::HistoricalUniversePlanArtifact::V4(plan) = artifact else {
+        return None;
+    };
+    plan.execution()
+        .targets()
+        .get(&tqsdk_data::HistoricalDataKind::Tick)
+        .and_then(|targets| targets.iter().map(|target| target.start_ns).min())
+}
+
+fn historical_universe_v4_visible_ranges(
+    plan: &tqsdk_data::HistoricalUniversePlanV4,
+) -> Result<BTreeMap<String, Vec<(i64, i64)>>> {
+    let mut starts = BTreeMap::<String, i64>::new();
+    let mut ranges = BTreeMap::<String, Vec<(i64, i64)>>::new();
+    for batch in &plan.timeline().batches {
+        for change in &batch.changes {
+            match change {
+                tqsdk_data::UniverseMemberChange::Add { instrument, .. } => {
+                    let symbol = instrument.symbol();
+                    if starts.insert(symbol.clone(), batch.effective_ns).is_some() {
+                        return Err(data_validation(format!(
+                            "historical Universe V4 adds already-active symbol {symbol}"
+                        )));
+                    }
+                }
+                tqsdk_data::UniverseMemberChange::Remove { instrument } => {
+                    let symbol = instrument.symbol();
+                    let start_ns = starts.remove(&symbol).ok_or_else(|| {
+                        data_validation(format!(
+                            "historical Universe V4 removes inactive symbol {symbol}"
+                        ))
+                    })?;
+                    ranges
+                        .entry(symbol)
+                        .or_default()
+                        .push((start_ns, batch.effective_ns));
+                }
+            }
+        }
+    }
+    for (symbol, start_ns) in starts {
+        ranges
+            .entry(symbol)
+            .or_default()
+            .push((start_ns, plan.timeline().end_ns));
+    }
+    Ok(ranges)
+}
+
+fn historical_universe_v4_tick_targets(
+    plan: &tqsdk_data::HistoricalUniversePlanV4,
+) -> Result<BTreeMap<String, (i64, i64)>> {
+    let targets = plan
+        .execution()
+        .targets()
+        .get(&tqsdk_data::HistoricalDataKind::Tick)
+        .ok_or_else(|| data_validation("historical Universe V4 has no tick target set"))?;
+    let mut by_symbol = BTreeMap::new();
+    for target in targets {
+        if by_symbol
+            .insert(
+                target.source_symbol.clone(),
+                (target.start_ns, target.end_ns),
+            )
+            .is_some()
+        {
+            return Err(data_validation(format!(
+                "historical Universe V4 repeats tick target {}",
+                target.source_symbol
+            )));
+        }
+    }
+    Ok(by_symbol)
+}
+
+fn restrict_historical_universe_v4_sources(
+    sources: Vec<tqsdk_task::HistoryBacktestTickSource>,
+    visible_ranges: &BTreeMap<String, Vec<(i64, i64)>>,
+    tick_targets: &BTreeMap<String, (i64, i64)>,
+) -> Result<Vec<tqsdk_task::HistoryBacktestTickSource>> {
+    let mut restricted = Vec::new();
+    for source in sources {
+        let Some(intervals) = visible_ranges.get(&source.replay_symbol) else {
+            continue;
+        };
+        let (target_start_ns, target_end_ns) = tick_targets
+            .get(&source.cache_symbol)
+            .copied()
+            .ok_or_else(|| {
+                data_validation(format!(
+                    "historical Universe V4 lacks tick target for {}",
+                    source.cache_symbol
+                ))
+            })?;
+        for (visible_start_ns, visible_end_ns) in intervals {
+            let start_ns = source.start_ns.max(*visible_start_ns).max(target_start_ns);
+            let end_ns = source.end_ns.min(*visible_end_ns).min(target_end_ns);
+            if start_ns < end_ns {
+                restricted.push(tqsdk_task::HistoryBacktestTickSource {
+                    start_ns,
+                    end_ns,
+                    ..source.clone()
+                });
+            }
+        }
+    }
+    Ok(restricted)
+}
+
+fn restrict_tick_sources_to_historical_universe_v4(
+    inputs: &mut PreparedBacktestInputs,
+    plan: &tqsdk_data::HistoricalUniversePlanV4,
+) -> Result<()> {
+    let visible_ranges = historical_universe_v4_visible_ranges(plan)?;
+    let tick_targets = historical_universe_v4_tick_targets(plan)?;
+    inputs.tick_sources = restrict_historical_universe_v4_sources(
+        std::mem::take(&mut inputs.tick_sources),
+        &visible_ranges,
+        &tick_targets,
+    )?;
+    inputs.synthetic_tick_sources = restrict_historical_universe_v4_sources(
+        std::mem::take(&mut inputs.synthetic_tick_sources),
+        &visible_ranges,
+        &tick_targets,
+    )?;
+    Ok(())
+}
+
+fn cache_fill_tick_sources_from_historical_v4_targets(
+    sources: Vec<tqsdk_task::HistoryBacktestTickSource>,
+    plan: &tqsdk_data::HistoricalUniversePlanV4,
+) -> Result<Vec<tqsdk_task::HistoryBacktestTickSource>> {
+    let tick_targets = historical_universe_v4_tick_targets(plan)?;
+    Ok(sources
+        .into_iter()
+        .filter_map(|source| {
+            let (target_start_ns, target_end_ns) =
+                tick_targets.get(&source.cache_symbol).copied()?;
+            let start_ns = source.start_ns.max(target_start_ns);
+            let end_ns = source.end_ns.min(target_end_ns);
+            (start_ns < end_ns).then_some(tqsdk_task::HistoryBacktestTickSource {
+                start_ns,
+                end_ns,
+                ..source
+            })
+        })
+        .collect())
 }
 
 fn cache_fill_tick_sources_from_historical_listing(
@@ -3931,7 +4330,10 @@ impl TqBuilder {
             kline_specs: Vec::new(),
             tick_specs: Vec::new(),
             universe_expression: None,
+            universe_spec: None,
+            universe_symbol_files: Vec::new(),
             historical_universe_plan: None,
+            historical_universe_artifact: None,
             warmup_batch_size: DEFAULT_BACKTEST_WARMUP_BATCH_SIZE,
             remote_fill_config: None,
             remote_fill_progress: None,
@@ -4532,6 +4934,27 @@ async fn resolve_backtest_universe(
     Ok(tqsdk_data::resolve_futures_universe_symbols(expression, &mut resolver).await?)
 }
 
+async fn resolve_backtest_universe_v2(
+    input: &tqsdk_data::ExpandedUniverseInput,
+    auth: Option<&Auth>,
+) -> Result<tqsdk_data::CompiledUniverse> {
+    if !universe_v2_requires_provider(input) {
+        return Ok(tqsdk_data::compile_static_futures_universe_v2(input)?);
+    }
+    let auth = auth.ok_or_else(|| data_validation("dynamic backtest Universe V2 requires auth"))?;
+    let client =
+        tqsdk_data::session_client_builder_for_futures_discovery(&auth.user, &auth.pass).build()?;
+    let mut resolver = tqsdk_data::SessionFuturesUniverseResolver::new(client);
+    if universe_v2_requires_activity_quotes(input) {
+        let activity_client =
+            tqsdk_session::SessionClientBuilder::new(auth.user.clone(), auth.pass.clone())
+                .futures_market()
+                .build()?;
+        resolver = resolver.with_activity_client(activity_client);
+    }
+    Ok(tqsdk_data::resolve_futures_universe_v2(input, &mut resolver).await?)
+}
+
 async fn resolve_universe_with_session(
     expression: &tqsdk_data::UniverseExpression,
     session: tqsdk_session::SessionClient,
@@ -4547,6 +4970,33 @@ async fn resolve_universe_with_session(
         resolver = resolver.with_activity_client(session);
     }
     Ok(tqsdk_data::resolve_futures_universe_symbols(expression, &mut resolver).await?)
+}
+
+fn universe_v2_requires_provider(input: &tqsdk_data::ExpandedUniverseInput) -> bool {
+    input.spec().is_some_and(|spec| {
+        spec.includes()
+            .iter()
+            .any(|selector| selector.view() != tqsdk_data::UniverseView::Symbol)
+    })
+}
+
+fn universe_v2_requires_activity_quotes(input: &tqsdk_data::ExpandedUniverseInput) -> bool {
+    input.spec().is_some_and(|spec| {
+        spec.includes().iter().any(
+            |selector| matches!(selector.view(), tqsdk_data::UniverseView::Top(limit) if limit > 1),
+        )
+    })
+}
+
+async fn resolve_universe_v2_with_session(
+    input: &tqsdk_data::ExpandedUniverseInput,
+    session: tqsdk_session::SessionClient,
+) -> Result<tqsdk_data::CompiledUniverse> {
+    let mut resolver = tqsdk_data::SessionFuturesUniverseResolver::new(session.clone());
+    if universe_v2_requires_activity_quotes(input) {
+        resolver = resolver.with_activity_client(session);
+    }
+    Ok(tqsdk_data::resolve_futures_universe_v2(input, &mut resolver).await?)
 }
 
 fn take_local_backtest_stream(

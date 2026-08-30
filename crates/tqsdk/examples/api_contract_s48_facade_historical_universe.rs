@@ -3,8 +3,13 @@
 
 use tqsdk::Tq;
 use tqsdk_data::{
-    ActiveInterval, CatalogContract, CatalogSnapshot, DynamicUniverseScope, UniverseBudget,
+    ActiveInterval, CatalogContract, CatalogSnapshot, DynamicUniverseScope,
+    HistoricalUniverseArtifactStore, UniverseBudget,
 };
+
+const CACHE_ROOT: &str = ".tqsdk/backtest_ticks";
+const V4_PLAN_SHA256: &str =
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 fn plan() -> tqsdk_data::Result<tqsdk_data::HistoricalUniversePlan> {
     let scope = DynamicUniverseScope::all();
@@ -25,12 +30,26 @@ fn plan() -> tqsdk_data::Result<tqsdk_data::HistoricalUniversePlan> {
 }
 
 fn main() -> tqsdk::Result<()> {
-    let _backtest = Tq::futures()
+    // The source-compatible V1-V3 entry point remains available.
+    let _legacy_backtest = Tq::futures()
         .backtest(0, 60_000_000_000)
-        .cache_dir(".tqsdk/backtest_ticks")?
+        .cache_dir(CACHE_ROOT)?
         .cache_only()
         .historical_universe_plan(plan()?)?;
 
-    // `prepare().await?.connect().await?` uses only the pinned plan and cache.
+    // A cache fill report supplies the real V4 hash. Loading through the
+    // artifact store verifies its canonical bytes; preparation additionally
+    // verifies acquisition, semantic-catalog and V3 rollback links.
+    if let Ok(artifact) =
+        HistoricalUniverseArtifactStore::new(CACHE_ROOT).load_plan_artifact(V4_PLAN_SHA256)
+    {
+        let _v4_backtest = Tq::futures()
+            .backtest(0, 60_000_000_000)
+            .cache_dir(CACHE_ROOT)?
+            .cache_only()
+            .historical_universe_artifact(artifact)?;
+    }
+
+    // `prepare().await?.connect().await?` then uses only the pinned chain and cache.
     Ok(())
 }
