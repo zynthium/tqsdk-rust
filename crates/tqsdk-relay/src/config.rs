@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::{RelayError, RelayResult};
-use crate::universe_expression::UniverseExpression;
+use crate::universe_expression::{
+    SnapshotUniverseDispatch, UniverseExpression, UniverseSpec, parse_snapshot_universe_compatible,
+};
 use crate::upstream::{UpstreamTickChart, upstream_subscription_ins_list_chars};
 
 const SECONDS_PER_DAY: u64 = 86_400;
@@ -15,6 +17,7 @@ const ENV_UPSTREAM_MARKET_URL: &str = "TQSDK_RELAY_UPSTREAM_MARKET_URL";
 const ENV_DOWNSTREAM_LISTEN: &str = "TQSDK_RELAY_DOWNSTREAM_LISTEN";
 const ENV_METRICS_LISTEN: &str = "TQSDK_RELAY_METRICS_LISTEN";
 const ENV_FUTURES_UNIVERSE: &str = "TQSDK_RELAY_FUTURES_UNIVERSE";
+const ENV_FUTURES_UNIVERSE_FILES: &str = "TQSDK_RELAY_FUTURES_UNIVERSE_FILES";
 const ENV_FUTURES_UNIVERSE_REFRESH_AT: &str = "TQSDK_RELAY_FUTURES_UNIVERSE_REFRESH_AT";
 const ENV_FUTURES_METADATA_BATCH_SIZE: &str = "TQSDK_RELAY_FUTURES_METADATA_BATCH_SIZE";
 const ENV_UPSTREAM_INS_LIST_WARN_CHARS: &str = "TQSDK_RELAY_UPSTREAM_INS_LIST_WARN_CHARS";
@@ -183,6 +186,8 @@ pub struct RelayConfig {
     pub futures_universe_refresh: FuturesUniverseRefreshSchedule,
     pub futures_metadata_batch_size: usize,
     pub futures_universe_expression: Option<UniverseExpression>,
+    pub futures_universe_spec: Option<UniverseSpec>,
+    pub futures_universe_symbol_files: Vec<PathBuf>,
     pub upstream_ins_list_limits: UpstreamInsListLimits,
     pub upstream_tick_view_width: usize,
     pub tick_ring_capacity: usize,
@@ -212,6 +217,11 @@ impl fmt::Debug for RelayConfig {
             .field(
                 "futures_universe_expression",
                 &self.futures_universe_expression,
+            )
+            .field("futures_universe_spec", &self.futures_universe_spec)
+            .field(
+                "futures_universe_symbol_files",
+                &self.futures_universe_symbol_files,
             )
             .field("upstream_ins_list_limits", &self.upstream_ins_list_limits)
             .field("upstream_tick_view_width", &self.upstream_tick_view_width)
@@ -244,6 +254,8 @@ impl Default for RelayConfig {
             futures_universe_refresh: FuturesUniverseRefreshSchedule::default(),
             futures_metadata_batch_size: DEFAULT_FUTURES_METADATA_BATCH_SIZE,
             futures_universe_expression: None,
+            futures_universe_spec: None,
+            futures_universe_symbol_files: Vec::new(),
             upstream_ins_list_limits: UpstreamInsListLimits::default(),
             upstream_tick_view_width: DEFAULT_UPSTREAM_TICK_VIEW_WIDTH,
             tick_ring_capacity: 200_000,
@@ -270,6 +282,56 @@ impl Default for BootstrapConfig {
 impl RelayConfig {
     pub fn from_env() -> RelayResult<Self> {
         Self::from_env_vars(|key| std::env::var(key).ok())
+    }
+
+    pub fn with_futures_universe(mut self, expression: impl AsRef<str>) -> RelayResult<Self> {
+        self.set_futures_universe(expression.as_ref())?;
+        Ok(self)
+    }
+
+    pub fn with_futures_universe_spec(mut self, spec: UniverseSpec) -> RelayResult<Self> {
+        if spec.mode() != crate::universe_expression::UniverseMode::Snapshot {
+            return Err(RelayError::invalid_config(
+                "futures universe spec is a snapshot-only entry point",
+            ));
+        }
+        self.futures_universe_expression = None;
+        self.futures_universe_spec = Some(spec);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn universe_symbol_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.futures_universe_symbol_files.push(path.into());
+        self
+    }
+
+    #[must_use]
+    pub fn universe_symbol_files<I, P>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.futures_universe_symbol_files
+            .extend(paths.into_iter().map(Into::into));
+        self
+    }
+
+    fn set_futures_universe(&mut self, expression: &str) -> RelayResult<()> {
+        match parse_snapshot_universe_compatible(expression)
+            .map_err(|error| RelayError::invalid_config(error.to_string()))?
+        {
+            SnapshotUniverseDispatch::Legacy { expression, .. } => {
+                self.futures_universe_expression = Some(expression);
+                self.futures_universe_spec = None;
+            }
+            SnapshotUniverseDispatch::V2 { spec, .. } => {
+                self.futures_universe_expression = None;
+                self.futures_universe_spec = Some(spec);
+            }
+            _ => unreachable!("snapshot universe dispatch is non-exhaustive"),
+        }
+        Ok(())
     }
 
     pub fn from_env_vars(mut get: impl FnMut(&str) -> Option<String>) -> RelayResult<Self> {
@@ -331,7 +393,10 @@ impl RelayConfig {
                 parse_positive_usize_env(ENV_OUTBOUND_CHANNEL_CAPACITY, &value)?;
         }
         if let Some(value) = get(ENV_FUTURES_UNIVERSE) {
-            config.futures_universe_expression = Some(UniverseExpression::parse(&value)?);
+            config.set_futures_universe(&value)?;
+        }
+        if let Some(value) = get(ENV_FUTURES_UNIVERSE_FILES) {
+            config.futures_universe_symbol_files = std::env::split_paths(&value).collect();
         }
         config.validate()?;
         Ok(config)
@@ -373,11 +438,13 @@ impl RelayConfig {
     #[must_use]
     pub fn has_upstream_futures_source(&self) -> bool {
         self.futures_universe_expression.is_some()
+            || self.futures_universe_spec.is_some()
+            || !self.futures_universe_symbol_files.is_empty()
     }
 
     #[must_use]
     pub fn refreshes_futures_universe(&self) -> bool {
-        self.futures_universe_expression.is_some()
+        self.has_upstream_futures_source()
     }
 
     pub fn validate(&self) -> RelayResult<()> {
@@ -394,6 +461,15 @@ impl RelayConfig {
         if self.metrics_listen.trim().is_empty() {
             return Err(RelayError::invalid_config(
                 "metrics_listen must not be empty",
+            ));
+        }
+        if self
+            .futures_universe_spec
+            .as_ref()
+            .is_some_and(|spec| spec.mode() != crate::universe_expression::UniverseMode::Snapshot)
+        {
+            return Err(RelayError::invalid_config(
+                "futures universe spec is a snapshot-only entry point",
             ));
         }
         self.futures_universe_refresh.validate();

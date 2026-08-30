@@ -108,47 +108,104 @@ async fn configured_upstream_tick_charts(
 async fn configured_upstream_tick_charts_with_contracts(
     config: &RelayConfig,
 ) -> RelayResult<ConfiguredTickCharts> {
+    if config
+        .futures_universe_spec
+        .as_ref()
+        .is_some_and(|spec| spec.mode() != tqsdk_data::UniverseMode::Snapshot)
+    {
+        return Err(RelayError::invalid_config(
+            "futures universe spec is a snapshot-only entry point",
+        ));
+    }
+    let expanded_v2 = if config.futures_universe_spec.is_some()
+        || !config.futures_universe_symbol_files.is_empty()
+    {
+        Some(
+            tqsdk_data::UniverseInput::new(config.futures_universe_spec.clone())
+                .universe_symbol_files(config.futures_universe_symbol_files.iter().cloned())
+                .expand()
+                .map_err(|error| RelayError::invalid_config(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let mut contracts_by_symbol = std::collections::BTreeMap::<String, FuturesContract>::new();
+    let mut calendar = None;
+
     if let Some(expression) = config.futures_universe_expression.as_ref() {
         if expression.is_static_symbol_only() {
-            let symbols = crate::universe::resolve_static_symbols_with_expression(expression)?;
-            let charts =
-                config.upstream_tick_charts_for_symbols(symbols.iter().map(String::as_str))?;
-            let contracts = crate::universe::static_contracts_with_expression(expression)?;
-            return Ok(ConfiguredTickCharts {
-                charts,
-                contracts,
-                calendar: None,
-            });
-        }
-        #[cfg(feature = "metadata")]
-        {
-            let mut resolver = SessionFuturesUniverseResolver::from_config(config)?;
-            let contracts =
-                resolve_futures_contracts_with_expression(expression, &mut resolver).await?;
-            let charts = config.upstream_tick_charts_for_symbols(
-                contracts.iter().map(|contract| contract.symbol.as_str()),
-            )?;
-            let calendar =
-                crate::universe::FuturesUniverseResolver::trading_calendar(&mut resolver)
-                    .await
-                    .ok();
-            return Ok(ConfiguredTickCharts {
-                charts,
-                contracts,
-                calendar,
-            });
-        }
-        #[cfg(not(feature = "metadata"))]
-        {
-            return Err(RelayError::invalid_config(
-                "tqsdk-relay metadata feature is required for dynamic futures universe expression",
-            ));
+            for contract in crate::universe::static_contracts_with_expression(expression)? {
+                contracts_by_symbol.insert(contract.symbol.clone(), contract);
+            }
+        } else {
+            #[cfg(feature = "metadata")]
+            {
+                let mut resolver = SessionFuturesUniverseResolver::from_config(config)?;
+                for contract in
+                    resolve_futures_contracts_with_expression(expression, &mut resolver).await?
+                {
+                    contracts_by_symbol.insert(contract.symbol.clone(), contract);
+                }
+                calendar =
+                    crate::universe::FuturesUniverseResolver::trading_calendar(&mut resolver)
+                        .await
+                        .ok();
+            }
+            #[cfg(not(feature = "metadata"))]
+            {
+                return Err(RelayError::invalid_config(
+                    "tqsdk-relay metadata feature is required for dynamic futures universe expression",
+                ));
+            }
         }
     }
+
+    if let Some(input) = expanded_v2.as_ref() {
+        let requires_provider = input.spec().is_some_and(|spec| {
+            spec.includes()
+                .iter()
+                .any(|selector| selector.view() != tqsdk_data::UniverseView::Symbol)
+        });
+        if requires_provider {
+            #[cfg(feature = "metadata")]
+            {
+                let mut resolver = SessionFuturesUniverseResolver::from_config(config)?;
+                let (_, contracts) =
+                    crate::universe::resolve_futures_universe_v2(input, &mut resolver).await?;
+                for contract in contracts {
+                    contracts_by_symbol.insert(contract.symbol.clone(), contract);
+                }
+                if calendar.is_none() {
+                    calendar =
+                        crate::universe::FuturesUniverseResolver::trading_calendar(&mut resolver)
+                            .await
+                            .ok();
+                }
+            }
+            #[cfg(not(feature = "metadata"))]
+            {
+                return Err(RelayError::invalid_config(
+                    "tqsdk-relay metadata feature is required for dynamic Universe V2 views",
+                ));
+            }
+        } else {
+            let compiled = tqsdk_data::compile_static_futures_universe_v2(input)?;
+            for candidate in compiled.candidates() {
+                let contract =
+                    crate::universe::contract_from_configured_symbol(candidate.symbol())?;
+                contracts_by_symbol.insert(contract.symbol.clone(), contract);
+            }
+        }
+    }
+
+    let contracts = contracts_by_symbol.into_values().collect::<Vec<_>>();
+    let charts = config.upstream_tick_charts_for_symbols(
+        contracts.iter().map(|contract| contract.symbol.as_str()),
+    )?;
     Ok(ConfiguredTickCharts {
-        charts: Vec::new(),
-        contracts: Vec::new(),
-        calendar: None,
+        charts,
+        contracts,
+        calendar,
     })
 }
 

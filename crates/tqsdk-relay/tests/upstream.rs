@@ -1206,6 +1206,43 @@ async fn configured_upstream_source_subscribes_universe_expression_symbols() {
 }
 
 #[tokio::test]
+async fn configured_upstream_source_subscribes_universe_v2_snapshot_symbols() {
+    use tqsdk_relay::{RelayConfig, connect_configured_upstream};
+    use websocket_support::TestWebSocketServer;
+
+    let server = TestWebSocketServer::spawn(|mut socket| {
+        expect_initial_universe_subscriptions(&mut socket, "DCE.m2609,SHFE.au2602");
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+    let config = RelayConfig {
+        upstream_market_url: server.url("/market"),
+        ..RelayConfig::default()
+    }
+    .with_futures_universe("snapshot(symbol:SHFE.au2602,DCE.m2609)")
+    .unwrap();
+
+    let _source = connect_configured_upstream(&config).await.unwrap().unwrap();
+    server.join();
+}
+
+#[tokio::test]
+async fn configured_upstream_rejects_typed_timeline_before_network() {
+    use tqsdk_relay::{RelayConfig, UniverseSpec, connect_configured_upstream};
+
+    let config = RelayConfig {
+        upstream_market_url: "ws://127.0.0.1:1/should-not-connect".to_string(),
+        futures_universe_spec: Some(UniverseSpec::parse_v2("timeline(contract:all)").unwrap()),
+        ..RelayConfig::default()
+    };
+    let error = match connect_configured_upstream(&config).await {
+        Ok(_) => panic!("typed timeline must fail before opening a WebSocket"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("snapshot-only entry point"));
+}
+
+#[tokio::test]
 async fn configured_upstream_source_is_absent_without_universe_expression() {
     use tqsdk_relay::{RelayConfig, connect_configured_upstream};
 
@@ -1454,9 +1491,18 @@ async fn configured_upstream_refresh_failure_keeps_existing_source_live() {
         socket.send_close().unwrap();
     })
     .unwrap();
+    let universe_file = std::env::temp_dir().join(format!(
+        "tqsdk-relay-refresh-universe-{}-{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&universe_file, "SHFE.au2602\n").unwrap();
     let config = RelayConfig {
         upstream_market_url: upstream.url("/market"),
-        futures_universe_expression: Some(UniverseExpression::parse("symbol:SHFE.au2602").unwrap()),
+        futures_universe_symbol_files: vec![universe_file.clone()],
         futures_universe_refresh: FuturesUniverseRefreshSchedule::daily(refresh_time_after(
             Duration::from_secs(4),
         )),
@@ -1476,6 +1522,7 @@ async fn configured_upstream_refresh_failure_keeps_existing_source_live() {
     wait_for_upstream_events_decoded(&engine, 1).await;
     wait_for_upstream_status(&engine, RelaySourceStatus::Up).await;
 
+    std::fs::remove_file(&universe_file).unwrap();
     tokio::time::sleep(Duration::from_secs(5)).await;
     assert_eq!(
         engine.lock().unwrap().health_snapshot().upstream_status,

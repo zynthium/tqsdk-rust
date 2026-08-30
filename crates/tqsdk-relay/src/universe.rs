@@ -38,6 +38,42 @@ enum ProductScope {
     Products(Vec<FuturesProductCode>),
 }
 
+#[cfg(test)]
+mod universe_v2_tests {
+    use super::{FuturesContract, StaticFuturesUniverseResolver, resolve_futures_universe_v2};
+
+    #[tokio::test]
+    async fn materialized_adapter_uses_shared_v2_compiler() {
+        let input = tqsdk_data::UniverseInput::from_spec(
+            tqsdk_data::UniverseSpec::parse_v2(
+                "snapshot(contract:all;main:DCE.m;continuous:DCE.m;index:DCE.m)",
+            )
+            .unwrap(),
+        )
+        .expand()
+        .unwrap();
+        let mut resolver = StaticFuturesUniverseResolver::new([
+            FuturesContract::new("DCE.m2609", "DCE", "m", false).unwrap(),
+            FuturesContract::new("SHFE.rb2601", "SHFE", "rb", false).unwrap(),
+        ])
+        .with_main_symbols(["DCE.m2609"]);
+
+        let (compiled, contracts) = resolve_futures_universe_v2(&input, &mut resolver)
+            .await
+            .unwrap();
+        let symbols = compiled
+            .candidates()
+            .iter()
+            .map(|candidate| candidate.symbol())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            symbols,
+            vec!["DCE.m2609", "KQ.i@DCE.m", "KQ.m@DCE.m", "SHFE.rb2601"]
+        );
+        assert_eq!(contracts.len(), symbols.len());
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct ProductSelection {
     limit_per_product: Option<usize>,
@@ -462,6 +498,77 @@ where
         .into_iter()
         .map(|contract| contract.symbol)
         .collect())
+}
+
+pub(crate) async fn resolve_futures_universe_v2<R>(
+    input: &tqsdk_data::ExpandedUniverseInput,
+    resolver: &mut R,
+) -> RelayResult<(tqsdk_data::CompiledUniverse, Vec<FuturesContract>)>
+where
+    R: FuturesUniverseResolver + Send,
+{
+    let contracts = resolver.active_futures().await?;
+    let needs_main = input.spec().is_some_and(|spec| {
+        spec.includes().iter().any(|selector| {
+            matches!(
+                selector.view(),
+                tqsdk_data::UniverseView::Main | tqsdk_data::UniverseView::Top(_)
+            )
+        })
+    });
+    let main_symbols = if needs_main {
+        resolver.main_futures().await?
+    } else {
+        Vec::new()
+    };
+    let quote_snapshots = if input.spec().is_some_and(|spec| {
+        spec.includes().iter().any(
+            |selector| matches!(selector.view(), tqsdk_data::UniverseView::Top(limit) if limit > 1),
+        )
+    }) {
+        let symbols = contracts
+            .iter()
+            .filter(|contract| !contract.expired)
+            .map(|contract| contract.symbol.clone())
+            .collect::<Vec<_>>();
+        resolver.quote_snapshots(&symbols).await?
+    } else {
+        Vec::new()
+    };
+
+    let mut data_contracts = Vec::with_capacity(contracts.len());
+    for contract in &contracts {
+        let mut converted = tqsdk_data::FuturesContract::new_with_trading_time(
+            &contract.symbol,
+            &contract.exchange_id,
+            &contract.product_id,
+            contract.expired,
+            contract.trading_time.clone(),
+        )?;
+        converted.instrument_name = contract.instrument_name.clone();
+        data_contracts.push(converted);
+    }
+    let mut data_resolver = tqsdk_data::StaticFuturesUniverseResolver::new(data_contracts)
+        .with_main_symbols(main_symbols)
+        .with_quote_snapshots(quote_snapshots);
+    let compiled = tqsdk_data::resolve_futures_universe_v2(input, &mut data_resolver).await?;
+
+    let contracts_by_symbol = contracts
+        .into_iter()
+        .map(|contract| (contract.symbol.clone(), contract))
+        .collect::<BTreeMap<_, _>>();
+    let resolved_contracts = compiled
+        .candidates()
+        .iter()
+        .map(|candidate| {
+            contracts_by_symbol
+                .get(candidate.symbol())
+                .cloned()
+                .map(Ok)
+                .unwrap_or_else(|| contract_from_configured_symbol(candidate.symbol()))
+        })
+        .collect::<RelayResult<Vec<_>>>()?;
+    Ok((compiled, resolved_contracts))
 }
 
 pub fn resolve_static_symbols_with_expression(

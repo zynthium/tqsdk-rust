@@ -77,7 +77,9 @@ pub use universe::{
     futures_metadata_symbol_batches, resolve_futures_universe_symbols,
 };
 pub use universe_expression::{
-    UniverseClause, UniverseExpression, UniverseSelector, UniverseSelectorKind,
+    ExpandedUniverseInput, SnapshotUniverseDispatch, UniverseClause, UniverseExpression,
+    UniverseInput, UniverseMode, UniverseSelector, UniverseSelectorKind, UniverseSpec,
+    UniverseView, parse_snapshot_universe_compatible,
 };
 #[cfg(feature = "server")]
 pub use upstream::WebSocketUpstreamTickSource;
