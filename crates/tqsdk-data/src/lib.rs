@@ -218,6 +218,13 @@ pub use universe_expression::{
     UniverseClause, UniverseExpression, UniverseSelector, UniverseSelectorKind,
 };
 pub use universe_spec::{
-    UNIVERSE_CANONICALIZER_ID, UNIVERSE_COMPILER_ID, UNIVERSE_LANGUAGE_VERSION, UniverseMode,
-    UniverseSelectorSpec, UniverseSpec, UniverseSpecError, UniverseTarget, UniverseView,
+    CompiledUniverse, CompiledUniverseCandidate, CompiledUniverseInstrumentKind,
+    ExpandedUniverseInput, ExpandedUniverseSymbolFile, HistoricalUniverseDispatch,
+    SnapshotCapabilities, SnapshotContract, SnapshotUniverseDispatch, UNIVERSE_CANONICALIZER_ID,
+    UNIVERSE_COMPILER_ID, UNIVERSE_LANGUAGE_VERSION, UniverseCompatibilityError,
+    UniverseCompileError, UniverseDispatchReport, UniverseEvaluationPolicy, UniverseInput,
+    UniverseLanguage, UniverseMode, UniverseProduct, UniverseSelectorSpec, UniverseSourceError,
+    UniverseSpec, UniverseSpecError, UniverseSymbolClass, UniverseSymbolFile, UniverseTarget,
+    UniverseView, compile_expanded_snapshot_universe, compile_snapshot_universe,
+    parse_historical_universe_compatible, parse_snapshot_universe_compatible,
 };
