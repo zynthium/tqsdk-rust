@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -72,6 +73,18 @@ fn fixture() -> (HistoricalCatalogAcquisition, HistoricalSemanticCatalog) {
         "timeline(contract:all;continuous:all;index:all)",
         snapshot,
     )
+    .unwrap()
+    .with_derived_availability(
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        BTreeMap::from([(
+            "KQ.i@SHFE.au".to_string(),
+            BTreeMap::from([
+                (HistoricalDataKind::Tick, 150),
+                (HistoricalDataKind::Minute, 160),
+                (HistoricalDataKind::Daily, 170),
+            ]),
+        )]),
+    )
     .unwrap();
     (acquisition, semantic)
 }
@@ -123,10 +136,16 @@ fn v2_timeline_compiler_keeps_logical_provenance_and_kind_specific_boundaries() 
         .expect("logical views retain the excluded contract as a dependency");
     assert_eq!(
         au2404.roles,
-        BTreeSet::from([
-            HistoricalDependencyRole::ContinuousUnderlying,
-            HistoricalDependencyRole::IndexSeries,
-        ])
+        BTreeSet::from([HistoricalDependencyRole::ContinuousUnderlying])
+    );
+    let index = resolution
+        .dependencies()
+        .iter()
+        .find(|dependency| dependency.source_symbol == "KQ.i@SHFE.au")
+        .expect("index view keeps its directly downloadable series");
+    assert_eq!(
+        index.roles,
+        BTreeSet::from([HistoricalDependencyRole::IndexSeries])
     );
     let au2406 = resolution
         .dependencies()
@@ -142,9 +161,52 @@ fn v2_timeline_compiler_keeps_logical_provenance_and_kind_specific_boundaries() 
     let tick = resolution.targets_for_kind(HistoricalDataKind::Tick);
     let minute = resolution.targets_for_kind(HistoricalDataKind::Minute);
     let daily = resolution.targets_for_kind(HistoricalDataKind::Daily);
-    assert_eq!(tick[0].start_ns, 110);
-    assert_eq!(minute[0].start_ns, 120);
-    assert_eq!(daily[0].start_ns, 130);
+    assert_eq!(
+        tick.iter()
+            .find(|target| target.source_symbol == "SHFE.au2404")
+            .unwrap()
+            .start_ns,
+        110
+    );
+    assert_eq!(
+        minute
+            .iter()
+            .find(|target| target.source_symbol == "SHFE.au2404")
+            .unwrap()
+            .start_ns,
+        120
+    );
+    assert_eq!(
+        daily
+            .iter()
+            .find(|target| target.source_symbol == "SHFE.au2404")
+            .unwrap()
+            .start_ns,
+        130
+    );
+    assert_eq!(
+        tick.iter()
+            .find(|target| target.source_symbol == "KQ.i@SHFE.au")
+            .unwrap()
+            .start_ns,
+        150
+    );
+    assert_eq!(
+        minute
+            .iter()
+            .find(|target| target.source_symbol == "KQ.i@SHFE.au")
+            .unwrap()
+            .start_ns,
+        160
+    );
+    assert_eq!(
+        daily
+            .iter()
+            .find(|target| target.source_symbol == "KQ.i@SHFE.au")
+            .unwrap()
+            .start_ns,
+        170
+    );
     assert_ne!(
         resolution.resolved_targets_sha256()[&HistoricalDataKind::Tick],
         resolution.resolved_targets_sha256()[&HistoricalDataKind::Minute]
@@ -250,7 +312,92 @@ fn write_set_projects_byte_equivalent_execution_and_pins_rollback() {
         write_set.v4().execution().to_v3().unwrap(),
         *write_set.rollback_v3().v3_execution.as_ref().unwrap()
     );
+    assert_ne!(
+        write_set
+            .rollback_v3()
+            .v3_identity
+            .as_ref()
+            .unwrap()
+            .execution_sha256
+            .as_deref()
+            .unwrap(),
+        write_set.v4().identity().execution_sha256(),
+        "V3 and V4 hash equivalent execution under version-specific domains"
+    );
     assert_eq!(write_set.v4().timeline(), &write_set.rollback_v3().timeline);
+}
+
+#[test]
+fn explicit_and_file_continuous_symbols_pin_the_materialized_mapping_identity() {
+    let (acquisition, semantic) = fixture();
+    let capabilities = (&acquisition, &semantic);
+    let cases = [
+        (
+            UniverseSpec::parse_v2("timeline(symbol:KQ.m@SHFE.au)").unwrap(),
+            Vec::new(),
+            None,
+        ),
+        (
+            UniverseSpec::parse_v2("timeline(contract:SHFE.au2406)").unwrap(),
+            vec!["KQ.m@SHFE.au".to_string()],
+            Some(
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                    .to_string(),
+            ),
+        ),
+    ];
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "tqsdk-historical-universe-v4-materialized-continuous-{}-{nanos}",
+        std::process::id()
+    ));
+    let store = HistoricalUniverseArtifactStore::new(&root);
+    store.publish_acquisition(&acquisition).unwrap();
+    store.publish_semantic_catalog(&semantic).unwrap();
+
+    for (spec, expanded_symbols, input_sources_sha256) in cases {
+        let resolution = compile_historical_universe_resolution_v4(
+            &capabilities,
+            &spec,
+            &expanded_symbols,
+            100,
+            500,
+            UniverseBudget::new(16, 32).unwrap(),
+            None,
+        )
+        .unwrap()
+        .with_input_sources_sha256(input_sources_sha256);
+        let write_set = resolution
+            .prepare_write_set(HistoricalPlanWritePolicy::V4WithV3Rollback)
+            .unwrap();
+
+        assert_eq!(
+            write_set.v4().identity().continuous_identity(),
+            Some(tqsdk_data::HISTORICAL_UNIVERSE_CONTINUOUS_ID)
+        );
+        assert_eq!(
+            write_set
+                .rollback_v3()
+                .v3_identity
+                .as_ref()
+                .unwrap()
+                .continuous_identity
+                .as_deref(),
+            Some(tqsdk_data::HISTORICAL_UNIVERSE_CONTINUOUS_ID)
+        );
+        store.publish_plan_write_set(&write_set).unwrap();
+        store
+            .verify_plan_artifact_chain_artifact(&HistoricalUniversePlanArtifact::V4(
+                write_set.v4().clone(),
+            ))
+            .unwrap();
+    }
+
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -304,4 +451,57 @@ fn dual_write_publishes_loadable_v4_and_v3_artifacts() {
     );
 
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dual_write_failure_preserves_the_collision_and_leaves_a_valid_rollback_orphan() {
+    let (acquisition, semantic) = fixture();
+    let capabilities = (&acquisition, &semantic);
+    let spec = UniverseSpec::parse_v2("timeline(contract:all;continuous:SHFE.au)").unwrap();
+    let resolution = compile_historical_universe_resolution_v4(
+        &capabilities,
+        &spec,
+        &[],
+        100,
+        500,
+        UniverseBudget::new(16, 32).unwrap(),
+        None,
+    )
+    .unwrap();
+    let write_set = resolution
+        .prepare_write_set(HistoricalPlanWritePolicy::V4WithV3Rollback)
+        .unwrap();
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "tqsdk-historical-universe-v4-partial-write-{}-{nanos}",
+        std::process::id()
+    ));
+    let store = HistoricalUniverseArtifactStore::new(&root);
+    let v4_path = store.plan_path(write_set.v4().plan_sha256()).unwrap();
+    fs::create_dir_all(v4_path.parent().unwrap()).unwrap();
+    fs::write(&v4_path, b"immutable collision").unwrap();
+
+    let error = store.publish_plan_write_set(&write_set).unwrap_err();
+    assert!(
+        error.to_string().contains("hash collision"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(fs::read(&v4_path).unwrap(), b"immutable collision");
+    assert_eq!(
+        store
+            .load_plan(&write_set.rollback_v3().plan_sha256)
+            .unwrap(),
+        write_set.rollback_v3().clone()
+    );
+    assert!(
+        store
+            .load_plan_artifact(write_set.v4().plan_sha256())
+            .is_err()
+    );
+
+    fs::remove_dir_all(root).unwrap();
 }

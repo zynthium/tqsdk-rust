@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::{self, Write as _};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const UNIVERSE_LANGUAGE_VERSION: u32 = 2;
@@ -176,6 +176,22 @@ impl UniverseSpec {
         }
     }
 
+    pub(crate) fn from_canonical_ast_json(bytes: &[u8]) -> Result<Self, UniverseSpecError> {
+        let wire: UniverseAstWireOwned = serde_json::from_slice(bytes).map_err(|error| {
+            UniverseSpecError::InvalidCanonicalAst {
+                reason: error.to_string(),
+            }
+        })?;
+        let expression = wire.expression()?;
+        let spec = Self::parse_v2(&expression)?;
+        if spec.canonical_ast_json_bytes() != bytes {
+            return Err(UniverseSpecError::InvalidCanonicalAst {
+                reason: "JSON is not the canonical Universe V2 AST encoding".to_string(),
+            });
+        }
+        Ok(spec)
+    }
+
     #[must_use]
     pub const fn mode(&self) -> UniverseMode {
         self.mode
@@ -252,6 +268,9 @@ pub enum UniverseSpecError {
         view: UniverseView,
         target: UniverseTarget,
     },
+    InvalidCanonicalAst {
+        reason: String,
+    },
     MissingInclude,
 }
 
@@ -291,6 +310,9 @@ impl fmt::Display for UniverseSpecError {
                 formatter,
                 "Universe V2 selector {view}:{target} is both included and excluded"
             ),
+            Self::InvalidCanonicalAst { reason } => {
+                write!(formatter, "invalid canonical Universe V2 AST: {reason}")
+            }
             Self::MissingInclude => {
                 formatter.write_str("Universe V2 expression requires at least one include selector")
             }
@@ -326,6 +348,126 @@ struct TargetWire<'a> {
     kind: &'static str,
     exchange: Option<&'a str>,
     value: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UniverseAstWireOwned {
+    language_version: u32,
+    mode: String,
+    includes: Vec<SelectorWireOwned>,
+    excludes: Vec<SelectorWireOwned>,
+    global_filters: Vec<TargetWireOwned>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectorWireOwned {
+    view: ViewWireOwned,
+    targets: Vec<TargetWireOwned>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ViewWireOwned {
+    kind: String,
+    limit: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetWireOwned {
+    kind: String,
+    exchange: Option<String>,
+    value: Option<String>,
+}
+
+impl UniverseAstWireOwned {
+    fn expression(&self) -> Result<String, UniverseSpecError> {
+        if self.language_version != UNIVERSE_LANGUAGE_VERSION {
+            return Err(invalid_canonical_ast(format!(
+                "unsupported language_version {}",
+                self.language_version
+            )));
+        }
+        let wrapper = match self.mode.as_str() {
+            "snapshot" => "snapshot",
+            "timeline" => "timeline",
+            other => {
+                return Err(invalid_canonical_ast(format!(
+                    "unsupported Universe mode {other}"
+                )));
+            }
+        };
+        let mut clauses = Vec::with_capacity(
+            self.includes.len() + self.excludes.len() + self.global_filters.len(),
+        );
+        for selector in &self.includes {
+            clauses.push(selector.expression(false)?);
+        }
+        for selector in &self.excludes {
+            clauses.push(selector.expression(true)?);
+        }
+        for target in &self.global_filters {
+            clauses.push(format!("!{}", target.expression()?));
+        }
+        Ok(format!("{wrapper}({})", clauses.join(";")))
+    }
+}
+
+impl SelectorWireOwned {
+    fn expression(&self, exclude: bool) -> Result<String, UniverseSpecError> {
+        let view = match (self.view.kind.as_str(), self.view.limit) {
+            ("contract", None) => "contract".to_string(),
+            ("main", None) => "main".to_string(),
+            ("top", Some(limit)) if limit > 0 => format!("top:{limit}"),
+            ("continuous", None) => "continuous".to_string(),
+            ("index", None) => "index".to_string(),
+            ("symbol", None) => "symbol".to_string(),
+            (kind, limit) => {
+                return Err(invalid_canonical_ast(format!(
+                    "invalid view/limit combination {kind}:{limit:?}"
+                )));
+            }
+        };
+        if self.targets.is_empty() {
+            return Err(invalid_canonical_ast("selector targets must not be empty"));
+        }
+        let targets = self
+            .targets
+            .iter()
+            .map(TargetWireOwned::expression)
+            .collect::<Result<Vec<_>, _>>()?
+            .join(",");
+        let prefix = if exclude { "!" } else { "" };
+        Ok(format!("{prefix}{view}:{targets}"))
+    }
+}
+
+impl TargetWireOwned {
+    fn expression(&self) -> Result<String, UniverseSpecError> {
+        match (
+            self.kind.as_str(),
+            self.exchange.as_deref(),
+            self.value.as_deref(),
+        ) {
+            ("all", None, None) => Ok("all".to_string()),
+            ("exchange", Some(exchange), None) => Ok(format!("{exchange}.*")),
+            ("product" | "contract", Some(exchange), Some(value)) => {
+                Ok(format!("{exchange}.{value}"))
+            }
+            ("symbol", None, Some(symbol)) => Ok(symbol.to_string()),
+            (kind, exchange, value) => Err(invalid_canonical_ast(format!(
+                "invalid target fields kind={kind} exchange={exchange:?} value={value:?}"
+            ))),
+        }
+    }
+}
+
+fn invalid_canonical_ast(reason: impl Into<String>) -> UniverseSpecError {
+    UniverseSpecError::InvalidCanonicalAst {
+        reason: reason.into(),
+    }
 }
 
 fn canonical_text(

@@ -3452,6 +3452,11 @@ impl BacktestBuilder {
     pub async fn connect(self) -> Result<Tq> {
         self.validate_range()?;
         if matches!(self.cache_policy, BacktestCachePolicy::Disabled) {
+            if self.historical_universe_artifact.is_some() {
+                return Err(data_validation(
+                    "historical universe plan/artifact requires a cache-backed local backtest; disabled_cache() cannot consume pinned timeline artifacts",
+                ));
+            }
             return self.into_remote_backtest().connect().await;
         }
         self.prepare().await?.connect().await

@@ -265,7 +265,21 @@ impl HistoricalUniverseResolutionV4 {
             self.proof,
         )?
         .with_execution_sha256(v3_execution.execution_sha256.clone())?;
-        if spec_has_view(&self.spec, UniverseView::Continuous) {
+        let timeline_requires_continuous = self
+            .timeline
+            .derived_views
+            .contains(&DerivedView::Continuous);
+        let execution_requires_continuous = self.dependencies.iter().any(|dependency| {
+            dependency
+                .roles
+                .contains(&HistoricalDependencyRole::ContinuousUnderlying)
+        });
+        if timeline_requires_continuous != execution_requires_continuous {
+            return Err(HistoricalUniverseV4Error::Invalid(
+                "historical continuous membership/dependency closure mismatch".to_string(),
+            ));
+        }
+        if timeline_requires_continuous {
             v3_identity.continuous_identity = Some(HISTORICAL_UNIVERSE_CONTINUOUS_ID.to_string());
         }
         v3_identity.ranking_identity = self.ranking_identity.clone();
@@ -290,7 +304,7 @@ impl HistoricalUniverseResolutionV4 {
         if let Some(input_sources_sha256) = &self.input_sources_sha256 {
             identity_builder = identity_builder.input_sources_sha256(input_sources_sha256);
         }
-        if spec_has_view(&self.spec, UniverseView::Continuous) {
+        if timeline_requires_continuous {
             identity_builder =
                 identity_builder.continuous_identity(HISTORICAL_UNIVERSE_CONTINUOUS_ID);
         }
@@ -855,12 +869,7 @@ fn resolve_dependencies(
                     HistoricalDependencyRole::VisiblePhysical,
                 )?;
             }
-            UniverseInstrumentId::Continuous { .. } | UniverseInstrumentId::Index { .. } => {
-                let role = if matches!(instrument, UniverseInstrumentId::Continuous { .. }) {
-                    HistoricalDependencyRole::ContinuousUnderlying
-                } else {
-                    HistoricalDependencyRole::IndexSeries
-                };
+            UniverseInstrumentId::Continuous { .. } => {
                 for contract in contracts.iter().filter(|contract| {
                     contract.exchange_id == candidate.exchange
                         && contract.product_id == candidate.product
@@ -869,8 +878,37 @@ fn resolve_dependencies(
                             .iter()
                             .any(|interval| interval.intersects(start_ns, end_ns))
                 }) {
-                    add_dependency_role(&mut dependencies, contract, role)?;
+                    add_dependency_role(
+                        &mut dependencies,
+                        contract,
+                        HistoricalDependencyRole::ContinuousUnderlying,
+                    )?;
                 }
+            }
+            UniverseInstrumentId::Index { .. } => {
+                let symbol = format!("KQ.i@{}.{}", candidate.exchange, candidate.product);
+                let listing_start_ns = contracts
+                    .iter()
+                    .filter(|contract| {
+                        contract.exchange_id == candidate.exchange
+                            && contract.product_id == candidate.product
+                    })
+                    .flat_map(|contract| contract.lifecycle.iter())
+                    .map(|interval| interval.start_ns)
+                    .min()
+                    .ok_or_else(|| {
+                        HistoricalUniverseV4Error::Invalid(format!(
+                            "historical index dependency {symbol} has no product lifecycle"
+                        ))
+                    })?;
+                dependencies.insert(
+                    symbol.clone(),
+                    HistoricalUniverseDependency {
+                        source_symbol: symbol,
+                        roles: BTreeSet::from([HistoricalDependencyRole::IndexSeries]),
+                        listing_start_ns,
+                    },
+                );
             }
         }
     }
@@ -1089,12 +1127,6 @@ fn merge_intervals(mut intervals: Vec<ActiveInterval>) -> Vec<ActiveInterval> {
         }
     }
     merged
-}
-
-fn spec_has_view(spec: &UniverseSpec, view: UniverseView) -> bool {
-    spec.includes()
-        .iter()
-        .any(|selector| selector.view() == view)
 }
 
 fn capability_error(

@@ -3,12 +3,15 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use sha2::{Digest, Sha256};
 use tqsdk_data::{
     ActiveInterval, CatalogContract, CatalogSnapshot, HistoricalAcquisitionContract,
     HistoricalCatalogAcquisition, HistoricalCatalogProof, HistoricalDataKind,
-    HistoricalFillUniverseSpec, HistoricalSemanticCatalog, HistoricalUniverseArtifactStore,
-    HistoricalUniversePlanArtifact, HistoricalUniversePlanV4, HistoricalUniversePlanV4Execution,
+    HistoricalFillUniverseSpec, HistoricalPlanWritePolicy, HistoricalSemanticCatalog,
+    HistoricalUniverseArtifactStore, HistoricalUniversePlanArtifact,
+    HistoricalUniversePlanV3Identity, HistoricalUniversePlanV4, HistoricalUniversePlanV4Execution,
     UniverseBudget, UniverseSpec, compile_historical_universe_resolution,
+    compile_historical_universe_resolution_v4,
 };
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -108,38 +111,37 @@ fn fixture() -> (
 fn v4_plan(
     acquisition: &HistoricalCatalogAcquisition,
     semantic: &HistoricalSemanticCatalog,
-    rollback: &tqsdk_data::HistoricalUniversePlan,
-) -> HistoricalUniversePlanV4 {
+) -> (HistoricalUniversePlanV4, tqsdk_data::HistoricalUniversePlan) {
     let spec = UniverseSpec::parse_v2("timeline(contract:all)").unwrap();
-    let execution = HistoricalUniversePlanV4Execution::from_v3(
-        rollback.v3_execution.as_ref().expect("fixture is V3"),
+    let capabilities = (acquisition, semantic);
+    let resolution = compile_historical_universe_resolution_v4(
+        &capabilities,
+        &spec,
+        &[],
+        100,
+        500,
+        UniverseBudget::new(8, 16).unwrap(),
+        None,
     )
     .unwrap();
-    let identity = tqsdk_data::HistoricalUniversePlanV4Identity::builder(&spec)
-        .acquisition_sha256(&acquisition.acquisition_sha256)
-        .semantic_catalog_sha256(&semantic.semantic_catalog_sha256)
-        .calendar_identity(&semantic.catalog.calendar_identity)
-        .proof(HistoricalCatalogProof::AuthoritativeLifecycle)
-        .execution_sha256(execution.execution_sha256())
-        .rollback_v3_plan_sha256(&rollback.plan_sha256)
-        .build()
+    let write_set = resolution
+        .prepare_write_set(HistoricalPlanWritePolicy::V4WithV3Rollback)
         .unwrap();
-    HistoricalUniversePlanV4::new(
-        rollback.timeline.clone(),
-        rollback.budget,
-        identity,
-        execution,
-    )
-    .unwrap()
+    (write_set.v4().clone(), write_set.rollback_v3().clone())
 }
 
 #[test]
 fn v4_artifact_uses_flat_canonical_wire_and_validated_round_trip() {
-    let (acquisition, semantic, rollback) = fixture();
-    let plan = v4_plan(&acquisition, &semantic, &rollback);
+    let (acquisition, semantic, _) = fixture();
+    let (plan, rollback) = v4_plan(&acquisition, &semantic);
     let artifact = HistoricalUniversePlanArtifact::V4(plan.clone());
 
     let bytes = serde_json::to_vec(&artifact).unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bytes)),
+        "2d9d7e9690338b3ef872568d775a133920cb441d0d8c94d10f6ae91b873fcaa3",
+        "V4 canonical JSON bytes are a persisted wire contract"
+    );
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(value["plan_version"], 4);
     assert!(value.get("V4").is_none());
@@ -154,15 +156,15 @@ fn v4_artifact_uses_flat_canonical_wire_and_validated_round_trip() {
     decoded.verify().unwrap();
     assert_eq!(
         plan.plan_sha256(),
-        "sha256:d2367dfd05fef186a795213ba8c1db767ee42beb89dd95b286a5dec534c44e41"
+        "sha256:7ff554a93c1f3c9e98b4e5c58364e9ca4a09aa53fde7042f4ed8f30dec4b1e8d"
     );
 }
 
 #[test]
 fn artifact_store_reads_legacy_and_v4_but_old_plan_reader_remains_legacy_only() {
     let directory = TempDirectory::new();
-    let (acquisition, semantic, rollback) = fixture();
-    let v4 = v4_plan(&acquisition, &semantic, &rollback);
+    let (acquisition, semantic, _) = fixture();
+    let (v4, rollback) = v4_plan(&acquisition, &semantic);
     let store = HistoricalUniverseArtifactStore::new(&directory.0);
 
     store.publish_acquisition(&acquisition).unwrap();
@@ -195,6 +197,71 @@ fn artifact_store_reads_legacy_and_v4_but_old_plan_reader_remains_legacy_only() 
             .unwrap_err()
             .to_string()
             .contains("canonical")
+    );
+}
+
+#[test]
+fn artifact_chain_rejects_a_self_valid_rollback_with_the_wrong_projection_identity() {
+    let directory = TempDirectory::new();
+    let (acquisition, semantic, _) = fixture();
+    let (valid_v4, valid_rollback) = v4_plan(&acquisition, &semantic);
+    let valid_identity = valid_rollback.v3_identity.as_ref().unwrap();
+    let rollback_execution = valid_rollback.v3_execution.as_ref().unwrap().clone();
+    let wrong_identity = HistoricalUniversePlanV3Identity::new(
+        valid_identity.canonical_universe.clone(),
+        "universe-v2-projection:wrong",
+        valid_identity.acquisition_sha256.clone(),
+        valid_identity.semantic_catalog_sha256.clone(),
+        valid_identity.compiler_identity.clone(),
+        valid_identity.proof,
+    )
+    .unwrap()
+    .with_execution_sha256(rollback_execution.execution_sha256.clone())
+    .unwrap();
+    let wrong_rollback = valid_rollback
+        .timeline
+        .clone()
+        .prepare_v3(
+            valid_rollback.budget,
+            wrong_identity,
+            rollback_execution.clone(),
+        )
+        .unwrap();
+
+    let spec = UniverseSpec::parse_v2("timeline(contract:all)").unwrap();
+    let execution = HistoricalUniversePlanV4Execution::from_v3(&rollback_execution).unwrap();
+    let identity = tqsdk_data::HistoricalUniversePlanV4Identity::builder(&spec)
+        .acquisition_sha256(&acquisition.acquisition_sha256)
+        .semantic_catalog_sha256(&semantic.semantic_catalog_sha256)
+        .calendar_identity(&semantic.catalog.calendar_identity)
+        .proof(HistoricalCatalogProof::AuthoritativeLifecycle)
+        .execution_sha256(execution.execution_sha256())
+        .rollback_v3_plan_sha256(&wrong_rollback.plan_sha256)
+        .build()
+        .unwrap();
+    let wrong_v4 = HistoricalUniversePlanV4::new(
+        valid_v4.timeline().clone(),
+        valid_v4.budget(),
+        identity,
+        execution,
+    )
+    .unwrap();
+
+    let store = HistoricalUniverseArtifactStore::new(&directory.0);
+    store.publish_acquisition(&acquisition).unwrap();
+    store.publish_semantic_catalog(&semantic).unwrap();
+    store.publish_plan(&wrong_rollback).unwrap();
+    let artifact = HistoricalUniversePlanArtifact::V4(wrong_v4);
+    store.publish_plan_artifact(&artifact).unwrap();
+
+    let error = store
+        .verify_plan_artifact_chain_artifact(&artifact)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("rollback identity/execution chain mismatch"),
+        "unexpected error: {error}"
     );
 }
 

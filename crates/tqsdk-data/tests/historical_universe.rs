@@ -231,6 +231,11 @@ fn prepared_plan_is_pinned_and_requires_an_explicit_budget() {
     assert!(plan.plan_sha256.starts_with("sha256:"));
     assert_eq!(plan.timeline, timeline);
     plan.verify().unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(serde_json::to_vec(&plan).unwrap())),
+        "e99bd151d7aa7ca961d72a698b7ac8909ed4bf943e6aec88a006aafc5c74e27a",
+        "V2 serialized bytes are a persisted wire contract"
+    );
     let mut tampered = plan.clone();
     tampered.timeline.end_ns += 1;
     assert!(
@@ -270,6 +275,11 @@ fn v1_plan_remains_verifiable_without_listing_starts() {
     plan.timeline.physical_listing_starts.clear();
     plan.plan_sha256 = format!("sha256:{:x}", Sha256::digest(legacy_bytes));
     plan.verify().unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(serde_json::to_vec(&plan).unwrap())),
+        "47543fe51add4d72cda48a8d03b35072c269e442f9a7df5bc59b76350c17d4f7",
+        "V1 serialized bytes are a persisted wire contract"
+    );
     assert!(
         plan.physical_fill_targets()
             .unwrap_err()
@@ -335,6 +345,11 @@ fn v3_plan_pins_authoritative_identity_without_changing_v2() {
         .unwrap();
     assert_eq!(plan.plan_version, 3);
     plan.verify().unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(serde_json::to_vec(&plan).unwrap())),
+        "e333866c707ab1e9436797ab29cf460fce6d4bdab4006af31ba836b1aa898872",
+        "V3 serialized bytes are a persisted wire contract"
+    );
     assert!(plan.v3_identity.is_some());
     assert_eq!(plan.physical_fill_targets().unwrap().len(), 1);
     let mut tampered = plan.clone();

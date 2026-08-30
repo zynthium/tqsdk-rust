@@ -8,6 +8,10 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::historical_universe_v4_resolution::{
+    HISTORICAL_UNIVERSE_V3_PROJECTION_CANONICALIZER_ID,
+    HISTORICAL_UNIVERSE_V3_PROJECTION_COMPILER_ID,
+};
 use crate::{
     ActiveInterval, CatalogContract, CatalogSnapshot, DataError, DynamicUniverseScope,
     HistoricalCatalogProof, HistoricalUniversePlan, HistoricalUniversePlanArtifact,
@@ -1045,6 +1049,13 @@ impl HistoricalUniverseArtifactStore {
         if rollback_identity.acquisition_sha256 != identity.acquisition_sha256()
             || rollback_identity.semantic_catalog_sha256 != identity.semantic_catalog_sha256()
             || rollback_identity.proof != identity.proof()
+            || rollback_identity.canonical_universe
+                != format!("universe-v2-ast:{}", identity.normalized_ast_sha256())
+            || rollback_identity.canonicalization_identity
+                != HISTORICAL_UNIVERSE_V3_PROJECTION_CANONICALIZER_ID
+            || rollback_identity.compiler_identity != HISTORICAL_UNIVERSE_V3_PROJECTION_COMPILER_ID
+            || rollback_identity.continuous_identity.as_deref() != identity.continuous_identity()
+            || rollback_identity.ranking_identity.as_deref() != identity.ranking_identity()
             || plan.execution().to_v3()? != *rollback_execution
         {
             return Err(validation(

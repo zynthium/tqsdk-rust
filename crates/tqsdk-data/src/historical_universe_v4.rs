@@ -4,12 +4,13 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
+use crate::historical_universe_v4_resolution::HISTORICAL_UNIVERSE_CONTINUOUS_ID;
 use crate::{
     DataError, DerivedView, DynamicUniverseScope, HistoricalCatalogProof, HistoricalDataKind,
     HistoricalUniverseDependency, HistoricalUniverseKindTarget, HistoricalUniversePlan,
     HistoricalUniversePlanV3Execution, HistoricalUniverseTimeline, Result,
     UNIVERSE_CANONICALIZER_ID, UNIVERSE_COMPILER_ID, UNIVERSE_LANGUAGE_VERSION, UniverseBudget,
-    UniverseSpec, UniverseTimelineBatch,
+    UniverseSpec, UniverseTimelineBatch, UniverseView,
 };
 
 const PLAN_VERSION_V4: u32 = 4;
@@ -126,16 +127,9 @@ impl HistoricalUniversePlanV4Identity {
                 "historical universe V4 canonicalizer/compiler identity mismatch",
             ));
         }
-        let ast: serde_json::Value =
-            serde_json::from_str(&self.normalized_ast_json).map_err(|error| {
-                validation(format!("invalid normalized Universe AST JSON: {error}"))
-            })?;
-        if ast
-            .get("language_version")
-            .and_then(serde_json::Value::as_u64)
-            != Some(u64::from(UNIVERSE_LANGUAGE_VERSION))
-            || ast.get("mode").and_then(serde_json::Value::as_str) != Some("timeline")
-        {
+        let spec = UniverseSpec::from_canonical_ast_json(self.normalized_ast_json.as_bytes())
+            .map_err(|error| validation(error.to_string()))?;
+        if spec.mode() != crate::UniverseMode::Timeline {
             return Err(validation(
                 "historical universe V4 requires a normalized timeline V2 AST",
             ));
@@ -191,6 +185,33 @@ impl HistoricalUniversePlanV4Identity {
                     "historical universe V4 {field} must not be empty"
                 )));
             }
+        }
+        let has_continuous = spec
+            .includes()
+            .iter()
+            .any(|selector| selector.view() == UniverseView::Continuous);
+        if self
+            .continuous_identity
+            .as_deref()
+            .is_some_and(|identity| identity != HISTORICAL_UNIVERSE_CONTINUOUS_ID)
+        {
+            return Err(validation(
+                "historical universe V4 continuous identity does not match the pinned mapping",
+            ));
+        }
+        if has_continuous && self.continuous_identity.is_none() {
+            return Err(validation(
+                "historical universe V4 continuous view requires the pinned continuous identity",
+            ));
+        }
+        let has_ranking = spec
+            .includes()
+            .iter()
+            .any(|selector| matches!(selector.view(), UniverseView::Main | UniverseView::Top(_)));
+        if has_ranking != self.ranking_identity.is_some() {
+            return Err(validation(
+                "historical universe V4 ranking identity presence does not match main/top views",
+            ));
         }
         Ok(())
     }
@@ -516,6 +537,25 @@ impl HistoricalUniversePlanV4 {
         if membership_sha256 != self.execution.visible_membership_sha256 {
             return Err(validation(
                 "historical universe V4 visible membership hash mismatch",
+            ));
+        }
+        let timeline_requires_continuous = self
+            .timeline
+            .derived_views
+            .contains(&DerivedView::Continuous);
+        let execution_requires_continuous = self.execution.dependencies.iter().any(|dependency| {
+            dependency
+                .roles
+                .contains(&crate::HistoricalDependencyRole::ContinuousUnderlying)
+        });
+        if timeline_requires_continuous != execution_requires_continuous {
+            return Err(validation(
+                "historical universe V4 continuous membership/dependency closure mismatch",
+            ));
+        }
+        if timeline_requires_continuous != self.identity.continuous_identity.is_some() {
+            return Err(validation(
+                "historical universe V4 continuous identity does not match materialized execution",
             ));
         }
         Ok(())
@@ -925,5 +965,96 @@ impl fmt::Display for HistoricalUniversePlanArtifact {
             self.plan_version(),
             self.plan_sha256()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_SHA256: &str =
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
+    fn identity_builder(spec: &UniverseSpec) -> HistoricalUniversePlanV4IdentityBuilder {
+        HistoricalUniversePlanV4Identity::builder(spec)
+            .acquisition_sha256(TEST_SHA256)
+            .semantic_catalog_sha256(TEST_SHA256)
+            .calendar_identity("calendar:test")
+            .proof(HistoricalCatalogProof::AuthoritativeLifecycle)
+            .execution_sha256(TEST_SHA256)
+            .rollback_v3_plan_sha256(TEST_SHA256)
+    }
+
+    fn plain_identity() -> HistoricalUniversePlanV4Identity {
+        let spec = UniverseSpec::parse_v2("timeline(contract:all)").unwrap();
+        identity_builder(&spec).build().unwrap()
+    }
+
+    fn replace_ast(identity: &mut HistoricalUniversePlanV4Identity, normalized_ast_json: String) {
+        identity.normalized_ast_sha256 =
+            hash_with_domain(UNIVERSE_AST_HASH_DOMAIN, normalized_ast_json.as_bytes());
+        identity.normalized_ast_json = normalized_ast_json;
+    }
+
+    #[test]
+    fn identity_rejects_unknown_ast_fields_even_with_matching_hash() {
+        let mut identity = plain_identity();
+        let mut ast: serde_json::Value =
+            serde_json::from_str(&identity.normalized_ast_json).unwrap();
+        ast.as_object_mut()
+            .unwrap()
+            .insert("unknown".to_string(), serde_json::Value::Bool(true));
+        replace_ast(&mut identity, serde_json::to_string(&ast).unwrap());
+
+        assert!(identity.validate().is_err());
+    }
+
+    #[test]
+    fn identity_rejects_noncanonical_ast_bytes_even_with_matching_hash() {
+        let mut identity = plain_identity();
+        let noncanonical = format!(" {}", identity.normalized_ast_json);
+        replace_ast(&mut identity, noncanonical);
+
+        assert!(identity.validate().is_err());
+    }
+
+    #[test]
+    fn identity_requires_exact_continuous_identity_and_ast_view_requires_presence() {
+        let continuous = UniverseSpec::parse_v2("timeline(continuous:SHFE.au)").unwrap();
+        assert!(identity_builder(&continuous).build().is_err());
+        assert!(
+            identity_builder(&continuous)
+                .continuous_identity("continuous:wrong")
+                .build()
+                .is_err()
+        );
+        identity_builder(&continuous)
+            .continuous_identity(HISTORICAL_UNIVERSE_CONTINUOUS_ID)
+            .build()
+            .unwrap();
+
+        let physical = UniverseSpec::parse_v2("timeline(contract:all)").unwrap();
+        identity_builder(&physical)
+            .continuous_identity(HISTORICAL_UNIVERSE_CONTINUOUS_ID)
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn identity_requires_ranking_identity_exactly_when_main_or_top_is_present() {
+        let main = UniverseSpec::parse_v2("timeline(main:all)").unwrap();
+        assert!(identity_builder(&main).build().is_err());
+        identity_builder(&main)
+            .ranking_identity("ranking:test")
+            .build()
+            .unwrap();
+
+        let physical = UniverseSpec::parse_v2("timeline(contract:all)").unwrap();
+        assert!(
+            identity_builder(&physical)
+                .ranking_identity("ranking:test")
+                .build()
+                .is_err()
+        );
     }
 }

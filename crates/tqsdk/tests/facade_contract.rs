@@ -590,11 +590,12 @@ async fn facade_backtest_accepts_static_v2_snapshot() {
 fn facade_v4_artifact(
     cache_dir: &std::path::Path,
     symbol: &str,
+    canonical_universe: &str,
+    derived_symbol: Option<&str>,
     start_ns: i64,
     tick_start_ns: i64,
     end_ns: i64,
 ) -> HistoricalUniversePlanArtifact {
-    let canonical_universe = "timeline(contract:all)";
     let acquisition = HistoricalCatalogAcquisition::new(
         HistoricalCatalogProof::AuthoritativeLifecycle,
         "fixture:facade-v4",
@@ -637,6 +638,23 @@ fn facade_v4_artifact(
     .unwrap();
     let semantic =
         HistoricalSemanticCatalog::new(&acquisition, canonical_universe, catalog).unwrap();
+    let semantic = if let Some(derived_symbol) = derived_symbol {
+        semantic
+            .with_derived_availability(
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                BTreeMap::from([(
+                    derived_symbol.to_string(),
+                    BTreeMap::from([
+                        (HistoricalDataKind::Tick, tick_start_ns),
+                        (HistoricalDataKind::Minute, tick_start_ns + 10),
+                        (HistoricalDataKind::Daily, tick_start_ns + 20),
+                    ]),
+                )]),
+            )
+            .unwrap()
+    } else {
+        semantic
+    };
     let spec = UniverseSpec::parse_v2(canonical_universe).unwrap();
     let capabilities = (&acquisition, &semantic);
     let resolution = compile_historical_universe_resolution_v4(
@@ -670,7 +688,15 @@ async fn facade_backtest_v4_artifact_verifies_chain_range_and_tick_boundary() {
         .unwrap()
         .store_ticks(symbol, tick_start_ns, end_ns, [tick(1, 2_000, 100.0)])
         .unwrap();
-    let artifact = facade_v4_artifact(&cache_dir, symbol, start_ns, tick_start_ns, end_ns);
+    let artifact = facade_v4_artifact(
+        &cache_dir,
+        symbol,
+        "timeline(contract:all)",
+        None,
+        start_ns,
+        tick_start_ns,
+        end_ns,
+    );
 
     let mut invalid_wire = serde_json::to_value(&artifact).unwrap();
     invalid_wire["plan_sha256"] =
@@ -723,6 +749,103 @@ async fn facade_backtest_v4_artifact_verifies_chain_range_and_tick_boundary() {
 
     let _ = std::fs::remove_dir_all(cache_dir);
     let _ = std::fs::remove_dir_all(missing_chain_dir);
+}
+
+#[tokio::test]
+async fn facade_backtest_v4_index_uses_the_direct_index_series() {
+    let physical_symbol = "SHFE.au2406";
+    let index_symbol = "KQ.i@SHFE.au";
+    let start_ns = 1_000;
+    let tick_start_ns = 1_500;
+    let end_ns = 3_000;
+    let cache_dir = temp_cache_dir();
+    BacktestTickCache::open(&cache_dir)
+        .unwrap()
+        .store_ticks(index_symbol, tick_start_ns, end_ns, [tick(1, 2_000, 100.0)])
+        .unwrap();
+    let artifact = facade_v4_artifact(
+        &cache_dir,
+        physical_symbol,
+        "timeline(index:SHFE.au)",
+        Some(index_symbol),
+        start_ns,
+        tick_start_ns,
+        end_ns,
+    );
+
+    let prepared = Tq::futures()
+        .backtest(start_ns, end_ns)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .historical_universe_artifact(artifact)
+        .unwrap()
+        .cache_only()
+        .prepare()
+        .await
+        .unwrap();
+
+    assert_eq!(prepared.tick_sources().len(), 1);
+    assert_eq!(prepared.tick_sources()[0].replay_symbol, index_symbol);
+    assert_eq!(prepared.tick_sources()[0].start_ns, tick_start_ns);
+    assert_eq!(prepared.tick_sources()[0].end_ns, end_ns);
+    drop(prepared);
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[tokio::test]
+async fn facade_v4_artifact_rejects_disabled_cache_in_either_builder_order() {
+    let symbol = "SHFE.au2406";
+    let start_ns = 1_000;
+    let tick_start_ns = 1_500;
+    let end_ns = 3_000;
+    let cache_dir = temp_cache_dir();
+    let artifact = facade_v4_artifact(
+        &cache_dir,
+        symbol,
+        "timeline(contract:all)",
+        None,
+        start_ns,
+        tick_start_ns,
+        end_ns,
+    );
+
+    let artifact_then_disabled = match Tq::futures()
+        .backtest(start_ns, end_ns)
+        .historical_universe_artifact(artifact.clone())
+        .unwrap()
+        .disabled_cache()
+        .connect()
+        .await
+    {
+        Ok(_) => panic!("V4 artifact must not bypass a disabled cache"),
+        Err(error) => error,
+    };
+    assert!(
+        artifact_then_disabled
+            .to_string()
+            .contains("requires a cache-backed local backtest"),
+        "unexpected error: {artifact_then_disabled}"
+    );
+
+    let disabled_then_artifact = match Tq::futures()
+        .backtest(start_ns, end_ns)
+        .disabled_cache()
+        .historical_universe_artifact(artifact)
+        .unwrap()
+        .connect()
+        .await
+    {
+        Ok(_) => panic!("V4 artifact must reject an already disabled cache"),
+        Err(error) => error,
+    };
+    assert!(
+        disabled_then_artifact
+            .to_string()
+            .contains("requires a cache-backed local backtest"),
+        "unexpected error: {disabled_then_artifact}"
+    );
+
+    let _ = std::fs::remove_dir_all(cache_dir);
 }
 
 #[tokio::test]
