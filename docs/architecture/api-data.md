@@ -462,11 +462,16 @@ tqsdk-wait        tqsdk-data
   deterministic replay / local backtest 输入属于 `tqsdk-task`
 - live pipe、live consumer feature、跨进程 cache service、daemon/supervisor orchestration 和 live hot-path cache dependency 均不属于当前 `tqsdk-data` public API。
 - `tqsdk-data` 不拥有 live diff consumption；`LiveTickCacheWriter` 只接收已解码 tick rows。
-- 历史 universe 使用独立的 `HistoricalFillUniverseSpec`，不会扩大 current/live
-  `UniverseExpression`。`HistoricalCatalogAcquisition`、`HistoricalSemanticCatalog`、
-  `HistoricalUniversePlan` v3 和 `HistoricalUniverseArtifactStore` 组成 acquisition → semantic
-  catalog → executable plan 的 content-addressed 链；proof、kind-specific availability、持久化与
-  兼容矩阵见 [历史 Universe Catalog](historical-universe-catalog.md)。
+- Universe Language V2 的 `UniverseSpec`、normalized AST、snapshot/timeline compiler 与 typed
+  capability contract 由 `tqsdk-data` 统一拥有；relay、facade 和 cache 不复制 parser/compiler。
+  Universe 只选择 instrument，tick/minute/daily 仍由调用入口决定。语法与入口能力见
+  [Universe Language V2](universe-language.md)。
+- legacy 历史 universe 继续使用独立的 `HistoricalFillUniverseSpec`。V2 historical timeline
+  则生成 `HistoricalUniversePlanArtifact::V4`，并固定 acquisition、semantic catalog、calendar、
+  visible membership、physical dependencies、kind targets、input identity 与 V3 rollback hash。
+  `HistoricalUniverseArtifactStore` 提供 flat V1–V4 reader/verifier 和 content-addressed store；proof、
+  provider-data membership 与 rollback 合同见
+  [历史 Universe Catalog](historical-universe-catalog.md)。
   订阅、`wait_update()` 驱动和实时策略 host 留在 `tqsdk` / `tqsdk-wait` 或调用方自建 reader/cursor
   消费层，跨进程持久化服务应作为可选上层 host 复用 writer。
 - queue、lock、reader manifest、recovery scan、writer election、compaction

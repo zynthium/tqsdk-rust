@@ -9,7 +9,7 @@ runtime contract；它只提供一个更容易开始的 facade：
 - Resumable current-day cache snapshot (`.provisional_open_day_fill(day_start_ns, as_of_ns)?`): never promotes an open day to ordinary final coverage
 - Shared tick cache policy for live recording and cache-backed local backtests (`MarketCachePolicy`, `.market_cache(...)`, `.record_universe(...)`)
 - Explicit live tick recording into the shared backtest cache (`.record_ticks(cache_dir, symbols)`)
-- Shared futures universe selector helper for live quotes (`quotes_universe(...)`)
+- Shared futures universe helpers for live quotes (`quotes_universe(...)` / `quotes_universe_spec(...)`)
 - Market-data-only server-side single-day replay (`.server_replay(date)?`)
 - Advanced custom replay backtest (`.replay_backtest(source)`, optional `.instrument_spec(...)` / `.default_price_tick(...)`)
 - `Tq::next()` 主循环
@@ -22,7 +22,12 @@ runtime contract；它只提供一个更容易开始的 facade：
 - `Tq::history()` helper
 - `tqsdk::advanced::*` 下钻到底层 crate
 
-历史动态合约集合不复用 `.universe(...)` 或 `main:all`/`cont:all`：后者始终是“当前”静态 selector。需要按回测时刻加入、退出物理合约时，调用 `.historical_universe_plan(plan)?`，其中 `plan` 由完整、版本化的 `CatalogSnapshot` 在离线阶段编译并以 SHA-256 固定。facade 会拒绝哈希或回测区间不匹配的计划；物理 tick 在回放时只读取生命周期相交的 cache range，计划 v2 的 warmup 会从其固定的上市起点补齐缓存，timeline 与同时间行情在一个 replay revision 中可见。连续与指数代码仍是独立派生视图，只有显式声明的行情绑定才会读取它们的数据。
+普通 `.universe(...)` / `.universe_spec(...)` 是当前 snapshot；历史动态合约集合必须消费 pinned
+artifact。旧 `.historical_universe_plan(plan)?` 签名继续读取 plan v1–v3；新
+`.historical_universe_artifact(artifact)?` 读取 V1–V4，并在 prepare/warmup 前验证 artifact hash、回测
+区间以及 acquisition/catalog/V3 rollback chain。V4 timeline 控制当时可见的 physical、continuous、
+index instrument，kind-specific tick targets 控制物理 cache dependency 与首可用边界；成员变化和同时间
+行情仍在一个 replay revision 可见。provider-history 起点表示数据 membership，不表示法定挂牌日。
 
 `.backtest(start_ns, end_ns)` 是默认 Python-style 策略回测入口。它默认使用
 `tqsdk-data` 共享 history cache root（`$HOME/.tqsdk/data_series_1`，可用
@@ -35,9 +40,13 @@ runtime contract；它只提供一个更容易开始的 facade：
 auth，缓存缺失时通过官方 server-side backtest stream 拉取 tick、canonical 60s 或 native 1d rows、
 推进本地回测并写入持久缓存。
 这个路径不使用专业历史下载接口，也不需要专业历史下载权限。`.universe(...)` 使用和 relay
-对齐的期货 selector 语法，适合全品种策略；同一套 selector 也被实时
-`quotes_universe(...)` 和 `MarketCachePolicy::record_universe(...)` 复用。最终 resolved
-universe 会排除当前不受本地 history cache / relay 支持的 `KQD` 外盘合约，因此 `cont:all`
+对齐的 legacy-first selector；`snapshot(...)` 强制 Universe Language V2，省略 wrapper 的 V2 默认
+snapshot。typed 调用可直接传 `tqsdk::advanced::data::UniverseSpec` 给 `.universe_spec(...)`、
+`quotes_universe_spec(...)` 或 `record_universe_spec(...)`。同一套 snapshot 选择被实时
+quotes 和 `MarketCachePolicy` 复用；可重复的 `universe_symbol_file(s)` 在 DSL 外组合 exact symbols。
+所有 snapshot-only 入口都在网络动作前拒绝 `timeline(...)`。最终 resolved
+universe 会排除当前不受本地 history cache / relay 支持的 `KQD` 外盘合约，因此 V2
+`continuous:all`
 不会请求不存在的 `KQ.m@KQD.*` 历史主连映射。
 
 `KQ.m@EX.product` 主连回测通过 `tqsdk-data` 的 persisted metadata sidecar 解析历史映射，并按 CST
@@ -131,7 +140,8 @@ history client 路径为 tick/minute/daily 执行 `inventory`、`inspect`、`fil
 
 实盘或模拟盘运行时推荐用 `MarketCachePolicy` 一次声明共享 cache 目录和要维护的 tick
 symbols，然后通过 `.market_cache(policy)` 挂到 live builder。symbol 集合可以用
-`.record_ticks([...])` 显式列出，也可以用 `.record_universe("active:all;!CFFEX")?`
+`.record_ticks([...])` 显式列出，也可以用
+`.record_universe("snapshot(contract:all;!CFFEX.*)")?`
 复用共享期货 selector。facade 会在 `connect()` 后启动 tick recording；回测 builder 也能
 复用同一个 policy 作为默认 cache 目录和 symbol 集合。
 仍可显式调用 `.record_ticks(cache_dir, symbols).await?` 作为运行时入口。两种方式都只记录

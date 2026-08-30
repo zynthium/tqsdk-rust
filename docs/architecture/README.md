@@ -220,7 +220,11 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
   tick/minute/daily batch/concurrency/timeout/progress 调度、bounded async scan 与 query terminal report
   的唯一 owner；tick 服务 tick 与 `<60s`，canonical minute 服务 `60s..<1d`，native daily 服务
   `1d..=28d`，daily miss 不回退到 minute；公开
-    `RemoteOnMiss` run 自动持有 shared cache-root gate，facade 已持锁时传递同一守卫，避免嵌套自锁
+  `RemoteOnMiss` run 自动持有 shared cache-root gate，facade 已持锁时传递同一守卫，避免嵌套自锁
+- Universe Language V2 的 parser、normalized AST、纯 snapshot/timeline compiler、typed exclusion、
+  legacy-first dispatcher 和外部 symbol file identity；Universe 只选择 instrument，不选择数据流
+- `HistoricalUniversePlanArtifact` 的 flat v1–v4 reader/verifier、content-addressed store 与 V4 → V3
+  rollback projection；V4 使用 private-field 类型和固定 wire/hash，不修改旧 public V1–V3 plan
   - `query_his_cont_quotes`
   - `query_his_cont_underlyings`
   - `query_his_cont_underlying_segments`
@@ -267,10 +271,13 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
    文件；真实 purge 均要求 `--yes` 与 exclusive root gate，三类缓存都没有自动 eviction/retention
   - 普通 fill/query 取得 shared root gate；refresh、stale repair、verify、doctor 和真实 purge 取得
     exclusive root gate，冲突以退出码 75 / `cache_busy` fail fast。`inventory` 与 purge dry-run 不取稳定视图锁
-  - generic trading-calendar snapshot 只用于日期 selector 和进度分母；TQBN coverage、CST `18:00`
-    partition 与 CacheOnly verification 仍是完整性权威
-  - 复用 `tqsdk` facade / `tqsdk-data` store，不定义或拥有任何缓存格式、session、状态树、live
-    recording loop、回测推进或 relay 服务；不进入 Cargo default-members
+- generic trading-calendar snapshot 只用于日期 selector 和进度分母；TQBN coverage、CST `18:00`
+  partition 与 CacheOnly verification 仍是完整性权威
+- historical fill 保留 legacy `physical:all` / legacy timeline 的 V3 路径；V2
+  `timeline(...)` 只有显式 `--historical-plan-write-policy v4-with-v3-rollback` 才 dual-write
+  V4 与等价 V3 projection，随后按 `--kind` 执行 targets
+- 复用 `tqsdk` facade / `tqsdk-data` store，不定义或拥有任何缓存格式、session、状态树、live
+  recording loop、回测推进或 relay 服务；不进入 Cargo default-members
 - `tqsdk-relay`
   - 可选 market relay / cache service
   - 不改变 SDK 默认直连路径，不代理 trade/query/auth
@@ -280,9 +287,12 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
     query/auth
   - 产品发现可选择只保留每品种主力合约，或每品种活跃度前 N 合约：主力来自
     `query_cont_quotes`，N 大于 1 时其余按 quote `open_interest` / `volume` 排名补足
-  - 二进制启动参数统一使用组合式 universe 表达式，把真实活跃合约、真实主力、加权指数连续合约、
-    主连连续合约、top-N、静态文件和排除规则放进同一个订阅前置计划，例如
-    `main:all;index:all;!CFFEX` 或 `file:./futures-symbols.txt`
+  - relay 只接受当前 snapshot；推荐显式写
+    `snapshot(main:all;continuous:all;index:all;!CFFEX.*)`。`timeline(...)` 在 resolver/WebSocket
+    之前失败，不在 relay 内产生第二套历史 membership
+  - external exact-symbol 文件在 DSL 外通过 typed file setter 或
+    `TQSDK_RELAY_FUTURES_UNIVERSE_FILES` 传入；V2 不接受 `file:`，刷新读取失败保留
+    last-known-good 上游订阅
   - shared universe resolver 在最终集合中剔除当前不受本地 history cache / relay 支持的 `KQD`
     外盘合约；因此 `index` / `cont` 不会分别合成不存在的 `KQ.i@KQD.*` /
     `KQ.m@KQD.*` 连续代码
@@ -410,6 +420,7 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
 | relay 本地 CacheOnly history 架构 ADR | [history-relay.md](history-relay.md) |
 | relay history HTTP v1 wire contract | [history-relay-http.md](history-relay-http.md) |
 | history snapshot manifest / publish / lease contract | [history-snapshot-manifest.md](history-snapshot-manifest.md) |
+| Universe Language V2：snapshot/timeline、typed scope、规范化和入口能力 | [universe-language.md](universe-language.md) |
 | 历史 universe provider 数据 membership proof / pinned execution / artifact contract | [historical-universe-catalog.md](historical-universe-catalog.md) |
 | 回测 tick / canonical-minute 缓存 CLI | [backtest-tick-cache-cli.md](backtest-tick-cache-cli.md) |
 | 回测 Tick 持久缓存预热、检查和严格本地回放 | [backtest-tick-cache-operations.md](backtest-tick-cache-operations.md) |
@@ -456,12 +467,13 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
 13. [Relay 内置只读历史查询 ADR](history-relay.md)
 14. [Relay History HTTP v1 Contract](history-relay-http.md)
 15. [History Snapshot Manifest v1](history-snapshot-manifest.md)
-16. [历史 Universe Catalog 与填充合同](historical-universe-catalog.md)
-16. [验收与测试矩阵](validation.md)
-14. [wait facade](api-wait.md)
-15. [task facade](api-task.md)
-16. [data facade](api-data.md)
-17. [演进路线](roadmap.md)
+16. [Universe Language V2](universe-language.md)
+17. [历史 Universe Catalog 与填充合同](historical-universe-catalog.md)
+18. [验收与测试矩阵](validation.md)
+19. [wait facade](api-wait.md)
+20. [task facade](api-task.md)
+21. [data facade](api-data.md)
+22. [演进路线](roadmap.md)
 
 ## 依赖方向
 ```text

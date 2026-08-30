@@ -1,8 +1,9 @@
 # 历史 Universe Catalog 与填充合同
 
-本文定义历史数据下载和动态回测使用的 catalog、证明与 artifact 边界。当前/live
-`UniverseExpression` 的语法和语义不变；历史入口使用
-`HistoricalFillUniverseSpec`，可见 CLI 入口只有 `--universe`。
+本文定义历史数据下载和动态回测使用的 catalog、证明与 artifact 边界。字符串入口保持
+legacy-first：既有 `UniverseExpression` / `HistoricalFillUniverseSpec` 语义不变；新
+`timeline(...)` Universe Language V2 编译 plan v4。可见 CLI 入口只有 `--universe`，语言规则见
+[Universe Language V2](universe-language.md)。
 
 ## 核心语义：数据生命周期
 
@@ -57,25 +58,34 @@ CLI 强制 daily bootstrap 的 symbol batch size 为 1，使每个 scheduler 终
 
 ## Timeline 与执行目标
 
-`physical:all` 内部等价于 `timeline(active:all)`；`timeline(...)` 可组合 `active`、`cont` 和
-`index`。可见 membership 与下载依赖是两个集合：continuous 需要对应物理合约数据，index 使用独立
-provider symbol。
+legacy `physical:all` 仍表示完整 provider-history 数据 membership；既有
+`timeline(active:all;cont:all;index:all)` 保持 legacy 顺序语义。V2 使用明确 view：
 
-provider-history plan 对 tick/minute/daily 使用
-`max(user_start, first_native_daily_row)` 作为物理合约请求起点；对应 kind 的 cache 仍必须独立达到
-terminal coverage。derived continuous/index 不从 daily 虚构 kind-specific availability，只能从相关产品
-最早数据 membership 起点开始请求。
+```text
+timeline(contract:all;continuous:all;index:all)
+```
 
-历史 plan 的 `physical_listing_starts` 是 v2/v3 wire compatibility 字段名；在
-`provider_history_observed` proof 下，其值严格表示 `physical_data_membership_starts`，不表示挂牌日。
-不能用合约名、交割月份或规则推断更早起点。
+可见 membership 与下载依赖是两个集合。physical contract 可以直接可见；continuous/index 是逻辑
+instrument，并固定其物理或 provider-series dependency closure。`timeline(main/top)` 在没有
+hash-pinned historical ranking capability 时必须在 acquisition 前失败。
 
-plan v3 固定以下 identity：
+每个 plan 同时固定 tick、minute、daily targets。kind 起点为
+`max(user_start, listing/data-membership floor, kind first-available evidence)`；若
+`provider_history_observed` 只有 native-daily evidence，则 daily membership floor 是 tick/minute 的安全
+请求下界，最终空前缀和完整性仍由对应 kind 的 terminal cache coverage 证明。不能从合约名、交割月份
+或规则向前推断。
 
-- canonical universe 与 canonicalizer/compiler identity；
-- acquisition、semantic catalog、calendar 与 execution SHA-256；
-- 可见 membership、dependency set 和 tick/minute/daily targets；
-- continuous/ranking identity（选择相关 derived view 时）。
+旧 plan 字段 `physical_listing_starts` 在 provider-history proof 下严格表示
+`physical_data_membership_starts`，不表示挂牌日。plan v3 继续固定 legacy canonical universe、
+acquisition/catalog/calendar、membership/dependencies/kind targets 与 execution hash。
+
+plan v4 在此基础上固定：
+
+- Universe Language V2 normalized AST bytes/hash 和 compiler/canonicalizer identity；
+- 外部 symbol 文件的 content-derived `input_sources_sha256`；
+- acquisition、semantic catalog、calendar、proof 与 execution SHA-256；
+- 可见 membership、dependency set、tick/minute/daily target hashes；
+- `rollback_v3_plan_sha256`，以及需要时的 continuous/ranking identity。
 
 ## 持久化与兼容
 
@@ -87,6 +97,16 @@ data 层拥有 codec、验证器和 content-addressed store：
   catalogs/<sha256>.json
   plans/<sha256>.json
 ```
+
+目录名保持兼容，plan 文件使用 flat `plan_version` dispatch。旧
+`HistoricalUniverseArtifactStore::publish_plan/load_plan` 只处理 v1–v3；
+`publish_plan_artifact/load_plan_artifact` 和 chain verifier 处理 v1–v4。V4 Rust 类型使用 private
+fields 与 validated constructors，避免 public struct literal 因 wire 演进而再次破坏 source compatibility。
+
+V2 timeline writer 采用 reader-first rollout：默认 `legacy-only`，显式
+`v4-with-v3-rollback` 时从同一 resolution 同时发布 canonical V4 与执行等价的 V3 rollback projection。
+报告同时给出两个 hash/path。两份都发布成功后才执行；content-addressed partial publish 只留下无害孤儿，
+不更新 mutable current pointer。
 
 `HistoricalDailyObservationStatus::Complete` 使用 serde default 且不写出 `status` 字段，因此已有
 complete/terminal-empty provider-history artifact 的 body/hash 保持不变；只有新的
@@ -106,12 +126,21 @@ root、lock、temp、cache coverage 或 plan。
 用户入口：
 
 ```text
-tqsdk-cache fill --kind tick|minute|daily --universe 'physical:all|timeline(...)'
+tqsdk-cache fill --kind tick|minute|daily \
+  --universe 'timeline(contract:all)' \
+  --historical-plan-write-policy v4-with-v3-rollback
 ```
 
-`--universe-plan` 只作为隐藏兼容入口；`--universe-timeline` 已移除。dry-run 只审计稳定 provider roster，
-返回 `preparation_required`/exit 1，因为生成数据 membership 必须写 native-daily cache。
+`physical:all` 和既有 legacy timeline 继续写 v3，无需 writer policy。V2 timeline 在默认
+`legacy-only` 策略下于认证/acquisition 前返回 writer-disabled；显式启用后 dual-write V4/V3。
+`--universe-file` 可重复并在 provider access 前一次性展开，其 identity 进入 V4。
+
+`--universe-plan` 只作为隐藏兼容入口；`--universe-timeline` 已移除。未传 `--end-day` 时 cutoff 固定为
+本次启动时最新可用闭市边界。dry-run 只审计稳定 provider roster，返回
+`preparation_required`/exit 1，因为生成数据 membership 必须写 native-daily cache。
 
 `tqsdk-data` 拥有 spec、proof、catalog、plan、验证和 artifact store；`tqsdk-cache` 只负责认证、采集/填充
 编排、进度、report、取消与退出码；`tqsdk-session` 提供 query/metadata 和 server-history substrate；
-`tqsdk-task`/`tqsdk` 只消费已验证的 timeline/plan。
+`tqsdk-task`/`tqsdk` 只消费已验证的 timeline/plan。`BacktestBuilder::historical_universe_artifact`
+验证 V4 自身、区间和 acquisition/catalog/rollback chain；timeline 控制可见 instrument，V4 tick targets
+控制物理 cache dependency 和首可用边界。

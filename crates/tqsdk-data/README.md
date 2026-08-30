@@ -60,6 +60,37 @@
   retained validation 仍只在 data 实现，`tqsdk-cache` 不复制 manifest parser
 - `BacktestHistoryMetadataCache` / `BacktestHistoryMaintenanceClient`
 
+## Universe Language V2 与历史 artifact
+
+`tqsdk-data` 是 Universe 语言和历史 plan 的唯一 owner：
+
+- legacy `UniverseExpression` / `HistoricalFillUniverseSpec` 及其原执行语义保持不变；
+- `UniverseSpec::parse_v2`、`UniverseInput` 与 `compile_static_futures_universe_v2` 提供纯 V2
+  snapshot 编译；需要 metadata/ranking 时通过 `FuturesUniverseResolver` capability adapter；
+- `compile_historical_universe_resolution_v4` 只接受 `timeline(...)`，固定 provider-data membership、
+  dependency closure 和 tick/minute/daily targets；
+- `HistoricalUniversePlanArtifact` flat-dispatch plan v1–v4；旧 `HistoricalUniversePlan` 结构和
+  `publish_plan/load_plan` v1–v3 API 保持；
+- `HistoricalUniverseArtifactStore` 验证 acquisition、semantic catalog、plan 与 V3 rollback chain。
+
+```rust
+use tqsdk_data::{UniverseInput, UniverseSpec, compile_static_futures_universe_v2};
+
+let spec = UniverseSpec::parse_v2(
+    "snapshot(symbol:SHFE.au2606,KQ.i@SHFE.au;!symbol:SHFE.au2506)",
+)?;
+let input = UniverseInput::from_spec(spec).expand()?;
+let compiled = compile_static_futures_universe_v2(&input)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+省略 wrapper 默认 snapshot。`main` 是当前具体主力，`continuous` 是 `KQ.m@...` 逻辑主连；
+Universe 只选 instrument，不选择数据流。V2 `file:` 被拒绝，外部 exact-symbol 文件通过
+`UniverseInput::universe_symbol_file(s)` 组合，每个文件只读一次且内容 identity 可重现。
+完整语法、兼容 dispatcher、排除矩阵和 V4 rollout 见
+[Universe Language V2](../../docs/architecture/universe-language.md) 与
+[历史 Universe Catalog](../../docs/architecture/historical-universe-catalog.md)。
+
 ## 回测历史查询
 
 `BacktestHistoryClient` 是 local-backtest durable history 的异步入口，不是 `DataClient` 专业历史下载

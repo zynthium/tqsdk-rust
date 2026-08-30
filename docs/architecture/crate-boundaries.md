@@ -319,7 +319,11 @@ sink、WAL、journal 或 cache writer。
 
 `tqsdk-data` 当前应继续承担：
 
-历史动态 universe 的 catalog、timeline 编译、预算和持久化计划归 `tqsdk-data`；`tqsdk-task` 只在 replay step 中消费已验证 timeline；`tqsdk` 只暴露 facade 接入，不重新解释静态 universe selector，也不维护第二套 membership state。
+Universe Language V2 的 parser、normalized AST、typed scope/exclusion、纯 snapshot/timeline compiler
+和 capability contracts 归 `tqsdk-data`。历史动态 universe 的 catalog、预算、kind targets、V1–V4
+artifact reader/verifier/store 和 V3 rollback projection 同样归 `tqsdk-data`；文件 IO、provider query 与
+下载调度不进入纯 compiler。`tqsdk-task` 只在 replay step 中消费已验证 timeline；`tqsdk` 只暴露
+facade 接入，不重新解释 selector，也不维护第二套 membership state。
 
 - history page / series / download / export substrate
 - `HistorySeriesCache` public facade 和 crate 内部 store adapter seam
@@ -382,6 +386,7 @@ sink、WAL、journal 或 cache writer。
 - shared market cache policy、live session 或订阅 ownership
 - remote-on-miss 的 session protocol、分页或推进 loop 实现
 - relay 进程、dashboard 或多客户端 market service
+- 第二套 Universe parser/compiler，或把 tick/minute/daily 数据流编码进 Universe AST
 
 ## `tqsdk-cache`
 
@@ -419,6 +424,8 @@ sink、WAL、journal 或 cache writer。
 ### 正确职责
 
 - 可选独立进程 / binary
+- 复用 `tqsdk-data` 的 legacy/V2 snapshot parser/compiler，支持外层 exact-symbol 文件与
+  last-known-good refresh；`timeline(...)` 必须在 resolver/WebSocket 之前拒绝
 - 代理 market route 子集
 - 维护共享上游 tick source、内存行情 cache、K 线合成、bootstrap/resync 队列
 - 在 relay 内部做期货产品到当前活跃合约集合的 typed metadata 发现与每日固定时间刷新

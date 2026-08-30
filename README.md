@@ -94,7 +94,8 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 `tqsdk-relay` 是可选基础设施。普通 SDK 使用不需要启动 relay；只有需要降低多进程、
 全品种、多周期行情订阅压力时，才显式把 market endpoint 指向 relay。
 relay 侧统一使用 `TQSDK_RELAY_FUTURES_UNIVERSE` 描述合约集合，例如
-`active:all`、`main:all;index:all;!CFFEX` 或 `file:./futures-symbols.txt`，
+`contract:all` 或 `snapshot(main:all;continuous:all;index:all;!CFFEX.*)`；external exact-symbol
+文件使用 `TQSDK_RELAY_FUTURES_UNIVERSE_FILES`，
 由 relay 动态查询当前活跃合约集合，并默认在本地时间每天 `08:30:00` 重新发现。relay 会暴露上游
 合约数、上游命令中的最大 `ins_list` 长度和阈值命中 metrics，并可用 `TQSDK_RELAY_DRY_RUN=1` 在启动前
 检查订阅规模；`/health` 会区分下游监听、上游连接、订阅/补历史阶段、合约集合刷新和数据 freshness；
@@ -104,20 +105,26 @@ dashboard 还会展示 backfilling 已持续时间、frame 速率和最近 frame
 判断合约是否处于交易时间段；
 可用 `main:all` 只订阅每品种主力合约；
 可用 `top:2:all` 将产品发现结果限制为每品种主力和次主力；
-也可用 `main:all;index:all;!CFFEX` 组合真实主力、加权指数、主连连续合约、top-N 和排除规则；
+也可用 `snapshot(main:all;continuous:all;index:all;!CFFEX.*)` 组合真实主力、加权指数、
+主连连续合约、top-N 和排除规则。`main` 返回当前具体主力，`continuous` 返回 `KQ.m@...`，二者不同；
 
-上述表达式都是 current/live selector。历史 cache fill 直接在 `--universe` 使用
-`physical:all` 或 `timeline(...)`：默认 provider 路径会稳定获取全物理合约 roster，首次补齐
+上述表达式都是 current/live snapshot。字符串 API 保持 legacy-first；`snapshot(...)` 强制进入
+Universe Language V2，typed API 接受 `UniverseSpec`。live/facade/relay 会在触网前拒绝
+`timeline(...)`。历史 cache fill 直接在 `--universe` 使用
+`timeline(contract:all)`，并显式启用
+`--historical-plan-write-policy v4-with-v3-rollback`；legacy `physical:all` 仍兼容写 v3。默认 provider
+路径会稳定获取全物理合约 roster，首次补齐
 原生 1d 历史，并以第一条 daily 行作为数据 membership 起点，再在 cache 内部生成内容寻址的
 acquisition、semantic catalog 和 pinned plan。终态空数据和隔离的 provider-unavailable 候选不进入
-universe；该路径不查询或推断交易所挂牌日期。旧
-`--universe-plan` 只作为隐藏兼容入口保留。
+universe；该路径不查询或推断交易所挂牌日期。V2 timeline 同时发布 V4 和执行等价的 V3 rollback
+artifact；旧 `--universe-plan` 只作为隐藏兼容入口保留。
 `index` 只生成天勤支持的 `KQ.i@EX.product` 加权 / 指数连续代码，`KQD` 外盘行情不会生成
 不存在的加权 / 指数连续合约；
 可用 `TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1` 调小后续动态 tick chart 补订的上游历史窗口；
 `/symbol-metrics` 可用于查看每个合约的数据接收状态与延迟；
 等待首样本或补历史尚未完成的合约会显示为 `initializing`，不计入问题数；
-静态完整合约文件通过 `file:<path>` selector 接入。
+V2 静态完整合约文件通过 DSL 外的 `--universe-file` / `universe_symbol_file(s)` 接入；legacy
+`file:<path>` 继续兼容。
 
 ## 快速开始
 
@@ -243,7 +250,7 @@ let mut tq = Tq::futures()
     .backtest(start_ns, end_ns)
     .default_price_tick(1.0)
     .kline("KQ.i@SHFE.au", std::time::Duration::from_secs(60), 200)?
-    .universe("active:all;!CFFEX")?
+    .universe("snapshot(contract:all;!CFFEX.*)")?
     .remote_on_miss()
     .connect()
     .await?;
@@ -252,7 +259,8 @@ let mut tq = Tq::futures()
 实盘或模拟盘策略如果要维护同一份回测可复用的 tick 缓存，推荐先定义共享
 `MarketCachePolicy`：live 连接时自动记录指定 tick，回测侧可复用同一个 policy 作为默认
 cache 目录和 symbol 集合。policy 可以用 `.record_ticks([...])` 显式列 symbol，也可以用
-`.record_universe("active:all;!CFFEX")?` 复用同一套 selector。
+`.record_universe("snapshot(contract:all;!CFFEX.*)")?` 复用同一套 selector；typed 调用使用
+`.record_universe_spec(...)`。
 
 ```rust
 let cache = MarketCachePolicy::new(".tqsdk/backtest_ticks")
@@ -547,6 +555,8 @@ cargo check --all-features --examples
 
 - [文档索引](docs/README.md)
 - [架构总览](docs/architecture/README.md)
+- [Universe Language V2](docs/architecture/universe-language.md)
+- [历史 Universe Catalog 与 V4 artifact](docs/architecture/historical-universe-catalog.md)
 - [回测 Tick 持久缓存预热与验收](docs/architecture/backtest-tick-cache-operations.md)
 - [回测 Tick Cache CLI](docs/architecture/backtest-tick-cache-cli.md)
 - [runtime core overview](docs/architecture/runtime-core/overview.md)

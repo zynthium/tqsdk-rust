@@ -197,20 +197,31 @@ history cache / cache-backed backtest current focused validation:
 cargo test -p tqsdk-data --test historical_universe
 cargo test -p tqsdk-data --test historical_universe_artifact
 cargo test -p tqsdk-data --test historical_universe_resolution
+cargo test -p tqsdk-data --test universe_spec
+cargo test -p tqsdk-data --test universe_spec_compiler
+cargo test -p tqsdk-data --test universe_compatibility
+cargo test -p tqsdk-data --test universe_input
+cargo test -p tqsdk-data --test historical_universe_v4
+cargo test -p tqsdk-data --test historical_universe_v4_resolution
 cargo test -p tqsdk-data --test provider_history_observed
 cargo test -p tqsdk-data --test provider_history_empty_expiry
 cargo test -p tqsdk-task --test strategy_backtest
 cargo test -p tqsdk --lib
+cargo test -p tqsdk --test facade_contract
 cargo test -p tqsdk-cache --bin tqsdk-cache
+cargo test -p tqsdk-relay --tests
 ```
 
-它们分别覆盖 v1/v2 hash compatibility 与 v3 execution pin、complete authoritative 或
-provider-history acquisition/semantic fact chain/content-addressed durability、daily-origin membership、
+它们分别覆盖 legacy parser/顺序结果冻结、Universe Language V2 grammar/canonical AST/hash、typed
+exclusion/capability/file identity、V1–V3 hash compatibility 与 V3 execution pin、V4 fixed wire/hash/
+chain、V4 → V3 projection 等价与 rollback、complete authoritative 或 provider-history
+acquisition/semantic fact chain/content-addressed durability、daily-origin membership、
 provider-unavailable 的精确 timeout 判定、零完成/比例熔断与旧 complete-observation JSON 兼容、
 用户起点优先的 physical/derived tick/minute/daily request floor、
 membership/dependency/kind target resolution、同时间 replay revision、
-facade 生命周期裁剪，以及 CLI 的 v3 default、legacy 显式 opt-in、
-统一 CacheOnly/RemoteOnMiss 参数与 terminal path。
+facade V4 区间/chain/首可用边界、relay timeline 触网前拒绝与 file-refresh last-known-good，以及 CLI
+的 legacy V3 default、V2 writer gate、V4/V3 dual publish、统一 CacheOnly/RemoteOnMiss 参数与
+terminal path。
 
 ```bash
 rtk cargo test -p tqsdk-data --test history_series_single_file_store
@@ -238,6 +249,12 @@ rtk cargo test -p tqsdk-data --test universe_selector
 rtk cargo test -p tqsdk-data --test historical_fill_universe
 rtk cargo test -p tqsdk-data --test historical_universe
 rtk cargo test -p tqsdk-data --test historical_universe_artifact
+rtk cargo test -p tqsdk-data --test universe_spec
+rtk cargo test -p tqsdk-data --test universe_spec_compiler
+rtk cargo test -p tqsdk-data --test universe_compatibility
+rtk cargo test -p tqsdk-data --test universe_input
+rtk cargo test -p tqsdk-data --test historical_universe_v4
+rtk cargo test -p tqsdk-data --test historical_universe_v4_resolution
 rtk cargo test -p tqsdk-task --test history_tick_replay
 rtk cargo test -p tqsdk-task --test history_backtest_replay
 rtk cargo test -p tqsdk-task --test minute_kline_aggregate

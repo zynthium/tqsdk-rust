@@ -32,11 +32,14 @@
 - [回测历史查询与缓存来源](architecture/api-data.md#回测历史查询与缓存来源)：`BacktestHistoryClient`
   的 request/chunk/terminal contract、tick / `<60s`、`60s..<1d`、`1d..=28d` 三层 durable-source
   matrix、native daily fail-closed 语义、metadata sidecar 和 CacheOnly 合同。
+- [Universe Language V2](architecture/universe-language.md)：snapshot/timeline、typed selector 与
+  exclusion、legacy-first dispatcher、external files、入口能力矩阵和 V4 rollout。
 
 - [Relay 内置只读历史查询 ADR](architecture/history-relay.md)：三 crate ownership、隔离、feature、迁移与发布门。
 - [Relay History HTTP v1](architecture/history-relay-http.md)：严格请求、all-or-nothing JSON、typed error、ETag 与 gzip。
 - [History Snapshot Manifest v1](architecture/history-snapshot-manifest.md)：结构共享、manifest identity、lease、发布/恢复/GC。
-- [历史 Universe Catalog](architecture/historical-universe-catalog.md)：provider 数据 membership 证明、v3 identity/execution DAG、kind-aware 固定目标与不可变 artifact。
+- [历史 Universe Catalog](architecture/historical-universe-catalog.md)：provider 数据 membership 证明、
+  plan v1–v4、kind-aware targets、V4/V3 rollback dual-write 与不可变 artifact chain。
 
 ## AI 助手读取顺序
 

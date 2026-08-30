@@ -15,14 +15,17 @@ session owner、后台守护进程、relay 或监控服务。完整合同见
 
 ### 历史动态 universe fill
 
-历史下载只需 `--universe`。`physical:all` 表示截止窗口内产生过 provider 行情数据的可枚举物理
-合约；`timeline(...)` 在同一数据 membership catalog 上编译动态 membership，并可同时选择
-`active`、`cont` 和 `index`。scope 固定为 `CFFEX,SHFE,DCE,CZCE,INE,GFEX`。
+历史下载只需 `--universe`。推荐的 Universe Language V2 写法是
+`timeline(contract:all)`；它表示截止窗口内产生过 provider 行情数据的全部可枚举物理合约。
+还可同时选择 `continuous` 和 `index`。scope 固定为
+`CFFEX,SHFE,DCE,CZCE,INE,GFEX`。legacy `physical:all` 和既有
+`timeline(active:all;cont:all)` 继续兼容并写 plan v3。
 
 首次运行会稳定查询前后 roster 和完整 metadata，再为 roster 的每个合约补齐从
 1990-01-01 到 cutoff 的原生 1d 历史。第一条 native-1d 行形成有效 membership 起点；没有行但
 服务端终态完成的前缀记录为空覆盖。随后 CLI 在 `<cache-dir>/historical-universe-v1/` 内部发布
-内容寻址的 acquisition、semantic catalog 和 v3 plan，再用统一 executor 下载选定 kind。
+内容寻址的 acquisition 与 semantic catalog。legacy 输入发布 v3 plan；V2 timeline 从同一
+execution dual-write V4 和 V3 rollback plan，再用统一 executor 下载选定 kind。
 `provider_history_observed` 不读取或推断交易所挂牌日期；到期 metadata 只用于 membership 终点。
 首次全市场 bootstrap 较慢，后续在相同 cache root 上复用已确认 coverage。
 服务端显式 rows 形成 membership，终态空窗口形成空观测。provider roster 中不创建历史 chart 的
@@ -36,17 +39,23 @@ session owner、后台守护进程、relay 或监控服务。完整合同见
 ```bash
 # 截止窗口内出现过的全部物理合约分钟线
 tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
-  --kind minute --universe 'physical:all' \
+  --kind minute --universe 'timeline(contract:all)' \
+  --historical-plan-write-policy v4-with-v3-rollback \
   --start-day 2025-01-01 --symbol-concurrency 4
 
 # 动态活跃物理合约，同时保留连续依赖和指数序列
 tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
-  --kind tick --universe 'timeline(active:all;cont:all;index:all)' \
+  --kind tick \
+  --universe 'timeline(contract:all;continuous:all;index:all)' \
+  --historical-plan-write-policy v4-with-v3-rollback \
   --start-day 2025-01-01 --symbol-concurrency 4
 ```
 
-不传 `--end-day` 时截止最新已收盘交易日。旧 `--universe-plan` 只作为隐藏兼容入口保留；
-`--universe-timeline` 已移除。旧 v2 plan 仍需显式 `--allow-legacy-universe-plan`。
+同一 `--universe` 分别运行 `--kind tick`、`minute`、`daily` 即填充三种数据；Universe 不选择
+数据流。不传 `--end-day` 时截止本次启动时的最新已收盘交易日。可重复的
+`--universe-file PATH` 是 V2 外部 exact-symbol 来源。V2 timeline writer 默认关闭，必须显式使用
+`v4-with-v3-rollback`；legacy historical 输入不需要该 flag。旧 `--universe-plan` 只作为隐藏兼容
+入口保留；`--universe-timeline` 已移除。旧 v2 plan 仍需显式 `--allow-legacy-universe-plan`。
 首次自动准备不能在 `--dry-run` 中完成：dry-run 只审计稳定 roster，并以
 `preparation_required`/exit 1 报告需要 native-daily cache mutation。
 
@@ -164,7 +173,7 @@ cargo run -p tqsdk-cache -- \
 # tick dry-run：可使用 futures universe；缺 coverage 时退出码为 1。
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history fill \
-  --universe 'main:all;index:all;!CFFEX' \
+  --universe 'snapshot(main:all;index:all;!CFFEX.*)' \
   --start-day 2026-06-01 --end-day 2026-06-30 --dry-run
 
 # final-only minute fill：只选择已结束 trading day。

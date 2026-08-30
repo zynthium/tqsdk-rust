@@ -16,14 +16,32 @@ daemon。
 
 ## 历史动态 universe
 
-可见入口是 `fill --universe 'physical:all|timeline(...)'`。CLI 稳定采集 provider-current roster，
-对每个成员探测 `[1990-01-01, cutoff)` native-daily，再把 rows/terminal-empty/
-provider-unavailable 观察、数据 membership catalog 和 kind-specific v3 plan 内容寻址发布到 cache root，最后由统一
-terminal/progress/cancel/report executor 执行目标 kind。
+可见入口统一为 `fill --universe EXPRESSION`。推荐的 Universe Language V2 历史全集写法是：
+
+```bash
+tqsdk-cache --cache-dir /var/lib/tqsdk/history --kind tick fill \
+  --universe 'timeline(contract:all)' \
+  --historical-plan-write-policy v4-with-v3-rollback \
+  --start-day 2025-01-01
+```
+
+同一表达式分别配 `--kind tick`、`minute`、`daily` 即填充三种数据；Universe 只选 instrument，
+`--kind` 才选数据流。不传 `--end-day` 时填充到本次启动时的最新可用闭市边界。
+
+CLI 稳定采集 provider-current roster，对每个成员探测 `[1990-01-01, cutoff)` native-daily，再把
+rows/terminal-empty/provider-unavailable 观察和数据 membership catalog 内容寻址发布到 cache root。
+legacy `physical:all` / legacy timeline 继续生成 plan v3；V2 `timeline(...)` 在显式 writer policy 下从
+同一 execution 同时生成 V4 和 V3 rollback projection，再由统一 terminal/progress/cancel/report executor
+执行目标 kind。
 
 第一条 daily row 是 provider-history membership 起点；默认路径不采集或推断挂牌日期。
 tick/minute cache 继续独立证明首行和空前缀。首次自动准备需要 cache mutation；`--dry-run`
-只审计 roster 并返回 `preparation_required`/exit 1。`--universe-plan` 仅为隐藏兼容入口，
+只审计 roster 并返回 `preparation_required`/exit 1。V2 writer 默认 `legacy-only`，因此未传
+`--historical-plan-write-policy v4-with-v3-rollback` 时会在认证和 provider I/O 前失败。
+
+可重复的 `--universe-file PATH` 是 V2 AST 外部 exact-symbol 来源；current snapshot fill 可单独
+使用，historical fill 必须与 V2 `timeline(...)` 合并。每个文件只读取一次，内容 identity 进入 V4。
+`--universe-plan` 仅为隐藏兼容入口，
 `--universe-timeline` 已移除。
 
 provider roster 成员不保证历史端点会创建 chart。daily bootstrap 强制 symbol batch size 1；调用方

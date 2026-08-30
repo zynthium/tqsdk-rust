@@ -1,5 +1,7 @@
 # GitNexus Engineering Plan
 
+> Status: completed and archived after implementation, validation, and architecture review.
+
 > Task: 以兼容迁移方式演进 Universe DSL：snapshot 默认、timeline 显式、typed scope、稳定 V4 artifact，并适配缓存填充、relay 与动态回测。
 >
 > Evidence verified at commit `eaebae7beba7b57e5fc8d158c8606d50d48312a2`; GitNexus index pinned to the same commit with PDG available. Deepen pass seeded from the architecture review and re-verified the load-bearing source paths.
@@ -807,4 +809,3 @@ None. Duplicate policy、cross-view exclusion、`contract` lifecycle、parser di
 - facade/relay在任何 acquisition前拒绝 timeline；relay失败保留 last-known-good；动态回测只消费已验证且区间匹配的 artifact。
 - Universe 与 tick/minute/daily 数据流保持正交；kind-specific targets在 execution closure中验证。
 - §8 全部命令成功，public docs/examples同步，GitNexus detect-changes结果完整且所有直接消费者已核对。
-
