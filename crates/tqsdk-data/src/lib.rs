@@ -65,6 +65,7 @@ mod live_tick_cache_writer;
 mod minute_kline_cache;
 mod universe;
 mod universe_expression;
+mod universe_spec;
 
 #[cfg(fuzzing)]
 #[doc(hidden)]
@@ -215,4 +216,8 @@ pub use universe::{
 };
 pub use universe_expression::{
     UniverseClause, UniverseExpression, UniverseSelector, UniverseSelectorKind,
+};
+pub use universe_spec::{
+    UNIVERSE_CANONICALIZER_ID, UNIVERSE_COMPILER_ID, UNIVERSE_LANGUAGE_VERSION, UniverseMode,
+    UniverseSelectorSpec, UniverseSpec, UniverseSpecError, UniverseTarget, UniverseView,
 };
