@@ -66,9 +66,13 @@ pub fn compile_historical_universe_resolution(
 ) -> Result<HistoricalUniverseResolution> {
     acquisition.validate()?;
     semantic.validate_against_acquisition(acquisition)?;
-    if acquisition.proof != HistoricalCatalogProof::AuthoritativeLifecycle {
+    if !matches!(
+        acquisition.proof,
+        HistoricalCatalogProof::AuthoritativeLifecycle
+            | HistoricalCatalogProof::ProviderHistoryObserved
+    ) {
         return Err(validation(
-            "strict historical universe resolution requires authoritative lifecycle proof",
+            "historical universe resolution requires executable membership proof",
         ));
     }
     if semantic.acquisition_sha256 != acquisition.acquisition_sha256 {
@@ -110,7 +114,7 @@ pub fn compile_historical_universe_resolution(
 
     let dependencies =
         resolve_dependencies(&semantic.catalog.contracts, &selection, start_ns, end_ns)?;
-    let targets = resolve_kind_targets(acquisition, semantic, &dependencies, end_ns)?;
+    let targets = resolve_kind_targets(acquisition, semantic, &dependencies, start_ns, end_ns)?;
     let visible_membership_sha256 = sha256_identity(&serde_json::to_vec(&timeline.batches)?);
     let dependency_set_sha256 = sha256_identity(&serde_json::to_vec(&dependencies)?);
     let resolved_targets_sha256 = targets
@@ -131,7 +135,7 @@ pub fn compile_historical_universe_resolution(
         acquisition.acquisition_sha256.clone(),
         semantic.semantic_catalog_sha256.clone(),
         HISTORICAL_UNIVERSE_COMPILER_IDENTITY,
-        HistoricalCatalogProof::AuthoritativeLifecycle,
+        acquisition.proof,
     )?
     .with_execution_sha256(execution.execution_sha256.clone())?;
     let plan = timeline.prepare_v3(budget, identity, execution)?;
@@ -358,6 +362,7 @@ fn resolve_kind_targets(
     acquisition: &HistoricalCatalogAcquisition,
     semantic: &HistoricalSemanticCatalog,
     dependencies: &[HistoricalUniverseDependency],
+    requested_start_ns: i64,
     end_ns: i64,
 ) -> Result<BTreeMap<HistoricalDataKind, Vec<HistoricalUniverseKindTarget>>> {
     let acquisitions = acquisition
@@ -384,13 +389,18 @@ fn resolve_kind_targets(
                         .and_then(|boundaries| boundaries.get(&kind))
                         .copied()
                 })
+                .or_else(|| {
+                    (acquisition.proof == HistoricalCatalogProof::ProviderHistoryObserved)
+                        .then_some(dependency.listing_start_ns)
+                })
                 .ok_or_else(|| {
                     validation(format!(
                         "historical {kind:?} availability boundary is unproven for {}",
                         dependency.source_symbol
                     ))
                 })?
-                .max(dependency.listing_start_ns);
+                .max(dependency.listing_start_ns)
+                .max(requested_start_ns);
             if kind_start >= end_ns {
                 continue;
             }

@@ -69,13 +69,19 @@ fill、进程内 single-flight、跨进程 per-series fill lease、shared cache-
 server-history chart substrate，`tqsdk-task` 仅消费结果来安排 replay event。
 
 历史全合约/动态 membership 不复用 current universe grammar。`HistoricalFillUniverseSpec`
-接受 `physical:all` 或受限的 `timeline(...)`；前者只形成 provider-current observed 证明，后者的
-可执行 v3 plan 必须引用 authoritative lifecycle acquisition 与 semantic catalog。artifact 由
-`HistoricalUniverseArtifactStore` content-addressed 保存且加载时重验 hash。semantic catalog 必须
-逐合约匹配 complete authoritative acquisition；v3 同时固定 visible membership、dependency closure
-和 tick/minute/daily kind-specific targets。logical index series 的 availability 必须携带独立 source
-identity；缺 kind boundary 不会回退到 listing time。详细合同见
+接受 `physical:all` 或受限的 `timeline(...)`。默认 acquisition 先记录稳定 provider roster，再由
+每个成员 `[1990-01-01, as_of)` 的 native-1d 观测升级为 `provider_history_observed`：第一条
+日线是数据 membership 起点，终态空区间和隔离的 `provider_unavailable` 候选不进入 universe；
+默认路径不读取或推断交易所挂牌日期。tick/minute 从 `max(用户起点, membership 起点)` 发起请求，
+实际首行和空前缀仍由各自 cache coverage 记录。`HistoricalUniverseArtifactStore` 内容寻址保存 acquisition、semantic catalog 和
+v3 plan；旧 `authoritative_lifecycle` 路径保持原语义。v3 固定 visible membership、dependency
+closure 和 kind-specific targets。详细合同见
 [`historical-universe-catalog.md`](../../docs/architecture/historical-universe-catalog.md)。
+
+每个 roster 候选都必须有显式 observation。complete rows、terminal empty 和
+`provider_unavailable` 是三个不同结果；后者仅允许来自 symbol batch size 1 的精确 timeout，并受
+一次独立重试和全局失败比例熔断保护；实际 timeout 也进入 artifact identity。它是 provider 数据可用性事实，
+不是“从未挂牌”的声明。
 
 同一个 client 是 tick/minute/daily fill scheduling 的唯一 owner：默认 symbol batch size 1、concurrency 2、
 idle timeout 60 秒、无 batch timeout；batch size/concurrency 都只接受 `1..=4`。它统一产生 planning、

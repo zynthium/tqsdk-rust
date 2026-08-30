@@ -45,6 +45,10 @@ fn acquisition(proof: HistoricalCatalogProof) -> HistoricalCatalogAcquisition {
 fn acquisition_hash_is_canonical_and_kind_boundaries_remain_independent() {
     let acquisition = acquisition(HistoricalCatalogProof::AuthoritativeLifecycle);
     acquisition.validate().unwrap();
+    assert_eq!(
+        acquisition.acquisition_sha256,
+        "sha256:d8e97eae75e1a4bb4ed854ab42309afe1719e14ea517aa51ddd4ffc5d31ca25c"
+    );
     assert_eq!(acquisition.roster_before, acquisition.roster_after);
     assert_eq!(acquisition.contracts[0].symbol, "SHFE.au2404");
     assert_ne!(

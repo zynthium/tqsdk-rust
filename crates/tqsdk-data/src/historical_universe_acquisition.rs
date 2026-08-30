@@ -1,6 +1,8 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tqsdk_session::{InstrumentClass, SessionClient, SymbolInfo};
+
+use crate::historical_universe_artifact::HistoricalDailyObservation;
 
 use crate::{
     DataError, HistoricalAcquisitionContract, HistoricalCatalogAcquisition, HistoricalCatalogProof,
@@ -9,6 +11,19 @@ use crate::{
 
 pub const PROVIDER_CURRENT_FUTURES_SOURCE_IDENTITY: &str =
     "tq-query:physical-futures:CFFEX,SHFE,DCE,CZCE,INE,GFEX:v2";
+/// Identity appended after every roster member has a persisted native-daily
+/// outcome: complete rows, terminal empty, or isolated provider-unavailable.
+pub const PROVIDER_DAILY_HISTORY_SOURCE_IDENTITY: &str =
+    "server-backtest-native-daily-data-membership:v8";
+/// Provider bootstrap floor preceding the first domestic futures trading.
+pub const PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS: i64 = 630_928_800_000_000_000;
+/// Calendar semantics for native daily row datetimes used as data-membership starts.
+pub const PROVIDER_DAILY_MEMBERSHIP_CALENDAR_IDENTITY: &str = "tq-native-daily-trading-datetime:v1";
+/// Legacy source name retained for compatibility. The identity denotes data
+/// membership, not exchange lifecycle.
+#[doc(hidden)]
+pub const PROVIDER_DAILY_LIFECYCLE_CALENDAR_IDENTITY: &str =
+    PROVIDER_DAILY_MEMBERSHIP_CALENDAR_IDENTITY;
 pub const PROVIDER_CURRENT_PHYSICAL_FUTURES_EXCHANGES: &[&str] =
     &["CFFEX", "SHFE", "DCE", "CZCE", "INE", "GFEX"];
 
@@ -119,6 +134,83 @@ impl ProviderCurrentHistoricalCatalogAcquirer {
         }
         Ok(infos)
     }
+}
+
+/// Promotes a stable provider-current roster after native-daily bootstrap.
+///
+/// The map must contain every acquired physical symbol. `None` records a
+/// terminally confirmed empty daily range; `Some` is the first observed native
+/// daily row. The resulting proof is provider-history observed, never exchange
+/// authoritative.
+pub fn promote_provider_daily_history(
+    acquisition: HistoricalCatalogAcquisition,
+    observations: &BTreeMap<String, Option<i64>>,
+) -> Result<HistoricalCatalogAcquisition> {
+    acquisition.validate()?;
+    if acquisition.proof != HistoricalCatalogProof::ProviderCurrentObserved || !acquisition.complete
+    {
+        return Err(validation(
+            "provider daily promotion requires complete provider-current acquisition",
+        ));
+    }
+    let acquired = acquisition
+        .contracts
+        .iter()
+        .map(|contract| contract.symbol.as_str())
+        .collect::<BTreeSet<_>>();
+    let observed = observations
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if acquired != observed {
+        return Err(validation(
+            "provider daily observations must exactly cover acquired roster",
+        ));
+    }
+
+    let persisted_observations = observations
+        .iter()
+        .map(|(symbol, first_row_ns)| {
+            Ok((
+                symbol.clone(),
+                HistoricalDailyObservation::new(
+                    PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS,
+                    acquisition.requested_as_of_ns,
+                    *first_row_ns,
+                )?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    promote_provider_daily_history_observations(acquisition, persisted_observations)
+}
+
+/// Promotes a stable provider roster using explicit per-contract daily
+/// outcomes. Provider-unavailable candidates remain auditable but do not enter
+/// the effective data-membership catalog.
+pub fn promote_provider_daily_history_observations(
+    acquisition: HistoricalCatalogAcquisition,
+    observations: BTreeMap<String, HistoricalDailyObservation>,
+) -> Result<HistoricalCatalogAcquisition> {
+    acquisition.validate()?;
+    let acquired = acquisition
+        .contracts
+        .iter()
+        .map(|contract| contract.symbol.as_str())
+        .collect::<BTreeSet<_>>();
+    let observed = observations
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if acquired != observed {
+        return Err(validation(
+            "provider daily observations must exactly cover acquired roster",
+        ));
+    }
+    let source_identity = format!(
+        "{}+{}",
+        acquisition.source_identity, PROVIDER_DAILY_HISTORY_SOURCE_IDENTITY
+    );
+    acquisition.promote_provider_daily_history(source_identity, observations)
 }
 
 fn contract_from_symbol_info(info: SymbolInfo) -> Result<HistoricalAcquisitionContract> {

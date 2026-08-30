@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    ActiveInterval, CatalogSnapshot, DataError, HistoricalCatalogProof, HistoricalUniversePlan,
-    Result,
+    ActiveInterval, CatalogContract, CatalogSnapshot, DataError, DynamicUniverseScope,
+    HistoricalCatalogProof, HistoricalUniversePlan, Result,
 };
 
 pub const HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION: u32 = 1;
@@ -25,6 +25,117 @@ pub enum HistoricalDataKind {
     Tick,
     Minute,
     Daily,
+}
+
+/// Outcome of one provider native-daily observation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HistoricalDailyObservationStatus {
+    /// The requested range reached a terminal response. `first_row_ns=None`
+    /// therefore proves a provider-empty range.
+    #[default]
+    Complete,
+    /// The provider did not expose a usable history chart for this isolated
+    /// contract before the bounded probe ended. This is not an assertion that
+    /// the exchange never listed the contract.
+    ProviderUnavailable,
+}
+
+impl HistoricalDailyObservationStatus {
+    fn is_complete(status: &Self) -> bool {
+        *status == Self::Complete
+    }
+}
+
+/// Native-daily observation for one provider roster member.
+///
+/// A complete observation with `first_row_ns=None` is an explicitly observed
+/// empty range. A `provider_unavailable` observation records that the provider
+/// could not serve the chart; both outcomes are distinct from missing facts
+/// and participate in artifact identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct HistoricalDailyObservation {
+    pub range_start_ns: i64,
+    pub range_end_ns: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_row_ns: Option<i64>,
+    #[serde(
+        default,
+        skip_serializing_if = "HistoricalDailyObservationStatus::is_complete"
+    )]
+    pub status: HistoricalDailyObservationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_unavailable_after_ns: Option<u64>,
+}
+
+impl HistoricalDailyObservation {
+    pub fn new(range_start_ns: i64, range_end_ns: i64, first_row_ns: Option<i64>) -> Result<Self> {
+        let observation = Self {
+            range_start_ns,
+            range_end_ns,
+            first_row_ns,
+            status: HistoricalDailyObservationStatus::Complete,
+            provider_unavailable_after_ns: None,
+        };
+        observation.validate()?;
+        Ok(observation)
+    }
+
+    pub fn provider_unavailable(
+        range_start_ns: i64,
+        range_end_ns: i64,
+        unavailable_after_ns: u64,
+    ) -> Result<Self> {
+        let observation = Self {
+            range_start_ns,
+            range_end_ns,
+            first_row_ns: None,
+            status: HistoricalDailyObservationStatus::ProviderUnavailable,
+            provider_unavailable_after_ns: Some(unavailable_after_ns),
+        };
+        observation.validate()?;
+        Ok(observation)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.range_start_ns <= 0 || self.range_end_ns <= self.range_start_ns {
+            return Err(validation(
+                "historical daily observation requires a positive non-empty range",
+            ));
+        }
+        if self
+            .first_row_ns
+            .is_some_and(|first| first < self.range_start_ns || first >= self.range_end_ns)
+        {
+            return Err(validation(
+                "historical daily first row must stay inside observed range",
+            ));
+        }
+        if self.status == HistoricalDailyObservationStatus::ProviderUnavailable
+            && self.first_row_ns.is_some()
+        {
+            return Err(validation(
+                "provider-unavailable daily observation cannot contain a first row",
+            ));
+        }
+        match (self.status, self.provider_unavailable_after_ns) {
+            (HistoricalDailyObservationStatus::Complete, None) => {}
+            (HistoricalDailyObservationStatus::ProviderUnavailable, Some(value)) if value > 0 => {}
+            (HistoricalDailyObservationStatus::Complete, Some(_)) => {
+                return Err(validation(
+                    "complete daily observation cannot contain an unavailable timeout",
+                ));
+            }
+            (HistoricalDailyObservationStatus::ProviderUnavailable, _) => {
+                return Err(validation(
+                    "provider-unavailable daily observation requires a positive timeout",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Provider facts for one physical futures contract.
@@ -84,6 +195,8 @@ pub struct HistoricalCatalogAcquisition {
     pub roster_before: Vec<String>,
     pub roster_after: Vec<String>,
     pub contracts: Vec<HistoricalAcquisitionContract>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_daily_observations: BTreeMap<String, HistoricalDailyObservation>,
 }
 
 #[derive(Serialize)]
@@ -98,6 +211,8 @@ struct HistoricalCatalogAcquisitionBody<'a> {
     roster_before: &'a [String],
     roster_after: &'a [String],
     contracts: &'a [HistoricalAcquisitionContract],
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    provider_daily_observations: &'a BTreeMap<String, HistoricalDailyObservation>,
 }
 
 impl HistoricalCatalogAcquisition {
@@ -125,10 +240,48 @@ impl HistoricalCatalogAcquisition {
             roster_before,
             roster_after,
             contracts,
+            provider_daily_observations: BTreeMap::new(),
         };
         acquisition.normalize()?;
         acquisition.acquisition_sha256 = sha256_identity(&acquisition.body_bytes()?);
         Ok(acquisition)
+    }
+
+    pub(crate) fn promote_provider_daily_history(
+        mut self,
+        source_identity: impl Into<String>,
+        observations: BTreeMap<String, HistoricalDailyObservation>,
+    ) -> Result<Self> {
+        self.validate()?;
+        if self.proof != HistoricalCatalogProof::ProviderCurrentObserved || !self.complete {
+            return Err(validation(
+                "provider daily promotion requires complete provider-current acquisition",
+            ));
+        }
+        for contract in &mut self.contracts {
+            let observation = observations.get(&contract.symbol).ok_or_else(|| {
+                validation("provider daily observations must cover every acquired contract")
+            })?;
+            match observation.first_row_ns {
+                Some(first_row_ns) => {
+                    contract
+                        .first_available_data_ns
+                        .insert(HistoricalDataKind::Daily, first_row_ns);
+                }
+                None => {
+                    contract
+                        .first_available_data_ns
+                        .remove(&HistoricalDataKind::Daily);
+                }
+            }
+        }
+        self.proof = HistoricalCatalogProof::ProviderHistoryObserved;
+        self.source_identity = source_identity.into();
+        self.provider_daily_observations = observations;
+        self.acquisition_sha256.clear();
+        self.normalize()?;
+        self.acquisition_sha256 = sha256_identity(&self.body_bytes()?);
+        Ok(self)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -192,6 +345,14 @@ impl HistoricalCatalogAcquisition {
             .iter()
             .map(|contract| contract.symbol.as_str())
             .collect::<BTreeSet<_>>();
+        for (symbol, observation) in &self.provider_daily_observations {
+            if symbol.is_empty() || symbol.trim() != symbol {
+                return Err(validation(
+                    "provider daily observation symbol must be non-empty and trimmed",
+                ));
+            }
+            observation.validate()?;
+        }
         let roster_symbols = self
             .roster_before
             .iter()
@@ -232,6 +393,45 @@ impl HistoricalCatalogAcquisition {
                 "authoritative historical acquisition must be complete",
             ));
         }
+        if self.proof == HistoricalCatalogProof::ProviderHistoryObserved && !self.complete {
+            return Err(validation("provider-history acquisition must be complete"));
+        }
+        if self.proof == HistoricalCatalogProof::ProviderHistoryObserved {
+            let observed_symbols = self
+                .provider_daily_observations
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            if observed_symbols != contract_symbols {
+                return Err(validation(
+                    "provider-history daily observations must exactly cover acquired contracts",
+                ));
+            }
+            for contract in &self.contracts {
+                let observation = &self.provider_daily_observations[&contract.symbol];
+                if observation.range_start_ns != crate::PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS
+                    || observation.range_end_ns != self.requested_as_of_ns
+                {
+                    return Err(validation(
+                        "provider-history daily observation range does not match bootstrap contract",
+                    ));
+                }
+                let first_available = contract
+                    .first_available_data_ns
+                    .get(&HistoricalDataKind::Daily)
+                    .copied();
+                if first_available != observation.first_row_ns {
+                    return Err(validation(format!(
+                        "provider-history daily origin differs from persisted observation for {}",
+                        contract.symbol
+                    )));
+                }
+            }
+        } else if !self.provider_daily_observations.is_empty() {
+            return Err(validation(
+                "provider daily observations require provider-history proof",
+            ));
+        }
         if self.proof == HistoricalCatalogProof::AuthoritativeLifecycle
             && self
                 .contracts
@@ -240,6 +440,18 @@ impl HistoricalCatalogAcquisition {
         {
             return Err(validation(
                 "authoritative historical acquisition requires every contract lifecycle",
+            ));
+        }
+        if self.proof == HistoricalCatalogProof::ProviderHistoryObserved
+            && self.contracts.iter().any(|contract| {
+                contract
+                    .first_available_data_ns
+                    .get(&HistoricalDataKind::Daily)
+                    .is_some_and(|origin| *origin >= self.requested_as_of_ns)
+            })
+        {
+            return Err(validation(
+                "provider-history daily origin must precede requested_as_of_ns",
             ));
         }
         Ok(())
@@ -257,6 +469,7 @@ impl HistoricalCatalogAcquisition {
             roster_before: &self.roster_before,
             roster_after: &self.roster_after,
             contracts: &self.contracts,
+            provider_daily_observations: &self.provider_daily_observations,
         })?)
     }
 }
@@ -314,6 +527,46 @@ impl HistoricalSemanticCatalog {
         Ok(artifact)
     }
 
+    /// Builds an effective data-membership catalog from native-daily provider
+    /// observations. Membership begins at the first observed daily row;
+    /// terminal-empty and provider-unavailable candidates are retained in the
+    /// acquisition audit but are not universe members.
+    pub fn from_provider_history_observed(
+        acquisition: &HistoricalCatalogAcquisition,
+        calendar_identity: impl Into<String>,
+    ) -> Result<Self> {
+        acquisition.validate()?;
+        if acquisition.proof != HistoricalCatalogProof::ProviderHistoryObserved
+            || !acquisition.complete
+        {
+            return Err(validation(
+                "provider-history semantic catalog requires complete provider-history proof",
+            ));
+        }
+        let contracts = provider_history_catalog_contracts(acquisition)?;
+        let catalog = CatalogSnapshot::new(
+            format!("provider-history:{}", acquisition.acquisition_sha256),
+            calendar_identity,
+            true,
+            DynamicUniverseScope::all(),
+            contracts,
+        )?;
+        let mut artifact = Self {
+            format_version: HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION,
+            semantic_catalog_sha256: String::new(),
+            acquisition_sha256: acquisition.acquisition_sha256.clone(),
+            canonical_universe: acquisition.canonical_universe.clone(),
+            catalog,
+            derived_availability_identity: None,
+            derived_first_available_data_ns: BTreeMap::new(),
+        };
+
+        artifact.normalize()?;
+        artifact.semantic_catalog_sha256 = sha256_identity(&artifact.body_bytes()?);
+        artifact.validate_against_acquisition(acquisition)?;
+        Ok(artifact)
+    }
+
     /// Pins independently observed availability boundaries for logical
     /// provider series such as `KQ.i@...` that are not physical contracts in
     /// the acquisition roster.
@@ -361,11 +614,14 @@ impl HistoricalSemanticCatalog {
     ) -> Result<()> {
         self.validate()?;
         acquisition.validate()?;
-        if acquisition.proof != HistoricalCatalogProof::AuthoritativeLifecycle
-            || !acquisition.complete
+        if !matches!(
+            acquisition.proof,
+            HistoricalCatalogProof::AuthoritativeLifecycle
+                | HistoricalCatalogProof::ProviderHistoryObserved
+        ) || !acquisition.complete
         {
             return Err(validation(
-                "semantic historical catalog requires a complete authoritative acquisition",
+                "semantic historical catalog requires a complete executable-membership acquisition",
             ));
         }
         if self.acquisition_sha256 != acquisition.acquisition_sha256 {
@@ -379,18 +635,30 @@ impl HistoricalSemanticCatalog {
             .iter()
             .map(|contract| (contract.symbol.as_str(), contract))
             .collect::<BTreeMap<_, _>>();
-        if acquired.len() != self.catalog.contracts.len() {
+        if acquisition.proof == HistoricalCatalogProof::AuthoritativeLifecycle
+            && acquired.len() != self.catalog.contracts.len()
+        {
             return Err(validation(
                 "historical acquisition/catalog contract counts differ",
+            ));
+        }
+        if acquisition.proof == HistoricalCatalogProof::ProviderHistoryObserved
+            && provider_history_catalog_contracts(acquisition)? != self.catalog.contracts
+        {
+            return Err(validation(
+                "provider-history acquisition/catalog lifecycle interpretation differs",
             ));
         }
         for contract in &self.catalog.contracts {
             let observed = acquired
                 .get(contract.physical_symbol.as_str())
                 .ok_or_else(|| validation("historical acquisition/catalog symbols differ"))?;
+            let lifecycle_differs = acquisition.proof
+                == HistoricalCatalogProof::AuthoritativeLifecycle
+                && observed.authoritative_lifecycle != contract.lifecycle;
             if observed.exchange_id != contract.exchange_id
                 || observed.product_id != contract.product_id
-                || observed.authoritative_lifecycle != contract.lifecycle
+                || lifecycle_differs
             {
                 return Err(validation(format!(
                     "historical acquisition/catalog facts differ for {}",
@@ -449,6 +717,44 @@ impl HistoricalSemanticCatalog {
             derived_first_available_data_ns: &self.derived_first_available_data_ns,
         })?)
     }
+}
+
+fn provider_history_catalog_contracts(
+    acquisition: &HistoricalCatalogAcquisition,
+) -> Result<Vec<CatalogContract>> {
+    let mut contracts = Vec::new();
+    for observed in &acquisition.contracts {
+        let observation = acquisition
+            .provider_daily_observations
+            .get(&observed.symbol)
+            .ok_or_else(|| validation("provider-history contract lacks daily observation"))?;
+        let Some(start_ns) = observation.first_row_ns else {
+            continue;
+        };
+        if observed.expired && observed.expire_datetime_ns.is_none() {
+            return Err(validation(format!(
+                "expired provider-history contract lacks expiry metadata: {}",
+                observed.symbol
+            )));
+        }
+        let end_ns = observed
+            .expire_datetime_ns
+            .unwrap_or(acquisition.requested_as_of_ns)
+            .min(acquisition.requested_as_of_ns);
+        if end_ns <= start_ns {
+            return Err(validation(format!(
+                "provider-history membership interval is empty for {}",
+                observed.symbol
+            )));
+        }
+        contracts.push(CatalogContract::new(
+            observed.symbol.clone(),
+            observed.exchange_id.clone(),
+            observed.product_id.clone(),
+            vec![ActiveInterval::new(start_ns, end_ns)?],
+        )?);
+    }
+    Ok(contracts)
 }
 
 /// Data-owned immutable artifact reader/publisher.
@@ -547,11 +853,14 @@ impl HistoricalUniverseArtifactStore {
         let acquisition = self.load_acquisition(&identity.acquisition_sha256)?;
         let semantic = self.load_semantic_catalog(&identity.semantic_catalog_sha256)?;
         semantic.validate_against_acquisition(&acquisition)?;
-        if acquisition.proof != HistoricalCatalogProof::AuthoritativeLifecycle
-            || acquisition.proof != identity.proof
+        if !matches!(
+            acquisition.proof,
+            HistoricalCatalogProof::AuthoritativeLifecycle
+                | HistoricalCatalogProof::ProviderHistoryObserved
+        ) || acquisition.proof != identity.proof
         {
             return Err(validation(
-                "historical universe plan proof does not match authoritative acquisition",
+                "historical universe plan proof does not match executable-membership acquisition",
             ));
         }
         if semantic.acquisition_sha256 != acquisition.acquisition_sha256 {

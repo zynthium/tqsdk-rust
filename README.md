@@ -106,9 +106,12 @@ dashboard 还会展示 backfilling 已持续时间、frame 速率和最近 frame
 可用 `top:2:all` 将产品发现结果限制为每品种主力和次主力；
 也可用 `main:all;index:all;!CFFEX` 组合真实主力、加权指数、主连连续合约、top-N 和排除规则；
 
-上述表达式都是 current/live selector。历史 cache fill 的 `physical:all` 与 `timeline(...)` 使用
-独立、可审计的 grammar：前者只采集 provider-current observed catalog；后者必须先由 authoritative
-lifecycle artifact 编译成 plan，再通过 `tqsdk-cache fill --universe-plan PLAN.json` 执行。
+上述表达式都是 current/live selector。历史 cache fill 直接在 `--universe` 使用
+`physical:all` 或 `timeline(...)`：默认 provider 路径会稳定获取全物理合约 roster，首次补齐
+原生 1d 历史，并以第一条 daily 行作为数据 membership 起点，再在 cache 内部生成内容寻址的
+acquisition、semantic catalog 和 pinned plan。终态空数据和隔离的 provider-unavailable 候选不进入
+universe；该路径不查询或推断交易所挂牌日期。旧
+`--universe-plan` 只作为隐藏兼容入口保留。
 `index` 只生成天勤支持的 `KQ.i@EX.product` 加权 / 指数连续代码，`KQD` 外盘行情不会生成
 不存在的加权 / 指数连续合约；
 可用 `TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1` 调小后续动态 tick chart 补订的上游历史窗口；

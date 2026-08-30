@@ -1,61 +1,83 @@
 # 历史 Universe Catalog 与填充合同
 
 本文定义历史数据下载和动态回测使用的 catalog、证明与 artifact 边界。当前/live
-`UniverseExpression` 的语法和语义不变；历史入口使用独立的
-`HistoricalFillUniverseSpec`。
+`UniverseExpression` 的语法和语义不变；历史入口使用
+`HistoricalFillUniverseSpec`，可见 CLI 入口只有 `--universe`。
 
-## 两条能力通道
+## 核心语义：数据生命周期
 
-- `physical:all` 表示 provider 在本次稳定快照中返回的全部物理期货合约。它的证明是
-  `provider_current_observed`：采集必须记录查询前后 roster、完整 metadata、观察时间和
-  source identity。当前 scope 明确固定为 `CFFEX,SHFE,DCE,CZCE,INE,GFEX`；`complete` 只表示
-  该 scope 内前后 roster 稳定且每个 roster 成员都有 metadata。缺 metadata 或 roster 漂移时仍保存
-  `complete=false` 的审计制品，但不得升级为可执行证明。它可以证明“本次看见了什么”，不能证明
-  过去某时刻的上市/退市状态。
-- `timeline(...)` 表示严格的 as-of membership。它要求
-  `authoritative_lifecycle`：每个物理合约都有权威生命周期，continuous/index 等派生视图
-  还必须固定对应 mapping/calendar/ranking identity。仅有合约名和到期时间不能升级为该证明。
+默认历史 universe 不再试图恢复交易所法定挂牌日期。物理合约只有在 provider
+首次产生可观测 native-daily 行后才成为历史 universe 成员：
 
-`main`/`top` 需要历史 ranking 证据，首版历史 grammar 拒绝；`file`/`auto` 也不进入可重现
-artifact。共享 current selector 继续拒绝 `physical:all` 和 `timeline(...)`。
+- membership 起点是 `[1990-01-01, as_of)` 完整探测中的第一条 native-daily 行；
+- 终态完成但没有行的候选合约不进入 universe；
+- symbol batch size 1 的精确 timeout 记录为 `provider_unavailable`；它不进入当前 universe，也不冒充终态空、“从未挂牌”或永远无行情；
+- 到期 metadata 仍用于 membership 终点；未到期合约的终点是本次 `as_of`；
+- tick/minute/daily 的实际首行与空前缀仍由各自 cache coverage 独立证明，daily
+  membership 起点只提供安全请求 floor。
 
-## Identity DAG
+这里的“严格”表示：稳定 provider roster 的每个候选合约都有不可变、可复核的观测结果，且
+catalog 只包含有正向数据证据的成员。它不表示“交易所法定挂牌全集”，也不要求交易所官网、
+公告爬虫或 reference lifecycle 服务。
 
-采集 artifact 保存 provider 原始事实并产生 `acquisition_sha256`；语义 catalog 引用该 hash，
-完成标准化和 lifecycle 验证后产生 `semantic_catalog_sha256`。语义 catalog 必须与 complete
-authoritative acquisition 逐合约一致，包括 symbol、exchange、product 和 lifecycle，不能只复制
-`acquisition_sha256` 来“洗白”无关 catalog。可执行 plan v3 同时固定两者、canonical universe、
-canonicalizer/compiler identity、proof、可见 membership hash、依赖闭包 hash、tick/minute/daily
-精确 target hash 和可选 mapping/ranking identity。
-任何 artifact 在反序列化后都必须重算自己的 hash，引用断链或字段篡改不得产生可执行对象。
+## 证明等级
 
-plan v1/v2 保持原 JSON/hash 兼容：它们可以读取和验证，但 CLI 默认只执行 v3。v1 永远不能作为
-cache fill 输入；v2 只有操作者显式传 `--allow-legacy-universe-plan` 才能执行，并在报告中标记
-`legacy_unproven=true`。v3 才表达完整 proof/hash/execution chain，不会把 observed proof 伪装成
-authoritative lifecycle，也不能通过删除 v3 字段并重算 v2 hash 获得默认执行资格。
+### `provider_current_observed`
 
-## 时间与目标语义
+`physical:all` 先查询 provider 当前可枚举的全部物理期货合约。采集记录查询前后 roster、完整
+metadata、观察时间和 source identity；scope 固定为
+`CFFEX,SHFE,DCE,CZCE,INE,GFEX`。`complete=true` 只表示前后 roster 稳定且每个成员都有
+metadata。roster 漂移或缺 metadata 时保存 `complete=false` 的审计 acquisition，但不得执行。
 
-- `effective_ns` 是 membership 何时生效；`known_from_ns` 是该事实何时可知。两者不得互换。
-- 可见 membership 与下载依赖是不同集合。continuous/index 可以作为可见成员，其底层物理
-  合约只进入 dependency closure，不因此暴露为策略成员。
-- tick、minute、daily 的 `first_available_data_ns` 分别证明；一个 kind 的起点不得复用于另一个。
-- v3 将三个 kind 的 resolved targets 全部写入计划并纳入 plan hash；CLI 只消费所选 kind 的固定
-  targets，不在执行时重新从 lifecycle 推导。continuous 的底层物理合约和 index logical series
-  都在依赖闭包中；logical series 必须在 semantic catalog 中携带独立 availability source identity
-  与 kind-specific boundaries。
-- 请求起点是 `max(user_start, proven kind start)`；严格 lifecycle 场景还必须覆盖权威 listing
-  start。名称/交割月/到期时间只允许作为探测提示，不能裁剪更早数据。
-- 没有安全 bounds 查询或经过验证的空窗口证明时，自动全历史填充必须 fail closed，不能发送
-  无界请求后把空响应解释成未上市。
+### `provider_history_observed`
 
-2026-08-30 的真实 provider spike 返回 5,372 个稳定的中国物理 futures metadata（4,505 个
-expired），但最早 expiry 只到 2020；2010 起点的单合约 minute 请求被 metadata coverage 拒绝，
-而 direct page/bounds 查询需要当前账号没有的 `tq_dl` 权限。因此首版 `physical:all` 只发布
-`provider_current_observed` acquisition 和诊断，`kind_boundaries_proven=0` 时明确不可执行；
-`timeline(...)` 也不会从 expiry/name 自动升级为 authoritative plan。
+稳定 roster 的每个成员请求 `[1990-01-01, as_of)` 原生 1d，并持久化
+`HistoricalDailyObservation`：
 
-## 持久化
+- `complete + first_row_ns=Some(...)`：进入数据 membership catalog；
+- `complete + first_row_ns=None`：provider 明确完成空区间，不进入 catalog；
+- `provider_unavailable`：隔离的 provider chart 在有界探测内不可用，不进入 catalog；实际 timeout
+  纳秒值随 observation 持久化。
+
+观测表必须与 acquisition roster 精确等键，观测区间必须与 bootstrap 合同一致，所有状态均参与
+acquisition SHA-256。完成探测后再次查询 roster/metadata；任何漂移都拒绝升级。
+
+CLI 强制 daily bootstrap 的 symbol batch size 为 1，使每个 scheduler 终态精确归属于一个候选。
+调用方未显式设置 `--batch-timeout-secs` 时，单候选观察默认使用 15 秒 wall-clock 上限。精确 timeout
+直接记录为 `provider_unavailable`：它只表达“本次有界 provider 观察不可用”，不表达终态空、从未
+挂牌或永远没有行情；后续 acquisition 可以重新观察并升级。认证、transport、取消和非 timeout 失败
+都拒绝发布。若没有任何完成请求，或者 unavailable 数超过 `max(8, ceil(roster/20))`，熔断并拒绝
+发布，防止全局故障被误编译成空市场。
+
+### `authoritative_lifecycle`
+
+该 proof 继续作为旧 artifact 和显式调用方提供 catalog 的兼容路径，但不再是默认
+`tqsdk-cache fill --universe` 的依赖。它不会触发交易所网页采集，也不会覆盖
+`provider_history_observed` 的数据 membership 语义。
+
+## Timeline 与执行目标
+
+`physical:all` 内部等价于 `timeline(active:all)`；`timeline(...)` 可组合 `active`、`cont` 和
+`index`。可见 membership 与下载依赖是两个集合：continuous 需要对应物理合约数据，index 使用独立
+provider symbol。
+
+provider-history plan 对 tick/minute/daily 使用
+`max(user_start, first_native_daily_row)` 作为物理合约请求起点；对应 kind 的 cache 仍必须独立达到
+terminal coverage。derived continuous/index 不从 daily 虚构 kind-specific availability，只能从相关产品
+最早数据 membership 起点开始请求。
+
+历史 plan 的 `physical_listing_starts` 是 v2/v3 wire compatibility 字段名；在
+`provider_history_observed` proof 下，其值严格表示 `physical_data_membership_starts`，不表示挂牌日。
+不能用合约名、交割月份或规则推断更早起点。
+
+plan v3 固定以下 identity：
+
+- canonical universe 与 canonicalizer/compiler identity；
+- acquisition、semantic catalog、calendar 与 execution SHA-256；
+- 可见 membership、dependency set 和 tick/minute/daily targets；
+- continuous/ranking identity（选择相关 derived view 时）。
+
+## 持久化与兼容
 
 data 层拥有 codec、验证器和 content-addressed store：
 
@@ -66,26 +88,30 @@ data 层拥有 codec、验证器和 content-addressed store：
   plans/<sha256>.json
 ```
 
-首版没有隐式 `CURRENT`。发布使用 root-scoped lock、同目录临时文件、file sync、rename 和
-parent-directory sync；新建目录逐层检查所有祖先不是 symlink，并同步新目录及其 parent；读取也拒绝
-任一已存在的 symlink 祖先。已有目标必须 byte-identical，并在重试成功前同步 parent，否则按碰撞/
-损坏拒绝。artifact 路径和目标 hash 可以纯计算，`--dry-run` 不得创建 root、lock 或 temp。
+`HistoricalDailyObservationStatus::Complete` 使用 serde default 且不写出 `status` 字段，因此已有
+complete/terminal-empty provider-history artifact 的 body/hash 保持不变；只有新的
+`provider_unavailable` outcome 增加显式字段。旧 `authoritative_lifecycle` artifact/hash 语义不变。
 
-当前实现使用标准库 pathname 操作，无法在所有检查与 open/rename 之间提供跨平台 dirfd 级
-`O_NOFOLLOW` 原子性；因此 cache root 仍属于本机可信操作者边界，不支持与能并发替换其祖先目录的恶意
-本地用户共享。内容寻址、逐层 symlink 拒绝和 root publish lock 防止正常并发与误配置，不宣称抵御该
-本地特权竞态。
+Rust source API 的 proof epoch 为
+`HISTORICAL_CATALOG_PROOF_API_VERSION = 2`，`HistoricalCatalogProof` 是 `#[non_exhaustive]`。
+旧二进制读取未知 proof 必须 fail closed。首版没有隐式 `CURRENT`：每个 plan 直接引用不可变 hash，
+不会在重放时悄悄切到最新版。
 
-## CLI 执行合同
+发布使用 root-scoped lock、同目录临时文件、file sync、rename 和 parent-directory sync；读取与写入均
+拒绝 symlink 祖先。已有目标必须 byte-identical。artifact 路径和 hash 可以纯计算，`--dry-run` 不创建
+root、lock、temp、cache coverage 或 plan。
 
-`tqsdk-cache fill --universe-plan PLAN.json --kind tick|minute|daily` 只读取计划文件一次，随后验证
-plan、acquisition、semantic catalog 和完整 identity chain，再进入统一的 flag validation、target
-selection、progress、cancel、terminal report 与退出码路径。`--universe-timeline` 只是可见兼容 alias。
-`--dry-run` 使用 CacheOnly；非 dry-run 才延迟读取认证。零 targets、缺 kind target、缺 artifact 或
-hash/fact 不一致都在远端认证和 cache mutation 前失败。
+## CLI 与 ownership
 
-## Ownership
+用户入口：
 
-`tqsdk-data` 拥有历史 spec、proof/catalog/plan codec、target resolver 和 store primitive；
-`tqsdk-cache` 只负责认证、采集/填充编排、进度、report、取消和退出码；`tqsdk-session` 保持现有
-query/metadata API；`tqsdk-task`/`tqsdk` 只消费已验证的 plan，不建立第二套 universe 状态。
+```text
+tqsdk-cache fill --kind tick|minute|daily --universe 'physical:all|timeline(...)'
+```
+
+`--universe-plan` 只作为隐藏兼容入口；`--universe-timeline` 已移除。dry-run 只审计稳定 provider roster，
+返回 `preparation_required`/exit 1，因为生成数据 membership 必须写 native-daily cache。
+
+`tqsdk-data` 拥有 spec、proof、catalog、plan、验证和 artifact store；`tqsdk-cache` 只负责认证、采集/填充
+编排、进度、report、取消与退出码；`tqsdk-session` 提供 query/metadata 和 server-history substrate；
+`tqsdk-task`/`tqsdk` 只消费已验证的 timeline/plan。

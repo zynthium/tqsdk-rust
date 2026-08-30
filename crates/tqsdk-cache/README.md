@@ -15,31 +15,40 @@ session owner、后台守护进程、relay 或监控服务。完整合同见
 
 ### 历史动态 universe fill
 
-`fill --universe-plan PLAN.json` 接受 `tqsdk-data::HistoricalUniversePlan` 的 JSON，支持
-`--kind tick|minute|daily`。`--universe-timeline` 保留为 visible compatibility alias。计划本身
-提供精确 `[start_ns, end_ns)`、可见 membership、依赖闭包及 tick/minute/daily 各自的固定目标。
-默认只执行 proof/hash/artifact chain 完整的 v3；v2 仅在显式
-`--allow-legacy-universe-plan` 时兼容执行，报告固定标记 `legacy_unproven=true`，v1 不可执行。
-三种 kind 共用一次性 plan load、artifact preflight、terminal/progress/cancel/report executor；不会在
-执行阶段重新从 lifecycle 推导目标。`--dry-run` 强制 CacheOnly。
+历史下载只需 `--universe`。`physical:all` 表示截止窗口内产生过 provider 行情数据的可枚举物理
+合约；`timeline(...)` 在同一数据 membership catalog 上编译动态 membership，并可同时选择
+`active`、`cont` 和 `index`。scope 固定为 `CFFEX,SHFE,DCE,CZCE,INE,GFEX`。
 
-历史自动表达式也放在 `--universe`：`physical:all` 会稳定查询前后 roster、完整 metadata 并
-生成 `provider_current_observed` acquisition，scope 固定为中国期货交易所
-`CFFEX,SHFE,DCE,CZCE,INE,GFEX`；缺 metadata 或 roster 漂移会保存 `complete=false` 审计制品。
-当前 provider 没有 authoritative listing 或
-kind-specific first-available bounds，因此该 lane 会以 `executable=false`/exit 1 fail closed；
-`--dry-run` 只返回拟写 artifact path，不创建 root/lock/temp。`timeline(...)` 需要 authoritative
-lifecycle artifact，必须先编译后通过 `--universe-plan` 执行。名称/到期日不会被当作上市证明。
+首次运行会稳定查询前后 roster 和完整 metadata，再为 roster 的每个合约补齐从
+1990-01-01 到 cutoff 的原生 1d 历史。第一条 native-1d 行形成有效 membership 起点；没有行但
+服务端终态完成的前缀记录为空覆盖。随后 CLI 在 `<cache-dir>/historical-universe-v1/` 内部发布
+内容寻址的 acquisition、semantic catalog 和 v3 plan，再用统一 executor 下载选定 kind。
+`provider_history_observed` 不读取或推断交易所挂牌日期；到期 metadata 只用于 membership 终点。
+首次全市场 bootstrap 较慢，后续在相同 cache root 上复用已确认 coverage。
+服务端显式 rows 形成 membership，终态空窗口形成空观测。provider roster 中不创建历史 chart 的
+候选会在 symbol batch size 1 的精确 timeout 后记录为 `provider_unavailable`，保留在 acquisition
+审计中但不进入 universe；后续 acquisition 可以重新观察并升级，当前状态不作为缺少行情的证明。
+每个 scheduler batch 只含一个候选；默认有界观察上限为 15 秒。精确 timeout 记录为
+`provider_unavailable`，只表示本次 provider chart 不可用，不表示终态空、从未挂牌或永远无行情。
+非 timeout、取消、零完成请求或超过 5%（至少 8 个）的 unavailable 会触发熔断并拒绝发布，避免
+全局故障被误判成空市场。
 
 ```bash
+# 截止窗口内出现过的全部物理合约分钟线
 tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
-  --kind minute --universe-plan historical-universe-plan.json --dry-run
+  --kind minute --universe 'physical:all' \
+  --start-day 2025-01-01 --symbol-concurrency 4
 
-# 只有迁移旧 v2 计划时才显式使用；输出会标记 legacy_unproven=true。
+# 动态活跃物理合约，同时保留连续依赖和指数序列
 tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
-  --kind minute --universe-plan legacy-v2-plan.json \
-  --allow-legacy-universe-plan --dry-run
+  --kind tick --universe 'timeline(active:all;cont:all;index:all)' \
+  --start-day 2025-01-01 --symbol-concurrency 4
 ```
+
+不传 `--end-day` 时截止最新已收盘交易日。旧 `--universe-plan` 只作为隐藏兼容入口保留；
+`--universe-timeline` 已移除。旧 v2 plan 仍需显式 `--allow-legacy-universe-plan`。
+首次自动准备不能在 `--dry-run` 中完成：dry-run 只审计稳定 roster，并以
+`preparation_required`/exit 1 报告需要 native-daily cache mutation。
 
 ## Cache family
 

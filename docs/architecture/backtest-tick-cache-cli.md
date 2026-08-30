@@ -16,17 +16,22 @@ daemon。
 
 ## 历史动态 universe
 
-`fill --universe-plan <PLAN.json>` 支持 tick、minute 与 native daily 的 pinned-plan 补数；
-`--universe-timeline` 是 visible compatibility alias。PLAN 是离线产出的
-`HistoricalUniversePlan` JSON，不是 selector：它带 version、catalog/calendar identity、预算、
-精确 horizon 和 SHA-256。命令在接触 cache 前验证计划，并拒绝与 symbol/day flags 混用。
-minute/daily 共享 history-client terminal/progress/cancel/report executor；tick 经同一 coordinator
-使用 coverage-aware facade adapter。`--dry-run` 使用 CacheOnly。
+可见入口是 `fill --universe 'physical:all|timeline(...)'`。CLI 稳定采集 provider-current roster，
+对每个成员探测 `[1990-01-01, cutoff)` native-daily，再把 rows/terminal-empty/
+provider-unavailable 观察、数据 membership catalog 和 kind-specific v3 plan 内容寻址发布到 cache root，最后由统一
+terminal/progress/cancel/report executor 执行目标 kind。
 
-`--universe physical:all` 属于独立 historical grammar：它只采集稳定的 provider-current roster 和
-metadata acquisition。没有 authoritative listing/kind bounds 时返回 `executable=false`/exit 1，
-不会用 expiry/name 推断后开始下载；dry-run 不落盘。`timeline(...)` 必须先从 authoritative
-lifecycle catalog 编译，再使用 `--universe-plan`。
+第一条 daily row 是 provider-history membership 起点；默认路径不采集或推断挂牌日期。
+tick/minute cache 继续独立证明首行和空前缀。首次自动准备需要 cache mutation；`--dry-run`
+只审计 roster 并返回 `preparation_required`/exit 1。`--universe-plan` 仅为隐藏兼容入口，
+`--universe-timeline` 已移除。
+
+provider roster 成员不保证历史端点会创建 chart。daily bootstrap 强制 symbol batch size 1；调用方
+未配置时单合约 wall-clock 上限为 15 秒。精确 timeout 作为 `provider_unavailable` 审计事实持久化实际
+上限纳秒值并从当前数据 membership 排除；它不声称合约终态空、从未挂牌或永远没有行情，只说明
+本次有界 provider 观察未完成。后续 acquisition 可以重新观察并升级该事实。
+认证、transport、取消、非 timeout 失败、零完成请求或超过 5%（至少 8 个）的 unavailable 仍然
+fail closed，不发布 semantic catalog/plan。
 
 ## Cache family 与命令路由
 

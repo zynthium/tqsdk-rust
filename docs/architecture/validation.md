@@ -197,14 +197,19 @@ history cache / cache-backed backtest current focused validation:
 cargo test -p tqsdk-data --test historical_universe
 cargo test -p tqsdk-data --test historical_universe_artifact
 cargo test -p tqsdk-data --test historical_universe_resolution
+cargo test -p tqsdk-data --test provider_history_observed
+cargo test -p tqsdk-data --test provider_history_empty_expiry
 cargo test -p tqsdk-task --test strategy_backtest
 cargo test -p tqsdk --lib
 cargo test -p tqsdk-cache --bin tqsdk-cache
 ```
 
-它们分别覆盖 v1/v2 hash compatibility 与 v3 execution pin、complete authoritative
-acquisition/semantic fact chain/content-addressed durability、membership/dependency/kind target
-resolution、同时间 replay revision、facade 生命周期裁剪，以及 CLI 的 v3 default、legacy 显式 opt-in、
+它们分别覆盖 v1/v2 hash compatibility 与 v3 execution pin、complete authoritative 或
+provider-history acquisition/semantic fact chain/content-addressed durability、daily-origin membership、
+provider-unavailable 的精确 timeout 判定、零完成/比例熔断与旧 complete-observation JSON 兼容、
+用户起点优先的 physical/derived tick/minute/daily request floor、
+membership/dependency/kind target resolution、同时间 replay revision、
+facade 生命周期裁剪，以及 CLI 的 v3 default、legacy 显式 opt-in、
 统一 CacheOnly/RemoteOnMiss 参数与 terminal path。
 
 ```bash

@@ -158,19 +158,23 @@ pub use historical_fill_universe::{
 };
 pub use historical_universe::{
     ActiveInterval, CatalogContract, CatalogSnapshot, DerivedView, DynamicUniverseScope,
-    HistoricalCatalogProof, HistoricalUniverseFillTarget, HistoricalUniversePlan,
-    HistoricalUniversePlanV3Execution, HistoricalUniversePlanV3Identity,
+    HISTORICAL_CATALOG_PROOF_API_VERSION, HistoricalCatalogProof, HistoricalUniverseFillTarget,
+    HistoricalUniversePlan, HistoricalUniversePlanV3Execution, HistoricalUniversePlanV3Identity,
     HistoricalUniverseTimeline, UniverseBudget, UniverseInstrumentId, UniverseMemberChange,
     UniverseTimelineBatch,
 };
 pub use historical_universe_acquisition::{
     PROVIDER_CURRENT_FUTURES_SOURCE_IDENTITY, PROVIDER_CURRENT_PHYSICAL_FUTURES_EXCHANGES,
-    ProviderCurrentHistoricalCatalogAcquirer,
+    PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS, PROVIDER_DAILY_HISTORY_SOURCE_IDENTITY,
+    PROVIDER_DAILY_LIFECYCLE_CALENDAR_IDENTITY, PROVIDER_DAILY_MEMBERSHIP_CALENDAR_IDENTITY,
+    ProviderCurrentHistoricalCatalogAcquirer, promote_provider_daily_history,
+    promote_provider_daily_history_observations,
 };
 pub use historical_universe_artifact::{
     HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION, HISTORICAL_UNIVERSE_ARTIFACT_NAMESPACE,
-    HistoricalAcquisitionContract, HistoricalCatalogAcquisition, HistoricalDataKind,
-    HistoricalSemanticCatalog, HistoricalUniverseArtifactStore,
+    HistoricalAcquisitionContract, HistoricalCatalogAcquisition, HistoricalDailyObservation,
+    HistoricalDailyObservationStatus, HistoricalDataKind, HistoricalSemanticCatalog,
+    HistoricalUniverseArtifactStore,
 };
 pub use historical_universe_resolution::{
     HISTORICAL_UNIVERSE_COMPILER_IDENTITY, HistoricalDependencyRole, HistoricalUniverseDependency,

@@ -295,11 +295,19 @@ impl UniverseBudget {
     }
 }
 
+/// Source-level compatibility epoch for [`HistoricalCatalogProof`].
+pub const HISTORICAL_CATALOG_PROOF_API_VERSION: u32 = 2;
+
 /// Reusable, identity-pinned offline preparation result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum HistoricalCatalogProof {
     ProviderCurrentObserved,
+    /// Stable provider roster with a persisted native-daily outcome for every
+    /// candidate. Membership starts are first observed provider-data rows;
+    /// this proof makes no exchange listing-date claim.
+    ProviderHistoryObserved,
     AuthoritativeLifecycle,
 }
 
@@ -567,9 +575,13 @@ impl HistoricalUniverseTimeline {
         self.validate()?;
         identity.validate()?;
         execution.validate()?;
-        if identity.proof != HistoricalCatalogProof::AuthoritativeLifecycle {
+        if !matches!(
+            identity.proof,
+            HistoricalCatalogProof::AuthoritativeLifecycle
+                | HistoricalCatalogProof::ProviderHistoryObserved
+        ) {
             return Err(validation(
-                "historical universe plan v3 requires authoritative lifecycle proof",
+                "historical universe plan v3 requires authoritative lifecycle or provider-history proof",
             ));
         }
         if identity.execution_sha256.as_deref() != Some(&execution.execution_sha256) {
@@ -742,9 +754,13 @@ impl HistoricalUniversePlan {
                         "historical universe plan v3 membership hash mismatch",
                     ));
                 }
-                if identity.proof != HistoricalCatalogProof::AuthoritativeLifecycle {
+                if !matches!(
+                    identity.proof,
+                    HistoricalCatalogProof::AuthoritativeLifecycle
+                        | HistoricalCatalogProof::ProviderHistoryObserved
+                ) {
                     return Err(validation(
-                        "historical universe plan v3 requires authoritative lifecycle proof",
+                        "historical universe plan v3 requires authoritative lifecycle or provider-history proof",
                     ));
                 }
                 let mut physical_adds = BTreeMap::new();

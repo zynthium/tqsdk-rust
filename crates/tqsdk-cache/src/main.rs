@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -276,18 +276,20 @@ struct FillArgs {
     /// Futures universe expression resolved by the SDK; may be combined with --symbol.
     #[arg(long, value_name = "EXPRESSION")]
     universe: Option<String>,
-    /// JSON `HistoricalUniversePlan` for lifecycle-aware historical cache fill.
+    /// Legacy compatibility input. New fills prepare plans internally from
+    /// `--universe`.
     #[arg(
         long = "universe-plan",
-        visible_alias = "universe-timeline",
         value_name = "PATH",
-        conflicts_with = "universe"
+        conflicts_with = "universe",
+        hide = true
     )]
     universe_timeline: Option<PathBuf>,
     /// Permit an unproven legacy v2 plan. V3 is required by default.
     #[arg(
         long,
         requires = "universe_timeline",
+        hide = true,
         help = "Permit a legacy v2 universe plan without pinned kind-specific targets"
     )]
     allow_legacy_universe_plan: bool,
@@ -1525,25 +1527,17 @@ async fn fill(
         && !matches!(kind, CacheKind::Tick | CacheKind::Minute | CacheKind::Daily)
     {
         return Err(CliError::Usage(
-            "--universe-timeline supports only --kind tick, minute, or daily fill".to_string(),
+            "legacy --universe-plan supports only --kind tick, minute, or daily fill".to_string(),
         ));
     }
     if let Some(universe) = args.universe.as_deref()
         && (universe.trim() == "physical:all" || universe.trim().starts_with("timeline("))
     {
         let historical = tqsdk_data::HistoricalFillUniverseSpec::parse(universe.trim())?;
-        return match historical {
-            tqsdk_data::HistoricalFillUniverseSpec::ObservedPhysicalAll => {
-                fill_provider_current_physical_catalog(cache_dir, kind, market, args).await
-            }
-            tqsdk_data::HistoricalFillUniverseSpec::Timeline(_) => Err(CliError::Usage(
-                "timeline(...) requires authoritative lifecycle artifacts; compile and pass the pinned result with --universe-plan"
-                    .to_string(),
-            )),
-        };
+        return fill_provider_history_universe(cache_dir, kind, market, args, historical).await;
     }
     if let Some(plan_path) = args.universe_timeline.clone() {
-        return fill_historical_universe_plan(cache_dir, kind, market, args, plan_path).await;
+        return fill_historical_universe_plan(cache_dir, kind, market, args, plan_path, None).await;
     }
     match kind {
         CacheKind::Tick if args.repair_stale => Err(CliError::Usage(
@@ -1559,15 +1553,16 @@ async fn fill(
     }
 }
 
-async fn fill_provider_current_physical_catalog(
+async fn fill_provider_history_universe(
     cache_dir: Option<&Path>,
     kind: CacheKind,
     market: MarketKind,
     args: FillArgs,
+    historical: tqsdk_data::HistoricalFillUniverseSpec,
 ) -> Result<CommandOutcome, CliError> {
     if !matches!(market, MarketKind::Futures) {
         return Err(CliError::Usage(
-            "--universe physical:all supports only --market futures".to_string(),
+            "historical --universe supports only --market futures".to_string(),
         ));
     }
     if !args.symbols.symbols.is_empty()
@@ -1577,7 +1572,7 @@ async fn fill_provider_current_physical_catalog(
         || args.daily_slices
     {
         return Err(CliError::Usage(
-            "--universe physical:all cannot be combined with explicit symbols, repair, open-day, require-final, or slicing flags"
+            "historical --universe cannot be combined with explicit symbols, repair, open-day, require-final, or slicing flags"
                 .to_string(),
         ));
     }
@@ -1591,14 +1586,10 @@ async fn fill_provider_current_physical_catalog(
     let resolved =
         resolve_fill_window(&canonical_cache_dir, &args.days, args.dry_run, false).await?;
     let user = std::env::var("TQ_AUTH_USER").map_err(|_| {
-        CliError::Usage(
-            "--universe physical:all requires TQ_AUTH_USER and TQ_AUTH_PASS".to_string(),
-        )
+        CliError::Usage("historical --universe requires TQ_AUTH_USER and TQ_AUTH_PASS".to_string())
     })?;
     let pass = std::env::var("TQ_AUTH_PASS").map_err(|_| {
-        CliError::Usage(
-            "--universe physical:all requires TQ_AUTH_USER and TQ_AUTH_PASS".to_string(),
-        )
+        CliError::Usage("historical --universe requires TQ_AUTH_USER and TQ_AUTH_PASS".to_string())
     })?;
     let discovery = tqsdk_data::session_client_builder_for_futures_discovery(&user, &pass)
         .build()
@@ -1610,6 +1601,21 @@ async fn fill_provider_current_physical_catalog(
         .acquire(resolved.window.end_ns, observed_at_ns)
         .await?;
     let store = tqsdk_data::HistoricalUniverseArtifactStore::new(&canonical_cache_dir);
+    if !args.dry_run {
+        store.publish_acquisition(&acquisition)?;
+        return bootstrap_provider_history_and_fill(ProviderHistoryFillContext {
+            canonical_cache_dir,
+            kind,
+            market,
+            args,
+            historical,
+            resolved,
+            acquisition,
+            auth_user: user,
+            auth_pass: pass,
+        })
+        .await;
+    }
     let artifact_path = store.acquisition_path(&acquisition.acquisition_sha256)?;
     let persisted_path = if args.dry_run {
         None
@@ -1632,13 +1638,13 @@ async fn fill_provider_current_physical_catalog(
         "market": market.as_str(),
         "cache_dir": canonical_cache_dir,
         "dry_run": args.dry_run,
-        "status": "incomplete",
+        "status": "preparation_required",
         "complete": false,
         "remote_used": true,
         "rows_written": 0,
         "requested_days": resolved.window,
         "historical_universe": {
-                "canonical": "physical:all",
+            "canonical": historical.to_string(),
                 "proof": "provider_current_observed",
                 "source_identity": acquisition.source_identity,
                 "scope_exchanges": tqsdk_data::PROVIDER_CURRENT_PHYSICAL_FUTURES_EXCHANGES,
@@ -1651,7 +1657,7 @@ async fn fill_provider_current_physical_catalog(
             "artifact_path": artifact_path,
             "persisted_path": persisted_path,
             "executable": false,
-            "blocked_reason": "provider metadata supplies expiry but no authoritative listing or kind-specific first-available boundary; name/expiry inference is probe-only and cannot safely define full-history fill targets",
+            "blocked_reason": "dry-run does not mutate the native-daily cache, so provider data-membership preparation cannot complete",
         },
     });
     if let Some(path) = &args.report {
@@ -1663,6 +1669,304 @@ async fn fill_provider_current_physical_catalog(
     })
 }
 
+struct ProviderHistoryFillContext {
+    canonical_cache_dir: PathBuf,
+    kind: CacheKind,
+    market: MarketKind,
+    args: FillArgs,
+    historical: tqsdk_data::HistoricalFillUniverseSpec,
+    resolved: ResolvedFillWindow,
+    acquisition: tqsdk_data::HistoricalCatalogAcquisition,
+    auth_user: String,
+    auth_pass: String,
+}
+
+async fn bootstrap_provider_history_and_fill(
+    context: ProviderHistoryFillContext,
+) -> Result<CommandOutcome, CliError> {
+    let ProviderHistoryFillContext {
+        canonical_cache_dir,
+        kind,
+        market,
+        mut args,
+        historical,
+        resolved,
+        acquisition,
+        auth_user,
+        auth_pass,
+    } = context;
+    if !acquisition.complete {
+        return Err(DataError::Validation(
+            "provider roster changed during acquisition; retry historical universe fill"
+                .to_string(),
+        )
+        .into());
+    }
+
+    let bootstrap_start_ns = tqsdk_data::PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS;
+    let bootstrap_end_ns = resolved.window.end_ns;
+    let client = BacktestHistoryClient::builder(canonical_cache_dir.clone())
+        .policy(BacktestHistoryPolicy::RemoteOnMiss)
+        .auth_env()
+        .build()?;
+    let requests = acquisition
+        .contracts
+        .iter()
+        .enumerate()
+        .map(|(index, contract)| {
+            BacktestHistoryRequest::kline(
+                u64::try_from(index).expect("provider roster count fits request id"),
+                &contract.symbol,
+                Duration::from_secs(24 * 60 * 60),
+                bootstrap_start_ns,
+                bootstrap_end_ns,
+            )
+        })
+        .collect::<Vec<_>>();
+    let progress_session =
+        FillProgressSession::new(args.progress, args.progress_max_bars, "daily-bootstrap");
+    let reporter = progress_session.observer();
+    reporter.planning("bootstrapping native daily history for provider roster");
+    let cancellation = BacktestHistoryFillCancellation::new();
+    let signal_task = spawn_shutdown_signal_handler(cancellation.clone(), CacheKind::Daily)?;
+    let progress_callback = reporter.clone();
+    // Keep every terminal outcome attributable to one symbol. Exact timeouts
+    // remain bounded provider-unavailable audit facts for this acquisition.
+    let mut bootstrap_config = history_fill_config(&args)?.with_symbol_batch_size(1)?;
+    if args.batch_timeout_secs.is_none() {
+        bootstrap_config = bootstrap_config.with_batch_timeout(Some(Duration::from_secs(15)))?;
+    }
+    let bootstrap = client
+        .orchestrate_fill(
+            requests,
+            bootstrap_config,
+            cancellation.clone(),
+            move |event| progress_callback.observe_history_progress(&event),
+        )
+        .await;
+    // A timed-out provider chart can keep the owning session unhealthy after the
+    // scheduler returns. Release bootstrap sessions before roster refresh and target fill.
+    drop(client);
+    let bootstrap = bootstrap?;
+    if bootstrap.status() == BacktestHistoryFillTerminalStatus::Interrupted {
+        progress_session.finish(
+            ProgressTerminalStatus::Interrupted,
+            "native daily data-membership bootstrap was cancelled",
+        );
+        return Err(DataError::InvalidState("provider history preparation cancelled").into());
+    }
+    let blocking_failures = bootstrap
+        .symbols()
+        .iter()
+        .filter(|item| {
+            if item.status != BacktestHistoryFillSymbolStatus::Failed {
+                return false;
+            }
+            isolated_provider_history_unavailable_after_ns(item.error.as_deref(), bootstrap_config)
+                .is_none()
+        })
+        .collect::<Vec<_>>();
+    if !blocking_failures.is_empty() {
+        let sample = blocking_failures
+            .iter()
+            .take(8)
+            .map(|item| item.symbol.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        progress_session.finish(
+            ProgressTerminalStatus::Failed,
+            "native daily bootstrap encountered non-timeout failures",
+        );
+        return Err(DataError::InvalidResponse(format!(
+            "provider native-daily bootstrap has {} blocking failures (sample: {}); data-membership artifact was not published",
+            blocking_failures.len(),
+            sample
+        ))
+        .into());
+    }
+    // Exact scheduler timeouts remain acquisition audit facts. They are not
+    // retried as absence proofs: a provider-unavailable chart says nothing
+    // about listing or whether data may become observable in a later run.
+    let provider_unavailable = bootstrap
+        .symbols()
+        .iter()
+        .filter_map(|item| {
+            (item.status == BacktestHistoryFillSymbolStatus::Failed)
+                .then(|| {
+                    isolated_provider_history_unavailable_after_ns(
+                        item.error.as_deref(),
+                        bootstrap_config,
+                    )
+                    .map(|timeout_ns| (item.symbol.clone(), timeout_ns))
+                })
+                .flatten()
+        })
+        .collect::<BTreeMap<_, _>>();
+    let unavailable_circuit_breaker = provider_history_unavailable_limit(bootstrap.symbols().len());
+    let confirmed_complete = bootstrap.completed_symbols();
+    if !provider_history_bootstrap_is_publishable(
+        confirmed_complete,
+        provider_unavailable.len(),
+        bootstrap.symbols().len(),
+    ) {
+        progress_session.finish(
+            ProgressTerminalStatus::Failed,
+            "native daily bootstrap provider-unavailable circuit breaker opened",
+        );
+        return Err(DataError::InvalidResponse(format!(
+            "provider native-daily bootstrap observed {} unavailable contracts out of {}; limit {}; data-membership artifact was not published",
+            provider_unavailable.len(),
+            bootstrap.symbols().len(),
+            unavailable_circuit_breaker
+        ))
+        .into());
+    }
+    progress_session.finish(
+        ProgressTerminalStatus::Complete,
+        format!(
+            "native daily bootstrap complete; deriving data membership ({} bounded provider-unavailable candidates)",
+            provider_unavailable.len()
+        ),
+    );
+
+    if cancellation.is_cancelled() {
+        return Err(DataError::InvalidState("provider history preparation cancelled").into());
+    }
+    let completed_at_ns = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .ok_or_else(|| CliError::Usage("current timestamp exceeds nanosecond range".to_string()))?;
+    let refreshed_discovery =
+        tqsdk_data::session_client_builder_for_futures_discovery(&auth_user, &auth_pass)
+            .build()
+            .map_err(tqsdk::Error::from)?;
+    let refreshed = tqsdk_data::ProviderCurrentHistoricalCatalogAcquirer::new(refreshed_discovery)
+        .acquire(bootstrap_end_ns, completed_at_ns)
+        .await?;
+    let store = tqsdk_data::HistoricalUniverseArtifactStore::new(&canonical_cache_dir);
+    store.publish_acquisition(&refreshed)?;
+    if !refreshed.complete
+        || acquisition.roster_after != refreshed.roster_after
+        || acquisition.contracts != refreshed.contracts
+    {
+        return Err(DataError::Validation(
+            "provider roster or metadata changed during daily bootstrap; retry historical universe fill"
+                .to_string(),
+        )
+        .into());
+    }
+    let acquisition = refreshed;
+
+    let daily_cache = DailyKlineCache::open_read_only(&canonical_cache_dir);
+    let mut observations = BTreeMap::new();
+    for contract in &acquisition.contracts {
+        if let Some(unavailable_after_ns) = provider_unavailable.get(&contract.symbol) {
+            observations.insert(
+                contract.symbol.clone(),
+                tqsdk_data::HistoricalDailyObservation::provider_unavailable(
+                    bootstrap_start_ns,
+                    bootstrap_end_ns,
+                    *unavailable_after_ns,
+                )?,
+            );
+            continue;
+        }
+        let snapshot = minute_cache_snapshot_for_symbol(
+            &canonical_cache_dir,
+            &contract.symbol,
+            bootstrap_start_ns,
+            bootstrap_end_ns,
+        )?;
+        let origin = daily_cache
+            .read_range(
+                &contract.symbol,
+                bootstrap_start_ns,
+                bootstrap_end_ns,
+                &snapshot,
+            )?
+            .first()
+            .map(|row| row.datetime);
+        observations.insert(
+            contract.symbol.clone(),
+            tqsdk_data::HistoricalDailyObservation::new(
+                bootstrap_start_ns,
+                bootstrap_end_ns,
+                origin,
+            )?,
+        );
+    }
+
+    let acquisition =
+        tqsdk_data::promote_provider_daily_history_observations(acquisition, observations)?;
+    let semantic = tqsdk_data::HistoricalSemanticCatalog::from_provider_history_observed(
+        &acquisition,
+        tqsdk_data::PROVIDER_DAILY_MEMBERSHIP_CALENDAR_IDENTITY,
+    )?;
+    let spec = match historical {
+        tqsdk_data::HistoricalFillUniverseSpec::ObservedPhysicalAll => {
+            tqsdk_data::HistoricalFillUniverseSpec::parse("timeline(active:all)")?
+        }
+        timeline @ tqsdk_data::HistoricalFillUniverseSpec::Timeline(_) => timeline,
+    };
+    let contract_count = semantic.catalog.contracts.len().max(1);
+    let budget = tqsdk_data::UniverseBudget::new(
+        contract_count.saturating_mul(4),
+        contract_count.saturating_mul(8),
+    )?;
+    let resolution = tqsdk_data::compile_historical_universe_resolution(
+        &acquisition,
+        &semantic,
+        &spec,
+        resolved.window.start_ns,
+        resolved.window.end_ns,
+        budget,
+    )?;
+    if cancellation.is_cancelled() {
+        return Err(DataError::InvalidState("provider history preparation cancelled").into());
+    }
+    store.publish_acquisition(&acquisition)?;
+    if cancellation.is_cancelled() {
+        return Err(DataError::InvalidState("provider history preparation cancelled").into());
+    }
+    store.publish_semantic_catalog(&semantic)?;
+    if cancellation.is_cancelled() {
+        return Err(DataError::InvalidState("provider history preparation cancelled").into());
+    }
+    let plan_path = store.publish_plan(&resolution.plan)?;
+    store.verify_plan_artifact_chain(&resolution.plan)?;
+
+    args.days.start_day = None;
+    args.days.end_day = None;
+    args.days.last_trading_days = None;
+    args.days.calendar = CalendarMode::Auto;
+    args.days.refresh_calendar = false;
+    let report_path = args.report.clone();
+    let mut outcome = fill_historical_universe_plan(
+        Some(&canonical_cache_dir),
+        kind,
+        market,
+        args,
+        plan_path,
+        Some((cancellation, signal_task)),
+    )
+    .await?;
+    if let Some(object) = outcome.value.as_object_mut() {
+        object.insert(
+            "provider_daily_membership".to_string(),
+            json!({
+                "observed_candidates": acquisition.contracts.len(),
+                "data_members": semantic.catalog.contracts.len(),
+                "provider_unavailable": provider_unavailable.len(),
+                "provider_unavailable_sample": provider_unavailable.keys().take(16).collect::<Vec<_>>(),
+                "membership_start": "first_native_daily_row",
+            }),
+        );
+    }
+    if let Some(path) = report_path {
+        write_atomically(&path, &serde_json::to_vec_pretty(&outcome.value)?)?;
+    }
+    Ok(outcome)
+}
+
 fn historical_data_kind(kind: CacheKind) -> tqsdk_data::HistoricalDataKind {
     match kind {
         CacheKind::Tick => tqsdk_data::HistoricalDataKind::Tick,
@@ -1672,12 +1976,42 @@ fn historical_data_kind(kind: CacheKind) -> tqsdk_data::HistoricalDataKind {
     }
 }
 
+fn isolated_provider_history_unavailable_after_ns(
+    error: Option<&str>,
+    config: BacktestHistoryFillConfig,
+) -> Option<u64> {
+    let message = error?;
+    let timeout = if message.starts_with("history fill batch made no progress for ") {
+        config.idle_timeout()
+    } else if message.starts_with("history fill batch exceeded ") {
+        config.batch_timeout()?
+    } else {
+        return None;
+    };
+    u64::try_from(timeout.as_nanos())
+        .ok()
+        .filter(|value| *value > 0)
+}
+
+fn provider_history_unavailable_limit(roster_len: usize) -> usize {
+    roster_len.div_ceil(20).max(8)
+}
+
+fn provider_history_bootstrap_is_publishable(
+    completed: usize,
+    unavailable: usize,
+    roster_len: usize,
+) -> bool {
+    completed > 0 && unavailable <= provider_history_unavailable_limit(roster_len)
+}
+
 async fn fill_historical_universe_plan(
     cache_dir: Option<&Path>,
     kind: CacheKind,
     market: MarketKind,
     args: FillArgs,
     plan_path: PathBuf,
+    signal_context: Option<(BacktestHistoryFillCancellation, tokio::task::JoinHandle<()>)>,
 ) -> Result<CommandOutcome, CliError> {
     let preflight_plan: tqsdk_data::HistoricalUniversePlan =
         serde_json::from_slice(&fs::read(&plan_path)?)?;
@@ -1687,7 +2021,7 @@ async fn fill_historical_universe_plan(
 
     if !matches!(market, MarketKind::Futures) {
         return Err(CliError::Usage(
-            "--universe-timeline supports only --market futures".to_string(),
+            "legacy --universe-plan supports only --market futures".to_string(),
         ));
     }
     if !args.symbols.symbols.is_empty()
@@ -1702,7 +2036,7 @@ async fn fill_historical_universe_plan(
         || args.daily_slices
     {
         return Err(CliError::Usage(
-            "--universe-timeline supplies exact source ranges; omit symbol, trading-day, calendar, open-day, repair, and slicing flags"
+            "legacy --universe-plan supplies exact source ranges; omit symbol, trading-day, calendar, open-day, repair, and slicing flags"
                 .to_string(),
         ));
     }
@@ -1770,8 +2104,14 @@ async fn fill_historical_universe_plan(
         FillProgressSession::new(args.progress, args.progress_max_bars, kind.as_str());
     let reporter = progress_session.observer();
     reporter.planning("validating pinned historical plan and materializing exact source ranges");
-    let cancellation = BacktestHistoryFillCancellation::new();
-    let signal_task = spawn_shutdown_signal_handler(cancellation.clone(), kind)?;
+    let (cancellation, signal_task) = match signal_context {
+        Some(context) => context,
+        None => {
+            let cancellation = BacktestHistoryFillCancellation::new();
+            let signal_task = spawn_shutdown_signal_handler(cancellation.clone(), kind)?;
+            (cancellation, signal_task)
+        }
+    };
     let progress_callback = reporter.clone();
     let fill_result = client
         .orchestrate_fill(
@@ -4556,11 +4896,14 @@ fn write_output(value: &Value, pretty: bool) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use super::{
         CacheKind, CalendarMode, Cli, Command, FillDaysArgs, MarketKind, MigrateArgs, ProgressMode,
         current_open_trading_day, fill_historical_universe_plan, fill_was_interrupted,
-        historical_universe_fill_targets, migrate, persist_calendar_if_needed, resolve_fill_window,
+        historical_universe_fill_targets, isolated_provider_history_unavailable_after_ns, migrate,
+        persist_calendar_if_needed, provider_history_bootstrap_is_publishable,
+        provider_history_unavailable_limit, resolve_fill_window,
     };
     use chrono::NaiveDate;
     use clap::Parser;
@@ -4570,13 +4913,64 @@ mod tests {
         read_trading_calendar_holidays_snapshot, write_trading_calendar_holidays_snapshot,
         write_trading_calendar_snapshot,
     };
-    use tqsdk_data::{BacktestTickCache, TradingCalendarHolidays, TradingCalendarRow};
+    use tqsdk_data::{
+        BacktestHistoryFillConfig, BacktestTickCache, TradingCalendarHolidays, TradingCalendarRow,
+    };
 
     #[test]
     fn successful_warmup_wins_a_late_shutdown_signal_race() {
         assert!(!fill_was_interrupted(true, true));
         assert!(fill_was_interrupted(true, false));
         assert!(!fill_was_interrupted(false, false));
+    }
+
+    #[test]
+    fn only_isolated_provider_timeouts_are_data_unavailable_outcomes() {
+        let config = BacktestHistoryFillConfig::default()
+            .with_idle_timeout(Duration::from_secs(9))
+            .unwrap()
+            .with_batch_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+        assert_eq!(
+            isolated_provider_history_unavailable_after_ns(
+                Some("history fill batch made no progress for 9s"),
+                config,
+            ),
+            Some(9_000_000_000)
+        );
+        assert_eq!(
+            isolated_provider_history_unavailable_after_ns(
+                Some("history fill batch exceeded 15s"),
+                config,
+            ),
+            Some(15_000_000_000)
+        );
+        assert_eq!(
+            isolated_provider_history_unavailable_after_ns(Some("authentication failed"), config),
+            None
+        );
+        assert_eq!(
+            isolated_provider_history_unavailable_after_ns(None, config),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_history_unavailable_circuit_breaker_boundaries() {
+        let roster_len = 100;
+        let limit = provider_history_unavailable_limit(roster_len);
+        assert_eq!(limit, 8);
+        assert!(!provider_history_bootstrap_is_publishable(0, 0, roster_len));
+        assert!(provider_history_bootstrap_is_publishable(
+            roster_len - limit,
+            limit,
+            roster_len,
+        ));
+        assert!(!provider_history_bootstrap_is_publishable(
+            roster_len - limit - 1,
+            limit + 1,
+            roster_len,
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4898,10 +5292,19 @@ mod tests {
 
     #[test]
     fn fill_accepts_historical_universe_timeline_path() {
-        let cli = Cli::try_parse_from([
+        let alias_error = Cli::try_parse_from([
             "tqsdk-cache",
             "fill",
             "--universe-timeline",
+            "fixture-plan.json",
+        ])
+        .unwrap_err();
+        assert_eq!(alias_error.kind(), clap::error::ErrorKind::UnknownArgument);
+
+        let cli = Cli::try_parse_from([
+            "tqsdk-cache",
+            "fill",
+            "--universe-plan",
             "fixture-plan.json",
         ])
         .unwrap();
@@ -5056,6 +5459,7 @@ mod tests {
             MarketKind::Futures,
             args,
             plan_path,
+            None,
         )
         .await
         .unwrap();
