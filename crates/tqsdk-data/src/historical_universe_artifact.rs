@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     ActiveInterval, CatalogContract, CatalogSnapshot, DataError, DynamicUniverseScope,
-    HistoricalCatalogProof, HistoricalUniversePlan, Result,
+    HistoricalCatalogProof, HistoricalUniversePlan, HistoricalUniversePlanArtifact, Result,
 };
 
 pub const HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION: u32 = 1;
@@ -840,6 +840,57 @@ impl HistoricalUniverseArtifactStore {
         Ok(value)
     }
 
+    /// Publishes either a frozen V1-V3 plan or a canonical V4 artifact.
+    pub fn publish_plan_artifact(
+        &self,
+        artifact: &HistoricalUniversePlanArtifact,
+    ) -> Result<PathBuf> {
+        artifact.verify()?;
+        match artifact {
+            HistoricalUniversePlanArtifact::Legacy(plan) => self.publish_plan(plan),
+            HistoricalUniversePlanArtifact::V4(_) => self.publish(
+                "plans",
+                artifact.plan_sha256(),
+                &artifact.canonical_json_bytes()?,
+            ),
+        }
+    }
+
+    /// Loads V1-V4 by the flat top-level `plan_version` discriminator.
+    ///
+    /// V4 bytes must exactly match the fixed-order canonical writer. The legacy
+    /// `load_plan` path intentionally keeps its existing V1-V3-only behavior.
+    pub fn load_plan_artifact(&self, sha256: &str) -> Result<HistoricalUniversePlanArtifact> {
+        let bytes = self.load_bytes("plans", sha256)?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let version = value
+            .get("plan_version")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| validation("historical universe plan lacks plan_version"))?;
+        let artifact = match version {
+            1..=3 => HistoricalUniversePlanArtifact::Legacy(serde_json::from_slice(&bytes)?),
+            4 => {
+                let artifact: HistoricalUniversePlanArtifact = serde_json::from_slice(&bytes)?;
+                if artifact.canonical_json_bytes()? != bytes {
+                    return Err(validation(
+                        "historical universe V4 artifact bytes are not canonical",
+                    ));
+                }
+                artifact
+            }
+            _ => {
+                return Err(validation(format!(
+                    "unsupported historical universe plan version {version}"
+                )));
+            }
+        };
+        artifact.verify()?;
+        if artifact.plan_sha256() != sha256 {
+            return Err(validation("historical universe plan path/hash mismatch"));
+        }
+        Ok(artifact)
+    }
+
     /// Verifies the complete content-addressed identity chain for an executable plan.
     /// Legacy v1/v2 plans have no external chain and retain their original verification.
     pub fn verify_plan_artifact_chain(&self, plan: &HistoricalUniversePlan) -> Result<()> {
@@ -874,6 +925,80 @@ impl HistoricalUniverseArtifactStore {
         {
             return Err(validation(
                 "historical universe plan timeline does not match its semantic catalog",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Verifies the version-specific artifact chain without applying numeric
+    /// `plan_version >= N` assumptions.
+    pub fn verify_plan_artifact_chain_artifact(
+        &self,
+        artifact: &HistoricalUniversePlanArtifact,
+    ) -> Result<()> {
+        let HistoricalUniversePlanArtifact::V4(plan) = artifact else {
+            let HistoricalUniversePlanArtifact::Legacy(plan) = artifact else {
+                unreachable!()
+            };
+            return self.verify_plan_artifact_chain(plan);
+        };
+
+        plan.verify()?;
+        let identity = plan.identity();
+        let acquisition = self.load_acquisition(identity.acquisition_sha256())?;
+        let semantic = self.load_semantic_catalog(identity.semantic_catalog_sha256())?;
+        semantic.validate_against_acquisition(&acquisition)?;
+        if acquisition.proof != identity.proof()
+            || !matches!(
+                acquisition.proof,
+                HistoricalCatalogProof::AuthoritativeLifecycle
+                    | HistoricalCatalogProof::ProviderHistoryObserved
+            )
+        {
+            return Err(validation(
+                "historical universe V4 proof does not match executable acquisition",
+            ));
+        }
+        if semantic.acquisition_sha256 != acquisition.acquisition_sha256 {
+            return Err(validation(
+                "historical universe V4 semantic/acquisition link is broken",
+            ));
+        }
+        let timeline = plan.timeline();
+        if timeline.catalog_id != semantic.catalog.catalog_id
+            || timeline.catalog_sha256 != semantic.catalog.content_sha256()
+            || timeline.calendar_identity != semantic.catalog.calendar_identity
+            || identity.calendar_identity() != semantic.catalog.calendar_identity
+        {
+            return Err(validation(
+                "historical universe V4 timeline does not match semantic catalog",
+            ));
+        }
+
+        let rollback = self.load_plan(identity.rollback_v3_plan_sha256())?;
+        if rollback.plan_version != 3
+            || rollback.timeline != *timeline
+            || rollback.budget != plan.budget()
+        {
+            return Err(validation(
+                "historical universe V4 rollback projection does not match V4 plan",
+            ));
+        }
+        let rollback_identity = rollback
+            .v3_identity
+            .as_ref()
+            .ok_or_else(|| validation("historical universe V4 rollback plan lacks V3 identity"))?;
+        let rollback_execution = rollback
+            .v3_execution
+            .as_ref()
+            .ok_or_else(|| validation("historical universe V4 rollback plan lacks V3 execution"))?;
+        if rollback_identity.acquisition_sha256 != identity.acquisition_sha256()
+            || rollback_identity.semantic_catalog_sha256 != identity.semantic_catalog_sha256()
+            || rollback_identity.proof != identity.proof()
+            || plan.execution().to_v3()? != *rollback_execution
+        {
+            return Err(validation(
+                "historical universe V4 rollback identity/execution chain mismatch",
             ));
         }
         Ok(())
@@ -915,11 +1040,15 @@ impl HistoricalUniverseArtifactStore {
     }
 
     fn load<T: for<'de> Deserialize<'de>>(&self, family: &str, sha256: &str) -> Result<T> {
+        Ok(serde_json::from_slice(&self.load_bytes(family, sha256)?)?)
+    }
+
+    fn load_bytes(&self, family: &str, sha256: &str) -> Result<Vec<u8>> {
         let path = self.artifact_path(family, sha256)?;
         reject_symlink_ancestors(&path)?;
         let mut bytes = Vec::new();
         File::open(path)?.read_to_end(&mut bytes)?;
-        Ok(serde_json::from_slice(&bytes)?)
+        Ok(bytes)
     }
 }
 
