@@ -1,6 +1,7 @@
 use tqsdk_data::{
     FuturesContract, FuturesUniverseResolver, StaticFuturesUniverseResolver, UniverseExpression,
-    resolve_futures_universe_symbols, resolve_static_symbols_with_expression,
+    UniverseInput, UniverseSpec, resolve_futures_universe_symbols, resolve_futures_universe_v2,
+    resolve_static_symbols_with_expression,
 };
 
 struct CountingFuturesUniverseResolver {
@@ -28,6 +29,37 @@ async fn selector_matches_relay_expression_semantics() {
         .unwrap();
 
     assert_eq!(symbols, vec!["SHFE.rb2601"]);
+}
+
+#[tokio::test]
+async fn universe_v2_snapshot_uses_the_shared_materialized_provider_adapter() {
+    let input = UniverseInput::from_spec(
+        UniverseSpec::parse_v2(concat!(
+            "snapshot(contract:all;main:DCE.m;continuous:DCE.m;index:DCE.m;",
+            "!contract:SHFE.rb2601)"
+        ))
+        .unwrap(),
+    )
+    .expand()
+    .unwrap();
+    let mut resolver = StaticFuturesUniverseResolver::new([
+        FuturesContract::new("DCE.m2609", "DCE", "m", false).unwrap(),
+        FuturesContract::new("SHFE.rb2601", "SHFE", "rb", false).unwrap(),
+        FuturesContract::new("KQD.CBOT.KE", "KQD", "CBOT.KE", false).unwrap(),
+    ])
+    .with_main_symbols(["DCE.m2609"]);
+
+    let compiled = resolve_futures_universe_v2(&input, &mut resolver)
+        .await
+        .unwrap();
+    let symbols = compiled
+        .candidates()
+        .iter()
+        .map(|candidate| candidate.symbol())
+        .collect::<Vec<_>>();
+
+    assert_eq!(symbols, vec!["DCE.m2609", "KQ.i@DCE.m", "KQ.m@DCE.m"]);
+    assert_eq!(compiled.physical_dependencies(), ["DCE.m2609"]);
 }
 
 #[tokio::test]

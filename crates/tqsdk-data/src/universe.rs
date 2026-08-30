@@ -2,6 +2,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -9,6 +10,10 @@ use tqsdk_core::{Quote, RuntimeReader, TradingTime};
 use tqsdk_session::{InstrumentClass, SessionClient, SessionClientBuilder, SymbolInfo};
 
 use crate::error::{DataError, Result};
+use crate::universe_spec::{
+    CompiledUniverse, ExpandedUniverseInput, SnapshotCapabilities, SnapshotContract,
+    UniverseProduct, UniverseSymbolClass, UniverseView, compile_expanded_snapshot_universe,
+};
 use crate::{UniverseClause, UniverseExpression, UniverseSelector, UniverseSelectorKind};
 
 pub const DEFAULT_FUTURES_METADATA_BATCH_SIZE: usize = 500;
@@ -410,6 +415,270 @@ where
         .into_iter()
         .map(|contract| contract.symbol)
         .collect())
+}
+
+/// Materializes the async provider capabilities once, then evaluates a
+/// snapshot Universe V2 input through the shared pure compiler.
+pub async fn resolve_futures_universe_v2<R>(
+    input: &ExpandedUniverseInput,
+    resolver: &mut R,
+) -> Result<CompiledUniverse>
+where
+    R: FuturesUniverseResolver + Send,
+{
+    let contracts = resolver.active_futures().await?;
+    let top_limits = input
+        .spec()
+        .into_iter()
+        .flat_map(|spec| spec.includes())
+        .filter_map(|selector| match selector.view() {
+            UniverseView::Top(limit) => Some(limit),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let needs_main = input.spec().is_some_and(|spec| {
+        spec.includes()
+            .iter()
+            .any(|selector| matches!(selector.view(), UniverseView::Main | UniverseView::Top(_)))
+    });
+    let mut main_symbols = if needs_main {
+        resolver.main_futures().await?
+    } else {
+        Vec::new()
+    };
+    main_symbols.sort();
+    main_symbols.dedup();
+
+    let quote_snapshots = if top_limits.iter().any(|limit| *limit > 1) {
+        let symbols = contracts
+            .iter()
+            .filter(|contract| !contract.expired)
+            .map(|contract| contract.symbol.clone())
+            .collect::<Vec<_>>();
+        resolver.quote_snapshots(&symbols).await?
+    } else {
+        Vec::new()
+    };
+
+    let capabilities = MaterializedFuturesSnapshotCapabilities::new(
+        contracts,
+        main_symbols,
+        quote_snapshots,
+        &top_limits,
+    )
+    .await?;
+    compile_expanded_snapshot_universe(input, &capabilities)
+        .map_err(|error| invalid_universe(error.to_string()))
+}
+
+/// Evaluates file/symbol-only Universe V2 input without provider access.
+pub fn compile_static_futures_universe_v2(
+    input: &ExpandedUniverseInput,
+) -> Result<CompiledUniverse> {
+    if input.spec().is_some_and(|spec| {
+        spec.includes()
+            .iter()
+            .any(|selector| selector.view() != UniverseView::Symbol)
+    }) {
+        return Err(invalid_universe(
+            "Universe V2 snapshot contains views that require provider capabilities",
+        ));
+    }
+    let capabilities = MaterializedFuturesSnapshotCapabilities {
+        contracts: Vec::new(),
+        futures_contracts: BTreeMap::new(),
+        products: BTreeSet::new(),
+        main_by_product: BTreeMap::new(),
+        top_by_product_and_limit: BTreeMap::new(),
+    };
+    compile_expanded_snapshot_universe(input, &capabilities)
+        .map_err(|error| invalid_universe(error.to_string()))
+}
+
+#[derive(Debug, Clone)]
+struct MaterializedFuturesSnapshotCapabilities {
+    contracts: Vec<SnapshotContract>,
+    futures_contracts: BTreeMap<String, FuturesContract>,
+    products: BTreeSet<UniverseProduct>,
+    main_by_product: BTreeMap<UniverseProduct, String>,
+    top_by_product_and_limit: BTreeMap<(UniverseProduct, u32), Vec<String>>,
+}
+
+impl MaterializedFuturesSnapshotCapabilities {
+    async fn new(
+        contracts: Vec<FuturesContract>,
+        main_symbols: Vec<String>,
+        quote_snapshots: Vec<Quote>,
+        top_limits: &BTreeSet<u32>,
+    ) -> Result<Self> {
+        let futures_contracts = contracts
+            .into_iter()
+            .map(|contract| (contract.symbol.clone(), contract))
+            .collect::<BTreeMap<_, _>>();
+        let snapshot_contracts = futures_contracts
+            .values()
+            .map(|contract| {
+                let (_, instrument_id) = contract
+                    .symbol
+                    .split_once('.')
+                    .expect("validated futures contract includes exchange");
+                SnapshotContract::new(&contract.exchange_id, instrument_id, &contract.product_id)
+                    .eligible(
+                        SUPPORTED_FUTURES_UNIVERSE_EXCHANGES
+                            .contains(&contract.exchange_id.as_str()),
+                    )
+                    .expired(contract.expired)
+            })
+            .collect::<Vec<_>>();
+        let products = snapshot_contracts
+            .iter()
+            .filter(|contract| contract.is_eligible() && !contract.is_expired())
+            .map(|contract| UniverseProduct::new(contract.exchange(), contract.product()))
+            .collect::<BTreeSet<_>>();
+
+        let mut main_by_product = BTreeMap::new();
+        for symbol in &main_symbols {
+            if let Some(contract) = futures_contracts.get(symbol) {
+                let product = UniverseProduct::new(&contract.exchange_id, &contract.product_id);
+                if products.contains(&product) {
+                    main_by_product
+                        .entry(product)
+                        .or_insert_with(|| symbol.clone());
+                }
+            }
+        }
+
+        let mut static_resolver = StaticFuturesUniverseResolver::new(
+            futures_contracts.values().cloned().collect::<Vec<_>>(),
+        )
+        .with_main_symbols(main_symbols)
+        .with_quote_snapshots(quote_snapshots);
+        let mut top_by_product_and_limit = BTreeMap::new();
+        for limit in top_limits {
+            let expression = UniverseExpression::parse(&format!("top:{limit}:all"))?;
+            let selected =
+                resolve_futures_universe_symbols(&expression, &mut static_resolver).await?;
+            let mut grouped = BTreeMap::<UniverseProduct, Vec<String>>::new();
+            for symbol in selected {
+                let Some(contract) = futures_contracts.get(&symbol) else {
+                    return Err(invalid_universe(format!(
+                        "top:{limit} returned unknown futures contract {symbol}"
+                    )));
+                };
+                grouped
+                    .entry(UniverseProduct::new(
+                        &contract.exchange_id,
+                        &contract.product_id,
+                    ))
+                    .or_default()
+                    .push(symbol);
+            }
+            for (product, mut symbols) in grouped {
+                symbols.sort();
+                symbols.dedup();
+                top_by_product_and_limit.insert((product, *limit), symbols);
+            }
+        }
+
+        Ok(Self {
+            contracts: snapshot_contracts,
+            futures_contracts,
+            products,
+            main_by_product,
+            top_by_product_and_limit,
+        })
+    }
+
+    fn classify_logical_symbol(&self, symbol: &str) -> Option<UniverseSymbolClass> {
+        let (kind, rest) = if let Some(rest) = symbol.strip_prefix("KQ.m@") {
+            (UniverseView::Continuous, rest)
+        } else {
+            let rest = symbol.strip_prefix("KQ.i@")?;
+            (UniverseView::Index, rest)
+        };
+        let (exchange, product) = rest.split_once('.')?;
+        if exchange.is_empty()
+            || product.is_empty()
+            || product.contains('.')
+            || !is_known_futures_exchange(&exchange.to_ascii_uppercase())
+        {
+            return None;
+        }
+        match kind {
+            UniverseView::Continuous => Some(UniverseSymbolClass::continuous(exchange, product)),
+            UniverseView::Index => Some(UniverseSymbolClass::index(exchange, product)),
+            _ => unreachable!("logical symbol classifier emits only continuous or index"),
+        }
+    }
+}
+
+impl SnapshotCapabilities for MaterializedFuturesSnapshotCapabilities {
+    type Error = Infallible;
+
+    fn current_contracts(&self) -> std::result::Result<Vec<SnapshotContract>, Self::Error> {
+        Ok(self.contracts.clone())
+    }
+
+    fn main_contract(
+        &self,
+        product: &UniverseProduct,
+    ) -> std::result::Result<Option<String>, Self::Error> {
+        Ok(self.main_by_product.get(product).cloned())
+    }
+
+    fn top_contracts(
+        &self,
+        product: &UniverseProduct,
+        limit: u32,
+    ) -> std::result::Result<Vec<String>, Self::Error> {
+        Ok(self
+            .top_by_product_and_limit
+            .get(&(product.clone(), limit))
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    fn continuous_symbol(
+        &self,
+        product: &UniverseProduct,
+    ) -> std::result::Result<Option<String>, Self::Error> {
+        Ok(self
+            .products
+            .contains(product)
+            .then(|| format!("KQ.m@{}.{}", product.exchange(), product.product())))
+    }
+
+    fn index_symbol(
+        &self,
+        product: &UniverseProduct,
+    ) -> std::result::Result<Option<String>, Self::Error> {
+        Ok(self
+            .products
+            .contains(product)
+            .then(|| format!("KQ.i@{}.{}", product.exchange(), product.product())))
+    }
+
+    fn classify_symbol(
+        &self,
+        symbol: &str,
+    ) -> std::result::Result<Option<UniverseSymbolClass>, Self::Error> {
+        if let Some(contract) = self.futures_contracts.get(symbol) {
+            return Ok(Some(UniverseSymbolClass::physical(
+                &contract.exchange_id,
+                &contract.product_id,
+            )));
+        }
+        if let Some(classification) = self.classify_logical_symbol(symbol) {
+            return Ok(Some(classification));
+        }
+        let classification = FuturesContract::from_symbol(symbol, false)
+            .ok()
+            .filter(|contract| is_known_futures_exchange(&contract.exchange_id))
+            .map(|contract| {
+                UniverseSymbolClass::physical(contract.exchange_id, contract.product_id)
+            });
+        Ok(classification)
+    }
 }
 
 pub fn resolve_static_symbols_with_expression(
