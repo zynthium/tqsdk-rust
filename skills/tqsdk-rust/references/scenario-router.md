@@ -29,6 +29,8 @@
 | "历史K线", "历史 tick", "下载", "CSV", "离线研究", "缓存", "回放", "Greeks", "data_series"，但未明确优先回测缓存 | Historical/offline research | `tqsdk-data` for generic rows/cache/export; `tqsdk-task` for replay source | data: `DataClient`, `get_*_data_series`, `*_data_download`, `export_*_csv`, `HistorySeriesCache`, `BacktestTickCache`; task replay: `ReplayMarketSource`, `StrategyReplaySourceBuilder` |
 | "低延迟", "同一 revision", "cursor", "commit", "runtime", "adapter", "command status" | Low-level substrate or custom facade | `tqsdk-session` plus `tqsdk-core` | `SessionClient`, `progress_once`, `RuntimeReader`, `cursor`, `read_market_trade_state` |
 
+涉及 Universe V2、当前/历史全部合约、动态合约集合、`timeline(...)` 或 `tqsdk-cache fill --universe` 时，先读 `references/universe.md`：它先区分 snapshot 与历史 timeline，再选择下载 kind 或回测入口。
+
 请求涉及角色覆盖或 public API 证据时，继续读 `references/scenario-contracts.md`，并把回答锚定到对应 `api_contract_sXX_*.rs` 示例。
 
 ## 各场景调用模式

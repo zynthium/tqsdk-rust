@@ -290,7 +290,7 @@ async fn run(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
 ```
 
 `MarketCachePolicy` 可以用 `.record_ticks([...])` 显式列 symbol，也可以用
-`.record_universe("active:all;!CFFEX")?` 复用共享 selector。`Tq::record_ticks(cache_dir, symbols).await?`
+`.record_universe("snapshot(contract:all;!CFFEX.*)")?` 复用共享 selector。`Tq::record_ticks(cache_dir, symbols).await?`
 仍保留为运行中临时开启 recording 的显式入口。两种方式都只记录 policy 解析出的 symbol，
 不会自动记录所有订阅，也不会启动后台守护进程。`coverage` 只在 tick id 连续时推进；断线、跳号或程序退出前未确认的尾部会留下缺口，后续需要显式
 `.warmup()` / `.remote_on_miss()` 补齐。
@@ -349,6 +349,17 @@ physical symbol、batch、cursor、retry/split 和终态。handler 位于远端�
 - `KQ.i@...` 指数和 `KQ.m@...` 主连是不同的请求语义：前者按该 index symbol 缓存，后者会解析为具体合约范围并共享具体合约的 tick 文件。不要用一个 symbol 的覆盖报告推断另一个 symbol 完整。
 - `RemoteOnMiss` 成功后，对相同 root、symbol/universe 和时间窗口运行 `.cache_only()`，并至少消费一次回放。验收应同时满足 cache-only 无缺口、所有目标 symbol complete、以及预期存在行情时 replay 非空；文件数、体积和 remote rows 仅作诊断指标。
 
+### Universe V2：当前快照与历史 timeline
+
+Universe 只选择 instrument；tick、minute、daily 由消费 API 或 `tqsdk-cache --kind` 选择。新配置应显式写 wrapper，避免落入 legacy v1 dispatcher：
+
+- 当前 live、relay 或静态回测集合使用 `snapshot(...)`，例如 `snapshot(contract:all;continuous:all;index:all;!CFFEX.*)`。
+- 历史下载和“回测时间推进时自动纳入有数据的合约、移出到期合约”使用 `timeline(...)`，例如 `timeline(contract:all;continuous:all;index:all)`。它由历史 compiler 固定成 V5 artifact；不能用于 live 订阅。
+- `contract` 是具体物理合约，`main` 是当前具体主力，`continuous`（输入可简写为 `cont`）是逻辑 `KQ.m@...`，`index` 是逻辑 `KQ.i@...`。不要把 `main` 当作主连。
+- `active`、`physical`、bare scope、`!CFFEX` 与 `file:` 都不是 V2 写法；旧入口可能为了兼容接受它们，但新配置使用 `contract`、`!CFFEX.*` 与外层 `--universe-file`。
+
+完整 DSL、V5 artifact 与迁移边界见 `references/universe.md`。
+
 ### Cache Operator CLI
 
 固定共享 root 的 cache 运维不必把策略进程改成 downloader。可选 `tqsdk-cache` binary 复用同一套
@@ -372,10 +383,10 @@ snapshot 后才输出 block，默认 fail closed。仅在有意用默认 `remote
 `TQ_AUTH_USER` / `TQ_AUTH_PASS`，并事先取得对目标 cache root 写入和联网的授权。
 
 ```bash
-# 预检不会请求远端 tick、写 cache 或获取 fill lock。
+# 当前 snapshot 的预检不会请求远端 tick、写 cache 或获取 fill lock。
 cargo run -p tqsdk-cache -- \
   --cache-dir /var/lib/tqsdk/history fill \
-  --universe 'main:all;index:all;!CFFEX' \
+  --universe 'snapshot(main:all;index:all;!CFFEX.*)' \
   --start-day 2026-06-01 --end-day 2026-06-30 --dry-run
 
 # 正常 fill 只补缺失 coverage。仅在实际 miss 时需要此账号对。
