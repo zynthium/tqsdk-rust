@@ -415,7 +415,7 @@ cache warmup runner 的远端 smoke：
 
 canonical-minute 的凭证门控验收同样只在用户明确授权时执行，且必须选择已结束的历史 trading-day
 window、不得连接交易账户或输出 `TQ_AUTH_*`。至少选取少量实际可用的指数合约（例如
-`KQ.i@SHFE.au` 与另一交易所的可用指数代码），先用 `tqsdk-cache --kind minute fill` materialize
+`KQ.i@SHFE.au` 与另一交易所的可用指数代码），先用 `tqsdk-cache fill --kind minute` materialize
 60s cache，再对相同 closed window：
 
 1. 从本地 canonical 60s cache 聚合 5m 与 15m bars；

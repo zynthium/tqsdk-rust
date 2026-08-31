@@ -228,7 +228,7 @@ cached range 比较 schema、market、logical symbol、session、交易日和主
 完全相同即可复用旧 coverage，新增日期只作为缺口填充，当前月下一次原子写入时迁移到新 snapshot hash。
 缺少任一 sidecar、session/交易日/映射变化、损坏文件或语义冲突的混合分区仍默认 fail closed，不会自动
 删除、重写或拼接数据。只有
-操作者显式传 `tqsdk-cache --kind minute fill --repair-stale` 时，CLI 才会在 active snapshot 覆盖窗口时，
+操作者显式传 `tqsdk-cache fill --kind minute --repair-stale` 时，CLI 才会在 active snapshot 覆盖窗口时，
 删除该窗口内与它冲突的整月分区，再走普通 `remote-on-miss` 补齐；它不适用于 tick 或
 `--dry-run`，普通读取与 fill 仍不会删除数据。
 
@@ -350,7 +350,7 @@ Tick v3 首 snapshot 是完整 keyframe，后续 snapshot 只写变化字段和 
 `tqsdk-cache migrate --apply --backup-dir DIR`；新 writer 拒绝向 v2 Tick 文件混写。
 canonical-minute v5 保留全部 60s Kline row，并仅在 zstd 更小时压缩 row payload；零成交或重复分钟
 不会被删除或合成。旧 minute v4 cache 需先执行
-`tqsdk-cache --kind minute migrate --apply --backup-dir DIR`，并由该命令把原文件硬链接备份到
+`tqsdk-cache migrate --kind minute --apply --backup-dir DIR`，并由该命令把原文件硬链接备份到
 cache root 外；v3 minute 文件仍按 fail-closed 处理。
 当前日 checkpoint 使用独立的 non-final provisional record，不进入普通 coverage；同日 final
 coverage 成功后会覆盖并在 compaction 中淘汰它。
@@ -441,7 +441,7 @@ let page = client.get_kline_data_page(request).await?;
 | 默认 facade 实时 tick 记录 | `TQ_RUN_LIVE_RECORD_TICKS=1 cargo run -p tqsdk --example api_contract_s46_facade_record_ticks` | 显式 `record_ticks(...)` 把指定合约 live tick 写入同一份回测缓存；需要账号 |
 | 默认 facade 共享缓存 policy | `TQ_RUN_LIVE_RECORD_TICKS=1 cargo run -p tqsdk --example api_contract_s47_facade_market_cache_policy` | `MarketCachePolicy` 同时驱动 live tick recording 和 cache-backed local backtest 输入 |
 | 回测缓存运维 CLI | `cargo run -p tqsdk-cache -- --help` | 可选 binary；以 `--kind tick|minute|daily|all` 管理 daily TQBN tick、canonical-minute 与 native-1d cache；daily 支持 closed-day inspect/fill/verify/report 与整文件 purge，不启动 relay 或守护进程 |
-| 修复遗失的 tick companion lock | `cargo run -p tqsdk-cache -- --kind tick repair-locks` | 默认检查每个 Tick 分区的 legacy `.tqbn.lock` 与逐文件 sidecar；停止同一 root 的读写者后，才用 `--apply` 补建缺失 lock，不填数、不重写 TQBN |
+| 修复遗失的 tick companion lock | `cargo run -p tqsdk-cache -- repair-locks --kind tick` | 默认检查每个 Tick 分区的 legacy `.tqbn.lock` 与逐文件 sidecar；停止同一 root 的读写者后，才用 `--apply` 补建缺失 lock，不填数、不重写 TQBN |
 | 回测历史查询 / LLM 上下文 CLI | `cargo run -p tqsdk-cache -- query --help` | 同一 cache-backed history query 的 CLI adapter；`jsonl` 用于无损 rows，`llm-csv` 用于 token-aware 模型输入 |
 | 默认 facade 多合约同主体 | `cargo run -p tqsdk --example api_contract_s39_facade_same_body` | 同一两腿价差策略只接受 `&mut Tq`，`TQ_EXAMPLE_MODE` 决定本地回测、快期模拟或实盘 |
 | 默认 facade 本地回测 TargetPos | `cargo run -p tqsdk --example api_contract_s40_facade_local_backtest_target_pos` | 同一 `Tq::next()` 策略主体在本地 replay 中读取持仓并用 `TargetPos` 调仓 |

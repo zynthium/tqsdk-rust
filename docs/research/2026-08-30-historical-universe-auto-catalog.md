@@ -1,5 +1,12 @@
 # Historical Universe 自动 Catalog 调研
 
+> 决策更新（2026-08-31）：本报告保留为实现前的研究记录，不覆盖当前
+> [Historical Universe Catalog](../architecture/historical-universe-catalog.md) 或
+> [Universe Language](../architecture/universe-language.md)。现行用户入口只使用
+> `--universe 'timeline(contract:all;continuous:all;index:all)'` 并直接发布 V5；文中
+> `physical:all`、`active:all`、`cont:all`、`--universe-timeline` 和 `PLAN.json` 均是历史提案，
+> 不应复制到新配置或示例。
+
 日期：2026-08-30
 
 状态：research note，不是当前架构规范，也不授权修改 Rust。

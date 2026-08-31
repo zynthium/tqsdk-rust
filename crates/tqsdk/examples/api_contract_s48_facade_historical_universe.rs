@@ -8,7 +8,7 @@ use tqsdk_data::{
 };
 
 const CACHE_ROOT: &str = ".tqsdk/backtest_ticks";
-const V4_PLAN_SHA256: &str =
+const V5_PLAN_SHA256: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 fn plan() -> tqsdk_data::Result<tqsdk_data::HistoricalUniversePlan> {
@@ -30,20 +30,20 @@ fn plan() -> tqsdk_data::Result<tqsdk_data::HistoricalUniversePlan> {
 }
 
 fn main() -> tqsdk::Result<()> {
-    // The source-compatible V1-V3 entry point remains available.
+    // Compatibility-only V1-V3 entry point; new code consumes V5 below.
     let _legacy_backtest = Tq::futures()
         .backtest(0, 60_000_000_000)
         .cache_dir(CACHE_ROOT)?
         .cache_only()
         .historical_universe_plan(plan()?)?;
 
-    // A cache fill report supplies the real V4 hash. Loading through the
-    // artifact store verifies its canonical bytes; preparation additionally
-    // verifies acquisition, semantic-catalog and V3 rollback links.
+    // A timeline fill report supplies a real V5 artifact hash. Loading through
+    // the artifact store verifies canonical bytes; preparation additionally
+    // verifies the requested interval and acquisition/catalog chain.
     if let Ok(artifact) =
-        HistoricalUniverseArtifactStore::new(CACHE_ROOT).load_plan_artifact(V4_PLAN_SHA256)
+        HistoricalUniverseArtifactStore::new(CACHE_ROOT).load_plan_artifact(V5_PLAN_SHA256)
     {
-        let _v4_backtest = Tq::futures()
+        let _v5_backtest = Tq::futures()
             .backtest(0, 60_000_000_000)
             .cache_dir(CACHE_ROOT)?
             .cache_only()

@@ -13,6 +13,9 @@ CLI 只编排已有的 `tqsdk` backtest builder 与 `tqsdk-data` cache API：不
 session owner、后台守护进程、relay 或监控服务。完整合同见
 [回测缓存 CLI](../../docs/architecture/backtest-tick-cache-cli.md)。
 
+本文统一写作 `tqsdk-cache <subcommand> [options]`；`--kind`、`--cache-dir` 等全局参数虽可被
+CLI 在兼容位置解析，新示例始终放在子命令之后。
+
 ### 历史动态 universe fill
 
 历史下载只需 `--universe`。推荐的 Universe Language V2 写法是
@@ -39,12 +42,14 @@ V4/V3 chain 验证后可迁移为 V5，source 与 rollback artifact 保留。
 
 ```bash
 # 截止窗口内出现过的全部物理合约分钟线
-tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
+tqsdk-cache fill \
+  --cache-dir /var/lib/tqsdk/history \
   --kind minute --universe 'timeline(contract:all)' \
   --start-day 2025-01-01 --symbol-concurrency 4
 
 # 动态活跃物理合约，同时保留连续依赖和指数序列
-tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
+tqsdk-cache fill \
+  --cache-dir /var/lib/tqsdk/history \
   --kind tick \
   --universe 'timeline(contract:all;continuous:all;index:all)' \
   --start-day 2025-01-01 --symbol-concurrency 4
@@ -60,8 +65,8 @@ V1–V3 plan 重新编译；`--universe-timeline` 已移除。
 先审计、再写入 V4→V5 mapping：
 
 ```bash
-tqsdk-cache --cache-dir /var/lib/tqsdk/history migrate-universe --plan-sha256 <V4_SHA256>
-tqsdk-cache --cache-dir /var/lib/tqsdk/history migrate-universe --plan-sha256 <V4_SHA256> --apply
+tqsdk-cache migrate-universe --cache-dir /var/lib/tqsdk/history --plan-sha256 <V4_SHA256>
+tqsdk-cache migrate-universe --cache-dir /var/lib/tqsdk/history --plan-sha256 <V4_SHA256> --apply
 ```
 首次自动准备不能在 `--dry-run` 中完成：dry-run 只审计稳定 roster，并以
 `preparation_required`/exit 1 报告需要 native-daily cache mutation。
@@ -90,7 +95,8 @@ partition 的 reader 使用。
 ```bash
 TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history metadata-refresh \
+  metadata-refresh \
+  --cache-dir /var/lib/tqsdk/history \
   --symbol SHFE.op2601 \
   --start 2025-09-25T00:00:00+08:00 \
   --end 2025-09-26T00:00:00+08:00
@@ -104,7 +110,7 @@ minute 的 format id 为 `tqsdk.minute-kline.monthly.v5`，但 namespace 有意�
 会将两者标记为 `legacy_unsupported`。
 
 ```bash
-tqsdk-cache --cache-dir DIR --kind minute migrate --apply --backup-dir DIR-v5-backup
+tqsdk-cache migrate --cache-dir DIR --kind minute --apply --backup-dir DIR-v5-backup
 ```
 
 每个 v5 月文件绑定写入时的 immutable metadata snapshot。active metadata pointer 随后前移不会单独
@@ -113,7 +119,7 @@ tqsdk-cache --cache-dir DIR --kind minute migrate --apply --backup-dir DIR-v5-ba
 session、交易日和 physical mapping。区间语义相同的旧 coverage 直接复用，新增日期保持为缺口；当前月写入
 新数据时才原子迁移 header。缺少 sidecar、session/交易日/映射变化、损坏或语义冲突的混合分区仍默认
 fail closed；CLI 不会为此自动删除、重写或重新下载数据。只有操作者显式传
-`--kind minute fill --repair-stale` 时，CLI 才会在同一次 facade remote-on-miss warmup 中，取得
+`fill --kind minute --repair-stale` 时，CLI 才会在同一次 facade remote-on-miss warmup 中，取得
 root remote-fill lock 并完成认证预检后，删除与覆盖窗口快照冲突的整月分区，再补齐缺口；若没有任何已持久化
 snapshot 覆盖整个请求窗口，则该 flag 会删除窗口内所有已存在的 minute 月分区，让官方 metadata refresh
 建立唯一的目标 snapshot。锁忙或 repair 所需认证缺失时，命令失败且不删除任何分区。该 flag 不支持 tick
@@ -121,7 +127,7 @@ snapshot 覆盖整个请求窗口，则该 flag 会删除窗口内所有已存�
 remote-on-miss metadata 会覆盖涉及的完整 CST trading month；短查询生成的 snapshot 不会替换更宽的 active
 pointer，后续查询会优先复用覆盖其范围的 retained snapshot。
 
-`--market futures|stock` 只影响 `--kind minute fill` 的 server-side backtest endpoint：
+`--market futures|stock` 只影响 `fill --kind minute` 的 server-side backtest endpoint：
 futures 是默认值，允许 `--universe`；stock 必须提供一个或多个显式 `--symbol`，不支持 futures
 universe selector。tick 与 daily fill 不支持 stock market；`--kind tick|daily --market stock` 是 usage error。
 daily fill 同样支持 futures `--symbol` / `--universe`，但它只请求 server-side native `1d` chart；当前或
@@ -129,7 +135,7 @@ daily fill 同样支持 futures `--symbol` / `--universe`，但它只请求 serv
 remote-scheduler 参数都会直接以 usage error 拒绝，绝不降级成 tick/minute 聚合。
 
 tick、minute 与 daily cache 都没有自动 retention、max-byte eviction 或后台清理。读写、普通回测和
-普通 `--kind minute|daily fill` 都不会删除已有数据；`--repair-stale` 是唯一用于混合 snapshot 的显式、
+普通 `fill --kind minute|daily` 都不会删除已有数据；`--repair-stale` 是唯一用于混合 snapshot 的显式、
 受控删除例外。
 
 ### Tick companion lock repair
@@ -143,11 +149,13 @@ tick、minute 与 daily cache 都没有自动 retention、max-byte eviction 或�
 ```bash
 # 默认 DryRun：检查每个 Tick 分区的 legacy lock，并逐文件检查 sidecar。
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --kind tick repair-locks
+  repair-locks \
+  --cache-dir /var/lib/tqsdk/history --kind tick
 
 # 只有确认计划且 reader/writer 已停止后，才创建缺失的 legacy 和逐文件 lock file。
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --kind tick repair-locks --apply
+  repair-locks \
+  --cache-dir /var/lib/tqsdk/history --kind tick --apply
 ```
 
 DryRun 不创建 TQBN companion lock；`--apply` 只创建缺失的 regular lock，绝不改写 TQBN bytes、rows、coverage、
@@ -163,30 +171,36 @@ V3，`--output-schema v2` 仅用于旧脚本迁移。
 ```bash
 # 默认是 tick：快速文件系统盘点；不存在的 root 不会被创建。
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history inventory
+  inventory \
+  --cache-dir /var/lib/tqsdk/history
 
 # 两类 cache 的快速盘点，或两类 cache 的深度诊断。
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --kind all inventory
+  inventory \
+  --cache-dir /var/lib/tqsdk/history --kind all
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --kind all doctor
+  doctor \
+  --cache-dir /var/lib/tqsdk/history --kind all
 
 # minute coverage 以 logical cache symbol 检查，不联网、不写文件。
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --kind minute inspect \
+  inspect \
+  --cache-dir /var/lib/tqsdk/history --kind minute \
   --symbol KQ.i@SHFE.au \
   --start-day 2026-06-01 --end-day 2026-06-30
 
 # tick dry-run：可使用 futures universe；缺 coverage 时退出码为 1。
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history fill \
+  fill \
+  --cache-dir /var/lib/tqsdk/history \
   --universe 'snapshot(main:all;index:all;!CFFEX.*)' \
   --start-day 2026-06-01 --end-day 2026-06-30 --dry-run
 
 # final-only minute fill：只选择已结束 trading day。
 TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --kind minute --market futures fill \
+  fill \
+  --cache-dir /var/lib/tqsdk/history --kind minute --market futures \
   --symbol KQ.i@SHFE.au \
   --start-day 2026-06-01 --end-day 2026-06-30 \
   --symbol-concurrency 2
@@ -194,7 +208,8 @@ cargo run -p tqsdk-cache -- \
 # final-only native daily fill：远端只请求官方 1d chart，不从 60s/tick 聚合。
 TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --kind daily fill \
+  fill \
+  --cache-dir /var/lib/tqsdk/history --kind daily \
   --symbol KQ.i@SHFE.au \
   --start-day 2026-06-01 --end-day 2026-06-30 \
   --symbol-concurrency 2 \
@@ -207,7 +222,8 @@ cargo run -p tqsdk-cache -- \
 # 仅在已确认 mixed snapshot 时显式修复冲突整月分区，再由同一次 fill 补齐。
 TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --kind minute fill \
+  fill \
+  --cache-dir /var/lib/tqsdk/history --kind minute \
   --symbol KQ.m@SHFE.au \
   --start-day 2026-06-01 --end-day 2026-06-30 \
   --repair-stale
@@ -215,7 +231,8 @@ cargo run -p tqsdk-cache -- \
 # stock minute fill 必须显式给出 symbol，不能传 --universe。
 TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --kind minute --market stock fill \
+  fill \
+  --cache-dir /var/lib/tqsdk/history --kind minute --market stock \
   --symbol SSE.000300 \
   --start-day 2026-06-01 --end-day 2026-06-30
 ```
@@ -298,7 +315,8 @@ history store。它接受 RFC 3339 的半开区间 `[start, end)`，支持 Tick�
 ```bash
 # 可逐行解析的 lossless JSONL；字段别名会规范化为 t/lp/v。
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --output-format jsonl query \
+  query \
+  --cache-dir /var/lib/tqsdk/history --output-format jsonl \
   --symbol KQ.m@SHFE.au --series tick \
   --start 2026-06-01T00:00:00Z --end 2026-06-01T01:00:00Z \
   --policy cache-only --timestamp offset \
@@ -307,7 +325,8 @@ cargo run -p tqsdk-cache -- \
 # 输出面向 GPT-5.6 的类 CSV 上下文；超过预算时按 price focus 确定性压缩。
 TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --output-format llm-csv query \
+  query \
+  --cache-dir /var/lib/tqsdk/history --output-format llm-csv \
   --symbol KQ.i@SHFE.au --series kline --period 5m \
   --start 2026-06-01T00:00:00Z --end 2026-06-01T04:00:00Z \
   --fields time,open,high,low,close,volume,close_oi \
@@ -379,7 +398,8 @@ fields = ["time", "open", "high", "low", "close", "volume"]
 
 ```bash
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --output-format llm-csv query \
+  query \
+  --cache-dir /var/lib/tqsdk/history --output-format llm-csv \
   --request-file analysis.toml --policy cache-only --data-token-budget 12000
 ```
 
@@ -398,19 +418,22 @@ cargo run -p tqsdk-cache -- \
 ```bash
 # 复用 minute report 的 canonical root、window 和 logical symbols，不需要账号。
 cargo run -p tqsdk-cache -- \
-  --kind minute verify \
+  verify \
+  --kind minute \
   --report /var/lib/tqsdk/history/reports/minute/june.json \
   --replay --min-rows 1
 
 # 明确验证一个 minute cache window。
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --kind minute verify \
+  verify \
+  --cache-dir /var/lib/tqsdk/history --kind minute \
   --symbol KQ.i@SHFE.au \
   --start-day 2026-06-01 --end-day 2026-06-30
 
 # 复用 daily report 的 root、window 和 logical symbols；可选重放本地 1d rows。
 cargo run -p tqsdk-cache -- \
-  --kind daily verify \
+  verify \
+  --kind daily \
   --report /var/lib/tqsdk/history/reports/daily/june.json \
   --replay --min-rows 1
 ```
@@ -489,13 +512,15 @@ remote fill 补齐；锁忙或认证缺失时不删除分区，且不能和 `--d
 ```bash
 # 先看会删除哪些整月分区。
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --kind minute purge \
+  purge \
+  --cache-dir /var/lib/tqsdk/history --kind minute \
   --symbol KQ.i@SHFE.au \
   --start-day 2026-06-01 --end-day 2026-06-30 --dry-run
 
 # 明确确认后才删除。
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --kind minute purge \
+  purge \
+  --cache-dir /var/lib/tqsdk/history --kind minute \
   --symbol KQ.i@SHFE.au \
   --start-day 2026-06-01 --end-day 2026-06-30 --yes
 ```
@@ -507,12 +532,14 @@ native 1d cache 的一个 logical symbol 就是一整个 `.tqdk` 文件。`--dry
 ```bash
 # 先确认会删除的整只 logical symbol 文件。
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --kind daily purge \
+  purge \
+  --cache-dir /var/lib/tqsdk/history --kind daily \
   --symbol KQ.i@SHFE.au --dry-run
 
 # 明确确认后删除该 .tqdk 文件。
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --kind daily purge \
+  purge \
+  --cache-dir /var/lib/tqsdk/history --kind daily \
   --symbol KQ.i@SHFE.au --yes
 ```
 

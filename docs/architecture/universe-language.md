@@ -1,7 +1,7 @@
 # Universe Language V2
 
 本文定义期货 instrument 集合的统一选择语言。Universe 只回答“选择哪些 instrument”，不选择
-tick、minute、daily 数据流；数据种类仍由订阅 API、回测请求或 `tqsdk-cache --kind` 决定。
+tick、minute、daily 数据流；数据种类仍由订阅 API、回测请求或 `tqsdk-cache fill --kind` 决定。
 
 ## 两个独立版本轴
 
@@ -172,8 +172,8 @@ V4 是迁移输入而不是 normal writer format。迁移会先验证完整 V4/V
 catalog chain，再发布新的 V5 内容寻址 artifact；原 V4 和 V3 文件绝不覆盖或删除：
 
 ```bash
-tqsdk-cache --cache-dir <DIR> migrate-universe --plan-sha256 <V4_SHA256>
-tqsdk-cache --cache-dir <DIR> migrate-universe --plan-sha256 <V4_SHA256> --apply
+tqsdk-cache migrate-universe --cache-dir <DIR> --plan-sha256 <V4_SHA256>
+tqsdk-cache migrate-universe --cache-dir <DIR> --plan-sha256 <V4_SHA256> --apply
 ```
 
 第一条只输出 immutable source-to-V5 mapping；第二条才发布。V1–V3 因没有可无损转换的 V4 execution

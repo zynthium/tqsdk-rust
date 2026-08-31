@@ -19,7 +19,9 @@ daemon。
 可见入口统一为 `fill --universe EXPRESSION`。推荐的 Universe Language V2 历史全集写法是：
 
 ```bash
-tqsdk-cache --cache-dir /var/lib/tqsdk/history --kind tick fill \
+tqsdk-cache fill \
+  --cache-dir /var/lib/tqsdk/history \
+  --kind tick \
   --universe 'timeline(contract:all)' \
   --start-day 2025-01-01
 ```
@@ -29,14 +31,14 @@ tqsdk-cache --cache-dir /var/lib/tqsdk/history --kind tick fill \
 
 CLI 稳定采集 provider-current roster，对每个成员探测 `[1990-01-01, cutoff)` native-daily，再把
 rows/terminal-empty/provider-unavailable 观察和数据 membership catalog 内容寻址发布到 cache root。
-legacy `physical:all` / legacy timeline 继续生成 plan v3；V2 `timeline(...)` 在显式 writer policy 下从
-同一 execution 同时生成 V4 和 V3 rollback projection，再由统一 terminal/progress/cancel/report executor
-执行目标 kind。
+legacy `physical:all` / legacy timeline 继续生成 plan v3；V2 `timeline(...)` 从同一 materialized
+resolution 直接发布 V5 artifact，不再生成 V4/V3 rollback companion，再由统一
+terminal/progress/cancel/report executor 执行目标 kind。
 
 第一条 daily row 是 provider-history membership 起点；默认路径不采集或推断挂牌日期。
 tick/minute cache 继续独立证明首行和空前缀。首次自动准备需要 cache mutation；`--dry-run`
-只审计 roster 并返回 `preparation_required`/exit 1。V2 writer 默认发布 V5；隐藏的
-`--historical-plan-write-policy v4-with-v3-rollback` token 只为旧脚本保留。
+只审计 roster 并返回 `preparation_required`/exit 1。V4 仅是迁移输入；隐藏的
+`--historical-plan-write-policy v4-with-v3-rollback` token 只保留旧调用兼容，实际仍发布 V5。
 
 可重复的 `--universe-file PATH` 是 V2 AST 外部 exact-symbol 来源；current snapshot fill 可单独
 使用，historical fill 必须与 V2 `timeline(...)` 合并。每个文件只读取一次，内容 identity 进入 V5。
@@ -152,7 +154,7 @@ minute 缓存当前的 format id 是 `tqsdk.minute-kline.monthly.v5`，schema/fi
 `logical symbol × trading month` 分区。v5 row payload 仅在 zstd 更小时压缩，且保留所有 row；目录名
 有意保持 `minute-kline-v3`。旧 v4 文件不自动覆盖或当作命中；coverage/read fail closed，deep doctor
 将其分类为 `legacy_unsupported`。operator 可用
-`tqsdk-cache --kind minute migrate --apply --backup-dir DIR` 先备份再显式重写 v4；v3 不可迁移。
+`tqsdk-cache migrate --kind minute --apply --backup-dir DIR` 先备份再显式重写 v4；v3 不可迁移。
 
 每个 v5 月文件绑定写入时的 immutable metadata snapshot。active pointer 后续变化不会单独令历史
 月文件失效：minute `inspect`、`fill --dry-run`、`verify`、普通 `fill` 和 cache-backed reader 在 hash
@@ -160,7 +162,7 @@ minute 缓存当前的 format id 是 `tqsdk.minute-kline.monthly.v5`，schema/fi
 symbol、session、交易日和 physical mapping。语义相同的旧 coverage 继续命中，新增尾部日期仍是 miss；
 当前月下一次原子写入才迁移 header。缺少 sidecar、session/交易日/映射变化、损坏文件或语义冲突的混合
 分区仍 fail closed，且不会
-自动 purge、重写、下载或拼接数据。唯一例外是显式的 `--kind minute fill --repair-stale`：active snapshot
+自动 purge、重写、下载或拼接数据。唯一例外是显式的 `fill --kind minute --repair-stale`：active snapshot
 覆盖窗口时，它仅在同一 root remote-fill lock 已取得且 repair 所需认证预检成功后删除与 active snapshot
 冲突的整月分区，随后由同一次 remote-on-miss fill 重建；锁忙或认证缺失时不删除分区。普通 `fill`、
 `inspect`、`verify` 和 cache-backed reader 仍 fail closed。

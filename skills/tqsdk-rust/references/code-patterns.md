@@ -351,7 +351,7 @@ physical symbol、batch、cursor、retry/split 和终态。handler 位于远端�
 
 ### Universe V2：当前快照与历史 timeline
 
-Universe 只选择 instrument；tick、minute、daily 由消费 API 或 `tqsdk-cache --kind` 选择。新配置应显式写 wrapper，避免落入 legacy v1 dispatcher：
+Universe 只选择 instrument；tick、minute、daily 由消费 API 或 `tqsdk-cache fill --kind` 选择。新配置应显式写 wrapper，避免落入 legacy v1 dispatcher：
 
 - 当前 live、relay 或静态回测集合使用 `snapshot(...)`，例如 `snapshot(contract:all;continuous:all;index:all;!CFFEX.*)`。
 - 历史下载和“回测时间推进时自动纳入有数据的合约、移出到期合约”使用 `timeline(...)`，例如 `timeline(contract:all;continuous:all;index:all)`。它由历史 compiler 固定成 V5 artifact；不能用于 live 订阅。
@@ -371,7 +371,8 @@ remote-on-miss / CacheOnly 合同：默认输出摘要；cron 或 CI 需要 vers
 ```bash
 # 已完整缓存的 5 分钟 K 线 LLM context；cache-only 不读取凭证、不联网也不写 cache。
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --output-format llm-csv query \
+  query \
+  --cache-dir /var/lib/tqsdk/history --output-format llm-csv \
   --symbol KQ.m@SHFE.au --series kline --period 5m \
   --start 2026-06-01T00:00:00Z --end 2026-06-01T04:00:00Z \
   --policy cache-only --fields time,open,high,low,close,volume,close_oi \
@@ -385,14 +386,16 @@ snapshot 后才输出 block，默认 fail closed。仅在有意用默认 `remote
 ```bash
 # 当前 snapshot 的预检不会请求远端 tick、写 cache 或获取 fill lock。
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history fill \
+  fill \
+  --cache-dir /var/lib/tqsdk/history \
   --universe 'snapshot(main:all;index:all;!CFFEX.*)' \
   --start-day 2026-06-01 --end-day 2026-06-30 --dry-run
 
 # 正常 fill 只补缺失 coverage。仅在实际 miss 时需要此账号对。
 TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history fill \
+  fill \
+  --cache-dir /var/lib/tqsdk/history \
   --symbol KQ.i@SHFE.au \
   --last-trading-days 60 --calendar auto \
   --progress-max-bars 8

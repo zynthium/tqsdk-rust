@@ -92,7 +92,8 @@ stale repair、verify、doctor 和真实 purge 使用 exclusive gate。每个实
 
 ```bash
 TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
-tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
+tqsdk-cache fill \
+  --cache-dir /var/lib/tqsdk/history \
   --universe 'snapshot(main:all;index:all;!CFFEX.*)' \
   --last-trading-days 60 --calendar auto \
   --progress-max-bars 8
@@ -102,7 +103,8 @@ tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
 
 ```bash
 TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
-tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
+tqsdk-cache fill \
+  --cache-dir /var/lib/tqsdk/history \
   --symbol CZCE.AP610 \
   --start-day 2026-07-24 --end-day 2026-07-24
 ```

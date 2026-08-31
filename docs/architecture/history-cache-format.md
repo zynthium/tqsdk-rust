@@ -134,13 +134,13 @@ range 前必须再验证该月全部既有 coverage，全部兼容后才把整�
 该兼容路径绝不自动 purge 或拼接冲突数据。remote-on-miss 的 metadata refresh 会扩展到涉及的完整
 CST trading month，并保留更宽的 active pointer；若 retained snapshot 覆盖请求且 schema/session 与 active
 兼容，可直接复用它，避免短查询把同一月变成不兼容 identity。仅 operator 显式使用
-`tqsdk-cache --kind minute fill --repair-stale` 时，才会在 active snapshot 覆盖窗口时删除其冲突的整月分区，
+`tqsdk-cache fill --kind minute --repair-stale` 时，才会在 active snapshot 覆盖窗口时删除其冲突的整月分区，
 再由该次 remote fill 补齐；这不改变普通 reader 的 fail-closed 合同。
 
 目录名继续保留 `minute-kline-v3`，但它承载的是 v5 文件身份。这是刻意的诊断兼容策略：
 旧 v4 文件不会被普通 reader/fill 静默读取、迁移或覆盖；读取/coverage 会 fail closed，`diagnose()`
 将其报告为 `LegacyUnsupported`。operator 如需升级，必须显式执行
-`tqsdk-cache --kind minute migrate --apply --backup-dir DIR`：该命令先深度校验全部 v4 input，
+`tqsdk-cache migrate --kind minute --apply --backup-dir DIR`：该命令先深度校验全部 v4 input，
 将原 `.tqmk` 及其 `.tqmk.lock` 备份到 cache root 外的同一文件系统，再逐月原子重写为 v5 并 doctor
 复检。v3 及其他版本仍不可迁移；如需移除必须显式 purge。
 

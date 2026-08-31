@@ -241,7 +241,7 @@ dry-run 不得为探测而创建持久目录或锁；临时探测只能位于操
 - reader 先支持 manifest/format，publisher 后输出；
 - manifest minimum reader 和每个 cache format 必须同时满足；
 - relay history feature 只启用本地 reader codec；
-- minute v4 必须先走现有 `tqsdk-cache --kind minute migrate --apply --backup-dir`；
+- minute v4 必须先走现有 `tqsdk-cache migrate --kind minute --apply --backup-dir`；
 - minute v3 和未知格式保持 `LegacyUnsupported`/fail closed；
 - 新旧 writer 不得同时写同一 staging/source root；
 - rollback 只切 pointer 到已验证兼容 generation，不能依赖旧 binary 读取新格式。

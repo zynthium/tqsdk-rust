@@ -52,7 +52,8 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 
   ```bash
   cargo run -p tqsdk-cache -- \
-    --cache-dir /var/lib/tqsdk/history --output-format llm-csv query \
+    query \
+    --cache-dir /var/lib/tqsdk/history --output-format llm-csv \
     --symbol KQ.m@SHFE.au --series kline --period 5m \
     --start 2026-06-01T00:00:00Z --end 2026-06-01T04:00:00Z \
     --policy cache-only --fields time,open,high,low,close,volume,close_oi
@@ -78,7 +79,7 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
 - Tick TQBN 缺失 legacy `<partition>/.tqbn.lock` 或逐文件 `<file>.tqbn.lock` companion lock 时，不能用
   `fill`、`RemoteOnMiss` 或 `--compact-cache-only`“修复”。由可写 cache owner 停止同一 root 的
   reader/writer、先确认 `doctor` clean 后，运行
-  `tqsdk-cache --cache-dir <root> --kind tick repair-locks` 做 DryRun；它按唯一 Tick 分区报告 legacy lock，
+  `tqsdk-cache repair-locks --cache-dir <root> --kind tick` 做 DryRun；它按唯一 Tick 分区报告 legacy lock，
   并逐文件报告 sidecar。确认计划后才加 `--apply`：先以非截断方式创建缺失 legacy lock，再补逐文件 regular
   sidecar。`repair-locks` 只支持 `--kind tick`，`--kind minute|all` 是 usage error；它不改 TQBN bytes、rows、
   coverage 或 index，也不访问 remote/auth 或调用 fill/compaction。脚本调用显式使用

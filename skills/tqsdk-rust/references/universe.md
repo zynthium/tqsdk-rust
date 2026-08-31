@@ -10,7 +10,10 @@
 ## 先区分两件事
 
 Universe 只回答“选择哪些 instrument”，不选择数据流。tick、minute、daily 分别由订阅/
-回测请求或 `tqsdk-cache --kind tick|minute|daily` 决定。
+回测请求或 `tqsdk-cache fill --kind tick|minute|daily` 决定。
+
+CLI 示例固定写为 `tqsdk-cache fill --kind <tick|minute|daily> ...`：把子命令放在前面，
+再给出它的参数。
 
 - `snapshot(...)`：调用时解析一次当前集合。省略 wrapper 的 V2 含义相同，但新配置应显式写出它，
   以避免 legacy v1 字符串路由歧义。适用于 live、relay、recording 和普通静态 backtest。
@@ -46,7 +49,8 @@ timeline(contract:all;continuous:all;index:all;!SHFE.au2506)
 ```bash
 TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --kind daily fill \
+  fill \
+  --cache-dir /var/lib/tqsdk/history --kind daily \
   --universe 'timeline(contract:all;continuous:all;index:all)' \
   --start-day 2025-01-01 --end-day 2026-06-30 \
   --symbol-concurrency 2

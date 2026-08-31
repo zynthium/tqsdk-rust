@@ -115,7 +115,8 @@
 
 ```bash
 cargo run -p tqsdk-cache -- \
-  --cache-dir /var/lib/tqsdk/history --output-format llm-csv query \
+  query \
+  --cache-dir /var/lib/tqsdk/history --output-format llm-csv \
   --symbol KQ.m@SHFE.au --series kline --period 5m \
   --start 2026-06-01T00:00:00Z --end 2026-06-01T04:00:00Z \
   --policy cache-only --fields time,open,high,low,close,volume,close_oi
