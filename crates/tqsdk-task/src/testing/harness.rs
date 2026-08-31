@@ -17,6 +17,7 @@ pub struct StrategyTestHarness {
 }
 
 /// Compatibility alias for callers that prefer an explicit builder type name.
+#[deprecated(note = "use StrategyTestHarness instead")]
 pub type StrategyTestHarnessBuilder = StrategyTestHarness;
 
 /// Built fake test harness.

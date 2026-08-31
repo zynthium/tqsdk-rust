@@ -214,13 +214,14 @@ cargo test -p tqsdk-relay --tests
 
 它们分别覆盖 legacy parser/顺序结果冻结、Universe Language V2 grammar/canonical AST/hash、typed
 exclusion/capability/file identity、V1–V3 hash compatibility 与 V3 execution pin、V4 fixed wire/hash/
-chain、V4 → V3 projection 等价与 rollback、complete authoritative 或 provider-history
+chain、V4 → V3 projection 等价与 rollback、V5 fixed wire/hash/canonical-byte gate、V4 → V5
+source-preserving migration、complete authoritative 或 provider-history
 acquisition/semantic fact chain/content-addressed durability、daily-origin membership、
 provider-unavailable 的精确 timeout 判定、零完成/比例熔断与旧 complete-observation JSON 兼容、
 用户起点优先的 physical/derived tick/minute/daily request floor、
 membership/dependency/kind target resolution、同时间 replay revision、
-facade V4 区间/chain/首可用边界、relay timeline 触网前拒绝与 file-refresh last-known-good，以及 CLI
-的 legacy V3 default、V2 writer gate、V4/V3 dual publish、统一 CacheOnly/RemoteOnMiss 参数与
+facade V5 区间/chain/首可用边界、relay timeline 触网前拒绝与 file-refresh last-known-good，以及 CLI
+的 V5 default writer、V4 compatibility token、dry-run/apply migration receipt、统一 CacheOnly/RemoteOnMiss 参数与
 terminal path。
 
 ```bash

@@ -2,9 +2,17 @@ use std::time::Duration;
 
 use tqsdk_core::OrderLifecycle;
 use tqsdk_task::StrategyHost;
+#[allow(deprecated)]
 use tqsdk_task::testing::{
     FakeBroker, FakeBrokerConnectionStatus, FakeMarket, StrategyTestClock, StrategyTestHarness,
+    StrategyTestHarnessBuilder,
 };
+
+#[allow(deprecated)]
+#[test]
+fn deprecated_harness_builder_alias_remains_source_compatible() {
+    let _: StrategyTestHarnessBuilder = StrategyTestHarness::new();
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn strategy_test_harness_seeds_market_and_fills_orders() {

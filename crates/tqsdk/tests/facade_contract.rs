@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 use tqsdk::advanced::task::{HistoryBacktestTickSource, ReplayMarketEvent, ReplayMarketSource};
 use tqsdk::prelude::*;
 use tqsdk_core::{
-    AdapterRegistry, CommitScope, InputPayload, IoEvent, Kline, ProtocolDomain, Quote,
+    AdapterRegistry, CommitScope, InputPayload, IoEvent, Kline, ProtocolDomain, Quote, Runtime,
     RuntimeHandle, RuntimeInput, Symbol, Tick,
 };
 use tqsdk_data::{
@@ -749,6 +749,105 @@ async fn facade_backtest_v4_artifact_verifies_chain_range_and_tick_boundary() {
 
     let _ = std::fs::remove_dir_all(cache_dir);
     let _ = std::fs::remove_dir_all(missing_chain_dir);
+}
+
+#[tokio::test]
+async fn facade_backtest_v4_and_v5_artifacts_install_the_current_execution_closure() {
+    let symbol = "SHFE.au2406";
+    let start_ns = 1_000;
+    let tick_start_ns = start_ns;
+    let end_ns = 3_000;
+    let cache_dir = temp_cache_dir();
+    BacktestTickCache::open(&cache_dir)
+        .unwrap()
+        .store_ticks(
+            symbol,
+            tick_start_ns,
+            end_ns,
+            [tick(1, start_ns, 100.0), tick(2, 2_000, 101.0)],
+        )
+        .unwrap();
+    let v4_artifact = facade_v4_artifact(
+        &cache_dir,
+        symbol,
+        "timeline(contract:all)",
+        None,
+        start_ns,
+        tick_start_ns,
+        end_ns,
+    );
+    let v4_plan_sha256 = match &v4_artifact {
+        HistoricalUniversePlanArtifact::V4(plan) => plan.plan_sha256().to_string(),
+        _ => panic!("fixture must produce a V4 artifact"),
+    };
+    let store = HistoricalUniverseArtifactStore::new(&cache_dir);
+    let v4_prepared = Tq::futures()
+        .backtest(start_ns, end_ns)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .historical_universe_artifact(v4_artifact)
+        .unwrap()
+        .cache_only()
+        .prepare()
+        .await
+        .unwrap();
+    let mut v4_connected = v4_prepared.connect().await.unwrap();
+    assert!(v4_connected.next().await.unwrap());
+    let v4_snapshot = v4_connected.api().session().handle().latest_snapshot();
+    assert_eq!(
+        v4_snapshot.get([
+            "replay",
+            "local-backtest-universe",
+            "universe",
+            "effective_ns",
+        ]),
+        Some(&json!(start_ns))
+    );
+
+    let migration = store.migrate_v4_plan(&v4_plan_sha256).unwrap();
+    let artifact = store
+        .load_plan_artifact(migration.current_plan_sha256())
+        .unwrap();
+    assert!(matches!(artifact, HistoricalUniversePlanArtifact::V5(_)));
+
+    let prepared = Tq::futures()
+        .backtest(start_ns, end_ns)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .historical_universe_artifact(artifact)
+        .unwrap()
+        .cache_only()
+        .prepare()
+        .await
+        .unwrap();
+    assert_eq!(prepared.tick_sources().len(), 1);
+    assert_eq!(prepared.tick_sources()[0].replay_symbol, symbol);
+    assert_eq!(prepared.tick_sources()[0].start_ns, tick_start_ns);
+    assert_eq!(prepared.tick_sources()[0].end_ns, end_ns);
+
+    let mut connected = prepared.connect().await.unwrap();
+    assert!(connected.next().await.unwrap());
+    let snapshot = connected.api().session().handle().latest_snapshot();
+    assert_eq!(
+        snapshot.get([
+            "replay",
+            "local-backtest-universe",
+            "universe",
+            "effective_ns",
+        ]),
+        Some(&json!(start_ns))
+    );
+    assert_eq!(
+        snapshot.get(["replay", "local-backtest-universe", "universe", "changes",]),
+        Some(&json!([{
+            "instrument": symbol,
+            "active": true,
+            "readiness": "ready",
+            "provenance": "universe-v2:contract",
+        }]))
+    );
+
+    let _ = std::fs::remove_dir_all(cache_dir);
 }
 
 #[tokio::test]

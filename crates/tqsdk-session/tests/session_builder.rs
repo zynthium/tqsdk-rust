@@ -21,6 +21,16 @@ fn builder_defaults_to_official_stock_live_market_target() {
     );
 }
 
+#[allow(deprecated)]
+#[test]
+fn deprecated_boolean_market_target_remains_source_compatible() {
+    let builder = SessionClientBuilder::new("user", "pass").market_target(true, true);
+    assert_eq!(
+        builder.market_target_ref(),
+        &MarketSessionTarget::stock_backtest()
+    );
+}
+
 #[test]
 fn builder_named_market_target_shortcuts_are_explicit() {
     let futures_live = SessionClientBuilder::new("user", "pass").futures_market();

@@ -15,7 +15,7 @@ use crate::historical_universe_v4_resolution::{
 use crate::{
     ActiveInterval, CatalogContract, CatalogSnapshot, DataError, DynamicUniverseScope,
     HistoricalCatalogProof, HistoricalUniversePlan, HistoricalUniversePlanArtifact,
-    HistoricalUniversePlanWriteSet, Result,
+    HistoricalUniversePlanV5, HistoricalUniversePlanWriteSet, Result,
 };
 
 pub const HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION: u32 = 1;
@@ -768,7 +768,9 @@ pub struct HistoricalUniverseArtifactStore {
     cache_dir: PathBuf,
 }
 
-/// Paths published by one successful V4 + V3 rollback dual write.
+/// Paths published by one successful legacy V4 + V3 rollback dual write.
+///
+/// The normal V5 writer does not use this compatibility-only write set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HistoricalUniversePublishedPlanSet {
@@ -797,6 +799,54 @@ impl HistoricalUniversePublishedPlanSet {
     #[must_use]
     pub fn rollback_v3_plan_sha256(&self) -> &str {
         &self.rollback_v3_plan_sha256
+    }
+}
+
+/// Immutable source-to-current mapping produced by a verified V4 migration.
+///
+/// The source artifact is intentionally retained. Consumers can use this
+/// receipt to replace an explicit V4 hash in their own configuration without
+/// relying on a mutable "current" pointer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct HistoricalUniversePlanMigration {
+    source_plan_version: u32,
+    source_plan_sha256: String,
+    source_path: PathBuf,
+    current_plan_version: u32,
+    current_plan_sha256: String,
+    current_path: PathBuf,
+}
+
+impl HistoricalUniversePlanMigration {
+    #[must_use]
+    pub const fn source_plan_version(&self) -> u32 {
+        self.source_plan_version
+    }
+
+    #[must_use]
+    pub fn source_plan_sha256(&self) -> &str {
+        &self.source_plan_sha256
+    }
+
+    #[must_use]
+    pub fn source_path(&self) -> &Path {
+        &self.source_path
+    }
+
+    #[must_use]
+    pub const fn current_plan_version(&self) -> u32 {
+        self.current_plan_version
+    }
+
+    #[must_use]
+    pub fn current_plan_sha256(&self) -> &str {
+        &self.current_plan_sha256
+    }
+
+    #[must_use]
+    pub fn current_path(&self) -> &Path {
+        &self.current_path
     }
 }
 
@@ -877,6 +927,94 @@ impl HistoricalUniverseArtifactStore {
         Ok(value)
     }
 
+    /// Publishes a current V5 plan into the immutable content-addressed plan
+    /// namespace. V5 never writes a rollback companion plan.
+    pub fn publish_current_plan(&self, plan: &HistoricalUniversePlanV5) -> Result<PathBuf> {
+        plan.verify()?;
+        self.publish("plans", plan.plan_sha256(), &plan.canonical_json_bytes()?)
+    }
+
+    /// Loads only the current V5 artifact. Older plan versions must be
+    /// migrated by the dedicated migration entry point before normal use.
+    pub fn load_current_plan(&self, sha256: &str) -> Result<HistoricalUniversePlanV5> {
+        let bytes = self.load_bytes("plans", sha256)?;
+        let value: HistoricalUniversePlanV5 = serde_json::from_slice(&bytes)?;
+        if value.canonical_json_bytes()? != bytes {
+            return Err(validation(
+                "historical universe plan does not use canonical V5 JSON",
+            ));
+        }
+        if value.plan_sha256() != sha256 {
+            return Err(validation("historical universe plan path/hash mismatch"));
+        }
+        Ok(value)
+    }
+
+    /// Verifies and plans a V4-to-V5 conversion without writing the V5 file.
+    pub fn preview_v4_migration(
+        &self,
+        source_plan_sha256: &str,
+    ) -> Result<HistoricalUniversePlanMigration> {
+        Ok(self.verified_v4_migration(source_plan_sha256)?.0)
+    }
+
+    /// Migrates one V4 plan only after validating its complete V4/V3 chain.
+    ///
+    /// The source and its rollback companion are never overwritten or
+    /// deleted. V1-V3 plans must be recompiled because they do not carry the
+    /// V4 execution closure required for a lossless V5 conversion.
+    pub fn migrate_v4_plan(
+        &self,
+        source_plan_sha256: &str,
+    ) -> Result<HistoricalUniversePlanMigration> {
+        let (migration, current) = self.verified_v4_migration(source_plan_sha256)?;
+        let current_path = self.publish_current_plan(&current)?;
+        if current_path != migration.current_path {
+            return Err(validation(
+                "historical universe V5 migration path changed during publish",
+            ));
+        }
+        let loaded = self.load_current_plan(current.plan_sha256())?;
+        if loaded != current {
+            return Err(validation(
+                "historical universe V5 migration changed plan bytes during publish",
+            ));
+        }
+        self.verify_current_plan_artifact_chain(&loaded)?;
+        Ok(migration)
+    }
+
+    fn verified_v4_migration(
+        &self,
+        source_plan_sha256: &str,
+    ) -> Result<(HistoricalUniversePlanMigration, HistoricalUniversePlanV5)> {
+        let source_path = self.plan_path(source_plan_sha256)?;
+        let artifact = self.load_plan_artifact(source_plan_sha256)?;
+        let plan = match &artifact {
+            HistoricalUniversePlanArtifact::V4(plan) => plan,
+            HistoricalUniversePlanArtifact::Legacy(plan) => {
+                return Err(validation(format!(
+                    "historical universe plan V{} must be recompiled before V5 migration",
+                    plan.plan_version
+                )));
+            }
+            HistoricalUniversePlanArtifact::V5(_) => {
+                return Err(validation("historical universe plan is already V5"));
+            }
+        };
+        self.verify_plan_artifact_chain_artifact(&artifact)?;
+        let current = plan.migrate_to_v5()?;
+        let migration = HistoricalUniversePlanMigration {
+            source_plan_version: plan.plan_version(),
+            source_plan_sha256: plan.plan_sha256().to_string(),
+            source_path,
+            current_plan_version: current.plan_version(),
+            current_plan_sha256: current.plan_sha256().to_string(),
+            current_path: self.plan_path(current.plan_sha256())?,
+        };
+        Ok((migration, current))
+    }
+
     /// Publishes either a frozen V1-V3 plan or a canonical V4 artifact.
     pub fn publish_plan_artifact(
         &self,
@@ -885,11 +1023,12 @@ impl HistoricalUniverseArtifactStore {
         artifact.verify()?;
         match artifact {
             HistoricalUniversePlanArtifact::Legacy(plan) => self.publish_plan(plan),
-            HistoricalUniversePlanArtifact::V4(_) => self.publish(
-                "plans",
-                artifact.plan_sha256(),
-                &artifact.canonical_json_bytes()?,
-            ),
+            HistoricalUniversePlanArtifact::V4(_) | HistoricalUniversePlanArtifact::V5(_) => self
+                .publish(
+                    "plans",
+                    artifact.plan_sha256(),
+                    &artifact.canonical_json_bytes()?,
+                ),
         }
     }
 
@@ -910,7 +1049,7 @@ impl HistoricalUniverseArtifactStore {
         })
     }
 
-    /// Loads V1-V4 by the flat top-level `plan_version` discriminator.
+    /// Loads V1-V5 by the flat top-level `plan_version` discriminator.
     ///
     /// V4 bytes must exactly match the fixed-order canonical writer. The legacy
     /// `load_plan` path intentionally keeps its existing V1-V3-only behavior.
@@ -923,11 +1062,11 @@ impl HistoricalUniverseArtifactStore {
             .ok_or_else(|| validation("historical universe plan lacks plan_version"))?;
         let artifact = match version {
             1..=3 => HistoricalUniversePlanArtifact::Legacy(serde_json::from_slice(&bytes)?),
-            4 => {
+            4 | 5 => {
                 let artifact: HistoricalUniversePlanArtifact = serde_json::from_slice(&bytes)?;
                 if artifact.canonical_json_bytes()? != bytes {
                     return Err(validation(
-                        "historical universe V4 artifact bytes are not canonical",
+                        "historical universe artifact bytes are not canonical",
                     ));
                 }
                 artifact
@@ -984,17 +1123,60 @@ impl HistoricalUniverseArtifactStore {
         Ok(())
     }
 
+    /// Verifies the complete acquisition/catalog chain for a current V5
+    /// executable plan. There is deliberately no V3 rollback dependency.
+    pub fn verify_current_plan_artifact_chain(
+        &self,
+        plan: &HistoricalUniversePlanV5,
+    ) -> Result<()> {
+        plan.verify()?;
+        let identity = plan.identity();
+        let acquisition = self.load_acquisition(identity.acquisition_sha256())?;
+        let semantic = self.load_semantic_catalog(identity.semantic_catalog_sha256())?;
+        semantic.validate_against_acquisition(&acquisition)?;
+        if acquisition.proof != identity.proof()
+            || !matches!(
+                acquisition.proof,
+                HistoricalCatalogProof::AuthoritativeLifecycle
+                    | HistoricalCatalogProof::ProviderHistoryObserved
+            )
+        {
+            return Err(validation(
+                "historical universe plan proof does not match executable acquisition",
+            ));
+        }
+        if semantic.acquisition_sha256 != acquisition.acquisition_sha256 {
+            return Err(validation(
+                "historical universe semantic catalog acquisition link broken",
+            ));
+        }
+        let timeline = plan.timeline();
+        if timeline.catalog_id != semantic.catalog.catalog_id
+            || timeline.catalog_sha256 != semantic.catalog.content_sha256()
+            || timeline.calendar_identity != semantic.catalog.calendar_identity
+            || identity.calendar_identity() != semantic.catalog.calendar_identity
+        {
+            return Err(validation(
+                "historical universe plan timeline does not match semantic catalog",
+            ));
+        }
+        Ok(())
+    }
+
     /// Verifies the version-specific artifact chain without applying numeric
     /// `plan_version >= N` assumptions.
     pub fn verify_plan_artifact_chain_artifact(
         &self,
         artifact: &HistoricalUniversePlanArtifact,
     ) -> Result<()> {
-        let HistoricalUniversePlanArtifact::V4(plan) = artifact else {
-            let HistoricalUniversePlanArtifact::Legacy(plan) = artifact else {
-                unreachable!()
-            };
-            return self.verify_plan_artifact_chain(plan);
+        let plan = match artifact {
+            HistoricalUniversePlanArtifact::Legacy(plan) => {
+                return self.verify_plan_artifact_chain(plan);
+            }
+            HistoricalUniversePlanArtifact::V4(plan) => plan,
+            HistoricalUniversePlanArtifact::V5(plan) => {
+                return self.verify_current_plan_artifact_chain(plan);
+            }
         };
 
         plan.verify()?;

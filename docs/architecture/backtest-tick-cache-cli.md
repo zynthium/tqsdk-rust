@@ -21,7 +21,6 @@ daemon。
 ```bash
 tqsdk-cache --cache-dir /var/lib/tqsdk/history --kind tick fill \
   --universe 'timeline(contract:all)' \
-  --historical-plan-write-policy v4-with-v3-rollback \
   --start-day 2025-01-01
 ```
 
@@ -36,11 +35,11 @@ legacy `physical:all` / legacy timeline 继续生成 plan v3；V2 `timeline(...)
 
 第一条 daily row 是 provider-history membership 起点；默认路径不采集或推断挂牌日期。
 tick/minute cache 继续独立证明首行和空前缀。首次自动准备需要 cache mutation；`--dry-run`
-只审计 roster 并返回 `preparation_required`/exit 1。V2 writer 默认 `legacy-only`，因此未传
-`--historical-plan-write-policy v4-with-v3-rollback` 时会在认证和 provider I/O 前失败。
+只审计 roster 并返回 `preparation_required`/exit 1。V2 writer 默认发布 V5；隐藏的
+`--historical-plan-write-policy v4-with-v3-rollback` token 只为旧脚本保留。
 
 可重复的 `--universe-file PATH` 是 V2 AST 外部 exact-symbol 来源；current snapshot fill 可单独
-使用，historical fill 必须与 V2 `timeline(...)` 合并。每个文件只读取一次，内容 identity 进入 V4。
+使用，historical fill 必须与 V2 `timeline(...)` 合并。每个文件只读取一次，内容 identity 进入 V5。
 `--universe-plan` 仅为隐藏兼容入口，
 `--universe-timeline` 已移除。
 

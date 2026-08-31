@@ -2745,7 +2745,7 @@ fn legacy_timeline_expression_routes_to_provider_acquisition() {
 }
 
 #[test]
-fn universe_v2_timeline_is_writer_gated_before_auth() {
+fn universe_v2_timeline_defaults_to_current_writer_before_auth() {
     let output = run_without_auth_json([
         "--kind",
         "minute",
@@ -2763,16 +2763,13 @@ fn universe_v2_timeline_is_writer_gated_before_auth() {
 
     assert_eq!(output.status.code(), Some(2));
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(
-        json["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("writer is disabled")
-    );
+    let message = json["error"]["message"].as_str().unwrap();
+    assert!(message.contains("requires TQ_AUTH_USER and TQ_AUTH_PASS"));
+    assert!(!message.contains("writer is disabled"));
 }
 
 #[test]
-fn universe_v2_timeline_writer_policy_advances_to_auth_preflight() {
+fn universe_v2_timeline_legacy_writer_policy_alias_advances_to_auth_preflight() {
     let output = run_without_auth_json([
         "--kind",
         "minute",
@@ -3586,6 +3583,28 @@ fn run<const N: usize>(args: [&str; N]) -> std::process::Output {
         .args(args)
         .output()
         .unwrap()
+}
+
+#[test]
+fn migrate_universe_dry_run_validates_before_creating_a_cache_root() {
+    let cache_dir = temp_dir("migrate-universe-dry-run");
+    let output = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "migrate-universe",
+        "--plan-sha256",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!cache_dir.exists());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["command"], "migrate-universe");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("No such file")
+    );
 }
 
 fn run_without_auth_json<const N: usize>(args: [&str; N]) -> std::process::Output {

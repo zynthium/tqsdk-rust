@@ -60,6 +60,7 @@ mod historical_universe_artifact;
 mod historical_universe_resolution;
 mod historical_universe_v4;
 mod historical_universe_v4_resolution;
+mod historical_universe_v5;
 mod history_series_cache;
 mod integrity;
 mod live_quote;
@@ -166,18 +167,20 @@ pub use historical_universe::{
     HistoricalUniverseTimeline, UniverseBudget, UniverseInstrumentId, UniverseMemberChange,
     UniverseTimelineBatch,
 };
+#[allow(deprecated)]
+pub use historical_universe_acquisition::PROVIDER_DAILY_LIFECYCLE_CALENDAR_IDENTITY;
 pub use historical_universe_acquisition::{
     PROVIDER_CURRENT_FUTURES_SOURCE_IDENTITY, PROVIDER_CURRENT_PHYSICAL_FUTURES_EXCHANGES,
     PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS, PROVIDER_DAILY_HISTORY_SOURCE_IDENTITY,
-    PROVIDER_DAILY_LIFECYCLE_CALENDAR_IDENTITY, PROVIDER_DAILY_MEMBERSHIP_CALENDAR_IDENTITY,
-    ProviderCurrentHistoricalCatalogAcquirer, promote_provider_daily_history,
-    promote_provider_daily_history_observations,
+    PROVIDER_DAILY_MEMBERSHIP_CALENDAR_IDENTITY, ProviderCurrentHistoricalCatalogAcquirer,
+    promote_provider_daily_history, promote_provider_daily_history_observations,
 };
 pub use historical_universe_artifact::{
     HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION, HISTORICAL_UNIVERSE_ARTIFACT_NAMESPACE,
     HistoricalAcquisitionContract, HistoricalCatalogAcquisition, HistoricalDailyObservation,
     HistoricalDailyObservationStatus, HistoricalDataKind, HistoricalSemanticCatalog,
-    HistoricalUniverseArtifactStore, HistoricalUniversePublishedPlanSet,
+    HistoricalUniverseArtifactStore, HistoricalUniversePlanMigration,
+    HistoricalUniversePublishedPlanSet,
 };
 pub use historical_universe_resolution::{
     HISTORICAL_UNIVERSE_COMPILER_IDENTITY, HistoricalDependencyRole, HistoricalUniverseDependency,
@@ -195,8 +198,10 @@ pub use historical_universe_v4_resolution::{
     HistoricalUniverseResolutionV4, HistoricalUniverseV4Error, TimelineCapabilities,
     compile_historical_universe_resolution_v4,
 };
-#[allow(deprecated)]
-pub use history_series_cache::SERIES_FILE_HISTORY_SERIES_FORMAT_ID;
+pub use historical_universe_v5::{
+    HISTORICAL_UNIVERSE_PLAN_VERSION, HistoricalUniversePlan as HistoricalUniversePlanV5,
+    HistoricalUniversePlanExecution, HistoricalUniversePlanIdentity,
+};
 pub use history_series_cache::{
     HISTORY_SERIES_CACHE_FORMAT_ID, HISTORY_SERIES_CACHE_SCHEMA_VERSION, HistorySeriesCache,
     HistorySeriesCacheFileReport, HistorySeriesCacheFileStatus,

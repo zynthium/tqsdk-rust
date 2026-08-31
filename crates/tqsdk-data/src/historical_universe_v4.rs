@@ -4,6 +4,8 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
+use crate::historical_universe_v5::HistoricalUniversePlan as HistoricalUniversePlanV5;
+
 use crate::historical_universe_v4_resolution::HISTORICAL_UNIVERSE_CONTINUOUS_ID;
 use crate::{
     DataError, DerivedView, DynamicUniverseScope, HistoricalCatalogProof, HistoricalDataKind,
@@ -561,6 +563,36 @@ impl HistoricalUniversePlanV4 {
         Ok(())
     }
 
+    /// Re-encodes a fully verified V4 plan as the current V5 artifact.
+    ///
+    /// This deliberately drops only the V4 rollback pointer: callers must
+    /// verify the complete V4 artifact chain before publishing the result.
+    pub(crate) fn migrate_to_v5(&self) -> Result<HistoricalUniversePlanV5> {
+        self.verify()?;
+        let v4_identity = self.identity();
+        let spec =
+            UniverseSpec::from_canonical_ast_json(v4_identity.normalized_ast_json().as_bytes())
+                .map_err(|error| validation(error.to_string()))?;
+        let v4_execution = self.execution();
+        let execution = crate::HistoricalUniversePlanExecution::from_domain(
+            self.timeline(),
+            v4_execution.dependencies().to_vec(),
+            v4_execution.targets().clone(),
+        )?;
+        let identity = crate::HistoricalUniversePlanIdentity::new(
+            &spec,
+            v4_identity.input_sources_sha256().map(str::to_owned),
+            v4_identity.acquisition_sha256().to_string(),
+            v4_identity.semantic_catalog_sha256().to_string(),
+            v4_identity.calendar_identity().to_string(),
+            v4_identity.proof(),
+            execution.execution_sha256().to_string(),
+            v4_identity.continuous_identity().map(str::to_owned),
+            v4_identity.ranking_identity().map(str::to_owned),
+        )?;
+        HistoricalUniversePlanV5::new(self.timeline().clone(), self.budget(), identity, execution)
+    }
+
     fn computed_sha256(&self) -> Result<String> {
         let bytes = serde_json::to_vec(&(
             PLAN_HASH_DOMAIN_V4,
@@ -604,6 +636,7 @@ impl<'de> Deserialize<'de> for HistoricalUniversePlanV4 {
 pub enum HistoricalUniversePlanArtifact {
     Legacy(HistoricalUniversePlan),
     V4(HistoricalUniversePlanV4),
+    V5(HistoricalUniversePlanV5),
 }
 
 impl HistoricalUniversePlanArtifact {
@@ -612,6 +645,7 @@ impl HistoricalUniversePlanArtifact {
         match self {
             Self::Legacy(plan) => plan.plan_version,
             Self::V4(plan) => plan.plan_version(),
+            Self::V5(plan) => plan.plan_version(),
         }
     }
 
@@ -620,6 +654,7 @@ impl HistoricalUniversePlanArtifact {
         match self {
             Self::Legacy(plan) => &plan.plan_sha256,
             Self::V4(plan) => plan.plan_sha256(),
+            Self::V5(plan) => plan.plan_sha256(),
         }
     }
 
@@ -634,6 +669,7 @@ impl HistoricalUniversePlanArtifact {
                 plan.verify()
             }
             Self::V4(plan) => plan.verify(),
+            Self::V5(plan) => plan.verify(),
         }
     }
 
@@ -642,6 +678,7 @@ impl HistoricalUniversePlanArtifact {
         match self {
             Self::Legacy(plan) => Ok(serde_json::to_vec(plan)?),
             Self::V4(plan) => plan.canonical_json_bytes(),
+            Self::V5(plan) => plan.canonical_json_bytes(),
         }
     }
 }
@@ -654,6 +691,7 @@ impl Serialize for HistoricalUniversePlanArtifact {
         match self {
             Self::Legacy(plan) => plan.serialize(serializer),
             Self::V4(plan) => plan.serialize(serializer),
+            Self::V5(plan) => plan.serialize(serializer),
         }
     }
 }
@@ -674,6 +712,9 @@ impl<'de> Deserialize<'de> for HistoricalUniversePlanArtifact {
                 .map_err(serde::de::Error::custom),
             4 => serde_json::from_value::<HistoricalUniversePlanV4>(value)
                 .map(Self::V4)
+                .map_err(serde::de::Error::custom),
+            5 => serde_json::from_value::<HistoricalUniversePlanV5>(value)
+                .map(Self::V5)
                 .map_err(serde::de::Error::custom),
             _ => Err(serde::de::Error::custom(format!(
                 "unsupported historical universe plan version {version}"

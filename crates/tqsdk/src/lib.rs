@@ -2632,12 +2632,21 @@ impl BacktestBuilder {
             )
             .await?,
         );
-        if let Some(tqsdk_data::HistoricalUniversePlanArtifact::V4(plan)) =
-            &self.historical_universe_artifact
-        {
-            tick_sources = cache_fill_tick_sources_from_historical_v4_targets(tick_sources, plan)?;
-        } else if let Some(plan) = &self.historical_universe_plan {
-            tick_sources = cache_fill_tick_sources_from_historical_listing(tick_sources, plan)?;
+        match &self.historical_universe_artifact {
+            Some(tqsdk_data::HistoricalUniversePlanArtifact::V4(plan)) => {
+                tick_sources =
+                    cache_fill_tick_sources_from_historical_v4_targets(tick_sources, plan)?;
+            }
+            Some(tqsdk_data::HistoricalUniversePlanArtifact::V5(plan)) => {
+                tick_sources =
+                    cache_fill_tick_sources_from_historical_v4_targets(tick_sources, plan)?;
+            }
+            _ => {
+                if let Some(plan) = &self.historical_universe_plan {
+                    tick_sources =
+                        cache_fill_tick_sources_from_historical_listing(tick_sources, plan)?;
+                }
+            }
         }
         let physical_ranges = physical_tick_ranges(&tick_sources);
         let mut logical_symbols = planned.tick_symbols.clone();
@@ -3137,7 +3146,7 @@ impl BacktestBuilder {
         Ok(self)
     }
 
-    /// Apply a V1-V4 artifact. The referenced acquisition/catalog/rollback
+    /// Apply a V1-V5 artifact. The referenced acquisition/catalog/rollback
     /// chain is verified against the selected cache root before preparation.
     pub fn historical_universe_artifact(
         self,
@@ -3149,21 +3158,34 @@ impl BacktestBuilder {
                 self.historical_universe_plan(plan.clone())?
             }
             tqsdk_data::HistoricalUniversePlanArtifact::V4(plan) => {
-                let runtime_plan = plan.timeline().clone().prepare(plan.budget())?;
-                let mut builder = self.historical_universe_plan(runtime_plan)?;
-                for batch in &plan.timeline().batches {
-                    for change in &batch.changes {
-                        if let tqsdk_data::UniverseMemberChange::Add { instrument, .. } = change {
-                            push_unique_string(&mut builder.symbols, instrument.symbol());
-                        }
-                    }
-                }
-                builder
+                self.historical_universe_artifact_timeline(plan.timeline())?
+            }
+            tqsdk_data::HistoricalUniversePlanArtifact::V5(plan) => {
+                self.historical_universe_artifact_timeline(plan.timeline())?
             }
             _ => unreachable!("historical universe artifact is non-exhaustive"),
         };
         builder.historical_universe_artifact = Some(artifact);
         Ok(builder)
+    }
+
+    fn historical_universe_artifact_timeline(
+        mut self,
+        timeline: &tqsdk_data::HistoricalUniverseTimeline,
+    ) -> Result<Self> {
+        if timeline.start_ns != self.start_ns || timeline.end_ns != self.end_ns {
+            return Err(data_validation(
+                "historical universe plan range must exactly match backtest range",
+            ));
+        }
+        for batch in &timeline.batches {
+            for change in &batch.changes {
+                if let tqsdk_data::UniverseMemberChange::Add { instrument, .. } = change {
+                    push_unique_string(&mut self.symbols, instrument.symbol());
+                }
+            }
+        }
+        Ok(self)
     }
 
     /// Validate cache coverage and prepare the local replay inputs.
@@ -3210,12 +3232,18 @@ impl BacktestBuilder {
             None
         };
         let mut prepared_inputs = self.resolved_prepared_inputs().await?;
-        if let Some(tqsdk_data::HistoricalUniversePlanArtifact::V4(plan)) =
-            &self.historical_universe_artifact
-        {
-            restrict_tick_sources_to_historical_universe_v4(&mut prepared_inputs, plan)?;
-        } else if let Some(plan) = &self.historical_universe_plan {
-            restrict_tick_sources_to_historical_universe(&mut prepared_inputs, plan)?;
+        match &self.historical_universe_artifact {
+            Some(tqsdk_data::HistoricalUniversePlanArtifact::V4(plan)) => {
+                restrict_tick_sources_to_historical_universe_v4(&mut prepared_inputs, plan)?;
+            }
+            Some(tqsdk_data::HistoricalUniversePlanArtifact::V5(plan)) => {
+                restrict_tick_sources_to_historical_universe_v4(&mut prepared_inputs, plan)?;
+            }
+            _ => {
+                if let Some(plan) = &self.historical_universe_plan {
+                    restrict_tick_sources_to_historical_universe(&mut prepared_inputs, plan)?;
+                }
+            }
         }
         if (!prepared_inputs.minute_klines.is_empty() || !prepared_inputs.daily_klines.is_empty())
             && matches!(
@@ -3770,12 +3798,18 @@ impl PreparedBacktest {
             }
         };
 
-        if let Some(tqsdk_data::HistoricalUniversePlanArtifact::V4(plan)) =
-            &builder.historical_universe_artifact
-        {
-            restrict_tick_sources_to_historical_universe_v4(&mut inputs, plan)?;
-        } else if let Some(plan) = &builder.historical_universe_plan {
-            restrict_tick_sources_to_historical_universe(&mut inputs, plan)?;
+        match &builder.historical_universe_artifact {
+            Some(tqsdk_data::HistoricalUniversePlanArtifact::V4(plan)) => {
+                restrict_tick_sources_to_historical_universe_v4(&mut inputs, plan)?;
+            }
+            Some(tqsdk_data::HistoricalUniversePlanArtifact::V5(plan)) => {
+                restrict_tick_sources_to_historical_universe_v4(&mut inputs, plan)?;
+            }
+            _ => {
+                if let Some(plan) = &builder.historical_universe_plan {
+                    restrict_tick_sources_to_historical_universe(&mut inputs, plan)?;
+                }
+            }
         }
         let BacktestBuilder {
             base,
@@ -3790,7 +3824,7 @@ impl PreparedBacktest {
             universe_spec: _,
             universe_symbol_files: _,
             historical_universe_plan,
-            historical_universe_artifact: _,
+            historical_universe_artifact,
             warmup_batch_size: _,
             remote_fill_config: _,
             remote_fill_progress: _,
@@ -3811,8 +3845,20 @@ impl PreparedBacktest {
         for spec in &tick_specs {
             base = base.tick_symbol(spec.symbol.clone(), spec.view_width);
         }
-        if let Some(plan) = historical_universe_plan {
-            base = base.historical_universe(plan.timeline);
+        let historical_universe_timeline = match historical_universe_artifact {
+            Some(tqsdk_data::HistoricalUniversePlanArtifact::V4(plan)) => {
+                Some(plan.timeline().clone())
+            }
+            Some(tqsdk_data::HistoricalUniversePlanArtifact::V5(plan)) => {
+                Some(plan.timeline().clone())
+            }
+            Some(tqsdk_data::HistoricalUniversePlanArtifact::Legacy(_)) | None => {
+                historical_universe_plan.map(|plan| plan.timeline)
+            }
+            _ => unreachable!("historical universe artifact is non-exhaustive"),
+        };
+        if let Some(timeline) = historical_universe_timeline {
+            base = base.historical_universe(timeline);
         }
         let stream = history_backtest_stream(cache.cache_dir(), start_ns, end_ns, inputs).await?;
         base.replay_backtest_stream(Box::new(stream))
@@ -3893,20 +3939,61 @@ fn restrict_tick_sources_to_historical_universe(
     Ok(())
 }
 
+trait HistoricalUniverseExecutablePlan {
+    fn timeline(&self) -> &tqsdk_data::HistoricalUniverseTimeline;
+    fn tick_targets(&self) -> Option<&[tqsdk_data::HistoricalUniverseKindTarget]>;
+}
+
+impl HistoricalUniverseExecutablePlan for tqsdk_data::HistoricalUniversePlanV4 {
+    fn timeline(&self) -> &tqsdk_data::HistoricalUniverseTimeline {
+        self.timeline()
+    }
+
+    fn tick_targets(&self) -> Option<&[tqsdk_data::HistoricalUniverseKindTarget]> {
+        self.execution()
+            .targets()
+            .get(&tqsdk_data::HistoricalDataKind::Tick)
+            .map(Vec::as_slice)
+    }
+}
+
+impl HistoricalUniverseExecutablePlan for tqsdk_data::HistoricalUniversePlanV5 {
+    fn timeline(&self) -> &tqsdk_data::HistoricalUniverseTimeline {
+        self.timeline()
+    }
+
+    fn tick_targets(&self) -> Option<&[tqsdk_data::HistoricalUniverseKindTarget]> {
+        self.execution()
+            .targets()
+            .get(&tqsdk_data::HistoricalDataKind::Tick)
+            .map(Vec::as_slice)
+    }
+}
+
 fn historical_universe_v4_tick_start(
     artifact: &tqsdk_data::HistoricalUniversePlanArtifact,
 ) -> Option<i64> {
-    let tqsdk_data::HistoricalUniversePlanArtifact::V4(plan) = artifact else {
-        return None;
-    };
-    plan.execution()
-        .targets()
-        .get(&tqsdk_data::HistoricalDataKind::Tick)
+    match artifact {
+        tqsdk_data::HistoricalUniversePlanArtifact::V4(plan) => {
+            historical_universe_executable_tick_start(plan)
+        }
+        tqsdk_data::HistoricalUniversePlanArtifact::V5(plan) => {
+            historical_universe_executable_tick_start(plan)
+        }
+        tqsdk_data::HistoricalUniversePlanArtifact::Legacy(_) => None,
+        _ => unreachable!("historical universe artifact is non-exhaustive"),
+    }
+}
+
+fn historical_universe_executable_tick_start(
+    plan: &impl HistoricalUniverseExecutablePlan,
+) -> Option<i64> {
+    plan.tick_targets()
         .and_then(|targets| targets.iter().map(|target| target.start_ns).min())
 }
 
 fn historical_universe_v4_visible_ranges(
-    plan: &tqsdk_data::HistoricalUniversePlanV4,
+    plan: &impl HistoricalUniverseExecutablePlan,
 ) -> Result<BTreeMap<String, Vec<(i64, i64)>>> {
     let mut starts = BTreeMap::<String, i64>::new();
     let mut ranges = BTreeMap::<String, Vec<(i64, i64)>>::new();
@@ -3946,12 +4033,10 @@ fn historical_universe_v4_visible_ranges(
 }
 
 fn historical_universe_v4_tick_targets(
-    plan: &tqsdk_data::HistoricalUniversePlanV4,
+    plan: &impl HistoricalUniverseExecutablePlan,
 ) -> Result<BTreeMap<String, (i64, i64)>> {
     let targets = plan
-        .execution()
-        .targets()
-        .get(&tqsdk_data::HistoricalDataKind::Tick)
+        .tick_targets()
         .ok_or_else(|| data_validation("historical Universe V4 has no tick target set"))?;
     let mut by_symbol = BTreeMap::new();
     for target in targets {
@@ -4007,7 +4092,7 @@ fn restrict_historical_universe_v4_sources(
 
 fn restrict_tick_sources_to_historical_universe_v4(
     inputs: &mut PreparedBacktestInputs,
-    plan: &tqsdk_data::HistoricalUniversePlanV4,
+    plan: &impl HistoricalUniverseExecutablePlan,
 ) -> Result<()> {
     let visible_ranges = historical_universe_v4_visible_ranges(plan)?;
     let tick_targets = historical_universe_v4_tick_targets(plan)?;
@@ -4026,7 +4111,7 @@ fn restrict_tick_sources_to_historical_universe_v4(
 
 fn cache_fill_tick_sources_from_historical_v4_targets(
     sources: Vec<tqsdk_task::HistoryBacktestTickSource>,
-    plan: &tqsdk_data::HistoricalUniversePlanV4,
+    plan: &impl HistoricalUniverseExecutablePlan,
 ) -> Result<Vec<tqsdk_task::HistoryBacktestTickSource>> {
     let tick_targets = historical_universe_v4_tick_targets(plan)?;
     Ok(sources

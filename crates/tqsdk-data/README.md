@@ -69,9 +69,11 @@
   snapshot 编译；需要 metadata/ranking 时通过 `FuturesUniverseResolver` capability adapter；
 - `compile_historical_universe_resolution_v4` 只接受 `timeline(...)`，固定 provider-data membership、
   dependency closure 和 tick/minute/daily targets；
-- `HistoricalUniversePlanArtifact` flat-dispatch plan v1–v4；旧 `HistoricalUniversePlan` 结构和
+- `HistoricalUniversePlanV5` 是 current immutable plan；`HistoricalUniversePlanArtifact` 保留 flat
+  v1–v5 dispatch 以支持迁移与受控兼容，旧 `HistoricalUniversePlan` 结构和
   `publish_plan/load_plan` v1–v3 API 保持；
-- `HistoricalUniverseArtifactStore` 验证 acquisition、semantic catalog、plan 与 V3 rollback chain。
+- `HistoricalUniverseArtifactStore` normal V5 路径验证 acquisition、semantic catalog 与 plan；
+  `preview_v4_migration/migrate_v4_plan` 先验证 V4/V3 rollback chain，且永不删除 source artifact。
 
 ```rust
 use tqsdk_data::{UniverseInput, UniverseSpec, compile_static_futures_universe_v2};
@@ -87,7 +89,7 @@ let compiled = compile_static_futures_universe_v2(&input)?;
 省略 wrapper 默认 snapshot。`main` 是当前具体主力，`continuous` 是 `KQ.m@...` 逻辑主连；
 Universe 只选 instrument，不选择数据流。V2 `file:` 被拒绝，外部 exact-symbol 文件通过
 `UniverseInput::universe_symbol_file(s)` 组合，每个文件只读一次且内容 identity 可重现。
-完整语法、兼容 dispatcher、排除矩阵和 V4 rollout 见
+完整语法、兼容 dispatcher、排除矩阵和 V5 migration 见
 [Universe Language V2](../../docs/architecture/universe-language.md) 与
 [历史 Universe Catalog](../../docs/architecture/historical-universe-catalog.md)。
 

@@ -111,13 +111,13 @@ dashboard 还会展示 backfilling 已持续时间、frame 速率和最近 frame
 上述表达式都是 current/live snapshot。字符串 API 保持 legacy-first；`snapshot(...)` 强制进入
 Universe Language V2，typed API 接受 `UniverseSpec`。live/facade/relay 会在触网前拒绝
 `timeline(...)`。历史 cache fill 直接在 `--universe` 使用
-`timeline(contract:all)`，并显式启用
-`--historical-plan-write-policy v4-with-v3-rollback`；legacy `physical:all` 仍兼容写 v3。默认 provider
+`timeline(contract:all)` 并默认发布 V5；legacy `physical:all` 仍兼容写 v3。默认 provider
 路径会稳定获取全物理合约 roster，首次补齐
 原生 1d 历史，并以第一条 daily 行作为数据 membership 起点，再在 cache 内部生成内容寻址的
 acquisition、semantic catalog 和 pinned plan。终态空数据和隔离的 provider-unavailable 候选不进入
-universe；该路径不查询或推断交易所挂牌日期。V2 timeline 同时发布 V4 和执行等价的 V3 rollback
-artifact；旧 `--universe-plan` 只作为隐藏兼容入口保留。
+universe；该路径不查询或推断交易所挂牌日期。V2 timeline 默认发布 current V5 artifact；已有 V4
+artifact 须先验证完整 V4/V3 chain 后以 `migrate-universe` 迁移，源文件保持不变。旧
+`--universe-plan` 只作为隐藏兼容入口保留。
 `index` 只生成天勤支持的 `KQ.i@EX.product` 加权 / 指数连续代码，`KQD` 外盘行情不会生成
 不存在的加权 / 指数连续合约；
 可用 `TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1` 调小后续动态 tick chart 补订的上游历史窗口；
@@ -556,7 +556,7 @@ cargo check --all-features --examples
 - [文档索引](docs/README.md)
 - [架构总览](docs/architecture/README.md)
 - [Universe Language V2](docs/architecture/universe-language.md)
-- [历史 Universe Catalog 与 V4 artifact](docs/architecture/historical-universe-catalog.md)
+- [历史 Universe Catalog 与 V5 artifact](docs/architecture/historical-universe-catalog.md)
 - [回测 Tick 持久缓存预热与验收](docs/architecture/backtest-tick-cache-operations.md)
 - [回测 Tick Cache CLI](docs/architecture/backtest-tick-cache-cli.md)
 - [runtime core overview](docs/architecture/runtime-core/overview.md)

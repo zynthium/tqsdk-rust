@@ -19,9 +19,10 @@ pub const PROVIDER_DAILY_HISTORY_SOURCE_IDENTITY: &str =
 pub const PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS: i64 = 630_928_800_000_000_000;
 /// Calendar semantics for native daily row datetimes used as data-membership starts.
 pub const PROVIDER_DAILY_MEMBERSHIP_CALENDAR_IDENTITY: &str = "tq-native-daily-trading-datetime:v1";
-/// Legacy source name retained for compatibility. The identity denotes data
-/// membership, not exchange lifecycle.
+/// Legacy source name retained for a source-compatible transition. The
+/// identity denotes data membership, not exchange lifecycle.
 #[doc(hidden)]
+#[deprecated(note = "use PROVIDER_DAILY_MEMBERSHIP_CALENDAR_IDENTITY instead")]
 pub const PROVIDER_DAILY_LIFECYCLE_CALENDAR_IDENTITY: &str =
     PROVIDER_DAILY_MEMBERSHIP_CALENDAR_IDENTITY;
 pub const PROVIDER_CURRENT_PHYSICAL_FUTURES_EXCHANGES: &[&str] =

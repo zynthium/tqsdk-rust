@@ -25,7 +25,8 @@ session owner、后台守护进程、relay 或监控服务。完整合同见
 1990-01-01 到 cutoff 的原生 1d 历史。第一条 native-1d 行形成有效 membership 起点；没有行但
 服务端终态完成的前缀记录为空覆盖。随后 CLI 在 `<cache-dir>/historical-universe-v1/` 内部发布
 内容寻址的 acquisition 与 semantic catalog。legacy 输入发布 v3 plan；V2 timeline 从同一
-execution dual-write V4 和 V3 rollback plan，再用统一 executor 下载选定 kind。
+execution 直接发布 current V5 plan，再用统一 executor 下载选定 kind。已有 V4 plan 在完整
+V4/V3 chain 验证后可迁移为 V5，source 与 rollback artifact 保留。
 `provider_history_observed` 不读取或推断交易所挂牌日期；到期 metadata 只用于 membership 终点。
 首次全市场 bootstrap 较慢，后续在相同 cache root 上复用已确认 coverage。
 服务端显式 rows 形成 membership，终态空窗口形成空观测。provider roster 中不创建历史 chart 的
@@ -40,22 +41,28 @@ execution dual-write V4 和 V3 rollback plan，再用统一 executor 下载选�
 # 截止窗口内出现过的全部物理合约分钟线
 tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
   --kind minute --universe 'timeline(contract:all)' \
-  --historical-plan-write-policy v4-with-v3-rollback \
   --start-day 2025-01-01 --symbol-concurrency 4
 
 # 动态活跃物理合约，同时保留连续依赖和指数序列
 tqsdk-cache --cache-dir /var/lib/tqsdk/history fill \
   --kind tick \
   --universe 'timeline(contract:all;continuous:all;index:all)' \
-  --historical-plan-write-policy v4-with-v3-rollback \
   --start-day 2025-01-01 --symbol-concurrency 4
 ```
 
 同一 `--universe` 分别运行 `--kind tick`、`minute`、`daily` 即填充三种数据；Universe 不选择
 数据流。不传 `--end-day` 时截止本次启动时的最新已收盘交易日。可重复的
-`--universe-file PATH` 是 V2 外部 exact-symbol 来源。V2 timeline writer 默认关闭，必须显式使用
-`v4-with-v3-rollback`；legacy historical 输入不需要该 flag。旧 `--universe-plan` 只作为隐藏兼容
-入口保留；`--universe-timeline` 已移除。旧 v2 plan 仍需显式 `--allow-legacy-universe-plan`。
+`--universe-file PATH` 是 V2 外部 exact-symbol 来源。V2 timeline writer 默认发布 V5；
+`--historical-plan-write-policy v4-with-v3-rollback` 仅保留为隐藏兼容 token。旧
+`--universe-plan` 只作为隐藏兼容入口保留；V4 plan 先执行 `migrate-universe --plan-sha256 <V4_SHA256>`，
+V1–V3 plan 重新编译；`--universe-timeline` 已移除。
+
+先审计、再写入 V4→V5 mapping：
+
+```bash
+tqsdk-cache --cache-dir /var/lib/tqsdk/history migrate-universe --plan-sha256 <V4_SHA256>
+tqsdk-cache --cache-dir /var/lib/tqsdk/history migrate-universe --plan-sha256 <V4_SHA256> --apply
+```
 首次自动准备不能在 `--dry-run` 中完成：dry-run 只审计稳定 roster，并以
 `preparation_required`/exit 1 报告需要 native-daily cache mutation。
 

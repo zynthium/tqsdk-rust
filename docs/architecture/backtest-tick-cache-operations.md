@@ -8,14 +8,13 @@
 已退市或后来出现的合约。动态历史集合必须使用 pinned plan：
 
 - 旧调用方继续使用 `historical_universe_plan(HistoricalUniversePlan)` 读取 plan v1–v3；
-- 新调用方使用 `historical_universe_artifact(HistoricalUniversePlanArtifact)` 读取 V1–V4；
-- V4 会验证自身 hash、回测区间以及 acquisition/catalog/V3 rollback chain；
-- timeline 控制当时可见 instrument，V4 kind-specific tick targets 控制物理 cache dependency 和
+- 新调用方使用 `historical_universe_artifact(HistoricalUniversePlanArtifact)` 读取 V1–V5；
+- V5 会验证自身 hash、回测区间以及 acquisition/catalog chain；V4/V3 rollback chain 在迁移前验证；
+- timeline 控制当时可见 instrument，V5 kind-specific tick targets 控制物理 cache dependency 和
   首可用边界。
 
 `tqsdk-cache fill --universe 'timeline(contract:all)'` 会内部采集 provider-data membership 并生成
-计划，不要求调用方手写 `PLAN.json`。V2 writer 必须显式传
-`--historical-plan-write-policy v4-with-v3-rollback`；legacy `physical:all` 仍可写 V3。
+计划，不要求调用方手写 `PLAN.json`。V2 writer 默认发布 V5；legacy `physical:all` 仍可写 V3。
 `main/top` 需要历史 ranking artifact，因此 timeline 当前 fail closed；`continuous/index` 可以与
 `contract` 同时选择。Universe 只选 instrument，tick/minute/daily 仍由 `--kind` 决定。
 

@@ -10,8 +10,6 @@ use crate::client::{
 use crate::error::{DataError, Result};
 
 mod ranges;
-mod series_file_store;
-mod storage;
 mod store;
 mod tqbn;
 
@@ -20,8 +18,6 @@ pub(crate) fn tqbn_snapshot_requires_zstd(bytes: &[u8]) -> Result<bool> {
 }
 
 pub(crate) use ranges::{rangeset_difference, rangeset_intersection};
-#[allow(deprecated)]
-pub use store::SERIES_FILE_HISTORY_SERIES_FORMAT_ID;
 pub use store::{
     HISTORY_SERIES_CACHE_FORMAT_ID, HistorySeriesCoverageReport, HistorySeriesPurgeReport,
 };
@@ -35,9 +31,6 @@ pub(crate) use store::{
 const DEFAULT_CACHE_DIR_ENV: &str = "TQSDK_HISTORY_CACHE_DIR";
 const DEFAULT_CACHE_DIR: &str = ".tqsdk/data_series_1";
 pub const HISTORY_SERIES_CACHE_SCHEMA_VERSION: u32 = 3;
-const KLINE_DATA_COLS: usize = 7;
-const TICK_1_LEVEL_DATA_COLS: usize = 11;
-const TICK_5_LEVEL_DATA_COLS: usize = 27;
 const TICK_TAIL_REFRESH_NS: i64 = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

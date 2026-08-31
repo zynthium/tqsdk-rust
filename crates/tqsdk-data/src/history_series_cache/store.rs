@@ -12,9 +12,6 @@ use super::{
 
 pub const HISTORY_SERIES_CACHE_FORMAT_ID: &str = "tqsdk.tqbn.daily.v3";
 
-#[deprecated(note = "use HISTORY_SERIES_CACHE_FORMAT_ID")]
-pub const SERIES_FILE_HISTORY_SERIES_FORMAT_ID: &str = HISTORY_SERIES_CACHE_FORMAT_ID;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HistorySeriesKind {
     Kline { duration_ns: i64 },

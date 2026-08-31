@@ -136,6 +136,8 @@ enum Command {
     RepairLocks(RepairLocksArgs),
     /// Re-encode legacy Tick or canonical-minute cache partitions into their current schema.
     Migrate(MigrateArgs),
+    /// Verify and migrate one immutable historical-universe V4 plan to V5.
+    MigrateUniverse(MigrateUniverseArgs),
     /// Explicitly refresh one logical symbol's metadata sidecar from the official source.
     MetadataRefresh(MetadataRefreshArgs),
     /// Explicitly remove canonical-minute month partitions.
@@ -156,6 +158,7 @@ impl Command {
             Self::Doctor => "doctor",
             Self::RepairLocks(_) => "repair-locks",
             Self::Migrate(_) => "migrate",
+            Self::MigrateUniverse(_) => "migrate-universe",
             Self::MetadataRefresh(_) => "metadata-refresh",
             Self::Purge(_) => "purge",
             Self::Query(_) => "query",
@@ -197,6 +200,16 @@ struct MigrateArgs {
     /// New empty rollback directory. Required with --apply; each original cache file is hard-linked here before rewrite.
     #[arg(long, value_name = "DIR", required_if_eq("apply", "true"))]
     backup_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct MigrateUniverseArgs {
+    /// Content-addressed V4 plan hash, including the sha256: prefix.
+    #[arg(long, value_name = "SHA256")]
+    plan_sha256: String,
+    /// Publish the verified V5 artifact. Without this flag, only verify and report the mapping.
+    #[arg(long)]
+    apply: bool,
 }
 
 #[derive(Debug, Args)]
@@ -282,11 +295,12 @@ struct FillArgs {
     #[arg(long = "universe-file", value_name = "PATH")]
     universe_files: Vec<PathBuf>,
 
-    /// Historical Universe V2 artifact rollout policy.
+    /// Hidden compatibility override. V2 timelines now publish V5 by default.
     #[arg(
         long,
-        default_value_t = tqsdk_data::HistoricalPlanWritePolicy::LegacyOnly,
-        value_name = "POLICY"
+        default_value_t = tqsdk_data::HistoricalPlanWritePolicy::V4WithV3Rollback,
+        value_name = "POLICY",
+        hide = true
     )]
     historical_plan_write_policy: tqsdk_data::HistoricalPlanWritePolicy,
     /// Legacy compatibility input. New fills prepare plans internally from
@@ -1269,6 +1283,7 @@ async fn run(cli: Cli) -> Result<CommandOutcome, CliError> {
         Command::Doctor => doctor(cli.cache_dir.as_deref(), cli.kind),
         Command::RepairLocks(args) => repair_locks(cli.cache_dir.as_deref(), cli.kind, args),
         Command::Migrate(args) => migrate(cli.cache_dir.as_deref(), cli.kind, args),
+        Command::MigrateUniverse(args) => migrate_universe(cli.cache_dir.as_deref(), args),
         Command::MetadataRefresh(args) => {
             metadata_refresh(cli.cache_dir.as_deref(), cli.kind, cli.market, args).await
         }
@@ -1281,6 +1296,14 @@ async fn run(cli: Cli) -> Result<CommandOutcome, CliError> {
 fn validate_command_kind(command: &Command, kind: CacheKind) -> Result<(), CliError> {
     if matches!(command, Command::Snapshot(_)) {
         return Ok(());
+    }
+    if matches!(command, Command::MigrateUniverse(_)) {
+        if matches!(kind, CacheKind::Tick) {
+            return Ok(());
+        }
+        return Err(CliError::Usage(
+            "migrate-universe does not use --kind; leave the default tick kind".to_string(),
+        ));
     }
     if matches!(kind, CacheKind::All) && !matches!(command, Command::Inventory | Command::Doctor) {
         return Err(CliError::Usage(
@@ -1538,7 +1561,7 @@ enum ProviderHistoricalUniverseInput {
 
 enum CompiledProviderHistoricalPlan {
     Legacy(Box<tqsdk_data::HistoricalUniversePlan>),
-    V2(Box<tqsdk_data::HistoricalUniversePlanWriteSet>),
+    V5(Box<tqsdk_data::HistoricalUniversePlanV5>),
 }
 
 impl ProviderHistoricalUniverseInput {
@@ -2157,10 +2180,10 @@ async fn bootstrap_provider_history_and_fill(
             )
             .map_err(|error| DataError::Validation(error.to_string()))?
             .with_input_sources_sha256(input.input_sources_sha256().map(str::to_owned));
-            let write_set = resolution
-                .prepare_write_set(args.historical_plan_write_policy)
+            let plan = resolution
+                .prepare_plan()
                 .map_err(|error| DataError::Validation(error.to_string()))?;
-            CompiledProviderHistoricalPlan::V2(Box::new(write_set))
+            CompiledProviderHistoricalPlan::V5(Box::new(plan))
         }
     };
     if cancellation.is_cancelled() {
@@ -2180,22 +2203,17 @@ async fn bootstrap_provider_history_and_fill(
             store.verify_plan_artifact_chain(&plan)?;
             (plan_path, None)
         }
-        CompiledProviderHistoricalPlan::V2(write_set) => {
-            let published = store.publish_plan_write_set(&write_set)?;
-            let artifact = tqsdk_data::HistoricalUniversePlanArtifact::V4(write_set.v4().clone());
-            store.verify_plan_artifact_chain_artifact(&artifact)?;
+        CompiledProviderHistoricalPlan::V5(plan) => {
+            let plan_path = store.publish_current_plan(&plan)?;
+            store.verify_current_plan_artifact_chain(&plan)?;
             let report = json!({
-                "plan_version": write_set.v4().plan_version(),
-                "plan_sha256": published.v4_plan_sha256(),
-                "plan_path": published.v4_path(),
-                "rollback_plan_version": write_set.rollback_v3().plan_version,
-                "rollback_v3_plan_sha256": published.rollback_v3_plan_sha256(),
-                "rollback_v3_plan_path": published.rollback_v3_path(),
-                "normalized_ast_sha256": write_set.v4().identity().normalized_ast_sha256(),
-                "input_sources_sha256": write_set.v4().identity().input_sources_sha256(),
-                "write_policy": args.historical_plan_write_policy.to_string(),
+                "plan_version": plan.plan_version(),
+                "plan_sha256": plan.plan_sha256(),
+                "plan_path": plan_path,
+                "normalized_ast_sha256": plan.identity().normalized_ast_sha256(),
+                "input_sources_sha256": plan.identity().input_sources_sha256(),
             });
-            (published.rollback_v3_path().to_path_buf(), Some(report))
+            (plan_path, Some(report))
         }
     };
 
@@ -2273,6 +2291,89 @@ fn provider_history_bootstrap_is_publishable(
     completed > 0 && unavailable <= provider_history_unavailable_limit(roster_len)
 }
 
+#[derive(Debug)]
+struct HistoricalUniverseFillPlan {
+    plan_version: u32,
+    plan_sha256: String,
+    catalog_id: String,
+    start_ns: i64,
+    end_ns: i64,
+    targets: Vec<tqsdk_data::HistoricalUniverseFillTarget>,
+    legacy_unproven: bool,
+}
+
+fn load_historical_universe_fill_plan(
+    store: &tqsdk_data::HistoricalUniverseArtifactStore,
+    plan_path: &Path,
+    kind: tqsdk_data::HistoricalDataKind,
+    allow_legacy: bool,
+) -> Result<HistoricalUniverseFillPlan, CliError> {
+    let bytes = fs::read(plan_path)?;
+    let plan_version = serde_json::from_slice::<Value>(&bytes)?
+        .get("plan_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            CliError::Usage("historical universe plan lacks plan_version".to_string())
+        })?;
+    match plan_version {
+        5 => {
+            let plan: tqsdk_data::HistoricalUniversePlanV5 = serde_json::from_slice(&bytes)?;
+            if plan.canonical_json_bytes()? != bytes {
+                return Err(CliError::Usage(
+                    "historical universe plan does not use canonical V5 JSON".to_string(),
+                ));
+            }
+            store.verify_current_plan_artifact_chain(&plan)?;
+            let targets = plan
+                .execution()
+                .targets()
+                .get(&kind)
+                .ok_or_else(|| {
+                    CliError::Usage(format!(
+                        "historical universe plan lacks pinned {kind:?} targets"
+                    ))
+                })?
+                .iter()
+                .map(|target| tqsdk_data::HistoricalUniverseFillTarget {
+                    symbol: target.source_symbol.clone(),
+                    start_ns: target.start_ns,
+                    end_ns: target.end_ns,
+                })
+                .collect();
+            Ok(HistoricalUniverseFillPlan {
+                plan_version: plan.plan_version(),
+                plan_sha256: plan.plan_sha256().to_string(),
+                catalog_id: plan.timeline().catalog_id.clone(),
+                start_ns: plan.timeline().start_ns,
+                end_ns: plan.timeline().end_ns,
+                targets,
+                legacy_unproven: false,
+            })
+        }
+        1..=3 => {
+            let plan: tqsdk_data::HistoricalUniversePlan = serde_json::from_slice(&bytes)?;
+            store.verify_plan_artifact_chain(&plan)?;
+            let (targets, legacy_unproven) =
+                historical_universe_fill_targets(&plan, kind, allow_legacy)?;
+            Ok(HistoricalUniverseFillPlan {
+                plan_version: plan.plan_version,
+                plan_sha256: plan.plan_sha256,
+                catalog_id: plan.timeline.catalog_id,
+                start_ns: plan.timeline.start_ns,
+                end_ns: plan.timeline.end_ns,
+                targets,
+                legacy_unproven,
+            })
+        }
+        4 => Err(CliError::Usage(
+            "historical universe V4 plan must be migrated to V5 before filling".to_string(),
+        )),
+        version => Err(CliError::Usage(format!(
+            "unsupported historical universe plan version {version}"
+        ))),
+    }
+}
+
 async fn fill_historical_universe_plan(
     cache_dir: Option<&Path>,
     kind: CacheKind,
@@ -2281,11 +2382,14 @@ async fn fill_historical_universe_plan(
     plan_path: PathBuf,
     signal_context: Option<(BacktestHistoryFillCancellation, tokio::task::JoinHandle<()>)>,
 ) -> Result<CommandOutcome, CliError> {
-    let preflight_plan: tqsdk_data::HistoricalUniversePlan =
-        serde_json::from_slice(&fs::read(&plan_path)?)?;
     let (_, preflight_cache_dir) = open_read_only_cache(cache_dir)?;
-    tqsdk_data::HistoricalUniverseArtifactStore::new(preflight_cache_dir)
-        .verify_plan_artifact_chain(&preflight_plan)?;
+    let preflight_store = tqsdk_data::HistoricalUniverseArtifactStore::new(preflight_cache_dir);
+    let plan = load_historical_universe_fill_plan(
+        &preflight_store,
+        &plan_path,
+        historical_data_kind(kind),
+        args.allow_legacy_universe_plan,
+    )?;
 
     if !matches!(market, MarketKind::Futures) {
         return Err(CliError::Usage(
@@ -2315,12 +2419,8 @@ async fn fill_historical_universe_plan(
         ));
     }
 
-    let plan = preflight_plan;
-    let (targets, legacy_unproven) = historical_universe_fill_targets(
-        &plan,
-        historical_data_kind(kind),
-        args.allow_legacy_universe_plan,
-    )?;
+    let targets = plan.targets.clone();
+    let legacy_unproven = plan.legacy_unproven;
     if targets.is_empty() {
         return Err(CliError::Usage(
             "historical universe plan resolves no physical fill targets".to_string(),
@@ -2412,8 +2512,8 @@ async fn fill_historical_universe_plan(
                     "error": error.to_string(),
                     "universe_plan": {
                         "path": plan_path,
-                        "plan_sha256": plan.plan_sha256,
-                        "catalog_id": plan.timeline.catalog_id,
+                    "plan_sha256": plan.plan_sha256,
+                    "catalog_id": plan.catalog_id,
                     },
                 });
                 write_atomically(path, &serde_json::to_vec_pretty(&value)?)?;
@@ -2464,9 +2564,9 @@ async fn fill_historical_universe_plan(
         "path": plan_path,
         "plan_version": plan.plan_version,
         "plan_sha256": plan.plan_sha256,
-        "catalog_id": plan.timeline.catalog_id,
-        "start_ns": plan.timeline.start_ns,
-        "end_ns": plan.timeline.end_ns,
+        "catalog_id": plan.catalog_id,
+        "start_ns": plan.start_ns,
+        "end_ns": plan.end_ns,
         "physical_symbols": requests.len(),
         "target_count": requests.len(),
     });
@@ -4427,6 +4527,30 @@ fn minute_migration_outcome(
         }),
         exit_code: if plan.problem_files == 0 { 0 } else { 1 },
     }
+}
+
+fn migrate_universe(
+    cache_dir: Option<&Path>,
+    args: MigrateUniverseArgs,
+) -> Result<CommandOutcome, CliError> {
+    let cache_dir = cache_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(tqsdk_data::default_history_cache_dir);
+    let store = tqsdk_data::HistoricalUniverseArtifactStore::new(&cache_dir);
+    let migration = if args.apply {
+        store.migrate_v4_plan(&args.plan_sha256)?
+    } else {
+        store.preview_v4_migration(&args.plan_sha256)?
+    };
+    Ok(CommandOutcome {
+        value: json!({
+            "command": "migrate-universe",
+            "cache_dir": cache_dir,
+            "dry_run": !args.apply,
+            "migration": migration,
+        }),
+        exit_code: 0,
+    })
 }
 
 fn migrate(

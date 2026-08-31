@@ -4,13 +4,15 @@ use std::fs;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
+
 use tqsdk_data::{
     ActiveInterval, CatalogContract, CatalogSnapshot, HistoricalAcquisitionContract,
     HistoricalCatalogAcquisition, HistoricalCatalogProof, HistoricalDataKind,
     HistoricalDependencyRole, HistoricalPlanWritePolicy, HistoricalSemanticCatalog,
-    HistoricalUniverseArtifactStore, HistoricalUniversePlanArtifact, HistoricalUniverseV4Error,
-    TimelineCapabilities, UniverseBudget, UniverseMemberChange, UniverseSpec,
-    compile_historical_universe_resolution_v4,
+    HistoricalUniverseArtifactStore, HistoricalUniversePlanArtifact, HistoricalUniversePlanV5,
+    HistoricalUniverseV4Error, TimelineCapabilities, UniverseBudget, UniverseMemberChange,
+    UniverseSpec, compile_historical_universe_resolution_v4,
 };
 
 fn acquisition_contract(symbol: &str, start_ns: i64, end_ns: i64) -> HistoricalAcquisitionContract {
@@ -27,6 +29,15 @@ fn acquisition_contract(symbol: &str, start_ns: i64, end_ns: i64) -> HistoricalA
             (HistoricalDataKind::Daily, start_ns + 30),
         ]),
     }
+}
+
+#[allow(deprecated)]
+#[test]
+fn deprecated_daily_lifecycle_calendar_alias_remains_source_compatible() {
+    assert_eq!(
+        tqsdk_data::PROVIDER_DAILY_LIFECYCLE_CALENDAR_IDENTITY,
+        tqsdk_data::PROVIDER_DAILY_MEMBERSHIP_CALENDAR_IDENTITY
+    );
 }
 
 fn fixture() -> (HistoricalCatalogAcquisition, HistoricalSemanticCatalog) {
@@ -396,6 +407,157 @@ fn explicit_and_file_continuous_symbols_pin_the_materialized_mapping_identity() 
             ))
             .unwrap();
     }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn v4_to_v5_migration_verifies_the_full_chain_and_preserves_the_source() {
+    let (acquisition, semantic) = fixture();
+    let capabilities = (&acquisition, &semantic);
+    let spec = UniverseSpec::parse_v2("timeline(contract:all;continuous:SHFE.au)").unwrap();
+    let resolution = compile_historical_universe_resolution_v4(
+        &capabilities,
+        &spec,
+        &[],
+        100,
+        500,
+        UniverseBudget::new(16, 32).unwrap(),
+        None,
+    )
+    .unwrap();
+    let write_set = resolution
+        .prepare_write_set(HistoricalPlanWritePolicy::V4WithV3Rollback)
+        .unwrap();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "tqsdk-historical-universe-v5-migration-{}-{nanos}",
+        std::process::id()
+    ));
+    let store = HistoricalUniverseArtifactStore::new(&root);
+    store.publish_acquisition(&acquisition).unwrap();
+    store.publish_semantic_catalog(&semantic).unwrap();
+    let published = store.publish_plan_write_set(&write_set).unwrap();
+    let source_path = published.v4_path().to_path_buf();
+    let source_bytes = fs::read(&source_path).unwrap();
+
+    let preview = store
+        .preview_v4_migration(published.v4_plan_sha256())
+        .unwrap();
+    assert_eq!(preview.source_plan_version(), 4);
+    assert_eq!(preview.current_plan_version(), 5);
+    assert!(!preview.current_path().exists());
+
+    let migration = store.migrate_v4_plan(published.v4_plan_sha256()).unwrap();
+    assert_eq!(migration, preview);
+    assert_eq!(
+        migration.current_plan_sha256(),
+        "sha256:1bed0981628430f913cc176c0e14662c72398da8d9d48675f282c927821d9dc0"
+    );
+    assert_eq!(fs::read(&source_path).unwrap(), source_bytes);
+    assert!(migration.current_path().is_file());
+    assert!(published.rollback_v3_path().is_file());
+
+    let current = store
+        .load_current_plan(migration.current_plan_sha256())
+        .unwrap();
+    assert_eq!(current.timeline(), write_set.v4().timeline());
+    assert_eq!(current.budget(), write_set.v4().budget());
+    store.verify_current_plan_artifact_chain(&current).unwrap();
+    assert!(matches!(
+        store
+            .load_plan_artifact(migration.current_plan_sha256())
+            .unwrap(),
+        HistoricalUniversePlanArtifact::V5(_)
+    ));
+
+    let canonical = fs::read(migration.current_path()).unwrap();
+    assert_eq!(
+        serde_json::to_vec(&current).unwrap(),
+        current.canonical_json_bytes().unwrap()
+    );
+    assert_eq!(current.canonical_json_bytes().unwrap(), canonical);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&canonical)),
+        "290e0772163372a460e2b369a04f5d49b69ee77d9fe7466bcd0245fdb8deeb5b",
+        "V5 canonical artifact byte SHA-256 changed"
+    );
+    let uppercase_sha = String::from_utf8(canonical.clone())
+        .unwrap()
+        .replace("sha256:", "SHA256:");
+    assert!(serde_json::from_str::<HistoricalUniversePlanV5>(&uppercase_sha).is_err());
+    let unknown_nested_field = String::from_utf8(canonical.clone()).unwrap().replacen(
+        "\"scope\":{",
+        "\"scope\":{\"unexpected\":true,",
+        1,
+    );
+    assert!(serde_json::from_str::<HistoricalUniversePlanV5>(&unknown_nested_field).is_err());
+
+    let noncanonical_hash =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let noncanonical_path = store.plan_path(noncanonical_hash).unwrap();
+    fs::create_dir_all(noncanonical_path.parent().unwrap()).unwrap();
+    let mut noncanonical = b" \n".to_vec();
+    noncanonical.extend_from_slice(&canonical);
+    fs::write(&noncanonical_path, noncanonical).unwrap();
+    let error = store.load_current_plan(noncanonical_hash).unwrap_err();
+    assert!(error.to_string().contains("canonical V5 JSON"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn current_prepare_plan_publishes_a_v5_artifact_without_a_rollback_companion() {
+    let (acquisition, semantic) = fixture();
+    let capabilities = (&acquisition, &semantic);
+    let spec = UniverseSpec::parse_v2("timeline(contract:all;continuous:SHFE.au)").unwrap();
+    let resolution = compile_historical_universe_resolution_v4(
+        &capabilities,
+        &spec,
+        &[],
+        100,
+        500,
+        UniverseBudget::new(16, 32).unwrap(),
+        None,
+    )
+    .unwrap();
+    let plan = resolution.prepare_plan().unwrap();
+    assert_eq!(
+        plan.plan_version(),
+        tqsdk_data::HISTORICAL_UNIVERSE_PLAN_VERSION
+    );
+    assert_eq!(plan.plan_version(), 5);
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "tqsdk-historical-universe-v5-current-{}-{nanos}",
+        std::process::id()
+    ));
+    let store = HistoricalUniverseArtifactStore::new(&root);
+    store.publish_acquisition(&acquisition).unwrap();
+    store.publish_semantic_catalog(&semantic).unwrap();
+    let path = store.publish_current_plan(&plan).unwrap();
+    assert!(path.is_file());
+    assert_eq!(
+        fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json"))
+            .count(),
+        1
+    );
+    let loaded = store.load_current_plan(plan.plan_sha256()).unwrap();
+    assert_eq!(loaded, plan);
+    store.verify_current_plan_artifact_chain(&loaded).unwrap();
 
     fs::remove_dir_all(root).unwrap();
 }

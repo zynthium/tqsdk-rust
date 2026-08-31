@@ -6,7 +6,7 @@ tick、minute、daily 数据流；数据种类仍由订阅 API、回测请求或
 ## 两个独立版本轴
 
 - `UNIVERSE_LANGUAGE_VERSION = 2`：语法、规范化 AST、集合运算和 compiler 语义。
-- `HISTORICAL_UNIVERSE_PLAN_VERSION = 4`：历史 timeline 的持久化 wire、hash、execution closure
+- `HISTORICAL_UNIVERSE_PLAN_VERSION = 5`：历史 timeline 的持久化 wire、hash、execution closure
   与 artifact chain。
 
 不能用笼统的“V2”同时指代两者。旧 `UniverseExpression` 是 legacy language v1；旧
@@ -158,23 +158,24 @@ legacy `file:path` 继续由 legacy parser 处理，但新配置应使用外层 
 | `MarketCachePolicy::record_universe(_spec)` | 保持 | 支持 | 启动 recording 前拒绝 |
 | `BacktestBuilder::universe(_spec)` | 当前静态集合 | 支持 | 拒绝隐式 acquire |
 | relay config/runtime | 保持 | 支持 | resolver/WebSocket 前拒绝 |
-| `tqsdk-cache fill --universe` | legacy historical 写 plan v3 | current snapshot fill | 显式 writer policy 下写 V4 + V3 rollback |
+| `tqsdk-cache fill --universe` | legacy historical 写 plan v3 | current snapshot fill | 默认发布 current V5 artifact |
 | `BacktestBuilder::historical_universe_plan` | 读取 plan v1–v3 | 不适用 | 旧签名保持 |
-| `BacktestBuilder::historical_universe_artifact` | wrap v1–v3 | 不适用 | 验证并消费 plan v4 |
+| `BacktestBuilder::historical_universe_artifact` | wrap v1–v3 | 不适用 | 验证并消费 version-dispatched v1–v5 artifact |
 
-## 历史 V4 与回滚
+## 历史 V5 与迁移
 
-V4 artifact 固定 normalized AST、input source identity、acquisition、semantic catalog、calendar、
-proof、可见 membership、physical dependencies、tick/minute/daily targets、execution hash 和
-`rollback_v3_plan_sha256`。`tqsdk-cache` 的 V2 timeline writer 默认关闭；启用方式：
+V5 artifact 固定 normalized AST、input source identity、acquisition、semantic catalog、calendar、
+proof、可见 membership、physical dependencies、tick/minute/daily targets 与 execution hash。V2
+timeline writer 默认直接发布 V5，不再写 V4/V3 rollback companion。
+
+V4 是迁移输入而不是 normal writer format。迁移会先验证完整 V4/V3 rollback、acquisition 与 semantic
+catalog chain，再发布新的 V5 内容寻址 artifact；原 V4 和 V3 文件绝不覆盖或删除：
 
 ```bash
---historical-plan-write-policy v4-with-v3-rollback
+tqsdk-cache --cache-dir <DIR> migrate-universe --plan-sha256 <V4_SHA256>
+tqsdk-cache --cache-dir <DIR> migrate-universe --plan-sha256 <V4_SHA256> --apply
 ```
 
-一次 compile 从相同 materialized timeline/execution 同时生成 V4 和 byte-equivalent V3 rollback
-projection。两份内容寻址 artifact 都发布后才进入执行；任何孤儿文件不会更新 mutable pointer。
-旧 reader 使用报告中的 V3 hash，新 reader 读取 flat version-dispatched V1–V4 artifact。
-
-动态回测会先校验 V4 自身 hash、回测区间和 acquisition/catalog/rollback chain，再用 timeline
+第一条只输出 immutable source-to-V5 mapping；第二条才发布。V1–V3 因没有可无损转换的 V4 execution
+closure，必须重新编译。动态回测会校验 V5 自身 hash、回测区间和 acquisition/catalog chain，再用 timeline
 限制可见 instrument，用 kind-specific tick targets 限制物理 cache symbol 与首可用边界。

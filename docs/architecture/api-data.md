@@ -467,10 +467,11 @@ tqsdk-wait        tqsdk-data
   Universe 只选择 instrument，tick/minute/daily 仍由调用入口决定。语法与入口能力见
   [Universe Language V2](universe-language.md)。
 - legacy 历史 universe 继续使用独立的 `HistoricalFillUniverseSpec`。V2 historical timeline
-  则生成 `HistoricalUniversePlanArtifact::V4`，并固定 acquisition、semantic catalog、calendar、
-  visible membership、physical dependencies、kind targets、input identity 与 V3 rollback hash。
-  `HistoricalUniverseArtifactStore` 提供 flat V1–V4 reader/verifier 和 content-addressed store；proof、
-  provider-data membership 与 rollback 合同见
+  则生成 current `HistoricalUniversePlanV5`，并固定 acquisition、semantic catalog、calendar、
+  visible membership、physical dependencies、kind targets 与 input identity。V4 artifact 可先验证完整
+  V4/V3 rollback chain 后迁移为 V5；迁移保留源文件。`HistoricalUniverseArtifactStore` 提供 normal V5
+  reader/verifier、受控 flat V1–V5 dispatch 与 content-addressed store；proof、
+  provider-data membership 与迁移合同见
   [历史 Universe Catalog](historical-universe-catalog.md)。
   订阅、`wait_update()` 驱动和实时策略 host 留在 `tqsdk` / `tqsdk-wait` 或调用方自建 reader/cursor
   消费层，跨进程持久化服务应作为可选上层 host 复用 writer。

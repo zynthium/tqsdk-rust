@@ -2,7 +2,7 @@
 
 本文定义历史数据下载和动态回测使用的 catalog、证明与 artifact 边界。字符串入口保持
 legacy-first：既有 `UniverseExpression` / `HistoricalFillUniverseSpec` 语义不变；新
-`timeline(...)` Universe Language V2 编译 plan v4。可见 CLI 入口只有 `--universe`，语言规则见
+`timeline(...)` Universe Language V2 编译 current plan v5。可见 CLI 入口只有 `--universe`，语言规则见
 [Universe Language V2](universe-language.md)。
 
 ## 核心语义：数据生命周期
@@ -100,13 +100,14 @@ data 层拥有 codec、验证器和 content-addressed store：
 
 目录名保持兼容，plan 文件使用 flat `plan_version` dispatch。旧
 `HistoricalUniverseArtifactStore::publish_plan/load_plan` 只处理 v1–v3；
-`publish_plan_artifact/load_plan_artifact` 和 chain verifier 处理 v1–v4。V4 Rust 类型使用 private
-fields 与 validated constructors，避免 public struct literal 因 wire 演进而再次破坏 source compatibility。
+`publish_plan_artifact/load_plan_artifact` 保留 version-dispatched v1–v5 读取，以便迁移与受控兼容；
+`publish_current_plan/load_current_plan` 是 normal V5 路径。V5 Rust 类型使用 private fields、固定
+wire 与 validated constructors，避免 public struct literal 或 domain serde shape 影响持久 hash。
 
-V2 timeline writer 采用 reader-first rollout：默认 `legacy-only`，显式
-`v4-with-v3-rollback` 时从同一 resolution 同时发布 canonical V4 与执行等价的 V3 rollback projection。
-报告同时给出两个 hash/path。两份都发布成功后才执行；content-addressed partial publish 只留下无害孤儿，
-不更新 mutable current pointer。
+V2 timeline writer 默认从同一 materialized resolution 发布 canonical V5。旧
+`v4-with-v3-rollback` policy token 仅作为隐藏兼容开关，实际仍产生 V5；它不再触发 V4/V3 dual write。
+V4→V5 迁移先验证 V4/V3 rollback projection 和 acquisition/semantic chain，生成 source-to-current mapping，
+然后才可用 `--apply` 发布 V5。source、rollback 与其内容地址都保留，且不会更新 mutable current pointer。
 
 `HistoricalDailyObservationStatus::Complete` 使用 serde default 且不写出 `status` 字段，因此已有
 complete/terminal-empty provider-history artifact 的 body/hash 保持不变；只有新的
@@ -127,20 +128,19 @@ root、lock、temp、cache coverage 或 plan。
 
 ```text
 tqsdk-cache fill --kind tick|minute|daily \
-  --universe 'timeline(contract:all)' \
-  --historical-plan-write-policy v4-with-v3-rollback
+  --universe 'timeline(contract:all)'
 ```
 
-`physical:all` 和既有 legacy timeline 继续写 v3，无需 writer policy。V2 timeline 在默认
-`legacy-only` 策略下于认证/acquisition 前返回 writer-disabled；显式启用后 dual-write V4/V3。
-`--universe-file` 可重复并在 provider access 前一次性展开，其 identity 进入 V4。
+`physical:all` 和既有 legacy timeline 继续写 v3。V2 timeline 默认发布 V5，不需要 writer policy。
+`--universe-file` 可重复并在 provider access 前一次性展开，其 identity 进入 V5。
 
-`--universe-plan` 只作为隐藏兼容入口；`--universe-timeline` 已移除。未传 `--end-day` 时 cutoff 固定为
+`--universe-plan` 只作为隐藏兼容入口；V4 artifact 先用 `migrate-universe --plan-sha256 <V4_SHA256>`
+迁移，V1–V3 重新编译；`--universe-timeline` 已移除。未传 `--end-day` 时 cutoff 固定为
 本次启动时最新可用闭市边界。dry-run 只审计稳定 provider roster，返回
 `preparation_required`/exit 1，因为生成数据 membership 必须写 native-daily cache。
 
 `tqsdk-data` 拥有 spec、proof、catalog、plan、验证和 artifact store；`tqsdk-cache` 只负责认证、采集/填充
 编排、进度、report、取消与退出码；`tqsdk-session` 提供 query/metadata 和 server-history substrate；
 `tqsdk-task`/`tqsdk` 只消费已验证的 timeline/plan。`BacktestBuilder::historical_universe_artifact`
-验证 V4 自身、区间和 acquisition/catalog/rollback chain；timeline 控制可见 instrument，V4 tick targets
-控制物理 cache dependency 和首可用边界。
+验证 V5 自身、区间和 acquisition/catalog chain；timeline 控制可见 instrument，V5 tick targets
+控制物理 cache dependency 和首可用边界。V4 的 rollback chain 只在迁移时验证。

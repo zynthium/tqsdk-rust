@@ -223,8 +223,8 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
   `RemoteOnMiss` run 自动持有 shared cache-root gate，facade 已持锁时传递同一守卫，避免嵌套自锁
 - Universe Language V2 的 parser、normalized AST、纯 snapshot/timeline compiler、typed exclusion、
   legacy-first dispatcher 和外部 symbol file identity；Universe 只选择 instrument，不选择数据流
-- `HistoricalUniversePlanArtifact` 的 flat v1–v4 reader/verifier、content-addressed store 与 V4 → V3
-  rollback projection；V4 使用 private-field 类型和固定 wire/hash，不修改旧 public V1–V3 plan
+- `HistoricalUniversePlanArtifact` 的受控 flat v1–v5 reader/verifier、content-addressed store 与 V4 → V5
+  source-preserving migration；normal writer/read path 使用 private-field、固定-wire V5，不修改旧 public V1–V3 plan
   - `query_his_cont_quotes`
   - `query_his_cont_underlyings`
   - `query_his_cont_underlying_segments`
@@ -274,8 +274,8 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
 - generic trading-calendar snapshot 只用于日期 selector 和进度分母；TQBN coverage、CST `18:00`
   partition 与 CacheOnly verification 仍是完整性权威
 - historical fill 保留 legacy `physical:all` / legacy timeline 的 V3 路径；V2
-  `timeline(...)` 只有显式 `--historical-plan-write-policy v4-with-v3-rollback` 才 dual-write
-  V4 与等价 V3 projection，随后按 `--kind` 执行 targets
+  `timeline(...)` 默认发布 V5 并随后按 `--kind` 执行 targets。旧
+  `v4-with-v3-rollback` token 仅作隐藏兼容；V4 artifact 先验证完整 V4/V3 chain 后迁移为 V5
 - 复用 `tqsdk` facade / `tqsdk-data` store，不定义或拥有任何缓存格式、session、状态树、live
   recording loop、回测推进或 relay 服务；不进入 Cargo default-members
 - `tqsdk-relay`

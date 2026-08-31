@@ -539,8 +539,11 @@ pub struct HistoricalUniverseFillTarget {
 }
 
 impl HistoricalUniverseTimeline {
-    pub fn prepare(self, budget: UniverseBudget) -> Result<HistoricalUniversePlan> {
+    /// Validates timeline structure and the explicit resource budget without
+    /// constructing a versioned plan artifact.
+    pub fn validate_with_budget(&self, budget: UniverseBudget) -> Result<()> {
         self.validate()?;
+        UniverseBudget::new(budget.max_batches, budget.max_changes)?;
         let changes: usize = self.batches.iter().map(|batch| batch.changes.len()).sum();
         if self.batches.len() > budget.max_batches {
             return Err(validation(format!(
@@ -555,6 +558,11 @@ impl HistoricalUniverseTimeline {
                 budget.max_changes
             )));
         }
+        Ok(())
+    }
+
+    pub fn prepare(self, budget: UniverseBudget) -> Result<HistoricalUniversePlan> {
+        self.validate_with_budget(budget)?;
         let bytes = serde_json::to_vec(&(2_u32, &self, budget))?;
         Ok(HistoricalUniversePlan {
             plan_version: 2,

@@ -9,10 +9,11 @@ use crate::{
     ActiveInterval, CatalogContract, DataError, DerivedView, DynamicUniverseScope,
     HistoricalCatalogAcquisition, HistoricalCatalogProof, HistoricalDataKind,
     HistoricalDependencyRole, HistoricalSemanticCatalog, HistoricalUniverseDependency,
-    HistoricalUniverseKindTarget, HistoricalUniversePlan, HistoricalUniversePlanV3Execution,
+    HistoricalUniverseKindTarget, HistoricalUniversePlan, HistoricalUniversePlanExecution,
+    HistoricalUniversePlanIdentity, HistoricalUniversePlanV3Execution,
     HistoricalUniversePlanV3Identity, HistoricalUniversePlanV4, HistoricalUniversePlanV4Execution,
-    HistoricalUniversePlanV4Identity, HistoricalUniverseTimeline, Result, UniverseBudget,
-    UniverseInstrumentId, UniverseMemberChange, UniverseMode, UniverseProduct,
+    HistoricalUniversePlanV4Identity, HistoricalUniversePlanV5, HistoricalUniverseTimeline, Result,
+    UniverseBudget, UniverseInstrumentId, UniverseMemberChange, UniverseMode, UniverseProduct,
     UniverseSelectorSpec, UniverseSpec, UniverseTarget, UniverseTimelineBatch, UniverseView,
 };
 
@@ -23,7 +24,11 @@ pub const HISTORICAL_UNIVERSE_V3_PROJECTION_COMPILER_ID: &str =
 pub const HISTORICAL_UNIVERSE_CONTINUOUS_ID: &str =
     "sha256:cee33b4d6151745c7de17665632ea9c214cb4c636d4c1f20b55f2924634a279a";
 
-/// Rollout policy for persisted historical-universe plans.
+/// Compatibility policy for legacy V4/V3 write-set construction.
+///
+/// Current CLI V2 timelines publish V5 directly; the historical policy token
+/// remains only so existing callers can keep constructing a V4/V3 write set
+/// for migration fixtures or controlled compatibility work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoricalPlanWritePolicy {
     LegacyOnly,
@@ -242,6 +247,45 @@ impl HistoricalUniverseResolutionV4 {
     #[must_use]
     pub fn targets_for_kind(&self, kind: HistoricalDataKind) -> &[HistoricalUniverseKindTarget] {
         self.targets.get(&kind).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Produces the current V5 artifact directly. No legacy rollback artifact
+    /// is created or consulted by the normal compile path.
+    pub fn prepare_plan(
+        &self,
+    ) -> std::result::Result<HistoricalUniversePlanV5, HistoricalUniverseV4Error> {
+        let execution = HistoricalUniversePlanExecution::from_domain(
+            &self.timeline,
+            self.dependencies.clone(),
+            self.targets.clone(),
+        )?;
+        let timeline_requires_continuous = self
+            .timeline
+            .derived_views
+            .contains(&DerivedView::Continuous);
+        let execution_requires_continuous = self.dependencies.iter().any(|dependency| {
+            dependency
+                .roles
+                .contains(&HistoricalDependencyRole::ContinuousUnderlying)
+        });
+        if timeline_requires_continuous != execution_requires_continuous {
+            return Err(HistoricalUniverseV4Error::Invalid(
+                "historical continuous membership/dependency closure mismatch".to_string(),
+            ));
+        }
+        let identity = HistoricalUniversePlanIdentity::new(
+            &self.spec,
+            self.input_sources_sha256.clone(),
+            self.acquisition_sha256.clone(),
+            self.semantic_catalog_sha256.clone(),
+            self.timeline.calendar_identity.clone(),
+            self.proof,
+            execution.execution_sha256().to_string(),
+            timeline_requires_continuous.then(|| HISTORICAL_UNIVERSE_CONTINUOUS_ID.to_string()),
+            self.ranking_identity.clone(),
+        )?;
+        HistoricalUniversePlanV5::new(self.timeline.clone(), self.budget, identity, execution)
+            .map_err(Into::into)
     }
 
     pub fn prepare_write_set(

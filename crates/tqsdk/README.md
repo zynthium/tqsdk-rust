@@ -24,9 +24,10 @@ runtime contract；它只提供一个更容易开始的 facade：
 
 普通 `.universe(...)` / `.universe_spec(...)` 是当前 snapshot；历史动态合约集合必须消费 pinned
 artifact。旧 `.historical_universe_plan(plan)?` 签名继续读取 plan v1–v3；新
-`.historical_universe_artifact(artifact)?` 读取 V1–V4，并在 prepare/warmup 前验证 artifact hash、回测
-区间以及 acquisition/catalog/V3 rollback chain。V4 timeline 控制当时可见的 physical、continuous、
-index instrument，kind-specific tick targets 控制物理 cache dependency 与首可用边界；成员变化和同时间
+`.historical_universe_artifact(artifact)?` 读取 V1–V5，并在 prepare/warmup 前验证 artifact hash、回测
+区间以及 V5 acquisition/catalog chain。V4 artifact 的 acquisition/catalog/V3 rollback chain 会在迁移
+为 V5 时验证。V5 timeline 控制当时可见的 physical、continuous、index instrument，kind-specific tick
+targets 控制物理 cache dependency 与首可用边界；成员变化和同时间
 行情仍在一个 replay revision 可见。provider-history 起点表示数据 membership，不表示法定挂牌日。
 
 `.backtest(start_ns, end_ns)` 是默认 Python-style 策略回测入口。它默认使用

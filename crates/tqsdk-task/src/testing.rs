@@ -9,6 +9,7 @@ mod runtime;
 
 pub use broker::{FakeBroker, FakeBrokerConnectionStatus, FakeBrokerPolicy};
 pub use clock::StrategyTestClock;
+#[allow(deprecated)]
 pub use harness::{BuiltStrategyTestHarness, StrategyTestHarness, StrategyTestHarnessBuilder};
 pub use market::FakeMarket;
 pub use report::StrategyTestReport;

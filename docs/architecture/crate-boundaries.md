@@ -320,10 +320,11 @@ sink、WAL、journal 或 cache writer。
 `tqsdk-data` 当前应继续承担：
 
 Universe Language V2 的 parser、normalized AST、typed scope/exclusion、纯 snapshot/timeline compiler
-和 capability contracts 归 `tqsdk-data`。历史动态 universe 的 catalog、预算、kind targets、V1–V4
-artifact reader/verifier/store 和 V3 rollback projection 同样归 `tqsdk-data`；文件 IO、provider query 与
-下载调度不进入纯 compiler。`tqsdk-task` 只在 replay step 中消费已验证 timeline；`tqsdk` 只暴露
-facade 接入，不重新解释 selector，也不维护第二套 membership state。
+和 capability contracts 归 `tqsdk-data`。历史动态 universe 的 catalog、预算、kind targets、V1–V5
+artifact reader/verifier/store 和 V4→V5 source-preserving migration 同样归 `tqsdk-data`；V3 rollback
+projection 仅保留给 V4 验证与迁移，不参与 normal V5 write path。文件 IO、provider query 与下载调度
+不进入纯 compiler。`tqsdk-task` 只在 replay step 中消费已验证 timeline；`tqsdk` 只暴露 facade 接入，
+不重新解释 selector，也不维护第二套 membership state。
 
 - history page / series / download / export substrate
 - `HistorySeriesCache` public facade 和 crate 内部 store adapter seam
