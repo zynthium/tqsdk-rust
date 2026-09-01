@@ -57,6 +57,11 @@ fn parse_clause(value: &str) -> Result<RawClause, UniverseSpecError> {
     if value.is_empty() {
         return Err(UniverseSpecError::EmptyClause);
     }
+
+    if let Some(value) = value.strip_prefix("except(") {
+        return parse_except_clause(value);
+    }
+
     let (exclude, selector) = match value.strip_prefix('!') {
         Some(selector) => (true, selector.trim()),
         None => (false, value),
@@ -109,6 +114,37 @@ fn parse_clause(value: &str) -> Result<RawClause, UniverseSpecError> {
         view: None,
         targets: vec![target],
     })
+}
+
+fn parse_except_clause(value: &str) -> Result<RawClause, UniverseSpecError> {
+    let selector = value
+        .strip_suffix(')')
+        .ok_or_else(|| UniverseSpecError::InvalidTarget {
+            target: format!("except({value}"),
+            reason: "except clause must end with `)`",
+        })?
+        .trim();
+    let (scope, values) =
+        selector
+            .split_once(':')
+            .ok_or_else(|| UniverseSpecError::InvalidTarget {
+                target: selector.to_string(),
+                reason: "except requires all:<targets> or view:<targets>",
+            })?;
+
+    if scope.trim() == "all" {
+        let targets = values
+            .split(',')
+            .map(|value| parse_structural_target(value.trim(), false))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(RawClause {
+            exclude: true,
+            view: None,
+            targets,
+        });
+    }
+
+    parse_clause(&format!("!{selector}"))
 }
 
 fn parse_view_clause(

@@ -837,6 +837,55 @@ async fn kq_main_tick_query_clamps_warmup_to_its_persisted_physical_segment() {
 }
 
 #[tokio::test]
+async fn cache_only_daily_reuses_file_snapshot_without_metadata_sidecar() {
+    const DAY_NS: i64 = 86_400_000_000_000;
+    let root = temp_dir("daily-file-snapshot");
+    let symbol = "SHFE.au2402";
+    let start_ns = utc_ns(2024, 1, 2, 0, 0, 0);
+    let end_ns = start_ns + DAY_NS;
+    let rows = vec![kline(1, start_ns, 100.0)];
+    let snapshot =
+        MinuteKlineCacheSnapshot::new(7, "legacy-daily-cache-snapshot", "legacy-daily-session")
+            .unwrap();
+    DailyKlineCache::open(&root)
+        .unwrap()
+        .store_final_range(symbol, start_ns, end_ns, &snapshot, &rows)
+        .unwrap();
+
+    let collected = cache_only_client(&root)
+        .query(BacktestHistoryRequest::kline(
+            1,
+            symbol,
+            Duration::from_secs(86_400),
+            start_ns,
+            end_ns,
+        ))
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let BacktestHistoryRows::Klines { rows: actual, .. } = collected.rows else {
+        panic!("1d request must return Kline rows");
+    };
+    assert_eq!(actual.len(), rows.len());
+    let actual = &actual[0];
+    let expected = &rows[0];
+    assert_eq!(actual.id, expected.id);
+    assert_eq!(actual.datetime, expected.datetime);
+    assert_eq!(actual.open, expected.open);
+    assert_eq!(actual.high, expected.high);
+    assert_eq!(actual.low, expected.low);
+    assert_eq!(actual.close, expected.close);
+    assert_eq!(actual.volume, expected.volume);
+    assert_eq!(actual.open_oi, expected.open_oi);
+    assert_eq!(actual.close_oi, expected.close_oi);
+    assert_eq!(actual.epoch, expected.epoch);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn cache_only_daily_and_multi_day_requests_read_native_daily_cache() {
     const DAY_NS: i64 = 86_400_000_000_000;
     let root = temp_dir("daily-and-2d");

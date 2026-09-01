@@ -213,6 +213,7 @@ struct ProgressState {
     inspection: Option<InspectionProgress>,
     symbols: BTreeMap<String, SymbolProgress>,
     completed_batches: BTreeSet<usize>,
+    history_rows_by_batch: BTreeMap<usize, usize>,
     total_batches: usize,
     history_fill: bool,
     history_batch_started: bool,
@@ -246,6 +247,8 @@ struct SymbolProgress {
     missing_days: BTreeSet<NaiveDate>,
     covered_days: BTreeSet<NaiveDate>,
     received_days: BTreeSet<NaiveDate>,
+    history_day_counts: Option<HistoryDayCounts>,
+    history_received_ranges: Vec<(i64, i64)>,
     rows_by_stream: BTreeMap<(usize, usize, i64, i64), usize>,
     active: bool,
     phase: Option<BacktestRemoteFillPhase>,
@@ -253,6 +256,29 @@ struct SymbolProgress {
     latest_trading_day: Option<NaiveDate>,
     retries: usize,
     split_fallback: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct HistoryDayCounts {
+    planned: usize,
+    missing: usize,
+    received: usize,
+}
+
+impl SymbolProgress {
+    fn day_counts(&self, history_fill: bool) -> (usize, usize, usize, usize) {
+        if history_fill {
+            let counts = self.history_day_counts.unwrap_or_default();
+            (0, counts.planned, counts.received, counts.missing)
+        } else {
+            (
+                self.covered_days.len(),
+                self.planned_days.len(),
+                self.received_days.len(),
+                self.missing_days.len(),
+            )
+        }
+    }
 }
 
 impl ProgressState {
@@ -277,6 +303,7 @@ impl ProgressState {
             inspection: None,
             symbols: BTreeMap::new(),
             completed_batches: BTreeSet::new(),
+            history_rows_by_batch: BTreeMap::new(),
             total_batches: 0,
             history_fill: false,
             history_batch_started: false,
@@ -317,22 +344,24 @@ impl ProgressState {
                 self.history_batch_started = true;
                 self.total_batches = *total_batches;
                 for symbol in symbols {
-                    let entry = self.symbols.entry(symbol.clone()).or_default();
-                    if !entry.requested_ranges.contains(requested_range) {
-                        entry.requested_ranges.push(*requested_range);
+                    {
+                        let entry = self.symbols.entry(symbol.clone()).or_default();
+                        if !entry.requested_ranges.contains(requested_range) {
+                            entry.requested_ranges.push(*requested_range);
+                        }
+                        if !entry.missing_ranges.contains(requested_range) {
+                            entry.missing_ranges.push(*requested_range);
+                        }
+                        entry.active = true;
+                        entry.phase = Some(BacktestRemoteFillPhase::Started);
+                        entry.last_event_sequence = self.revision;
+                        entry
+                            .rows_by_stream
+                            .entry((*batch_number, 0, requested_range.0, requested_range.1))
+                            .or_default();
                     }
-                    if !entry.missing_ranges.contains(requested_range) {
-                        entry.missing_ranges.push(*requested_range);
-                    }
-                    entry.active = true;
-                    entry.phase = Some(BacktestRemoteFillPhase::Started);
-                    entry.last_event_sequence = self.revision;
-                    entry
-                        .rows_by_stream
-                        .entry((*batch_number, 0, requested_range.0, requested_range.1))
-                        .or_default();
+                    self.recalculate_history_symbol_days(symbol);
                 }
-                self.recalculate_days();
             }
             BacktestHistoryFillProgress::Telemetry {
                 batch_number,
@@ -355,11 +384,15 @@ impl ProgressState {
             }
             BacktestHistoryFillProgress::BatchFinished {
                 batch_number,
+                requested_range,
                 symbols,
+                rows_written,
                 ..
             } => {
                 self.history_batch_started = true;
                 self.completed_batches.insert(*batch_number);
+                self.history_rows_by_batch
+                    .insert(*batch_number, *rows_written);
                 for symbol in symbols {
                     if let Some(entry) = self.symbols.get_mut(symbol) {
                         entry.active = false;
@@ -367,7 +400,19 @@ impl ProgressState {
                         entry
                             .received_days
                             .extend(entry.missing_days.iter().copied());
+                        if !entry.history_received_ranges.contains(requested_range) {
+                            entry.history_received_ranges.push(*requested_range);
+                        }
                     }
+                    self.recalculate_history_symbol_days(symbol);
+                }
+                if let [symbol] = symbols.as_slice()
+                    && let Some(entry) = self.symbols.get_mut(symbol)
+                {
+                    entry.rows_by_stream.insert(
+                        (*batch_number, 0, requested_range.0, requested_range.1),
+                        *rows_written,
+                    );
                 }
             }
             BacktestHistoryFillProgress::BatchFailed { symbols, .. } => {
@@ -499,6 +544,13 @@ impl ProgressState {
     }
 
     fn recalculate_days(&mut self) {
+        if self.history_fill {
+            let symbols = self.symbols.keys().cloned().collect::<Vec<_>>();
+            for symbol in symbols {
+                self.recalculate_history_symbol_days(&symbol);
+            }
+            return;
+        }
         for symbol in self.symbols.values_mut() {
             symbol.planned_days = days_for_ranges(&symbol.requested_ranges, self.calendar.as_ref());
             symbol.missing_days = days_for_ranges(&symbol.missing_ranges, self.calendar.as_ref());
@@ -511,6 +563,18 @@ impl ProgressState {
                 .received_days
                 .retain(|day| symbol.missing_days.contains(day));
         }
+    }
+
+    fn recalculate_history_symbol_days(&mut self, symbol: &str) {
+        let calendar = self.calendar.as_ref();
+        let Some(symbol) = self.symbols.get_mut(symbol) else {
+            return;
+        };
+        symbol.history_day_counts = Some(HistoryDayCounts {
+            planned: day_count_for_ranges(&symbol.requested_ranges, calendar),
+            missing: day_count_for_ranges(&symbol.missing_ranges, calendar),
+            received: day_count_for_ranges(&symbol.history_received_ranges, calendar),
+        });
     }
 
     fn visible_symbols(&self) -> Vec<String> {
@@ -561,13 +625,17 @@ impl ProgressState {
         let mut planned = 0;
         let mut received = 0;
         let mut missing = 0;
-        let mut rows = 0;
+        let mut rows = self.history_rows_by_batch.values().copied().sum::<usize>();
         for symbol in self.symbols.values() {
-            covered += symbol.covered_days.len();
-            planned += symbol.planned_days.len();
-            received += symbol.received_days.len();
-            missing += symbol.missing_days.len();
-            rows += symbol.rows_by_stream.values().copied().sum::<usize>();
+            let (symbol_covered, symbol_planned, symbol_received, symbol_missing) =
+                symbol.day_counts(self.history_fill);
+            covered += symbol_covered;
+            planned += symbol_planned;
+            received += symbol_received;
+            missing += symbol_missing;
+            if !self.history_fill {
+                rows += symbol.rows_by_stream.values().copied().sum::<usize>();
+            }
         }
         (covered, planned, received, missing, rows)
     }
@@ -641,20 +709,23 @@ impl ProgressState {
                 .symbols
                 .iter()
                 .filter(|(_, state)| state.active)
-                .map(|(symbol, state)| json!({
+            .map(|(symbol, state)| {
+                let (covered, planned, received, missing) = state.day_counts(self.history_fill);
+                json!({
                     "symbol": symbol,
                     "phase": state.phase.map(phase_name).unwrap_or("pending"),
                     "trading_day": state.latest_trading_day.map(|day| day.to_string()),
                     "coverage_days": {
-                        "covered": state.covered_days.len(),
-                        "planned": state.planned_days.len(),
-                        "received": state.received_days.len(),
-                        "missing": state.missing_days.len(),
+                    "covered": covered,
+                    "planned": planned,
+                    "received": received,
+                    "missing": missing,
                     },
                     "rows": state.rows_by_stream.values().copied().sum::<usize>(),
                     "attempt_retries": state.retries,
                     "split_fallback": state.split_fallback,
-                }))
+                })
+            })
                 .collect::<Vec<_>>(),
             "summary": summary,
         })
@@ -706,6 +777,63 @@ fn days_for_ranges(
         }
     }
     days
+}
+
+fn day_count_for_ranges(ranges: &[(i64, i64)], calendar: Option<&ProgressCalendar>) -> usize {
+    let ranges = normalized_trading_day_ranges(ranges);
+    if let Some(calendar) = calendar {
+        return calendar
+            .days
+            .iter()
+            .filter(|day| {
+                ranges
+                    .iter()
+                    .any(|(start_day, end_day)| start_day <= *day && *day <= end_day)
+            })
+            .count();
+    }
+
+    ranges.iter().fold(0, |count, (start_day, end_day)| {
+        let range_days = usize::try_from(
+            end_day
+                .signed_duration_since(*start_day)
+                .num_days()
+                .saturating_add(1),
+        )
+        .unwrap_or(usize::MAX);
+        count.saturating_add(range_days)
+    })
+}
+
+fn normalized_trading_day_ranges(ranges: &[(i64, i64)]) -> Vec<(NaiveDate, NaiveDate)> {
+    let mut days = ranges
+        .iter()
+        .filter_map(|(start_ns, end_ns)| {
+            if start_ns >= end_ns {
+                return None;
+            }
+            let start_day = backtest_tick_trading_day_for_timestamp_ns(*start_ns).ok()?;
+            let end_day =
+                backtest_tick_trading_day_for_timestamp_ns(end_ns.saturating_sub(1)).ok()?;
+            Some((start_day, end_day))
+        })
+        .collect::<Vec<_>>();
+    days.sort_unstable();
+
+    let mut merged = Vec::<(NaiveDate, NaiveDate)>::new();
+    for (start_day, end_day) in days {
+        if let Some((_, previous_end)) = merged.last_mut()
+            && (start_day <= *previous_end
+                || previous_end
+                    .succ_opt()
+                    .is_some_and(|next_day| start_day <= next_day))
+        {
+            *previous_end = (*previous_end).max(end_day);
+        } else {
+            merged.push((start_day, end_day));
+        }
+    }
+    merged
 }
 
 fn completed_days_through_cursor(
@@ -787,15 +915,17 @@ fn render_plain(shared: Arc<Mutex<ProgressState>>) {
                         .latest_trading_day
                         .map(|day| day.to_string())
                         .unwrap_or_else(|| "-".to_string());
+                    let (covered, planned, received, missing) =
+                        state.day_counts(snapshot.history_fill);
                     eprintln!(
                         "tqsdk-cache: phase=symbol symbol={} state={} trading_day={} coverage_days={}/{} received_days={}/{} rows={} attempt_retries={} split_fallback={}",
                         symbol,
                         state.phase.map(phase_name).unwrap_or("pending"),
                         trading_day,
-                        state.covered_days.len(),
-                        state.planned_days.len(),
-                        state.received_days.len(),
-                        state.missing_days.len(),
+                        covered,
+                        planned,
+                        received,
+                        missing,
                         state.rows_by_stream.values().copied().sum::<usize>(),
                         state.retries,
                         state.split_fallback,
@@ -907,9 +1037,11 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
                         bar
                     });
                     let state = &snapshot.symbols[symbol];
+                    let (covered, planned, received, missing) =
+                        state.day_counts(snapshot.history_fill);
                     bar.set_prefix(symbol.clone());
-                    bar.set_length(state.missing_days.len() as u64);
-                    bar.set_position(state.received_days.len() as u64);
+                    bar.set_length(missing as u64);
+                    bar.set_position(received as u64);
                     let retry = if state.retries > 0 {
                         format!(" | retry {}", state.retries)
                     } else {
@@ -924,10 +1056,10 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
                         "{} | {} | 覆盖 {}/{} | 本轮接收 {}/{} | {} rows{}{}",
                         state.phase.map(phase_name).unwrap_or("pending"),
                         trading_day,
-                        state.covered_days.len(),
-                        state.planned_days.len(),
-                        state.received_days.len(),
-                        state.missing_days.len(),
+                        covered,
+                        planned,
+                        received,
+                        missing,
                         state.rows_by_stream.values().copied().sum::<usize>(),
                         retry,
                         split,
@@ -1008,7 +1140,7 @@ fn symbol_style() -> ProgressStyle {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, time::Duration};
 
     use super::{
         ProgressCalendar, ProgressMode, ProgressState, ResolvedProgressMode, SymbolProgress,
@@ -1017,7 +1149,122 @@ mod tests {
     use chrono::NaiveDate;
     use tqsdk::BacktestRemoteFillPhase;
     use tqsdk_cache::FillReportSymbolDayStats;
-    use tqsdk_data::backtest_tick_trading_day_range;
+    use tqsdk_data::{
+        BacktestHistoryFillFamily, BacktestHistoryFillProgress, backtest_tick_trading_day_range,
+    };
+
+    #[test]
+    fn history_batch_finished_records_rows_without_telemetry() {
+        let mut state = ProgressState::new(ResolvedProgressMode::Plain, 8);
+        let symbol = "SHFE.au2608".to_string();
+        let requested_range = (0, 86_400_000_000_000);
+
+        state.apply_history_progress(&BacktestHistoryFillProgress::BatchStarted {
+            family: BacktestHistoryFillFamily::Daily,
+            batch_number: 1,
+            total_batches: 1,
+            requested_range,
+            pending_batches: 0,
+            active_batches: 1,
+            symbols: vec![symbol.clone()],
+        });
+        state.apply_history_progress(&BacktestHistoryFillProgress::BatchFinished {
+            family: BacktestHistoryFillFamily::Daily,
+            batch_number: 1,
+            total_batches: 1,
+            requested_range,
+            symbols: vec![symbol.clone()],
+            rows_written: 37,
+            elapsed: Duration::from_secs(1),
+        });
+
+        assert_eq!(state.coverage_counts().4, 37);
+        assert_eq!(
+            state.symbols[&symbol]
+                .rows_by_stream
+                .values()
+                .sum::<usize>(),
+            37
+        );
+    }
+
+    #[test]
+    fn history_progress_keeps_long_day_ranges_compact() {
+        let first_day = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+        let last_day = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let first_range = backtest_tick_trading_day_range(first_day).unwrap();
+        let last_range = backtest_tick_trading_day_range(last_day).unwrap();
+        let requested_range = (first_range.start_ns, last_range.end_ns);
+        let expected_days =
+            usize::try_from(last_day.signed_duration_since(first_day).num_days() + 1).unwrap();
+        let symbol = "SHFE.au2608".to_string();
+        let mut state = ProgressState::new(ResolvedProgressMode::Plain, 8);
+
+        state.apply_history_progress(&BacktestHistoryFillProgress::BatchStarted {
+            family: BacktestHistoryFillFamily::Daily,
+            batch_number: 1,
+            total_batches: 2,
+            requested_range,
+            pending_batches: 1,
+            active_batches: 1,
+            symbols: vec![symbol.clone()],
+        });
+
+        assert!(state.symbols[&symbol].planned_days.is_empty());
+        assert!(state.symbols[&symbol].missing_days.is_empty());
+        assert_eq!(
+            state.symbols[&symbol].day_counts(true),
+            (0, expected_days, 0, expected_days)
+        );
+        assert_eq!(
+            state.coverage_counts(),
+            (0, expected_days, 0, expected_days, 0)
+        );
+    }
+
+    #[test]
+    fn history_progress_scales_to_provider_roster_without_day_sets() {
+        const PROVIDER_ROSTER_SIZE: usize = 5_378;
+
+        let first_day = NaiveDate::from_ymd_opt(1989, 12, 29).unwrap();
+        let last_day = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+        let first_range = backtest_tick_trading_day_range(first_day).unwrap();
+        let last_range = backtest_tick_trading_day_range(last_day).unwrap();
+        let requested_range = (first_range.start_ns, last_range.end_ns);
+        let days_per_symbol =
+            usize::try_from(last_day.signed_duration_since(first_day).num_days() + 1).unwrap();
+        let mut state = ProgressState::new(ResolvedProgressMode::Plain, 8);
+
+        for batch_number in 0..PROVIDER_ROSTER_SIZE {
+            state.apply_history_progress(&BacktestHistoryFillProgress::BatchStarted {
+                family: BacktestHistoryFillFamily::Daily,
+                batch_number,
+                total_batches: PROVIDER_ROSTER_SIZE,
+                requested_range,
+                pending_batches: PROVIDER_ROSTER_SIZE - batch_number - 1,
+                active_batches: 1,
+                symbols: vec![format!("SHFE.au{batch_number:04}")],
+            });
+        }
+
+        assert_eq!(state.symbols.len(), PROVIDER_ROSTER_SIZE);
+        assert!(
+            state
+                .symbols
+                .values()
+                .all(|symbol| symbol.planned_days.is_empty())
+        );
+        assert_eq!(
+            state.coverage_counts(),
+            (
+                0,
+                days_per_symbol * PROVIDER_ROSTER_SIZE,
+                0,
+                days_per_symbol * PROVIDER_ROSTER_SIZE,
+                0,
+            )
+        );
+    }
 
     #[test]
     fn partition_days_preserve_night_session_day_boundaries() {

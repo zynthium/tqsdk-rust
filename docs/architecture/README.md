@@ -263,7 +263,10 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
   tick cache、canonical final-60s minute cache 与 native final-1d single-file cache。`all` 的 inventory /
   doctor 同时包含三类缓存；daily 还支持 inspect/fill/verify/purge，且只通过官方 native `1d` chart补洞，
   不从 tick/minute 聚合
- - tick 保留 remote-on-miss / current-day provisional / `--require-final`、calendar-aware
+- 历史 universe 的 `provider_unavailable` 使用独立 content-addressed retry receipt 维护；
+  `refresh-provider-membership` 以 pinned acquisition、小批 due probes、stable-roster/cutoff
+  revalidation 和 remote canary 处理，不改写原 proof，也不隐式生成 plan
+- tick 保留 remote-on-miss / current-day provisional / `--require-final`、calendar-aware
    `--last-trading-days` 等合同；三类 fill 共享 batch/concurrency/timeout defaults 和 selectable stderr
    progress（plain/TTY/JSONL）。新 fill report 统一写 schema v3 与 `cache_kind`，默认目录为
    `reports/tick/`、`reports/minute/`、`reports/daily/`；reader 兼容 tick v1/v2、minute v1、daily v1
@@ -335,6 +338,8 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
 - S31 trading desk profile 是 task 层的薄执行 profile，但 hot path 固定在
   `tqsdk-session + RuntimeReader`；它不进入 `tqsdk-data`，也不把 durable sidecar
   变成 task profile 的 public dependency。
+
+Universe Language V2 的 `except(...)` 是 `tqsdk-data` parser 输入糖：`except(view:...)` 保持 view scope，`except(all:...)` 产生 global filter；二者均归一为既有 `!` AST，不能改变 artifact identity。
 
 ## API 归属总表
 

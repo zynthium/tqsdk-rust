@@ -37,6 +37,8 @@ spec              := clause-list
 clause-list       := clause (";" clause)*
 clause            := ["!"] view-selector
                    | "!" structural-target
+                   | except-clause
+except-clause     := "except(" ("all:" structural-target-list | view-selector) ")"
 view-selector     := "contract:" target-list
                    | "main:" target-list
                    | "top:" positive-integer ":" target-list
@@ -45,6 +47,7 @@ view-selector     := "contract:" target-list
                    | "symbol:" symbol-list
 target-list       := "all"
                    | structural-target ("," structural-target)*
+structural-target-list := structural-target ("," structural-target)*
 structural-target := EXCHANGE ".*"
                    | EXCHANGE "." PRODUCT
                    | EXCHANGE "." CONTRACT
@@ -67,6 +70,12 @@ exchange 大小写不敏感并规范化为大写；product、contract 尾部和 
 V2 不接受 `active`、`physical`、`exchange:`、`product:`、bare 自动识别、`file:` 或 `~`。
 `cont` 只作为输入别名，规范化输出使用 `continuous`。`physical:all` 是 cache historical
 legacy macro，不是 V2 selector。
+
+`except(...)` 是批量排除输入糖：`except(contract:CZCE.ZC,CZCE.CY)` 等价于 `!contract:CZCE.ZC,CZCE.CY`，只排除物理合约 view；`except(all:CZCE.ZC,CZCE.CY)` 等价于重复的 `!CZCE.ZC;!CZCE.CY`，排除所有可分类 view。`all` 必须显式写出，避免把“所有 view”与 `contract` view 混淆。
+
+```text
+timeline(contract:all;except(contract:CFFEX.*,CZCE.ZC,CZCE.CY,DCE.rr,SHFE.wr))
+```
 
 ## Snapshot 与 Timeline 能力
 
@@ -91,6 +100,8 @@ V2 固定执行：include union → typed exclusions → global filters → fina
 - `!contract:<scope>` 只移除 contract provenance。
 - `!main:<scope>`、`!top:N:<scope>`、`!continuous:<scope>`、`!index:<scope>` 只移除对应 view。
 - `!symbol:X` 移除最终 symbol 为 X 的所有 provenance。
+- `except(<view>:<targets>)` 与对应的 `!<view>:<targets>` 完全等价；`top` 仍写作 `except(top:N:<targets>)`。
+- `except(all:<structural-targets>)` 与逐个 `!<structural-target>` global filter 完全等价；它不能接 opaque `symbol`。
 - `!CFFEX.*` 移除能分类到该交易所的所有 view。
 - `!SHFE.au` 移除能分类到该品种的所有 view。
 - `!SHFE.au2506` 移除该物理合约的 contract/main/top provenance，不移除同品种
@@ -119,6 +130,8 @@ AST_SHA256 = SHA256("tqsdk.universe.ast.v2" || NUL || canonical_ast_json_bytes)
 
 hash 输出使用 `sha256:<lowercase-hex>`。public Rust struct 的任意 serde 表示不是 hash preimage；
 wire 字段、tag 或排序变化必须提升 language/canonicalizer version。
+
+`except(...)` 仅在 parser 层展开为既有 `!` selector/global filter；canonical text、canonical AST、hash、language version 和 canonicalizer id 都保持旧表示。因此同义的旧/新写法可复用同一 artifact identity。
 
 ## Legacy-first 兼容路由
 

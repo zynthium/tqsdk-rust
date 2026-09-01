@@ -15,11 +15,13 @@ use crate::historical_universe_v4_resolution::{
 use crate::{
     ActiveInterval, CatalogContract, CatalogSnapshot, DataError, DynamicUniverseScope,
     HistoricalCatalogProof, HistoricalUniversePlan, HistoricalUniversePlanArtifact,
-    HistoricalUniversePlanV5, HistoricalUniversePlanWriteSet, Result,
+    HistoricalUniversePlanV5, HistoricalUniversePlanWriteSet,
+    PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS, PROVIDER_DAILY_HISTORY_SOURCE_IDENTITY, Result,
 };
 
 pub const HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION: u32 = 1;
 pub const HISTORICAL_UNIVERSE_ARTIFACT_NAMESPACE: &str = "historical-universe-v1";
+pub const PROVIDER_DAILY_UNAVAILABLE_RETRY_STATE_FORMAT_VERSION: u32 = 1;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -51,6 +53,373 @@ impl HistoricalDailyObservationStatus {
     fn is_complete(status: &Self) -> bool {
         *status == Self::Complete
     }
+}
+
+/// Retry receipt for one bounded provider-unavailable native-daily probe.
+///
+/// This is operator maintenance state, deliberately separate from the
+/// provider-history observation proof. It gives retry scheduling a durable,
+/// immutable receipt without changing acquisition identity semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ProviderDailyUnavailableRetry {
+    pub attempts: u32,
+    pub next_retry_at_ns: i64,
+}
+
+impl ProviderDailyUnavailableRetry {
+    fn initial(expired: bool, observed_at_ns: i64) -> Result<Self> {
+        Self::scheduled(expired, 1, observed_at_ns)
+    }
+
+    fn next(self, expired: bool, observed_at_ns: i64) -> Result<Self> {
+        let attempts = self
+            .attempts
+            .checked_add(1)
+            .ok_or_else(|| validation("provider-unavailable retry attempt overflow"))?;
+        Self::scheduled(expired, attempts, observed_at_ns)
+    }
+
+    fn scheduled(expired: bool, attempts: u32, observed_at_ns: i64) -> Result<Self> {
+        if observed_at_ns <= 0 {
+            return Err(validation(
+                "provider-unavailable retry requires positive observation timestamp",
+            ));
+        }
+        let next_retry_at_ns = observed_at_ns
+            .checked_add(provider_daily_unavailable_retry_delay_ns(expired, attempts))
+            .ok_or_else(|| validation("provider-unavailable retry timestamp overflow"))?;
+        let retry = Self {
+            attempts,
+            next_retry_at_ns,
+        };
+        retry.validate()?;
+        Ok(retry)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.attempts == 0 || self.next_retry_at_ns <= 0 {
+            return Err(validation(
+                "provider-unavailable retry requires positive attempt and due timestamp",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One provider-unavailable contract eligible for maintenance selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ProviderDailyUnavailableRetryCandidate {
+    pub symbol: String,
+    pub expired: bool,
+    pub unavailable_after_ns: u64,
+    pub retry: ProviderDailyUnavailableRetry,
+}
+
+/// Immutable retry receipt bound to one provider-history acquisition.
+///
+/// The proof artifact records provider observations only. This side receipt
+/// records retry scheduling and is keyed by the immutable acquisition hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ProviderDailyUnavailableRetryState {
+    pub format_version: u32,
+    pub retry_state_sha256: String,
+    pub acquisition_sha256: String,
+    pub observed_at_ns: i64,
+    pub retries: BTreeMap<String, ProviderDailyUnavailableRetry>,
+}
+
+#[derive(Serialize)]
+struct ProviderDailyUnavailableRetryStateBody<'a> {
+    format_version: u32,
+    acquisition_sha256: &'a str,
+    observed_at_ns: i64,
+    retries: &'a BTreeMap<String, ProviderDailyUnavailableRetry>,
+}
+
+impl ProviderDailyUnavailableRetryState {
+    /// Derive the first bounded-retry schedule from immutable observations.
+    pub fn from_acquisition(acquisition: &HistoricalCatalogAcquisition) -> Result<Self> {
+        acquisition.validate()?;
+        ensure_provider_history_observed(acquisition)?;
+
+        let contracts = acquisition
+            .contracts
+            .iter()
+            .map(|contract| (contract.symbol.as_str(), contract))
+            .collect::<BTreeMap<_, _>>();
+        let mut retries = BTreeMap::new();
+        for (symbol, observation) in &acquisition.provider_daily_observations {
+            if observation.status != HistoricalDailyObservationStatus::ProviderUnavailable {
+                continue;
+            }
+            let contract = contracts.get(symbol.as_str()).ok_or_else(|| {
+                validation(format!(
+                    "provider-unavailable observation references missing contract {symbol}"
+                ))
+            })?;
+            retries.insert(
+                symbol.clone(),
+                ProviderDailyUnavailableRetry::initial(
+                    contract.expired,
+                    acquisition.observed_at_ns,
+                )?,
+            );
+        }
+        Self::new(
+            acquisition.acquisition_sha256.clone(),
+            acquisition.observed_at_ns,
+            retries,
+        )
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.retries.is_empty()
+    }
+
+    /// Return all retry candidates. Caller applies operator budget and force policy.
+    pub fn candidates(
+        &self,
+        acquisition: &HistoricalCatalogAcquisition,
+    ) -> Result<Vec<ProviderDailyUnavailableRetryCandidate>> {
+        self.validate_against(acquisition)?;
+        let contracts = acquisition
+            .contracts
+            .iter()
+            .map(|contract| (contract.symbol.as_str(), contract))
+            .collect::<BTreeMap<_, _>>();
+        let mut candidates = self
+            .retries
+            .iter()
+            .map(|(symbol, retry)| {
+                let contract = contracts.get(symbol.as_str()).ok_or_else(|| {
+                    validation(format!(
+                        "provider-unavailable retry references missing contract {symbol}"
+                    ))
+                })?;
+                let observation = acquisition
+                    .provider_daily_observations
+                    .get(symbol)
+                    .ok_or_else(|| {
+                        validation(format!(
+                            "provider-unavailable retry omits observation for {symbol}"
+                        ))
+                    })?;
+                let unavailable_after_ns =
+                    observation.provider_unavailable_after_ns.ok_or_else(|| {
+                        validation(format!(
+                            "provider-unavailable observation omits timeout for {symbol}"
+                        ))
+                    })?;
+                Ok(ProviderDailyUnavailableRetryCandidate {
+                    symbol: symbol.clone(),
+                    expired: contract.expired,
+                    unavailable_after_ns,
+                    retry: *retry,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        candidates.sort_by(|left, right| {
+            left.expired
+                .cmp(&right.expired)
+                .then(
+                    left.retry
+                        .next_retry_at_ns
+                        .cmp(&right.retry.next_retry_at_ns),
+                )
+                .then(left.symbol.cmp(&right.symbol))
+        });
+        Ok(candidates)
+    }
+
+    /// Advance only attempted provider-unavailable candidates onto a refreshed
+    /// immutable acquisition. Completed retries disappear from the receipt.
+    pub fn refreshed(
+        &self,
+        previous: &HistoricalCatalogAcquisition,
+        refreshed: &HistoricalCatalogAcquisition,
+        attempted_symbols: &BTreeSet<String>,
+        observed_at_ns: i64,
+    ) -> Result<Self> {
+        self.validate_against(previous)?;
+        refreshed.validate()?;
+        ensure_provider_history_observed(refreshed)?;
+        if observed_at_ns < self.observed_at_ns {
+            return Err(validation(
+                "provider-unavailable retry refresh timestamp moved backwards",
+            ));
+        }
+        if !previous.matches_provider_history_refresh(refreshed) {
+            return Err(validation(
+                "provider-unavailable retry refresh must preserve stable provider-history roster",
+            ));
+        }
+
+        let previous_unavailable = provider_unavailable_symbols(previous)?;
+        if !attempted_symbols.is_subset(&previous_unavailable) {
+            return Err(validation(
+                "provider-unavailable retry refresh attempted a non-unavailable contract",
+            ));
+        }
+
+        let refreshed_unavailable = provider_unavailable_symbols(refreshed)?;
+        if !refreshed_unavailable.is_subset(&previous_unavailable) {
+            return Err(validation(
+                "provider-unavailable retry refresh introduced an unobserved unavailable contract",
+            ));
+        }
+        if previous_unavailable
+            .difference(attempted_symbols)
+            .any(|symbol| !refreshed_unavailable.contains(symbol))
+        {
+            return Err(validation(
+                "provider-unavailable retry refresh changed an unattempted contract",
+            ));
+        }
+
+        let contracts = refreshed
+            .contracts
+            .iter()
+            .map(|contract| (contract.symbol.as_str(), contract))
+            .collect::<BTreeMap<_, _>>();
+        let mut retries = BTreeMap::new();
+        for symbol in refreshed_unavailable {
+            let prior = self.retries.get(&symbol).ok_or_else(|| {
+                validation(format!("provider-unavailable retry receipt omits {symbol}"))
+            })?;
+            let contract = contracts.get(symbol.as_str()).ok_or_else(|| {
+                validation(format!(
+                    "provider-unavailable refreshed observation references missing contract {symbol}"
+                ))
+            })?;
+            let retry = if attempted_symbols.contains(&symbol) {
+                prior.next(contract.expired, observed_at_ns)?
+            } else {
+                *prior
+            };
+            retries.insert(symbol, retry);
+        }
+        Self::new(
+            refreshed.acquisition_sha256.clone(),
+            observed_at_ns,
+            retries,
+        )
+    }
+
+    fn new(
+        acquisition_sha256: String,
+        observed_at_ns: i64,
+        retries: BTreeMap<String, ProviderDailyUnavailableRetry>,
+    ) -> Result<Self> {
+        let mut state = Self {
+            format_version: PROVIDER_DAILY_UNAVAILABLE_RETRY_STATE_FORMAT_VERSION,
+            retry_state_sha256: String::new(),
+            acquisition_sha256,
+            observed_at_ns,
+            retries,
+        };
+        state.normalize()?;
+        state.retry_state_sha256 = sha256_identity(&state.body_bytes()?);
+        Ok(state)
+    }
+
+    fn validate_against(&self, acquisition: &HistoricalCatalogAcquisition) -> Result<()> {
+        self.validate()?;
+        acquisition.validate()?;
+        ensure_provider_history_observed(acquisition)?;
+        if self.acquisition_sha256 != acquisition.acquisition_sha256 {
+            return Err(validation(
+                "provider-unavailable retry receipt acquisition hash mismatch",
+            ));
+        }
+        let expected = provider_unavailable_symbols(acquisition)?;
+        let actual = self.retries.keys().cloned().collect::<BTreeSet<_>>();
+        if actual != expected {
+            return Err(validation(
+                "provider-unavailable retry receipt must cover exactly unavailable observations",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<()> {
+        let mut normalized = self.clone();
+        let claimed = normalized.retry_state_sha256.clone();
+        normalized.retry_state_sha256.clear();
+        normalized.normalize()?;
+        if self
+            != &(Self {
+                retry_state_sha256: claimed.clone(),
+                ..normalized.clone()
+            })
+        {
+            return Err(validation(
+                "provider-unavailable retry receipt not canonically encoded",
+            ));
+        }
+        let expected = sha256_identity(&normalized.body_bytes()?);
+        if claimed != expected {
+            return Err(validation(
+                "provider-unavailable retry receipt hash mismatch",
+            ));
+        }
+        Ok(())
+    }
+
+    fn normalize(&mut self) -> Result<()> {
+        if self.format_version != PROVIDER_DAILY_UNAVAILABLE_RETRY_STATE_FORMAT_VERSION {
+            return Err(validation(format!(
+                "unsupported provider-unavailable retry receipt version {}",
+                self.format_version
+            )));
+        }
+        validate_sha256(
+            "provider-unavailable retry acquisition sha256",
+            &self.acquisition_sha256,
+        )?;
+        if self.observed_at_ns <= 0 {
+            return Err(validation(
+                "provider-unavailable retry receipt requires positive observation timestamp",
+            ));
+        }
+        for (symbol, retry) in &self.retries {
+            if symbol.trim().is_empty() {
+                return Err(validation(
+                    "provider-unavailable retry receipt symbol must be non-empty",
+                ));
+            }
+            retry.validate()?;
+        }
+        Ok(())
+    }
+
+    fn body_bytes(&self) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(
+            &ProviderDailyUnavailableRetryStateBody {
+                format_version: self.format_version,
+                acquisition_sha256: &self.acquisition_sha256,
+                observed_at_ns: self.observed_at_ns,
+                retries: &self.retries,
+            },
+        )?)
+    }
+}
+
+fn provider_daily_unavailable_retry_delay_ns(expired: bool, attempts: u32) -> i64 {
+    const HOUR_NS: i64 = 60 * 60 * 1_000_000_000;
+    const DAY_NS: i64 = 24 * HOUR_NS;
+    const ACTIVE_DELAYS_NS: [i64; 4] = [HOUR_NS, DAY_NS, 7 * DAY_NS, 30 * DAY_NS];
+    const EXPIRED_DELAYS_NS: [i64; 3] = [7 * DAY_NS, 30 * DAY_NS, 90 * DAY_NS];
+    let delays = if expired {
+        &EXPIRED_DELAYS_NS[..]
+    } else {
+        &ACTIVE_DELAYS_NS[..]
+    };
+    let index = usize::try_from(attempts.saturating_sub(1)).unwrap_or(usize::MAX);
+    delays[index.min(delays.len() - 1)]
 }
 
 /// Native-daily observation for one provider roster member.
@@ -311,6 +680,140 @@ impl HistoricalCatalogAcquisition {
         Ok(())
     }
 
+    fn matches_provider_current_acquisition(&self, current: &Self) -> bool {
+        if self.proof != HistoricalCatalogProof::ProviderHistoryObserved
+            || current.proof != HistoricalCatalogProof::ProviderCurrentObserved
+            || !self.complete
+            || !current.complete
+            || self.format_version != current.format_version
+            || self.source_identity
+                != format!(
+                    "{}+{}",
+                    current.source_identity, PROVIDER_DAILY_HISTORY_SOURCE_IDENTITY
+                )
+            || self.canonical_universe != current.canonical_universe
+            || self.requested_as_of_ns != current.requested_as_of_ns
+            || self.roster_before != current.roster_before
+            || self.roster_after != current.roster_after
+            || self.contracts.len() != current.contracts.len()
+            || self.provider_daily_observations.len() != self.contracts.len()
+        {
+            return false;
+        }
+
+        self.contracts
+            .iter()
+            .zip(&current.contracts)
+            .all(|(observed, current)| {
+                let mut observed = observed.clone();
+                observed
+                    .first_available_data_ns
+                    .remove(&HistoricalDataKind::Daily);
+                observed == *current
+            })
+            && self
+                .provider_daily_observations
+                .values()
+                .all(|observation| {
+                    observation.range_start_ns == PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS
+                        && observation.range_end_ns == current.requested_as_of_ns
+                })
+    }
+
+    /// Promote a bounded subset of prior provider-unavailable observations
+    /// against a newly stable provider-current acquisition. All other
+    /// observations remain byte-for-byte facts from the prior acquisition.
+    pub fn refresh_provider_daily_observations(
+        &self,
+        current: Self,
+        updates: BTreeMap<String, HistoricalDailyObservation>,
+    ) -> Result<Self> {
+        self.validate()?;
+        current.validate()?;
+        ensure_provider_history_observed(self)?;
+        self.validate_provider_daily_refresh_current(&current)?;
+        if updates.is_empty() {
+            return Err(validation(
+                "provider-unavailable refresh requires at least one attempted observation",
+            ));
+        }
+
+        let mut observations = self.provider_daily_observations.clone();
+        for (symbol, observation) in updates {
+            observation.validate()?;
+            let prior = observations.get(&symbol).ok_or_else(|| {
+                validation(format!(
+                    "provider-unavailable refresh references unknown contract {symbol}"
+                ))
+            })?;
+            if prior.status != HistoricalDailyObservationStatus::ProviderUnavailable {
+                return Err(validation(format!(
+                    "provider-unavailable refresh may update only unavailable contract {symbol}"
+                )));
+            }
+            if observation.range_start_ns != prior.range_start_ns
+                || observation.range_end_ns != prior.range_end_ns
+            {
+                return Err(validation(format!(
+                    "provider-unavailable refresh changed observation range for {symbol}"
+                )));
+            }
+            observations.insert(symbol, observation);
+        }
+
+        let source_identity = format!(
+            "{}+{}",
+            current.source_identity, PROVIDER_DAILY_HISTORY_SOURCE_IDENTITY
+        );
+        current.promote_provider_daily_history(source_identity, observations)
+    }
+
+    /// Verify a current provider roster can safely refresh this pinned
+    /// provider-history acquisition without widening its proof range.
+    pub fn validate_provider_daily_refresh_current(&self, current: &Self) -> Result<()> {
+        self.validate()?;
+        current.validate()?;
+        ensure_provider_history_observed(self)?;
+        if !self.matches_provider_current_acquisition(current) {
+            return Err(validation(
+                "provider-unavailable refresh requires an exact stable provider-current acquisition",
+            ));
+        }
+        Ok(())
+    }
+
+    fn matches_provider_history_refresh(&self, refreshed: &Self) -> bool {
+        if self.proof != HistoricalCatalogProof::ProviderHistoryObserved
+            || refreshed.proof != HistoricalCatalogProof::ProviderHistoryObserved
+            || !self.complete
+            || !refreshed.complete
+            || self.format_version != refreshed.format_version
+            || self.source_identity != refreshed.source_identity
+            || self.canonical_universe != refreshed.canonical_universe
+            || self.requested_as_of_ns != refreshed.requested_as_of_ns
+            || self.roster_before != refreshed.roster_before
+            || self.roster_after != refreshed.roster_after
+            || self.contracts.len() != refreshed.contracts.len()
+        {
+            return false;
+        }
+
+        self.contracts
+            .iter()
+            .zip(&refreshed.contracts)
+            .all(|(previous, refreshed)| {
+                let mut previous = previous.clone();
+                let mut refreshed = refreshed.clone();
+                previous
+                    .first_available_data_ns
+                    .remove(&HistoricalDataKind::Daily);
+                refreshed
+                    .first_available_data_ns
+                    .remove(&HistoricalDataKind::Daily);
+                previous == refreshed
+            })
+    }
+
     fn normalize(&mut self) -> Result<()> {
         if self.format_version != HISTORICAL_UNIVERSE_ARTIFACT_FORMAT_VERSION {
             return Err(validation(format!(
@@ -477,6 +980,31 @@ impl HistoricalCatalogAcquisition {
             provider_daily_observations: &self.provider_daily_observations,
         })?)
     }
+}
+
+fn ensure_provider_history_observed(acquisition: &HistoricalCatalogAcquisition) -> Result<()> {
+    if acquisition.proof != HistoricalCatalogProof::ProviderHistoryObserved || !acquisition.complete
+    {
+        return Err(validation(
+            "provider-unavailable retry requires complete provider-history observation",
+        ));
+    }
+    Ok(())
+}
+
+fn provider_unavailable_symbols(
+    acquisition: &HistoricalCatalogAcquisition,
+) -> Result<BTreeSet<String>> {
+    ensure_provider_history_observed(acquisition)?;
+    let symbols = acquisition
+        .provider_daily_observations
+        .iter()
+        .filter(|(_, observation)| {
+            observation.status == HistoricalDailyObservationStatus::ProviderUnavailable
+        })
+        .map(|(symbol, _)| symbol.clone())
+        .collect::<BTreeSet<_>>();
+    Ok(symbols)
 }
 
 /// Content-addressed semantic catalog used by a strict timeline compiler.
@@ -768,6 +1296,16 @@ pub struct HistoricalUniverseArtifactStore {
     cache_dir: PathBuf,
 }
 
+/// Root-scoped exclusive guard for a provider-membership retry operation.
+///
+/// A retry receipt selection, remote probe, and any resulting immutable
+/// publication form one operation. Holding this guard prevents two operators
+/// from advancing the same retry schedule concurrently.
+#[derive(Debug)]
+pub struct ProviderDailyUnavailableRetryOperationLock {
+    _file: fs::File,
+}
+
 /// Paths published by one successful legacy V4 + V3 rollback dual write.
 ///
 /// The normal V5 writer does not use this compatibility-only write set.
@@ -862,6 +1400,27 @@ impl HistoricalUniverseArtifactStore {
         self.cache_dir.join(HISTORICAL_UNIVERSE_ARTIFACT_NAMESPACE)
     }
 
+    pub fn try_acquire_provider_daily_retry_operation_lock(
+        &self,
+    ) -> Result<ProviderDailyUnavailableRetryOperationLock> {
+        ensure_directory_without_symlink(&self.cache_dir)?;
+        let namespace_dir = self.namespace_dir();
+        ensure_directory_without_symlink(&namespace_dir)?;
+        let path = namespace_dir.join(".provider-daily-retry.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)?;
+        file.try_lock_exclusive()
+            .map_err(|_| DataError::CacheBusy {
+                cache_dir: self.cache_dir.clone(),
+                operation: "provider-unavailable retry refresh",
+            })?;
+        Ok(ProviderDailyUnavailableRetryOperationLock { _file: file })
+    }
+
     pub fn acquisition_path(&self, sha256: &str) -> Result<PathBuf> {
         self.artifact_path("acquisitions", sha256)
     }
@@ -872,6 +1431,10 @@ impl HistoricalUniverseArtifactStore {
 
     pub fn plan_path(&self, sha256: &str) -> Result<PathBuf> {
         self.artifact_path("plans", sha256)
+    }
+
+    pub fn provider_daily_retry_state_path(&self, retry_state_sha256: &str) -> Result<PathBuf> {
+        self.artifact_path("provider-daily-retries", retry_state_sha256)
     }
 
     pub fn publish_acquisition(
@@ -893,6 +1456,158 @@ impl HistoricalUniverseArtifactStore {
             return Err(validation("historical acquisition path/hash mismatch"));
         }
         Ok(value)
+    }
+
+    /// Persist one immutable maintenance receipt bound to an acquisition.
+    pub fn publish_provider_daily_retry_state(
+        &self,
+        state: &ProviderDailyUnavailableRetryState,
+    ) -> Result<PathBuf> {
+        state.validate()?;
+        self.publish(
+            "provider-daily-retries",
+            &state.retry_state_sha256,
+            &serde_json::to_vec(state)?,
+        )
+    }
+
+    pub fn load_provider_daily_retry_state(
+        &self,
+        retry_state_sha256: &str,
+        acquisition: &HistoricalCatalogAcquisition,
+    ) -> Result<ProviderDailyUnavailableRetryState> {
+        acquisition.validate()?;
+        let value: ProviderDailyUnavailableRetryState =
+            self.load("provider-daily-retries", retry_state_sha256)?;
+        value.validate_against(acquisition)?;
+        if value.retry_state_sha256 != retry_state_sha256 {
+            return Err(validation(
+                "provider-unavailable retry receipt path/hash mismatch",
+            ));
+        }
+        Ok(value)
+    }
+
+    /// Find the latest immutable retry receipt for one provider-history
+    /// acquisition. Missing receipts are expected for artifacts published
+    /// before retry maintenance existed.
+    pub fn find_provider_daily_retry_state(
+        &self,
+        acquisition: &HistoricalCatalogAcquisition,
+    ) -> Result<Option<ProviderDailyUnavailableRetryState>> {
+        acquisition.validate()?;
+        let directory = self.namespace_dir().join("provider-daily-retries");
+        let metadata = match fs::symlink_metadata(&directory) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Ok(None);
+        }
+
+        let mut matched = None;
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if !file_type.is_file() || file_type.is_symlink() {
+                continue;
+            }
+            let file_name = entry.file_name();
+            let Some(stem) = file_name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            let retry_state_sha256 = format!("sha256:{stem}");
+            if validate_sha256(
+                "provider-unavailable retry receipt sha256",
+                &retry_state_sha256,
+            )
+            .is_err()
+            {
+                continue;
+            }
+            let candidate: ProviderDailyUnavailableRetryState =
+                self.load("provider-daily-retries", &retry_state_sha256)?;
+            candidate.validate()?;
+            if candidate.acquisition_sha256 != acquisition.acquisition_sha256 {
+                continue;
+            }
+            candidate.validate_against(acquisition)?;
+            match &matched {
+                None => matched = Some(candidate),
+                Some(existing)
+                    if (candidate.observed_at_ns, &candidate.retry_state_sha256)
+                        > (existing.observed_at_ns, &existing.retry_state_sha256) =>
+                {
+                    matched = Some(candidate);
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(matched)
+    }
+
+    /// Finds the newest immutable provider-history observation for this exact
+    /// stable provider roster. Missing, malformed, or unrelated artifacts are
+    /// ignored so callers can safely fall back to a fresh bootstrap.
+    pub fn find_matching_provider_history_observed_acquisition(
+        &self,
+        current: &HistoricalCatalogAcquisition,
+    ) -> Result<Option<HistoricalCatalogAcquisition>> {
+        current.validate()?;
+        if current.proof != HistoricalCatalogProof::ProviderCurrentObserved || !current.complete {
+            return Ok(None);
+        }
+
+        let directory = self.namespace_dir().join("acquisitions");
+        let metadata = match fs::symlink_metadata(&directory) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Ok(None);
+        }
+
+        let mut matched = None;
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if !file_type.is_file() || file_type.is_symlink() {
+                continue;
+            }
+            let file_name = entry.file_name();
+            let Some(stem) = file_name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            let sha256 = format!("sha256:{stem}");
+            if validate_sha256("artifact sha256", &sha256).is_err() {
+                continue;
+            }
+            let Ok(candidate) = self.load_acquisition(&sha256) else {
+                continue;
+            };
+            if !candidate.matches_provider_current_acquisition(current) {
+                continue;
+            }
+            match &matched {
+                None => matched = Some(candidate),
+                Some(existing)
+                    if (candidate.observed_at_ns, &candidate.acquisition_sha256)
+                        > (existing.observed_at_ns, &existing.acquisition_sha256) =>
+                {
+                    matched = Some(candidate);
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(matched)
     }
 
     pub fn publish_semantic_catalog(&self, catalog: &HistoricalSemanticCatalog) -> Result<PathBuf> {

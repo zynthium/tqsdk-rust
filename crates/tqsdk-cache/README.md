@@ -55,6 +55,18 @@ tqsdk-cache fill \
   --start-day 2025-01-01 --symbol-concurrency 4
 ```
 
+```bash
+# 仅排除这些品种的物理合约；不会排除 continuous/index view。
+tqsdk-cache fill \
+  --cache-dir /var/lib/tqsdk/history \
+  --kind daily \
+  --universe 'timeline(contract:all;except(contract:CFFEX.*,CZCE.ZC,CZCE.CY,CZCE.RI,CZCE.RS,CZCE.PM,CZCE.WH,CZCE.JR,DCE.rr,DCE.lg,DCE.fb,DCE.bb,SHFE.wr))' \
+  --start-day 2023-01-01 \
+  --symbol-concurrency 2
+```
+
+若需跨全部 view 排除，改用 `except(all:CFFEX.*,CZCE.ZC,...)`；`except(...)` 会规范化为旧 `!` 表示，已发布 artifact identity 不变。
+
 同一 `--universe` 分别运行 `--kind tick`、`minute`、`daily` 即填充三种数据；Universe 不选择
 数据流。不传 `--end-day` 时截止本次启动时的最新已收盘交易日。可重复的
 `--universe-file PATH` 是 V2 外部 exact-symbol 来源。V2 timeline writer 默认发布 V5；
@@ -253,6 +265,37 @@ tick fill 按 trading day 顺序执行，以 8192 rows 缓冲追加；取消会 
 范围的 final/provisional coverage。fill-only 不回读刚写入 rows；`rows_written` 只统计实际物理落盘，
 同一 shared fill 被多个 logical request 复用时只计一次，完整 cache hit 为 `0`。final fill 只按本轮
 实际远端回填的 `symbol × trading day` 去重 compact 相交分区；provisional fill 跳过 compaction。
+
+### Provider-unavailable membership maintenance
+
+当 `fill --universe 'timeline(contract:all)'` 的初始 provider 探测留下少量
+`provider_unavailable` 时，不要反复完整扫描全部合约。使用 pinned acquisition 的小批维护：
+
+```bash
+# 只选 due candidates；不认证、不请求远端、也不写入 cache/artifact。
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history \
+  refresh-provider-membership \
+  --acquisition-sha256 sha256:... \
+  --max-symbols 4 \
+  --dry-run
+
+# 真正重试；只允许 futures，命令自身固定 native-daily，不传 --kind。
+TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
+cargo run -p tqsdk-cache -- \
+  --cache-dir /var/lib/tqsdk/history \
+  refresh-provider-membership \
+  --acquisition-sha256 sha256:... \
+  --max-symbols 4 --progress plain
+```
+
+每轮先以已完成合约的 isolated-cache canary 检查 provider，再仅请求最多 32 个 timeout
+candidates。canary、认证、传输、取消或非 timeout 失败均不会推进退避。重复 timeout 只写新的 retry
+receipt；首次 daily row 或终态空结果才创建新的 acquisition/catalog，且不隐式改写任何 plan。之后以
+相同 `--universe` 和相同固定 `--end-day` 重跑普通 `fill`，由它编译所需的新 plan。维护前后 roster、
+metadata 与 cutoff 必须和 pinned acquisition 完全一致；漂移时 fail closed，改用完整 bootstrap。
+canary 仅请求成熟 complete observation 的已知单日窗口，默认上限 30 秒；实际 retry candidate 默认
+仍为 15 秒，因此不活跃合约不会把维护轮拉成长扫描。显式 `--batch-timeout-secs` 覆盖两种请求。
 
 ## Immutable history snapshot publisher
 

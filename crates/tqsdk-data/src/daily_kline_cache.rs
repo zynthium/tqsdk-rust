@@ -229,6 +229,36 @@ impl DailyKlineCache {
         ))
     }
 
+    /// Returns the immutable snapshot identity stored in a daily file header.
+    ///
+    /// This performs no row-payload decode. Callers must still use a normal
+    /// coverage/read operation before treating the file as valid cache data.
+    #[doc(hidden)]
+    pub fn stored_snapshot(
+        &self,
+        symbol: impl AsRef<str>,
+    ) -> Result<Option<DailyKlineCacheSnapshot>> {
+        let symbol = symbol.as_ref();
+        validate_symbol(symbol)?;
+        let path = self.symbol_file_path(symbol);
+        match fs::metadata(path.as_path()) {
+            Ok(metadata) if !metadata.is_file() => Err(DataError::InvalidResponse(
+                "daily kline cache path not regular file".to_string(),
+            )),
+            Ok(_) => {
+                let header = read_daily_file_header(path.as_path())?;
+                if header.symbol != symbol {
+                    return Err(DataError::InvalidResponse(
+                        "daily kline cache symbol does not match file path".to_string(),
+                    ));
+                }
+                Ok(Some(header.snapshot))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Inspects final coverage without falling back to a cache miss on any
     /// incompatible, corrupt, or unsupported file.
     pub fn inspect(
@@ -833,6 +863,92 @@ fn read_daily_file_prefix(path: &Path) -> Result<String> {
     })?;
     validate_symbol(symbol.as_str())?;
     Ok(symbol)
+}
+
+struct DailyFileHeader {
+    symbol: String,
+    snapshot: DailyKlineCacheSnapshot,
+}
+
+fn read_daily_file_header(path: &Path) -> Result<DailyFileHeader> {
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(DataError::InvalidResponse(
+            "daily kline cache path not regular file".to_string(),
+        ));
+    }
+    let mut file = File::open(path)?;
+    let mut header = [0_u8; FILE_HEADER_BYTES];
+    file.read_exact(&mut header)?;
+    if header[..4] != FILE_MAGIC {
+        return Err(DataError::InvalidResponse(
+            "daily kline cache magic mismatch".to_string(),
+        ));
+    }
+    let version = u16::from_le_bytes(header[4..6].try_into().expect("fixed header slice"));
+    if version != FILE_VERSION {
+        return Err(DataError::InvalidResponse(format!(
+            "unsupported daily kline cache version {version}"
+        )));
+    }
+    let payload_len = u64::from_le_bytes(header[8..16].try_into().expect("fixed header slice"));
+    let expected_len = u64::try_from(FILE_HEADER_BYTES)
+        .expect("usize fits u64")
+        .checked_add(payload_len)
+        .ok_or_else(|| DataError::InvalidResponse("daily kline cache size overflow".to_string()))?;
+    if metadata.len() != expected_len {
+        return Err(DataError::InvalidResponse(
+            "daily kline cache payload length mismatch".to_string(),
+        ));
+    }
+
+    let mut remaining = payload_len;
+    let symbol = read_daily_payload_string(&mut file, &mut remaining, "symbol")?;
+    validate_symbol(symbol.as_str())?;
+    let version = u32::from_le_bytes(
+        read_daily_payload_bytes(&mut file, &mut remaining, 4, "snapshot version")?
+            .try_into()
+            .expect("fixed u32 bytes"),
+    );
+    let calendar_hash = read_daily_payload_string(&mut file, &mut remaining, "calendar hash")?;
+    let session_hash = read_daily_payload_string(&mut file, &mut remaining, "session hash")?;
+    let snapshot = DailyKlineCacheSnapshot::new(version, calendar_hash, session_hash)?;
+    Ok(DailyFileHeader { symbol, snapshot })
+}
+
+fn read_daily_payload_string(file: &mut File, remaining: &mut u64, field: &str) -> Result<String> {
+    let length = u32::from_le_bytes(
+        read_daily_payload_bytes(file, remaining, 4, field)?
+            .try_into()
+            .expect("fixed u32 bytes"),
+    );
+    let length = usize::try_from(length).expect("u32 fits usize");
+    if length > MAX_STRING_BYTES {
+        return Err(DataError::InvalidResponse(format!(
+            "daily kline cache {field} length exceeds maximum"
+        )));
+    }
+    String::from_utf8(read_daily_payload_bytes(file, remaining, length, field)?).map_err(|_| {
+        DataError::InvalidResponse("daily kline cache string is not UTF-8".to_string())
+    })
+}
+
+fn read_daily_payload_bytes(
+    file: &mut File,
+    remaining: &mut u64,
+    length: usize,
+    field: &str,
+) -> Result<Vec<u8>> {
+    let length_u64 = u64::try_from(length).expect("usize fits u64");
+    if length_u64 > *remaining {
+        return Err(DataError::InvalidResponse(format!(
+            "daily kline cache {field} exceeds payload length"
+        )));
+    }
+    let mut bytes = vec![0_u8; length];
+    file.read_exact(bytes.as_mut_slice())?;
+    *remaining -= length_u64;
+    Ok(bytes)
 }
 
 fn fallback_daily_symbol(path: &Path) -> String {

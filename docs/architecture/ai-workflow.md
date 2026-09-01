@@ -14,7 +14,7 @@
 | runtime / 状态 / cursor / command | [`runtime-core/overview.md`](runtime-core/overview.md) | `runtime-core/*.md`、[`validation.md`](validation.md) |
 | feature、用户入口或验证 | 根 README、目标 crate README | contract example、`validation.md` |
 | Universe DSL、snapshot/timeline 或入口能力 | [`universe-language.md`](universe-language.md) | 受影响 crate README、contract example、`validation.md` |
-| 历史 universe proof、artifact 或 plan 持久化 | [`historical-universe-catalog.md`](historical-universe-catalog.md)、[`universe-language.md`](universe-language.md) | `tqsdk-data`/`tqsdk-cache` README、`validation.md` |
+| 历史 universe proof、artifact、retry receipt 或 plan 持久化 | [`historical-universe-catalog.md`](historical-universe-catalog.md)、[`universe-language.md`](universe-language.md) | `tqsdk-data`/`tqsdk-cache` README、`validation.md` |
 | WebSocket DIFF / 状态字段 | [`diff_protocol_spec.md`](../diff_protocol_spec.md) 的目标章节 | 不全文读取协议 |
 | relay history / snapshot | [`history-relay.md`](history-relay.md)、[`history-relay-http.md`](history-relay-http.md)、[`history-snapshot-manifest.md`](history-snapshot-manifest.md) | relay README、`validation.md` |
 

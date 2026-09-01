@@ -5,6 +5,8 @@ legacy-first：既有 `UniverseExpression` / `HistoricalFillUniverseSpec` 语义
 `timeline(...)` Universe Language V2 编译 current plan v5。可见 CLI 入口只有 `--universe`，语言规则见
 [Universe Language V2](universe-language.md)。
 
+`timeline(...)` 可用 `except(contract:<targets>)` 批量移除物理合约 view，或用 `except(all:<structural-targets>)` 移除所有可分类 view。该输入糖在 parser 中归一为既有 `!` 排除，因此 V5 identity、已发布 acquisition/catalog/plan 和 migration 输入保持兼容。
+
 ## 核心语义：数据生命周期
 
 默认历史 universe 不再试图恢复交易所法定挂牌日期。物理合约只有在 provider
@@ -96,7 +98,37 @@ data 层拥有 codec、验证器和 content-addressed store：
   acquisitions/<sha256>.json
   catalogs/<sha256>.json
   plans/<sha256>.json
+  provider-daily-retries/<retry-state-sha256>.json
 ```
+
+`provider_unavailable` 的后续探测使用独立、版本化、内容寻址的 retry receipt。它绑定不可变
+acquisition hash，记录每个仍不可用 symbol 的尝试次数和下次可探测时间；它不属于
+`HistoricalDailyObservation` 的 proof body，因此旧 acquisition 的 JSON/body/hash 不会因一次
+timeout 重试而变化。默认退避为未到期合约 `1h, 1d, 7d, 30d`，已到期合约
+`7d, 30d, 90d`。同一 acquisition 的 receipt winner 以
+`(observed_at_ns, retry_state_sha256)` 确定，读取损坏或不匹配 receipt 必须 fail closed。
+
+维护命令固定一个已有 acquisition，而不是重新解释 universe 或推进 cutoff：
+
+```text
+tqsdk-cache --cache-dir DIR refresh-provider-membership \
+  --acquisition-sha256 sha256:... --max-symbols 4 [--force] [--dry-run]
+```
+
+它仅支持 futures、最多 32 个 symbol，且始终请求 native-daily history；不要传普通 fill 的
+`--kind`。`--dry-run` 只选择 due candidates，不认证、不请求 provider、不创建 lock 或文件。
+真实执行持有 cache-root operation lock，在每轮候选前以已完成合约的 isolated-cache remote
+canary 验证 provider；canary、认证、传输、取消或非精确-timeout 失败都不发布 proof 或推进
+receipt。探测前后必须重新获得与 pinned acquisition 相同的 stable roster/metadata，且
+`requested_as_of_ns` 必须完全相同；任何漂移或新 cutoff 都要求完整 bootstrap。
+canary 选择成熟的未到期 complete observation，并只请求其已知首行所在的一日窗口；默认给 canary
+30 秒以区分 provider 慢启动与单合约 timeout，真实候选仍保持 15 秒上限。显式
+`--batch-timeout-secs` 同时覆盖两者。
+
+重复 timeout 只发布新的 retry receipt。首次 daily row 或 terminal-empty 才生成新的
+acquisition 和 semantic catalog；维护命令从不生成 plan，因为一个 acquisition 可被多个
+universe 输入引用。需要新 plan 时，操作者以相同 `--universe` 和相同固定 `--end-day` 再运行
+普通 `fill`。
 
 目录名保持兼容，plan 文件使用 flat `plan_version` dispatch。旧
 `HistoricalUniverseArtifactStore::publish_plan/load_plan` 只处理 v1–v3；

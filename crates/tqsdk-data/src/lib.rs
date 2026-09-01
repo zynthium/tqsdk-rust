@@ -180,7 +180,9 @@ pub use historical_universe_artifact::{
     HistoricalAcquisitionContract, HistoricalCatalogAcquisition, HistoricalDailyObservation,
     HistoricalDailyObservationStatus, HistoricalDataKind, HistoricalSemanticCatalog,
     HistoricalUniverseArtifactStore, HistoricalUniversePlanMigration,
-    HistoricalUniversePublishedPlanSet,
+    HistoricalUniversePublishedPlanSet, PROVIDER_DAILY_UNAVAILABLE_RETRY_STATE_FORMAT_VERSION,
+    ProviderDailyUnavailableRetry, ProviderDailyUnavailableRetryCandidate,
+    ProviderDailyUnavailableRetryOperationLock, ProviderDailyUnavailableRetryState,
 };
 pub use historical_universe_resolution::{
     HISTORICAL_UNIVERSE_COMPILER_IDENTITY, HistoricalDependencyRole, HistoricalUniverseDependency,

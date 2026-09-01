@@ -116,6 +116,15 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | 可选 market relay | `cargo test -p tqsdk-relay --tests` | 覆盖 relay 配置、dry-run 启动自检、结构化启动诊断、分层 HTTP `/health`、`/metrics`、`/symbol-metrics`、原子 `/dashboard-snapshot`、dashboard 5 分钟 `timeline_history` 服务端内存缓存、内置 `/dashboard`、上游连接/订阅/补历史阶段 telemetry 和 backfilling 可观测进度、等待首样本或补历史无样本合约 `initializing` 非问题状态、frame/event idle 秒级告警、raw frame 后先发 `peek_message` 再 JSON decode 的顺序 guard、上游 idle 期间周期性 `peek_message` 恢复守卫、peek/decode timing metrics、200 合约 decode guard、可恢复 decode health、每日合约集合刷新调度、typed metadata 期货产品发现与分批查询、每品种主力-only 快捷选择、每品种活跃度前 N 合约选择、上游一合约一 tick chart 订阅、tick row 连续性缺口/重复/乱序 telemetry、当前 universe ∪ 当前订阅健康集合、dashboard read-model 低频缓存、dashboard read-model 锁外分类、进程内固定容量事件账本、单 chart `ins_list` 长度防线、tick view width 配置、下游 market 协议、interest/chart-id 隔离、K 线 `[start,end)` 合成、tick-ring 冷启动回放、bootstrap 队列限流、observability、WebSocket loopback、upstream tick scaffold 和 quote-only 远月行情更新 |
 | relay endpoint opt-in | `cargo test -p tqsdk-session --test session_builder builder_accepts_explicit_market_relay_url_without_enabling_other_routes` | 确认 relay 只显式改 market endpoint，不启用 trade/query/auth |
 
+### Provider-unavailable membership maintenance
+
+`cargo test -p tqsdk-data --test historical_universe_artifact` 必须覆盖 retry receipt 的 canonical
+round-trip、过期/未过期退避、timeout→timeout、timeout→terminal success、stable-roster/cutoff
+fail-closed 与 root operation lock。CLI 至少运行 `refresh-provider-membership --help` 和已存在
+acquisition 的 `--dry-run`，后者不得认证、请求 provider 或写 cache/artifact。真实远端验证应限制
+`--max-symbols`，并确认 canary/认证/传输/取消失败不会发布 receipt/proof；正常成功只允许发布 receipt
+或新的 acquisition/catalog，绝不发布 plan。
+
 ### Relay CacheOnly history
 
 新增 history sibling 时，以下四组契约必须一起成立：
@@ -198,6 +207,7 @@ cargo test -p tqsdk-data --test historical_universe
 cargo test -p tqsdk-data --test historical_universe_artifact
 cargo test -p tqsdk-data --test historical_universe_resolution
 cargo test -p tqsdk-data --test universe_spec
+cargo test -p tqsdk-data --test universe_except
 cargo test -p tqsdk-data --test universe_spec_compiler
 cargo test -p tqsdk-data --test universe_compatibility
 cargo test -p tqsdk-data --test universe_input
@@ -208,11 +218,12 @@ cargo test -p tqsdk-data --test provider_history_empty_expiry
 cargo test -p tqsdk-task --test strategy_backtest
 cargo test -p tqsdk --lib
 cargo test -p tqsdk --test facade_contract
+cargo test -p tqsdk --test facade_universe_except
 cargo test -p tqsdk-cache --bin tqsdk-cache
 cargo test -p tqsdk-relay --tests
 ```
 
-它们分别覆盖 legacy parser/顺序结果冻结、Universe Language V2 grammar/canonical AST/hash、typed
+它们分别覆盖 legacy parser/顺序结果冻结、Universe Language V2 grammar/canonical AST/hash、`except(...)` 与旧 `!` 表示的 identity 等价、typed
 exclusion/capability/file identity、V1–V3 hash compatibility 与 V3 execution pin、V4 fixed wire/hash/
 chain、V4 → V3 projection 等价与 rollback、V5 fixed wire/hash/canonical-byte gate、V4 → V5
 source-preserving migration、complete authoritative 或 provider-history

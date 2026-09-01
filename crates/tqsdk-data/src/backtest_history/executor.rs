@@ -20,7 +20,8 @@ use crate::{
 use super::fill::{BacktestHistoryFillRequest, RemoteFillCoordinator};
 use super::metadata::{ensure_metadata_for_remote_miss, metadata_snapshot_covers_range};
 use super::planner::{
-    PlannedBacktestHistoryRequest, PlannedBaseSource, bar_end_ns, classify_request, plan_request,
+    PlannedBacktestHistoryRequest, PlannedBaseSource, bar_end_ns, classify_request,
+    is_direct_native_daily_cache_request, plan_request,
 };
 use super::report::{
     BacktestHistoryBatchReport, BacktestHistoryChunk, BacktestHistoryEvent,
@@ -845,12 +846,15 @@ async fn plan_request_for_execution(
     request: ValidatedBacktestHistoryRequest,
 ) -> Result<PlannedBacktestHistoryRequest> {
     let requested_range = (request.start_ns, request.end_ns);
-    let active_metadata = BacktestHistoryMetadataCache::open_read_only(config.cache_dir.as_path())
-        .load_active(request.symbol.as_str())?;
     let base_source = classify_request(&request)?;
     let is_main_continuous = request.symbol.starts_with("KQ.m@");
-    let requires_metadata =
-        !matches!(base_source, PlannedBaseSource::CanonicalDaily) || is_main_continuous;
+    let requires_metadata = !is_direct_native_daily_cache_request(&request, base_source);
+    let active_metadata = if requires_metadata {
+        BacktestHistoryMetadataCache::open_read_only(config.cache_dir.as_path())
+            .load_active(request.symbol.as_str())?
+    } else {
+        None
+    };
     let selected_metadata = if !requires_metadata {
         None
     } else if matches!(base_source, PlannedBaseSource::CanonicalMinute) {

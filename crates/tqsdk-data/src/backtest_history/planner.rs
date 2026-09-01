@@ -5,7 +5,7 @@ use crate::aggregation::{KlineSessionPosition, KlineSessionTemplate};
 use crate::backtest_tick_cache::{
     backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
 };
-use crate::daily_kline_cache::DAILY_KLINE_DURATION_NS;
+use crate::daily_kline_cache::{DAILY_KLINE_DURATION_NS, DailyKlineCache};
 use crate::minute_kline_cache::{MINUTE_KLINE_DURATION_NS, MinuteKlineCacheSnapshot};
 use crate::{
     BacktestHistoryTradingDay, DataError, Result, resolve_backtest_metadata_snapshot,
@@ -111,6 +111,16 @@ pub(crate) fn plan_request(
             "provisional_as_of_ns leaves no queryable backtest history range".to_string(),
         ));
     }
+    // A cached raw 1d native series is self-describing: its file header carries
+    // the immutable cache identity. Do not deserialize the much larger metadata
+    // sidecar merely to rediscover that identity. Multi-day aggregation remains
+    // metadata-backed because it needs the instrument session definition.
+    let cached_direct_daily_snapshot =
+        if is_direct_native_daily_cache_request(&request, base_source) {
+            DailyKlineCache::open_read_only(cache_dir).stored_snapshot(request.symbol.as_str())?
+        } else {
+            None
+        };
     let metadata = match base_source {
         PlannedBaseSource::CanonicalMinute => resolve_minute_cache_metadata_snapshot(
             cache_dir,
@@ -118,14 +128,19 @@ pub(crate) fn plan_request(
             request.start_ns,
             effective_end_ns,
         )?,
-        PlannedBaseSource::Tick | PlannedBaseSource::CanonicalDaily => {
-            resolve_backtest_metadata_snapshot(
-                cache_dir,
-                request.symbol.as_str(),
-                request.start_ns,
-                effective_end_ns,
-            )?
-        }
+        PlannedBaseSource::Tick => resolve_backtest_metadata_snapshot(
+            cache_dir,
+            request.symbol.as_str(),
+            request.start_ns,
+            effective_end_ns,
+        )?,
+        PlannedBaseSource::CanonicalDaily if cached_direct_daily_snapshot.is_some() => None,
+        PlannedBaseSource::CanonicalDaily => resolve_backtest_metadata_snapshot(
+            cache_dir,
+            request.symbol.as_str(),
+            request.start_ns,
+            effective_end_ns,
+        )?,
     };
     // A native daily request, except KQ.m@ main continuous, uses a single
     // server-side series. Its retained sidecar only binds existing cache
@@ -173,11 +188,14 @@ pub(crate) fn plan_request(
                 start_ns: request.start_ns,
                 end_ns: effective_end_ns,
             }];
+            let minute_snapshot =
+                cached_direct_daily_snapshot.unwrap_or_else(MinuteKlineCacheSnapshot::cst_v1);
+            let snapshot_hash = minute_snapshot.calendar_hash.clone();
             (
                 session,
                 None,
-                MinuteKlineCacheSnapshot::cst_v1(),
-                "cst-trading-day-v1".to_string(),
+                minute_snapshot,
+                snapshot_hash,
                 physical_segments.clone(),
                 physical_segments,
             )
@@ -313,6 +331,15 @@ pub(crate) fn classify_request(
         None => Ok(PlannedBaseSource::Tick),
         Some(duration_ns) => classify_duration(duration_ns),
     }
+}
+
+pub(crate) fn is_direct_native_daily_cache_request(
+    request: &ValidatedBacktestHistoryRequest,
+    base_source: PlannedBaseSource,
+) -> bool {
+    matches!(base_source, PlannedBaseSource::CanonicalDaily)
+        && request.duration_ns == Some(DAILY_KLINE_DURATION_NS)
+        && !request.symbol.starts_with("KQ.m@")
 }
 
 fn intersect_segments(
@@ -494,7 +521,8 @@ mod tests {
     use crate::backtest_history::request::BacktestHistoryRequest;
     use crate::{
         BACKTEST_HISTORY_METADATA_SCHEMA_VERSION, BacktestHistoryMarketKind,
-        BacktestHistoryMetadataCache, BacktestHistoryMetadataSnapshot,
+        BacktestHistoryMetadataCache, BacktestHistoryMetadataSnapshot, DailyKlineCache,
+        MinuteKlineCacheSnapshot,
     };
 
     #[test]
@@ -784,6 +812,46 @@ mod tests {
             index_plan.source_slices[0].range,
             (requested_start_ns, requested_end_ns)
         );
+    }
+
+    #[test]
+    fn direct_daily_plan_reuses_file_snapshot_without_metadata_sidecar() {
+        let root = temp_dir("daily-file-snapshot");
+        let symbol = "CFFEX.T2609";
+        let start_ns = utc_ns(2026, 8, 17, 0, 0, 0);
+        let end_ns = start_ns + DAILY_KLINE_DURATION_NS;
+        let snapshot =
+            MinuteKlineCacheSnapshot::new(7, "legacy-daily-cache-snapshot", "legacy-daily-session")
+                .unwrap();
+        DailyKlineCache::open(&root)
+            .unwrap()
+            .store_final_range_at(
+                symbol,
+                start_ns,
+                end_ns,
+                &snapshot,
+                &[],
+                end_ns + DAILY_KLINE_DURATION_NS,
+            )
+            .unwrap();
+
+        let plan = plan_request(
+            &root,
+            BacktestHistoryRequest::kline(
+                1,
+                symbol,
+                Duration::from_secs(24 * 60 * 60),
+                start_ns,
+                end_ns,
+            )
+            .validate()
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(plan.minute_snapshot, snapshot);
+        assert_eq!(plan.snapshot_hash, "legacy-daily-cache-snapshot");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

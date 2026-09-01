@@ -1,10 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tqsdk_data::{
     ActiveInterval, CatalogContract, CatalogSnapshot, HistoricalAcquisitionContract,
-    HistoricalCatalogAcquisition, HistoricalCatalogProof, HistoricalDataKind,
-    HistoricalFillUniverseSpec, HistoricalSemanticCatalog, HistoricalUniverseArtifactStore,
-    UniverseBudget, compile_historical_universe_resolution,
+    HistoricalCatalogAcquisition, HistoricalCatalogProof, HistoricalDailyObservation,
+    HistoricalDataKind, HistoricalFillUniverseSpec, HistoricalSemanticCatalog,
+    HistoricalUniverseArtifactStore, ProviderDailyUnavailableRetryState, UniverseBudget,
+    compile_historical_universe_resolution, promote_provider_daily_history,
+    promote_provider_daily_history_observations,
 };
 
 fn contract(symbol: &str, start_ns: i64, end_ns: i64) -> HistoricalAcquisitionContract {
@@ -37,6 +39,30 @@ fn acquisition(proof: HistoricalCatalogProof) -> HistoricalCatalogAcquisition {
             contract("SHFE.au2406", 200, 500),
             contract("SHFE.au2404", 100, 400),
         ],
+    )
+    .unwrap()
+}
+
+fn provider_current_acquisition(requested_as_of_ns: i64) -> HistoricalCatalogAcquisition {
+    let mut contracts = vec![
+        contract("SHFE.au2406", 200, 500),
+        contract("SHFE.au2404", 100, 400),
+    ];
+    for contract in &mut contracts {
+        contract
+            .first_available_data_ns
+            .remove(&HistoricalDataKind::Daily);
+    }
+    HistoricalCatalogAcquisition::new(
+        HistoricalCatalogProof::ProviderCurrentObserved,
+        "fixture-provider-current:v1",
+        "physical:all",
+        requested_as_of_ns,
+        600,
+        true,
+        vec!["SHFE.au2406".to_string(), "SHFE.au2404".to_string()],
+        vec!["SHFE.au2404".to_string(), "SHFE.au2406".to_string()],
+        contracts,
     )
     .unwrap()
 }
@@ -268,6 +294,53 @@ fn content_addressed_store_round_trips_and_rejects_collision() {
 }
 
 #[test]
+fn store_reuses_only_exact_provider_history_observation() {
+    let root = std::env::temp_dir().join(format!(
+        "tqsdk-historical-observation-reuse-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    if root.exists() {
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    let store = HistoricalUniverseArtifactStore::new(&root);
+    let requested_as_of_ns = tqsdk_data::PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS + 1_000;
+    let current = provider_current_acquisition(requested_as_of_ns);
+    let observed = promote_provider_daily_history(
+        current.clone(),
+        &BTreeMap::from([
+            (
+                "SHFE.au2404".to_string(),
+                Some(tqsdk_data::PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS + 110),
+            ),
+            (
+                "SHFE.au2406".to_string(),
+                Some(tqsdk_data::PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS + 220),
+            ),
+        ]),
+    )
+    .unwrap();
+    store.publish_acquisition(&observed).unwrap();
+
+    assert_eq!(
+        store
+            .find_matching_provider_history_observed_acquisition(&current)
+            .unwrap(),
+        Some(observed)
+    );
+    assert!(
+        store
+            .find_matching_provider_history_observed_acquisition(&provider_current_acquisition(
+                requested_as_of_ns + 1,
+            ))
+            .unwrap()
+            .is_none()
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn v3_plan_chain_requires_present_and_matching_authoritative_artifacts() {
     let root = std::env::temp_dir().join(format!("tqsdk-historical-chain-{}", std::process::id()));
     if root.exists() {
@@ -348,5 +421,156 @@ fn artifact_store_rejects_symlinked_cache_ancestor() {
         .unwrap_err();
     assert!(error.to_string().contains("symlink"));
 
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+fn provider_history_observed_with_unavailable() -> HistoricalCatalogAcquisition {
+    let range_start_ns = tqsdk_data::PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS;
+    let requested_as_of_ns = range_start_ns + 1_000_000;
+    promote_provider_daily_history_observations(
+        provider_current_acquisition(requested_as_of_ns),
+        BTreeMap::from([
+            (
+                "SHFE.au2404".to_string(),
+                HistoricalDailyObservation::provider_unavailable(
+                    range_start_ns,
+                    requested_as_of_ns,
+                    15_000_000_000,
+                )
+                .unwrap(),
+            ),
+            (
+                "SHFE.au2406".to_string(),
+                HistoricalDailyObservation::new(
+                    range_start_ns,
+                    requested_as_of_ns,
+                    Some(range_start_ns + 220),
+                )
+                .unwrap(),
+            ),
+        ]),
+    )
+    .unwrap()
+}
+
+#[test]
+fn provider_unavailable_retry_receipt_backs_off_and_removes_completed_symbol() {
+    let observed = provider_history_observed_with_unavailable();
+    let state = ProviderDailyUnavailableRetryState::from_acquisition(&observed).unwrap();
+    let candidates = state.candidates(&observed).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].symbol, "SHFE.au2404");
+    assert_eq!(candidates[0].retry.attempts, 1);
+    assert_eq!(
+        candidates[0].retry.next_retry_at_ns,
+        observed.observed_at_ns + 7 * 24 * 60 * 60 * 1_000_000_000
+    );
+
+    let attempted = BTreeSet::from(["SHFE.au2404".to_string()]);
+    let retried = state
+        .refreshed(&observed, &observed, &attempted, 700)
+        .unwrap();
+    let retried_candidates = retried.candidates(&observed).unwrap();
+    assert_eq!(retried_candidates[0].retry.attempts, 2);
+    assert_eq!(
+        retried_candidates[0].retry.next_retry_at_ns,
+        700 + 30 * 24 * 60 * 60 * 1_000_000_000
+    );
+    assert!(
+        state
+            .refreshed(&observed, &observed, &attempted, 599)
+            .is_err()
+    );
+
+    let range_start_ns = tqsdk_data::PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS;
+    let refreshed = observed
+        .refresh_provider_daily_observations(
+            provider_current_acquisition(observed.requested_as_of_ns),
+            BTreeMap::from([(
+                "SHFE.au2404".to_string(),
+                HistoricalDailyObservation::new(
+                    range_start_ns,
+                    observed.requested_as_of_ns,
+                    Some(range_start_ns + 110),
+                )
+                .unwrap(),
+            )]),
+        )
+        .unwrap();
+    assert!(
+        state
+            .refreshed(&observed, &refreshed, &attempted, 700)
+            .unwrap()
+            .is_empty()
+    );
+
+    let terminal_empty = observed
+        .refresh_provider_daily_observations(
+            provider_current_acquisition(observed.requested_as_of_ns),
+            BTreeMap::from([(
+                "SHFE.au2404".to_string(),
+                HistoricalDailyObservation::new(range_start_ns, observed.requested_as_of_ns, None)
+                    .unwrap(),
+            )]),
+        )
+        .unwrap();
+    assert_eq!(
+        terminal_empty.provider_daily_observations["SHFE.au2404"].first_row_ns,
+        None
+    );
+    assert!(
+        state
+            .refreshed(&observed, &terminal_empty, &attempted, 700)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn provider_unavailable_retry_receipt_store_is_content_addressed_and_locked() {
+    let root = std::env::temp_dir().join(format!(
+        "tqsdk-provider-retry-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    if root.exists() {
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    let acquisition = provider_history_observed_with_unavailable();
+    let state = ProviderDailyUnavailableRetryState::from_acquisition(&acquisition).unwrap();
+    let store = HistoricalUniverseArtifactStore::new(&root);
+    let planned = store
+        .provider_daily_retry_state_path(&state.retry_state_sha256)
+        .unwrap();
+    assert!(!root.exists(), "state path planning must not write");
+    assert_eq!(
+        store.publish_provider_daily_retry_state(&state).unwrap(),
+        planned
+    );
+    assert_eq!(
+        store
+            .load_provider_daily_retry_state(&state.retry_state_sha256, &acquisition)
+            .unwrap(),
+        state
+    );
+    assert_eq!(
+        store.find_provider_daily_retry_state(&acquisition).unwrap(),
+        Some(state)
+    );
+
+    let lock = store
+        .try_acquire_provider_daily_retry_operation_lock()
+        .unwrap();
+    assert!(
+        store
+            .try_acquire_provider_daily_retry_operation_lock()
+            .is_err()
+    );
+    drop(lock);
+    drop(
+        store
+            .try_acquire_provider_daily_retry_operation_lock()
+            .unwrap(),
+    );
     std::fs::remove_dir_all(&root).unwrap();
 }

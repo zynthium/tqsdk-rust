@@ -128,6 +128,8 @@ enum Command {
     Inspect(InspectArgs),
     /// Fill missing closed trading days through the server-side backtest stream.
     Fill(FillArgs),
+    /// Retry a bounded set of provider-unavailable history membership probes.
+    RefreshProviderMembership(ProviderMembershipRefreshArgs),
     /// Verify coverage and optionally replay cached data without remote fill.
     Verify(VerifyArgs),
     /// Deep read-only cache health diagnostics; requires a stable cache view.
@@ -154,6 +156,7 @@ impl Command {
             Self::Inventory => "inventory",
             Self::Inspect(_) => "inspect",
             Self::Fill(_) => "fill",
+            Self::RefreshProviderMembership(_) => "refresh-provider-membership",
             Self::Verify(_) => "verify",
             Self::Doctor => "doctor",
             Self::RepairLocks(_) => "repair-locks",
@@ -364,6 +367,37 @@ struct FillArgs {
     progress: ProgressMode,
     /// Maximum active symbol bars in TTY mode; zero keeps only the global bar.
     #[arg(long, value_name = "COUNT", default_value_t = 8)]
+    progress_max_bars: usize,
+}
+
+#[derive(Debug, Args)]
+struct ProviderMembershipRefreshArgs {
+    /// Pin refresh to this historical provider acquisition cutoff.
+    #[arg(long, value_name = "SHA256")]
+    acquisition_sha256: String,
+    /// Retry at most this many unavailable contracts in one operation.
+    #[arg(long, value_name = "COUNT", default_value_t = 4)]
+    max_symbols: usize,
+    /// Ignore persisted retry due times while retaining the bounded budget.
+    #[arg(long)]
+    force: bool,
+    /// Select candidates and emit report without provider access or writes.
+    #[arg(long)]
+    dry_run: bool,
+    /// Override default logical symbol concurrency for bounded native-daily probes.
+    #[arg(long, value_name = "COUNT")]
+    symbol_concurrency: Option<usize>,
+    /// Override idle timeout for each bounded native-daily probe.
+    #[arg(long, value_name = "SECONDS")]
+    idle_timeout_secs: Option<u64>,
+    /// Override native-daily batch timeout; zero disables timeout.
+    #[arg(long, value_name = "SECONDS")]
+    batch_timeout_secs: Option<u64>,
+    /// Progress rendering mode; defaults to dynamic TTY bars.
+    #[arg(long, value_enum, default_value_t = ProgressMode::Tty)]
+    progress: ProgressMode,
+    /// Maximum active symbol bars in TTY mode; zero keeps only global bar.
+    #[arg(long, value_name = "COUNT", default_value_t = 4)]
     progress_max_bars: usize,
 }
 
@@ -1279,6 +1313,9 @@ async fn run(cli: Cli) -> Result<CommandOutcome, CliError> {
         Command::Inventory => inventory(cli.cache_dir.as_deref(), cli.kind),
         Command::Inspect(args) => inspect(cli.cache_dir.as_deref(), cli.kind, args),
         Command::Fill(args) => fill(cli.cache_dir.as_deref(), cli.kind, cli.market, args).await,
+        Command::RefreshProviderMembership(args) => {
+            refresh_provider_membership(cli.cache_dir.as_deref(), cli.kind, cli.market, args).await
+        }
         Command::Verify(args) => verify(cli.cache_dir.as_deref(), cli.kind, args).await,
         Command::Doctor => doctor(cli.cache_dir.as_deref(), cli.kind),
         Command::RepairLocks(args) => repair_locks(cli.cache_dir.as_deref(), cli.kind, args),
@@ -1303,6 +1340,15 @@ fn validate_command_kind(command: &Command, kind: CacheKind) -> Result<(), CliEr
         }
         return Err(CliError::Usage(
             "migrate-universe does not use --kind; leave the default tick kind".to_string(),
+        ));
+    }
+    if matches!(command, Command::RefreshProviderMembership(_)) {
+        if matches!(kind, CacheKind::Tick) {
+            return Ok(());
+        }
+        return Err(CliError::Usage(
+            "refresh-provider-membership always probes native daily history; leave default tick --kind"
+                .to_string(),
         ));
     }
     if matches!(kind, CacheKind::All) && !matches!(command, Command::Inventory | Command::Doctor) {
@@ -1526,12 +1572,7 @@ fn inspect(
             symbols
                 .iter()
                 .map(|symbol| {
-                    let snapshot = minute_cache_snapshot_for_symbol(
-                        &cache_dir,
-                        symbol.as_str(),
-                        window.start_ns,
-                        window.end_ns,
-                    )?;
+                    let snapshot = daily_cache_snapshot_for_symbol(&cache_dir, symbol.as_str())?;
                     daily_cache
                         .inspect(symbol, window.start_ns, window.end_ns, &snapshot)
                         .map(|status| daily_cache_status_json(&status))
@@ -1910,6 +1951,651 @@ async fn fill_provider_history_universe(
     })
 }
 
+const PROVIDER_MEMBERSHIP_REFRESH_MAX_SYMBOLS: usize = 32;
+const PROVIDER_MEMBERSHIP_CANARY_WINDOW_NS: i64 = 24 * 60 * 60 * 1_000_000_000;
+const PROVIDER_MEMBERSHIP_DEFAULT_RETRY_TIMEOUT_SECS: u64 = 15;
+const PROVIDER_MEMBERSHIP_DEFAULT_CANARY_TIMEOUT_SECS: u64 = 30;
+
+#[derive(Debug)]
+struct ProviderMembershipCanaryReport {
+    symbol: String,
+    healthy: bool,
+    remote_used: bool,
+    error: Option<String>,
+}
+
+struct ProviderMembershipCanaryCache {
+    path: PathBuf,
+}
+
+impl ProviderMembershipCanaryCache {
+    fn new(namespace_dir: &Path) -> Result<Self, CliError> {
+        fs::create_dir_all(namespace_dir)?;
+        let nonce = current_timestamp_ns()?;
+        let path = namespace_dir.join(format!(
+            ".provider-daily-canary-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&path)?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for ProviderMembershipCanaryCache {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+async fn refresh_provider_membership(
+    cache_dir: Option<&Path>,
+    _kind: CacheKind,
+    market: MarketKind,
+    args: ProviderMembershipRefreshArgs,
+) -> Result<CommandOutcome, CliError> {
+    if !matches!(market, MarketKind::Futures) {
+        return Err(CliError::Usage(
+            "refresh-provider-membership supports only --market futures".to_string(),
+        ));
+    }
+    if args.max_symbols == 0 || args.max_symbols > PROVIDER_MEMBERSHIP_REFRESH_MAX_SYMBOLS {
+        return Err(CliError::Usage(format!(
+            "--max-symbols must be within 1..={PROVIDER_MEMBERSHIP_REFRESH_MAX_SYMBOLS}"
+        )));
+    }
+
+    let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
+    let store = tqsdk_data::HistoricalUniverseArtifactStore::new(&canonical_cache_dir);
+    let _operation_lock = (!args.dry_run)
+        .then(|| store.try_acquire_provider_daily_retry_operation_lock())
+        .transpose()?;
+    let acquisition = store.load_acquisition(&args.acquisition_sha256)?;
+    let retry_state = store
+        .find_provider_daily_retry_state(&acquisition)?
+        .map_or_else(
+            || tqsdk_data::ProviderDailyUnavailableRetryState::from_acquisition(&acquisition),
+            Ok,
+        )?;
+    let now_ns = current_timestamp_ns()?;
+    let candidates = retry_state.candidates(&acquisition)?;
+    let due_count = candidates
+        .iter()
+        .filter(|candidate| candidate.retry.next_retry_at_ns <= now_ns)
+        .count();
+    let selected = candidates
+        .iter()
+        .filter(|candidate| args.force || candidate.retry.next_retry_at_ns <= now_ns)
+        .take(args.max_symbols)
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected_json = selected
+        .iter()
+        .map(provider_membership_retry_candidate_json)
+        .collect::<Vec<_>>();
+
+    if args.dry_run {
+        return Ok(CommandOutcome {
+            value: json!({
+                "schema_version": REPORT_SCHEMA_VERSION,
+                "command": "refresh-provider-membership",
+                "cache_kind": "daily",
+                "market": market.as_str(),
+                "cache_dir": canonical_cache_dir,
+                "dry_run": true,
+                "status": "planned",
+                "complete": true,
+                "acquisition_sha256": acquisition.acquisition_sha256,
+                "candidate_count": candidates.len(),
+                "due_count": due_count,
+                "selected_count": selected.len(),
+                "force": args.force,
+                "selected": selected_json,
+            }),
+            exit_code: 0,
+        });
+    }
+    if selected.is_empty() {
+        return Ok(CommandOutcome {
+            value: json!({
+                "schema_version": REPORT_SCHEMA_VERSION,
+                "command": "refresh-provider-membership",
+                "cache_kind": "daily",
+                "market": market.as_str(),
+                "cache_dir": canonical_cache_dir,
+                "dry_run": false,
+                "status": "idle",
+                "complete": true,
+                "acquisition_sha256": acquisition.acquisition_sha256,
+                "candidate_count": candidates.len(),
+                "due_count": due_count,
+                "selected_count": 0,
+                "force": args.force,
+                "selected": selected_json,
+            }),
+            exit_code: 0,
+        });
+    }
+
+    let user = std::env::var("TQ_AUTH_USER").map_err(|_| {
+        CliError::Usage(
+            "refresh-provider-membership requires TQ_AUTH_USER and TQ_AUTH_PASS".to_string(),
+        )
+    })?;
+    let pass = std::env::var("TQ_AUTH_PASS").map_err(|_| {
+        CliError::Usage(
+            "refresh-provider-membership requires TQ_AUTH_USER and TQ_AUTH_PASS".to_string(),
+        )
+    })?;
+    let current_before =
+        acquire_provider_membership_current(&user, &pass, acquisition.requested_as_of_ns).await?;
+    acquisition.validate_provider_daily_refresh_current(&current_before)?;
+
+    let cancellation = BacktestHistoryFillCancellation::new();
+    let signal_task = spawn_shutdown_signal_handler(cancellation.clone(), CacheKind::Daily)?;
+    let progress_session = FillProgressSession::new(
+        args.progress,
+        args.progress_max_bars,
+        "daily-membership-refresh",
+    );
+    let reporter = progress_session.observer();
+    let operation = async {
+        reporter.planning("probing provider-health canary before bounded membership refresh");
+        let canary =
+            probe_provider_membership_canary(&store, &acquisition, &args, cancellation.clone())
+                .await?;
+        if cancellation.is_cancelled() {
+            progress_session.finish(
+                ProgressTerminalStatus::Interrupted,
+                "provider membership refresh was cancelled before retries",
+            );
+            return Ok(provider_membership_refresh_cancelled_outcome(
+                &canonical_cache_dir,
+                market,
+                &acquisition,
+                candidates.len(),
+                due_count,
+                selected_json,
+                canary,
+            ));
+        }
+        if !canary.healthy {
+            progress_session.finish(
+                ProgressTerminalStatus::Failed,
+                "provider-health canary did not complete remotely; retry schedule unchanged",
+            );
+            return Ok(CommandOutcome {
+                value: json!({
+                    "schema_version": REPORT_SCHEMA_VERSION,
+                    "command": "refresh-provider-membership",
+                    "cache_kind": "daily",
+                    "market": market.as_str(),
+                    "cache_dir": canonical_cache_dir,
+                    "dry_run": false,
+                    "status": "provider_unhealthy",
+                    "complete": false,
+                    "acquisition_sha256": acquisition.acquisition_sha256,
+                    "candidate_count": candidates.len(),
+                    "due_count": due_count,
+                    "selected_count": selected.len(),
+                    "selected": selected_json,
+                    "canary": provider_membership_canary_json(&canary),
+                    "retry_state_advanced": false,
+                }),
+                exit_code: 1,
+            });
+        }
+
+        reporter.planning("retrying bounded provider-unavailable native daily probes");
+        let config = provider_membership_refresh_fill_config(&args)?;
+        let requests = selected
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                let observation = acquisition
+                    .provider_daily_observations
+                    .get(&candidate.symbol)
+                    .expect("retry candidate validated against provider-history acquisition");
+                BacktestHistoryRequest::kline(
+                    u64::try_from(index).expect("bounded retry request id fits u64"),
+                    &candidate.symbol,
+                    Duration::from_secs(24 * 60 * 60),
+                    observation.range_start_ns,
+                    observation.range_end_ns,
+                )
+            })
+            .collect::<Vec<_>>();
+        let client = BacktestHistoryClient::builder(canonical_cache_dir.clone())
+            .policy(BacktestHistoryPolicy::RemoteOnMiss)
+            .auth_env()
+            .build()?;
+        let progress_callback = reporter.clone();
+        let report = client
+            .orchestrate_fill(requests, config, cancellation.clone(), move |event| {
+                progress_callback.observe_history_progress(&event)
+            })
+            .await;
+        drop(client);
+        let report = report?;
+        if report.status() == BacktestHistoryFillTerminalStatus::Interrupted
+            || cancellation.is_cancelled()
+        {
+            progress_session.finish(
+                ProgressTerminalStatus::Interrupted,
+                "provider membership refresh was cancelled",
+            );
+            return Ok(provider_membership_refresh_cancelled_outcome(
+                &canonical_cache_dir,
+                market,
+                &acquisition,
+                candidates.len(),
+                due_count,
+                selected_json,
+                canary,
+            ));
+        }
+
+        let mut updates = BTreeMap::new();
+        let mut symbol_reports = Vec::new();
+        let daily_cache = DailyKlineCache::open_read_only(&canonical_cache_dir);
+        for item in report.symbols() {
+            let prior = acquisition
+                .provider_daily_observations
+                .get(&item.symbol)
+                .expect("retry request derived from provider-history acquisition");
+            let observation = match item.status {
+                BacktestHistoryFillSymbolStatus::Complete => {
+                    let snapshot =
+                        daily_cache_snapshot_for_symbol(&canonical_cache_dir, &item.symbol)?;
+                    let first_row_ns = daily_cache
+                        .read_range(
+                            &item.symbol,
+                            prior.range_start_ns,
+                            prior.range_end_ns,
+                            &snapshot,
+                        )?
+                        .first()
+                        .map(|row| row.datetime);
+                    tqsdk_data::HistoricalDailyObservation::new(
+                        prior.range_start_ns,
+                        prior.range_end_ns,
+                        first_row_ns,
+                    )?
+                }
+                BacktestHistoryFillSymbolStatus::Failed => {
+                    let Some(unavailable_after_ns) = isolated_provider_history_unavailable_after_ns(
+                        item.error.as_deref(),
+                        config,
+                    ) else {
+                        let sample = item.error.as_deref().unwrap_or("unknown provider failure");
+                        progress_session.finish(
+                            ProgressTerminalStatus::Failed,
+                            "provider membership refresh encountered non-timeout failure",
+                        );
+                        return Err(DataError::InvalidResponse(format!(
+                            "provider membership refresh has blocking failure for {}: {sample}",
+                            item.symbol
+                        ))
+                        .into());
+                    };
+                    tqsdk_data::HistoricalDailyObservation::provider_unavailable(
+                        prior.range_start_ns,
+                        prior.range_end_ns,
+                        unavailable_after_ns,
+                    )?
+                }
+                BacktestHistoryFillSymbolStatus::Interrupted => {
+                    progress_session.finish(
+                        ProgressTerminalStatus::Interrupted,
+                        "provider membership refresh was interrupted",
+                    );
+                    return Ok(provider_membership_refresh_cancelled_outcome(
+                        &canonical_cache_dir,
+                        market,
+                        &acquisition,
+                        candidates.len(),
+                        due_count,
+                        selected_json,
+                        canary,
+                    ));
+                }
+            };
+            let status = match observation.status {
+                tqsdk_data::HistoricalDailyObservationStatus::Complete => "complete",
+                tqsdk_data::HistoricalDailyObservationStatus::ProviderUnavailable => {
+                    "provider_unavailable"
+                }
+                _ => {
+                    return Err(DataError::InvalidState(
+                        "provider membership retry emitted unsupported observation status",
+                    )
+                    .into());
+                }
+            };
+            symbol_reports.push(json!({
+                "symbol": item.symbol,
+                "status": status,
+                "first_row_ns": observation.first_row_ns,
+                "unavailable_after_ns": observation.provider_unavailable_after_ns,
+                "remote_used": item.remote_used,
+                "error": item.error,
+            }));
+            updates.insert(item.symbol.clone(), observation);
+        }
+        let attempted_symbols = selected
+            .iter()
+            .map(|candidate| candidate.symbol.clone())
+            .collect::<BTreeSet<_>>();
+        if updates.len() != attempted_symbols.len() {
+            return Err(DataError::InvalidState(
+                "provider membership retry report omitted an attempted symbol",
+            )
+            .into());
+        }
+
+        reporter.planning("revalidating stable provider roster before publishing retry result");
+        let current_after =
+            acquire_provider_membership_current(&user, &pass, acquisition.requested_as_of_ns)
+                .await?;
+        acquisition.validate_provider_daily_refresh_current(&current_after)?;
+        if cancellation.is_cancelled() {
+            progress_session.finish(
+                ProgressTerminalStatus::Interrupted,
+                "provider membership refresh was cancelled before publication",
+            );
+            return Ok(provider_membership_refresh_cancelled_outcome(
+                &canonical_cache_dir,
+                market,
+                &acquisition,
+                candidates.len(),
+                due_count,
+                selected_json,
+                canary,
+            ));
+        }
+
+        let upgraded = updates.values().any(|observation| {
+            observation.status == tqsdk_data::HistoricalDailyObservationStatus::Complete
+        });
+        let receipt_at_ns = current_timestamp_ns()?;
+        let (next_acquisition, catalog_path, acquisition_path) = if upgraded {
+            let next = acquisition.refresh_provider_daily_observations(current_after, updates)?;
+            let semantic = tqsdk_data::HistoricalSemanticCatalog::from_provider_history_observed(
+                &next,
+                tqsdk_data::PROVIDER_DAILY_MEMBERSHIP_CALENDAR_IDENTITY,
+            )?;
+            let receipt =
+                retry_state.refreshed(&acquisition, &next, &attempted_symbols, receipt_at_ns)?;
+            if cancellation.is_cancelled() {
+                return Ok(provider_membership_refresh_cancelled_outcome(
+                    &canonical_cache_dir,
+                    market,
+                    &acquisition,
+                    candidates.len(),
+                    due_count,
+                    selected_json,
+                    canary,
+                ));
+            }
+            let acquisition_path = store.publish_acquisition(&next)?;
+            if cancellation.is_cancelled() {
+                return Ok(provider_membership_refresh_cancelled_outcome(
+                    &canonical_cache_dir,
+                    market,
+                    &acquisition,
+                    candidates.len(),
+                    due_count,
+                    selected_json,
+                    canary,
+                ));
+            }
+            let catalog_path = store.publish_semantic_catalog(&semantic)?;
+            if !receipt.is_empty() {
+                store.publish_provider_daily_retry_state(&receipt)?;
+            }
+            (next, Some(catalog_path), Some(acquisition_path))
+        } else {
+            let receipt = retry_state.refreshed(
+                &acquisition,
+                &acquisition,
+                &attempted_symbols,
+                receipt_at_ns,
+            )?;
+            store.publish_provider_daily_retry_state(&receipt)?;
+            (acquisition.clone(), None, None)
+        };
+        progress_session.finish(
+            ProgressTerminalStatus::Complete,
+            "bounded provider membership retry completed",
+        );
+        Ok(CommandOutcome {
+            value: json!({
+                "schema_version": REPORT_SCHEMA_VERSION,
+                "command": "refresh-provider-membership",
+                "cache_kind": "daily",
+                "market": market.as_str(),
+                "cache_dir": canonical_cache_dir,
+                "dry_run": false,
+                "status": "complete",
+                "complete": true,
+                "source_acquisition_sha256": acquisition.acquisition_sha256,
+                "acquisition_sha256": next_acquisition.acquisition_sha256,
+                "acquisition_path": acquisition_path,
+                "semantic_catalog_path": catalog_path,
+                "candidate_count": candidates.len(),
+                "due_count": due_count,
+                "selected_count": selected.len(),
+                "selected": selected_json,
+                "canary": provider_membership_canary_json(&canary),
+                "upgraded": upgraded,
+                "symbol_reports": symbol_reports,
+            }),
+            exit_code: 0,
+        })
+    }
+    .await;
+    signal_task.abort();
+    let _ = signal_task.await;
+    operation
+}
+
+async fn acquire_provider_membership_current(
+    user: &str,
+    pass: &str,
+    requested_as_of_ns: i64,
+) -> Result<tqsdk_data::HistoricalCatalogAcquisition, CliError> {
+    let discovery = tqsdk_data::session_client_builder_for_futures_discovery(user, pass)
+        .build()
+        .map_err(tqsdk::Error::from)?;
+    tqsdk_data::ProviderCurrentHistoricalCatalogAcquirer::new(discovery)
+        .acquire(requested_as_of_ns, current_timestamp_ns()?)
+        .await
+        .map_err(Into::into)
+}
+
+fn provider_membership_refresh_fill_config(
+    args: &ProviderMembershipRefreshArgs,
+) -> Result<BacktestHistoryFillConfig, DataError> {
+    let mut config = BacktestHistoryFillConfig::default().with_symbol_batch_size(1)?;
+    if let Some(value) = args.symbol_concurrency {
+        config = config.with_symbol_concurrency(value)?;
+    }
+    if let Some(value) = args.idle_timeout_secs {
+        config = config.with_idle_timeout(Duration::from_secs(value))?;
+    }
+    config = match args.batch_timeout_secs {
+        Some(0) => config.without_batch_timeout(),
+        Some(value) => config.with_batch_timeout(Some(Duration::from_secs(value)))?,
+        None => config.with_batch_timeout(Some(Duration::from_secs(
+            PROVIDER_MEMBERSHIP_DEFAULT_RETRY_TIMEOUT_SECS,
+        )))?,
+    };
+    Ok(config)
+}
+
+fn provider_membership_canary_fill_config(
+    args: &ProviderMembershipRefreshArgs,
+) -> Result<BacktestHistoryFillConfig, DataError> {
+    let mut config = provider_membership_refresh_fill_config(args)?;
+    if args.batch_timeout_secs.is_none() {
+        config = config.with_batch_timeout(Some(Duration::from_secs(
+            PROVIDER_MEMBERSHIP_DEFAULT_CANARY_TIMEOUT_SECS,
+        )))?;
+    }
+    Ok(config)
+}
+
+async fn probe_provider_membership_canary(
+    store: &tqsdk_data::HistoricalUniverseArtifactStore,
+    acquisition: &tqsdk_data::HistoricalCatalogAcquisition,
+    args: &ProviderMembershipRefreshArgs,
+    cancellation: BacktestHistoryFillCancellation,
+) -> Result<ProviderMembershipCanaryReport, CliError> {
+    let (symbol, start_ns, end_ns) = provider_membership_canary_target(acquisition)?;
+    let temporary_cache = ProviderMembershipCanaryCache::new(&store.namespace_dir())?;
+    let client = BacktestHistoryClient::builder(temporary_cache.path.clone())
+        .policy(BacktestHistoryPolicy::RemoteOnMiss)
+        .auth_env()
+        .build()?;
+    let result = client
+        .orchestrate_fill(
+            [BacktestHistoryRequest::kline(
+                0,
+                &symbol,
+                Duration::from_secs(24 * 60 * 60),
+                start_ns,
+                end_ns,
+            )],
+            provider_membership_canary_fill_config(args)?,
+            cancellation,
+            |_| {},
+        )
+        .await;
+    drop(client);
+    match result {
+        Ok(report) => {
+            let item = report.symbols().first();
+            let remote_used = item.is_some_and(|item| item.remote_used);
+            let complete = report.status() == BacktestHistoryFillTerminalStatus::Complete
+                && item
+                    .is_some_and(|item| item.status == BacktestHistoryFillSymbolStatus::Complete);
+            let error = item.and_then(|item| item.error.clone()).or_else(|| {
+                (!remote_used).then(|| "canary did not use remote provider".to_string())
+            });
+            Ok(ProviderMembershipCanaryReport {
+                symbol,
+                healthy: complete && remote_used,
+                remote_used,
+                error,
+            })
+        }
+        Err(error) => Ok(ProviderMembershipCanaryReport {
+            symbol,
+            healthy: false,
+            remote_used: false,
+            error: Some(error.to_string()),
+        }),
+    }
+}
+
+fn provider_membership_canary_target(
+    acquisition: &tqsdk_data::HistoricalCatalogAcquisition,
+) -> Result<(String, i64, i64), CliError> {
+    let mut candidates = acquisition
+        .contracts
+        .iter()
+        .filter_map(|contract| {
+            acquisition
+                .provider_daily_observations
+                .get(&contract.symbol)
+                .filter(|observation| {
+                    observation.status == tqsdk_data::HistoricalDailyObservationStatus::Complete
+                })
+                .and_then(|observation| observation.first_row_ns)
+                .filter(|first_row_ns| *first_row_ns < acquisition.requested_as_of_ns)
+                .map(|first_row_ns| (contract.expired, contract.symbol.clone(), first_row_ns))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then(left.2.cmp(&right.2))
+            .then(left.1.cmp(&right.1))
+    });
+    candidates
+        .into_iter()
+        .next()
+        .map(|(_, symbol, first_row_ns)| {
+            let end_ns = first_row_ns
+                .saturating_add(PROVIDER_MEMBERSHIP_CANARY_WINDOW_NS)
+                .min(acquisition.requested_as_of_ns);
+            (symbol, first_row_ns, end_ns)
+        })
+        .ok_or_else(|| {
+            CliError::Usage(
+                "provider membership refresh requires at least one complete native-daily observation for canary"
+                    .to_string(),
+            )
+        })
+}
+
+fn provider_membership_retry_candidate_json(
+    candidate: &tqsdk_data::ProviderDailyUnavailableRetryCandidate,
+) -> Value {
+    json!({
+        "symbol": candidate.symbol,
+        "expired": candidate.expired,
+        "unavailable_after_ns": candidate.unavailable_after_ns,
+        "attempts": candidate.retry.attempts,
+        "next_retry_at_ns": candidate.retry.next_retry_at_ns,
+    })
+}
+
+fn provider_membership_canary_json(canary: &ProviderMembershipCanaryReport) -> Value {
+    json!({
+        "symbol": canary.symbol,
+        "healthy": canary.healthy,
+        "remote_used": canary.remote_used,
+        "error": canary.error,
+    })
+}
+
+fn provider_membership_refresh_cancelled_outcome(
+    cache_dir: &Path,
+    market: MarketKind,
+    acquisition: &tqsdk_data::HistoricalCatalogAcquisition,
+    candidate_count: usize,
+    due_count: usize,
+    selected: Vec<Value>,
+    canary: ProviderMembershipCanaryReport,
+) -> CommandOutcome {
+    CommandOutcome {
+        value: json!({
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "command": "refresh-provider-membership",
+            "cache_kind": "daily",
+            "market": market.as_str(),
+            "cache_dir": cache_dir,
+            "dry_run": false,
+            "status": "cancelled",
+            "complete": false,
+            "acquisition_sha256": acquisition.acquisition_sha256,
+            "candidate_count": candidate_count,
+            "due_count": due_count,
+            "selected_count": selected.len(),
+            "selected": selected,
+            "canary": provider_membership_canary_json(&canary),
+            "retry_state_advanced": false,
+        }),
+        exit_code: 130,
+    }
+}
+
+fn current_timestamp_ns() -> Result<i64, CliError> {
+    chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .ok_or_else(|| CliError::Usage("current timestamp exceeds nanosecond range".to_string()))
+}
+
 struct ProviderHistoryFillContext {
     canonical_cache_dir: PathBuf,
     kind: CacheKind,
@@ -1944,125 +2630,139 @@ async fn bootstrap_provider_history_and_fill(
         .into());
     }
 
-    let bootstrap_start_ns = tqsdk_data::PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS;
-    let bootstrap_end_ns = resolved.window.end_ns;
-    let client = BacktestHistoryClient::builder(canonical_cache_dir.clone())
-        .policy(BacktestHistoryPolicy::RemoteOnMiss)
-        .auth_env()
-        .build()?;
-    let requests = acquisition
-        .contracts
-        .iter()
-        .enumerate()
-        .map(|(index, contract)| {
-            BacktestHistoryRequest::kline(
-                u64::try_from(index).expect("provider roster count fits request id"),
-                &contract.symbol,
-                Duration::from_secs(24 * 60 * 60),
-                bootstrap_start_ns,
-                bootstrap_end_ns,
-            )
-        })
-        .collect::<Vec<_>>();
-    let progress_session =
-        FillProgressSession::new(args.progress, args.progress_max_bars, "daily-bootstrap");
-    let reporter = progress_session.observer();
-    reporter.planning("bootstrapping native daily history for provider roster");
-    let cancellation = BacktestHistoryFillCancellation::new();
-    let signal_task = spawn_shutdown_signal_handler(cancellation.clone(), CacheKind::Daily)?;
-    let progress_callback = reporter.clone();
-    // Keep every terminal outcome attributable to one symbol. Exact timeouts
-    // remain bounded provider-unavailable audit facts for this acquisition.
-    let mut bootstrap_config = history_fill_config(&args)?.with_symbol_batch_size(1)?;
-    if args.batch_timeout_secs.is_none() {
-        bootstrap_config = bootstrap_config.with_batch_timeout(Some(Duration::from_secs(15)))?;
-    }
-    let bootstrap = client
-        .orchestrate_fill(
-            requests,
-            bootstrap_config,
-            cancellation.clone(),
-            move |event| progress_callback.observe_history_progress(&event),
-        )
-        .await;
-    // A timed-out provider chart can keep the owning session unhealthy after the
-    // scheduler returns. Release bootstrap sessions before roster refresh and target fill.
-    drop(client);
-    let bootstrap = bootstrap?;
-    if bootstrap.status() == BacktestHistoryFillTerminalStatus::Interrupted {
-        progress_session.finish(
-            ProgressTerminalStatus::Interrupted,
-            "native daily data-membership bootstrap was cancelled",
-        );
-        return Err(DataError::InvalidState("provider history preparation cancelled").into());
-    }
-    let blocking_failures = bootstrap
-        .symbols()
-        .iter()
-        .filter(|item| {
-            if item.status != BacktestHistoryFillSymbolStatus::Failed {
-                return false;
-            }
-            isolated_provider_history_unavailable_after_ns(item.error.as_deref(), bootstrap_config)
-                .is_none()
-        })
-        .collect::<Vec<_>>();
-    if !blocking_failures.is_empty() {
-        let sample = blocking_failures
+    let store = tqsdk_data::HistoricalUniverseArtifactStore::new(&canonical_cache_dir);
+    let (acquisition, provider_unavailable, signal_context) = 'prepared: {
+        if let Some(observed) =
+            store.find_matching_provider_history_observed_acquisition(&acquisition)?
+        {
+            let provider_unavailable = provider_unavailable_from_observed_acquisition(&observed)?;
+            break 'prepared (observed, provider_unavailable, None);
+        }
+
+        let bootstrap_start_ns = tqsdk_data::PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS;
+        let bootstrap_end_ns = resolved.window.end_ns;
+        let client = BacktestHistoryClient::builder(canonical_cache_dir.clone())
+            .policy(BacktestHistoryPolicy::RemoteOnMiss)
+            .auth_env()
+            .build()?;
+        let requests = acquisition
+            .contracts
             .iter()
-            .take(8)
-            .map(|item| item.symbol.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-        progress_session.finish(
-            ProgressTerminalStatus::Failed,
-            "native daily bootstrap encountered non-timeout failures",
-        );
-        return Err(DataError::InvalidResponse(format!(
+            .enumerate()
+            .map(|(index, contract)| {
+                BacktestHistoryRequest::kline(
+                    u64::try_from(index).expect("provider roster count fits request id"),
+                    &contract.symbol,
+                    Duration::from_secs(24 * 60 * 60),
+                    bootstrap_start_ns,
+                    bootstrap_end_ns,
+                )
+            })
+            .collect::<Vec<_>>();
+        let progress_session =
+            FillProgressSession::new(args.progress, args.progress_max_bars, "daily-bootstrap");
+        let reporter = progress_session.observer();
+        reporter.planning("bootstrapping native daily history for provider roster");
+        let cancellation = BacktestHistoryFillCancellation::new();
+        let signal_task = spawn_shutdown_signal_handler(cancellation.clone(), CacheKind::Daily)?;
+        let progress_callback = reporter.clone();
+        // Keep every terminal outcome attributable to one symbol. Exact timeouts
+        // remain bounded provider-unavailable audit facts for this acquisition.
+        let mut bootstrap_config = history_fill_config(&args)?.with_symbol_batch_size(1)?;
+        if args.batch_timeout_secs.is_none() {
+            bootstrap_config =
+                bootstrap_config.with_batch_timeout(Some(Duration::from_secs(15)))?;
+        }
+        let bootstrap = client
+            .orchestrate_fill(
+                requests,
+                bootstrap_config,
+                cancellation.clone(),
+                move |event| progress_callback.observe_history_progress(&event),
+            )
+            .await;
+        // A timed-out provider chart can keep the owning session unhealthy after the
+        // scheduler returns. Release bootstrap sessions before roster refresh and target fill.
+        drop(client);
+        let bootstrap = bootstrap?;
+        if bootstrap.status() == BacktestHistoryFillTerminalStatus::Interrupted {
+            progress_session.finish(
+                ProgressTerminalStatus::Interrupted,
+                "native daily data-membership bootstrap was cancelled",
+            );
+            return Err(DataError::InvalidState("provider history preparation cancelled").into());
+        }
+        let blocking_failures = bootstrap
+            .symbols()
+            .iter()
+            .filter(|item| {
+                if item.status != BacktestHistoryFillSymbolStatus::Failed {
+                    return false;
+                }
+                isolated_provider_history_unavailable_after_ns(
+                    item.error.as_deref(),
+                    bootstrap_config,
+                )
+                .is_none()
+            })
+            .collect::<Vec<_>>();
+        if !blocking_failures.is_empty() {
+            let sample = blocking_failures
+                .iter()
+                .take(8)
+                .map(|item| item.symbol.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            progress_session.finish(
+                ProgressTerminalStatus::Failed,
+                "native daily bootstrap encountered non-timeout failures",
+            );
+            return Err(DataError::InvalidResponse(format!(
             "provider native-daily bootstrap has {} blocking failures (sample: {}); data-membership artifact was not published",
             blocking_failures.len(),
             sample
         ))
         .into());
-    }
-    // Exact scheduler timeouts remain acquisition audit facts. They are not
-    // retried as absence proofs: a provider-unavailable chart says nothing
-    // about listing or whether data may become observable in a later run.
-    let provider_unavailable = bootstrap
-        .symbols()
-        .iter()
-        .filter_map(|item| {
-            (item.status == BacktestHistoryFillSymbolStatus::Failed)
-                .then(|| {
-                    isolated_provider_history_unavailable_after_ns(
-                        item.error.as_deref(),
-                        bootstrap_config,
-                    )
-                    .map(|timeout_ns| (item.symbol.clone(), timeout_ns))
-                })
-                .flatten()
-        })
-        .collect::<BTreeMap<_, _>>();
-    let unavailable_circuit_breaker = provider_history_unavailable_limit(bootstrap.symbols().len());
-    let confirmed_complete = bootstrap.completed_symbols();
-    if !provider_history_bootstrap_is_publishable(
-        confirmed_complete,
-        provider_unavailable.len(),
-        bootstrap.symbols().len(),
-    ) {
-        progress_session.finish(
-            ProgressTerminalStatus::Failed,
-            "native daily bootstrap provider-unavailable circuit breaker opened",
-        );
-        return Err(DataError::InvalidResponse(format!(
+        }
+        // Exact scheduler timeouts remain acquisition audit facts. They are not
+        // retried as absence proofs: a provider-unavailable chart says nothing
+        // about listing or whether data may become observable in a later run.
+        let provider_unavailable = bootstrap
+            .symbols()
+            .iter()
+            .filter_map(|item| {
+                (item.status == BacktestHistoryFillSymbolStatus::Failed)
+                    .then(|| {
+                        isolated_provider_history_unavailable_after_ns(
+                            item.error.as_deref(),
+                            bootstrap_config,
+                        )
+                        .map(|timeout_ns| (item.symbol.clone(), timeout_ns))
+                    })
+                    .flatten()
+            })
+            .collect::<BTreeMap<_, _>>();
+        let unavailable_circuit_breaker =
+            provider_history_unavailable_limit(bootstrap.symbols().len());
+        let confirmed_complete = bootstrap.completed_symbols();
+        if !provider_history_bootstrap_is_publishable(
+            confirmed_complete,
+            provider_unavailable.len(),
+            bootstrap.symbols().len(),
+        ) {
+            progress_session.finish(
+                ProgressTerminalStatus::Failed,
+                "native daily bootstrap provider-unavailable circuit breaker opened",
+            );
+            return Err(DataError::InvalidResponse(format!(
             "provider native-daily bootstrap observed {} unavailable contracts out of {}; limit {}; data-membership artifact was not published",
             provider_unavailable.len(),
             bootstrap.symbols().len(),
             unavailable_circuit_breaker
         ))
         .into());
-    }
-    progress_session.finish(
+        }
+        progress_session.finish(
         ProgressTerminalStatus::Complete,
         format!(
             "native daily bootstrap complete; deriving data membership ({} bounded provider-unavailable candidates)",
@@ -2070,78 +2770,84 @@ async fn bootstrap_provider_history_and_fill(
         ),
     );
 
-    if cancellation.is_cancelled() {
-        return Err(DataError::InvalidState("provider history preparation cancelled").into());
-    }
-    let completed_at_ns = chrono::Utc::now()
-        .timestamp_nanos_opt()
-        .ok_or_else(|| CliError::Usage("current timestamp exceeds nanosecond range".to_string()))?;
-    let refreshed_discovery =
-        tqsdk_data::session_client_builder_for_futures_discovery(&auth_user, &auth_pass)
-            .build()
-            .map_err(tqsdk::Error::from)?;
-    let refreshed = tqsdk_data::ProviderCurrentHistoricalCatalogAcquirer::new(refreshed_discovery)
-        .acquire(bootstrap_end_ns, completed_at_ns)
-        .await?;
-    let store = tqsdk_data::HistoricalUniverseArtifactStore::new(&canonical_cache_dir);
-    store.publish_acquisition(&refreshed)?;
-    if !refreshed.complete
-        || acquisition.roster_after != refreshed.roster_after
-        || acquisition.contracts != refreshed.contracts
-    {
-        return Err(DataError::Validation(
+        if cancellation.is_cancelled() {
+            return Err(DataError::InvalidState("provider history preparation cancelled").into());
+        }
+        let completed_at_ns = chrono::Utc::now().timestamp_nanos_opt().ok_or_else(|| {
+            CliError::Usage("current timestamp exceeds nanosecond range".to_string())
+        })?;
+        let refreshed_discovery =
+            tqsdk_data::session_client_builder_for_futures_discovery(&auth_user, &auth_pass)
+                .build()
+                .map_err(tqsdk::Error::from)?;
+        let refreshed =
+            tqsdk_data::ProviderCurrentHistoricalCatalogAcquirer::new(refreshed_discovery)
+                .acquire(bootstrap_end_ns, completed_at_ns)
+                .await?;
+        store.publish_acquisition(&refreshed)?;
+        if !refreshed.complete
+            || acquisition.roster_after != refreshed.roster_after
+            || acquisition.contracts != refreshed.contracts
+        {
+            return Err(DataError::Validation(
             "provider roster or metadata changed during daily bootstrap; retry historical universe fill"
                 .to_string(),
         )
         .into());
-    }
-    let acquisition = refreshed;
+        }
+        let acquisition = refreshed;
 
-    let daily_cache = DailyKlineCache::open_read_only(&canonical_cache_dir);
-    let mut observations = BTreeMap::new();
-    for contract in &acquisition.contracts {
-        if let Some(unavailable_after_ns) = provider_unavailable.get(&contract.symbol) {
-            observations.insert(
-                contract.symbol.clone(),
-                tqsdk_data::HistoricalDailyObservation::provider_unavailable(
+        let daily_cache = DailyKlineCache::open_read_only(&canonical_cache_dir);
+        let mut observations = BTreeMap::new();
+        for contract in &acquisition.contracts {
+            if let Some(unavailable_after_ns) = provider_unavailable.get(&contract.symbol) {
+                observations.insert(
+                    contract.symbol.clone(),
+                    tqsdk_data::HistoricalDailyObservation::provider_unavailable(
+                        bootstrap_start_ns,
+                        bootstrap_end_ns,
+                        *unavailable_after_ns,
+                    )?,
+                );
+                continue;
+            }
+            let snapshot = daily_cache_snapshot_for_symbol(&canonical_cache_dir, &contract.symbol)?;
+            let origin = daily_cache
+                .read_range(
+                    &contract.symbol,
                     bootstrap_start_ns,
                     bootstrap_end_ns,
-                    *unavailable_after_ns,
+                    &snapshot,
+                )?
+                .first()
+                .map(|row| row.datetime);
+            observations.insert(
+                contract.symbol.clone(),
+                tqsdk_data::HistoricalDailyObservation::new(
+                    bootstrap_start_ns,
+                    bootstrap_end_ns,
+                    origin,
                 )?,
             );
-            continue;
         }
-        let snapshot = minute_cache_snapshot_for_symbol(
-            &canonical_cache_dir,
-            &contract.symbol,
-            bootstrap_start_ns,
-            bootstrap_end_ns,
-        )?;
-        let origin = daily_cache
-            .read_range(
-                &contract.symbol,
-                bootstrap_start_ns,
-                bootstrap_end_ns,
-                &snapshot,
-            )?
-            .first()
-            .map(|row| row.datetime);
-        observations.insert(
-            contract.symbol.clone(),
-            tqsdk_data::HistoricalDailyObservation::new(
-                bootstrap_start_ns,
-                bootstrap_end_ns,
-                origin,
-            )?,
-        );
-    }
 
-    let acquisition =
-        tqsdk_data::promote_provider_daily_history_observations(acquisition, observations)?;
+        let acquisition =
+            tqsdk_data::promote_provider_daily_history_observations(acquisition, observations)?;
+        break 'prepared (
+            acquisition,
+            provider_unavailable,
+            Some((cancellation, signal_task)),
+        );
+    };
+
     let semantic = tqsdk_data::HistoricalSemanticCatalog::from_provider_history_observed(
         &acquisition,
         tqsdk_data::PROVIDER_DAILY_MEMBERSHIP_CALENDAR_IDENTITY,
     )?;
+    let bootstrap_retry_state = signal_context
+        .as_ref()
+        .map(|_| tqsdk_data::ProviderDailyUnavailableRetryState::from_acquisition(&acquisition))
+        .transpose()?;
     let contract_count = semantic.catalog.contracts.len().max(1);
     let budget = tqsdk_data::UniverseBudget::new(
         contract_count.saturating_mul(4),
@@ -2186,15 +2892,29 @@ async fn bootstrap_provider_history_and_fill(
             CompiledProviderHistoricalPlan::V5(Box::new(plan))
         }
     };
-    if cancellation.is_cancelled() {
+    if signal_context
+        .as_ref()
+        .is_some_and(|(cancellation, _)| cancellation.is_cancelled())
+    {
         return Err(DataError::InvalidState("provider history preparation cancelled").into());
     }
     store.publish_acquisition(&acquisition)?;
-    if cancellation.is_cancelled() {
+    if let Some(state) = &bootstrap_retry_state {
+        if !state.is_empty() {
+            store.publish_provider_daily_retry_state(state)?;
+        }
+    }
+    if signal_context
+        .as_ref()
+        .is_some_and(|(cancellation, _)| cancellation.is_cancelled())
+    {
         return Err(DataError::InvalidState("provider history preparation cancelled").into());
     }
     store.publish_semantic_catalog(&semantic)?;
-    if cancellation.is_cancelled() {
+    if signal_context
+        .as_ref()
+        .is_some_and(|(cancellation, _)| cancellation.is_cancelled())
+    {
         return Err(DataError::InvalidState("provider history preparation cancelled").into());
     }
     let (plan_path, artifact_report) = match compiled_plan {
@@ -2229,7 +2949,7 @@ async fn bootstrap_provider_history_and_fill(
         market,
         args,
         plan_path,
-        Some((cancellation, signal_task)),
+        signal_context,
     )
     .await?;
     if let Some(object) = outcome.value.as_object_mut() {
@@ -2289,6 +3009,32 @@ fn provider_history_bootstrap_is_publishable(
     roster_len: usize,
 ) -> bool {
     completed > 0 && unavailable <= provider_history_unavailable_limit(roster_len)
+}
+
+fn provider_unavailable_from_observed_acquisition(
+    acquisition: &tqsdk_data::HistoricalCatalogAcquisition,
+) -> Result<BTreeMap<String, u64>, CliError> {
+    if acquisition.proof != tqsdk_data::HistoricalCatalogProof::ProviderHistoryObserved {
+        return Err(DataError::Validation(
+            "provider-history observation reuse requires provider_history_observed proof"
+                .to_string(),
+        )
+        .into());
+    }
+
+    let mut provider_unavailable = BTreeMap::new();
+    for (symbol, observation) in &acquisition.provider_daily_observations {
+        if observation.status != tqsdk_data::HistoricalDailyObservationStatus::ProviderUnavailable {
+            continue;
+        }
+        let unavailable_after_ns = observation.provider_unavailable_after_ns.ok_or_else(|| {
+            DataError::Validation(format!(
+                "provider-history observation for {symbol} omits unavailable timeout"
+            ))
+        })?;
+        provider_unavailable.insert(symbol.clone(), unavailable_after_ns);
+    }
+    Ok(provider_unavailable)
 }
 
 #[derive(Debug)]
@@ -2835,12 +3581,7 @@ fn daily_cache_statuses(
     symbols
         .iter()
         .map(|symbol| {
-            let snapshot = minute_cache_snapshot_for_symbol(
-                cache_dir,
-                symbol,
-                window.start_ns,
-                window.end_ns,
-            )?;
+            let snapshot = daily_cache_snapshot_for_symbol(cache_dir, symbol)?;
             cache.inspect(symbol, window.start_ns, window.end_ns, &snapshot)
         })
         .collect::<Result<Vec<_>, _>>()
@@ -3085,6 +3826,15 @@ fn minute_cache_snapshot_for_symbol(
             )
         })
         .transpose()?
+        .map_or_else(|| Ok(MinuteKlineCacheSnapshot::cst_v1()), Ok)
+}
+
+fn daily_cache_snapshot_for_symbol(
+    cache_dir: &Path,
+    symbol: &str,
+) -> Result<MinuteKlineCacheSnapshot, DataError> {
+    DailyKlineCache::open_read_only(cache_dir)
+        .stored_snapshot(symbol)?
         .map_or_else(|| Ok(MinuteKlineCacheSnapshot::cst_v1()), Ok)
 }
 
@@ -3879,14 +4629,7 @@ async fn verify_daily(
     let cache = DailyKlineCache::open_read_only(&canonical_cache_dir);
     let snapshots = symbols
         .iter()
-        .map(|symbol| {
-            minute_cache_snapshot_for_symbol(
-                &canonical_cache_dir,
-                symbol,
-                window.start_ns,
-                window.end_ns,
-            )
-        })
+        .map(|symbol| daily_cache_snapshot_for_symbol(&canonical_cache_dir, symbol))
         .collect::<Result<Vec<_>, _>>()?;
     let statuses = symbols
         .iter()
@@ -5292,10 +6035,12 @@ mod tests {
 
     use super::{
         CacheKind, CalendarMode, Cli, Command, FillDaysArgs, MarketKind, MigrateArgs, ProgressMode,
-        current_open_trading_day, fill_historical_universe_plan, fill_was_interrupted,
-        historical_universe_fill_targets, isolated_provider_history_unavailable_after_ns, migrate,
-        persist_calendar_if_needed, provider_history_bootstrap_is_publishable,
-        provider_history_unavailable_limit, resolve_fill_window,
+        ProviderMembershipRefreshArgs, current_open_trading_day, fill_historical_universe_plan,
+        fill_was_interrupted, historical_universe_fill_targets,
+        isolated_provider_history_unavailable_after_ns, migrate, persist_calendar_if_needed,
+        provider_history_bootstrap_is_publishable, provider_history_unavailable_limit,
+        provider_membership_canary_fill_config, provider_membership_refresh_fill_config,
+        resolve_fill_window,
     };
     use chrono::NaiveDate;
     use clap::Parser;
@@ -5314,6 +6059,69 @@ mod tests {
         assert!(!fill_was_interrupted(true, true));
         assert!(fill_was_interrupted(true, false));
         assert!(!fill_was_interrupted(false, false));
+    }
+
+    #[test]
+    fn provider_membership_canary_gets_grace_but_candidates_stay_bounded() {
+        let defaults = ProviderMembershipRefreshArgs {
+            acquisition_sha256: "sha256:fixture".to_string(),
+            max_symbols: 1,
+            force: false,
+            dry_run: true,
+            symbol_concurrency: None,
+            idle_timeout_secs: None,
+            batch_timeout_secs: None,
+            progress: ProgressMode::Off,
+            progress_max_bars: 4,
+        };
+        assert_eq!(
+            provider_membership_refresh_fill_config(&defaults)
+                .unwrap()
+                .batch_timeout(),
+            Some(Duration::from_secs(15))
+        );
+        assert_eq!(
+            provider_membership_canary_fill_config(&defaults)
+                .unwrap()
+                .batch_timeout(),
+            Some(Duration::from_secs(30))
+        );
+
+        let overridden = ProviderMembershipRefreshArgs {
+            batch_timeout_secs: Some(21),
+            ..defaults
+        };
+        assert_eq!(
+            provider_membership_refresh_fill_config(&overridden)
+                .unwrap()
+                .batch_timeout(),
+            Some(Duration::from_secs(21))
+        );
+        assert_eq!(
+            provider_membership_canary_fill_config(&overridden)
+                .unwrap()
+                .batch_timeout(),
+            Some(Duration::from_secs(21))
+        );
+    }
+
+    #[test]
+    fn provider_membership_refresh_cli_pins_acquisition_and_keeps_default_kind() {
+        let cli = Cli::try_parse_from([
+            "tqsdk-cache",
+            "refresh-provider-membership",
+            "--acquisition-sha256",
+            "sha256:fixture",
+            "--dry-run",
+        ])
+        .unwrap();
+        assert_eq!(cli.kind, CacheKind::Tick);
+        let Command::RefreshProviderMembership(args) = cli.command else {
+            panic!("refresh-provider-membership must parse to its dedicated command");
+        };
+        assert_eq!(args.acquisition_sha256, "sha256:fixture");
+        assert_eq!(args.max_symbols, 4);
+        assert!(args.dry_run);
     }
 
     #[test]

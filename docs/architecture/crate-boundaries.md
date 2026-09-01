@@ -378,6 +378,8 @@ projection 仅保留给 V4 验证与迁移，不参与 normal V5 write path。�
 `BacktestTickCache` 是回测加速主存储的 data facade：它只缓存 tick，K 线由 tick
 回放/合成路径派生。
 
+`except(...)` 只扩展 `tqsdk-data` V2 parser 输入：它归一为已有 typed exclusion/global filter，不新增 facade、runtime state、compiler 分支或 artifact wire。
+
 ### 不应吸收的能力
 
 `tqsdk-data` 不应继续吸收：
@@ -401,6 +403,10 @@ projection 仅保留给 V4 验证与迁移，不参与 normal V5 write path。�
 - tick/minute/daily fill 共享 `BacktestHistoryClient` 的 batch/concurrency/timeout/cancellation/progress
   合同。默认 batch size 1、concurrency 2、idle timeout 60s、无 batch timeout，最大 batch size 与
   concurrency 均为 4
+- `refresh-provider-membership` 只编排 futures native-daily 的 pinned acquisition maintenance：
+  `tqsdk-data` 拥有 retry receipt、due selection、stable-roster/cutoff 验证和 operation lock；CLI
+  负责认证、isolated-cache canary、bounded probe、取消、report。它绝不把 receipt 塞入 proof、
+  不扩大 cutoff，且不猜测或发布 plan
 - 新 fill report 统一写 schema v3，默认目录为 `reports/tick/`、`reports/minute/`、
   `reports/daily/`；reader 兼容 tick v1/v2、minute v1、daily v1
 - tick purge 删除相交 TQBN trading-day partitions，minute purge 删除相交整月，daily purge 删除整个

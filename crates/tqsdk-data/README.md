@@ -93,6 +93,8 @@ Universe 只选 instrument，不选择数据流。V2 `file:` 被拒绝，外部 
 [Universe Language V2](../../docs/architecture/universe-language.md) 与
 [历史 Universe Catalog](../../docs/architecture/historical-universe-catalog.md)。
 
+批量排除可写 `except(contract:CFFEX.*,CZCE.ZC,CZCE.CY)`；若要对全部 view 生效，写 `except(all:CFFEX.*,CZCE.ZC,CZCE.CY)`。它们都会规范化为既有 `!` 表示，因此不会改变 V2 AST/hash 或历史 artifact identity。
+
 ## 回测历史查询
 
 `BacktestHistoryClient` 是 local-backtest durable history 的异步入口，不是 `DataClient` 专业历史下载
@@ -113,8 +115,11 @@ closure 和 kind-specific targets。详细合同见
 
 每个 roster 候选都必须有显式 observation。complete rows、terminal empty 和
 `provider_unavailable` 是三个不同结果；后者仅允许来自 symbol batch size 1 的精确 timeout，并受
-一次独立重试和全局失败比例熔断保护；实际 timeout 也进入 artifact identity。它是 provider 数据可用性事实，
-不是“从未挂牌”的声明。
+初始 bootstrap 的独立重试和全局失败比例熔断保护；它是 provider 数据可用性事实，不是“从未挂牌”的声明。
+后续维护将 attempts/next-due 放入独立、版本化且内容寻址的 retry receipt（绑定 immutable acquisition
+hash），不改写 proof-bearing observation。receipt 只在稳定 roster、相同 cutoff 和 provider-health
+canary 成功后前进；发现首行或 terminal empty 才发布新的 acquisition/catalog，普通 `fill --universe`
+再负责生成 plan。
 
 同一个 client 是 tick/minute/daily fill scheduling 的唯一 owner：默认 symbol batch size 1、concurrency 2、
 idle timeout 60 秒、无 batch timeout；batch size/concurrency 都只接受 `1..=4`。它统一产生 planning、
