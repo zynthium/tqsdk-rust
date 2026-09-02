@@ -3,6 +3,16 @@ use serde_json::{Map, Value, json};
 
 use crate::{ContractError, Result};
 
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub(crate) struct SensitiveString(String);
+
+impl std::fmt::Debug for SensitiveString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("\"[REDACTED]\"")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "aid")]
 pub(crate) enum DiffProtocolMessage {
@@ -29,11 +39,13 @@ pub(crate) enum DiffProtocolMessage {
     ReqLogin {
         bid: String,
         user_name: String,
-        password: String,
+        password: SensitiveString,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_mac_address: Option<SensitiveString>,
         #[serde(skip_serializing_if = "Option::is_none")]
         client_app_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        client_system_info: Option<String>,
+        client_system_info: Option<SensitiveString>,
         #[serde(skip_serializing_if = "Option::is_none")]
         broker_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,9 +151,10 @@ impl DiffProtocolMessage {
         Self::ReqLogin {
             bid: request.bid,
             user_name: request.user_name,
-            password: request.password,
+            password: SensitiveString(request.password),
+            client_mac_address: request.client_mac_address.map(SensitiveString),
             client_app_id: request.client_app_id,
-            client_system_info: request.client_system_info,
+            client_system_info: request.client_system_info.map(SensitiveString),
             broker_id: request.broker_id,
             front: request.front,
         }
@@ -295,6 +308,7 @@ pub(crate) struct DiffLoginRequest {
     pub(crate) bid: String,
     pub(crate) user_name: String,
     pub(crate) password: String,
+    pub(crate) client_mac_address: Option<String>,
     pub(crate) client_app_id: Option<String>,
     pub(crate) client_system_info: Option<String>,
     pub(crate) broker_id: Option<String>,
@@ -307,8 +321,15 @@ impl std::fmt::Debug for DiffLoginRequest {
             .field("bid", &self.bid)
             .field("user_name", &self.user_name)
             .field("password", &"[REDACTED]")
+            .field(
+                "client_mac_address",
+                &self.client_mac_address.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("client_app_id", &self.client_app_id)
-            .field("client_system_info", &self.client_system_info)
+            .field(
+                "client_system_info",
+                &self.client_system_info.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("broker_id", &self.broker_id)
             .field("front", &self.front)
             .finish()
@@ -325,6 +346,7 @@ impl DiffLoginRequest {
             bid: bid.into(),
             user_name: user_name.into(),
             password: password.into(),
+            client_mac_address: None,
             client_app_id: None,
             client_system_info: None,
             broker_id: None,
@@ -477,6 +499,36 @@ mod tests {
                 "future_password": "future-pass",
                 "currency": "CNY",
                 "amount": 1500.0,
+            })
+        );
+    }
+
+    #[test]
+    fn login_protocol_debug_redacts_secrets_but_serialization_preserves_them() {
+        let mut login =
+            DiffLoginRequest::new("debug-broker", "debug-account", "debug-password-secret");
+        login.client_mac_address = Some("01-23-45-67-89-AB".to_string());
+        login.client_system_info = Some("debug-system-info-secret".to_string());
+
+        let request_debug = format!("{login:?}");
+        assert!(!request_debug.contains("debug-password-secret"));
+        assert!(!request_debug.contains("01-23-45-67-89-AB"));
+        assert!(!request_debug.contains("debug-system-info-secret"));
+
+        let message = DiffProtocolMessage::req_login(login);
+        let message_debug = format!("{message:?}");
+        assert!(!message_debug.contains("debug-password-secret"));
+        assert!(!message_debug.contains("01-23-45-67-89-AB"));
+        assert!(!message_debug.contains("debug-system-info-secret"));
+        assert_eq!(
+            message.into_value().unwrap(),
+            json!({
+                "aid": "req_login",
+                "bid": "debug-broker",
+                "user_name": "debug-account",
+                "password": "debug-password-secret",
+                "client_mac_address": "01-23-45-67-89-AB",
+                "client_system_info": "debug-system-info-secret",
             })
         );
     }

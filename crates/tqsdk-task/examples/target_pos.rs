@@ -34,6 +34,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             account_id: AccountId::new(account_id),
             broker_id,
             password,
+            client_mac_address: None,
             account_type: TradeAccountType::Future,
             front_broker: None,
             front_url: None,

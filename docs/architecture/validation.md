@@ -634,6 +634,19 @@ cargo test -p tqsdk-session instrument_spec_normalizes_contract_metadata_from_sy
    EDB service query 默认在账号无 EDB 权限时跳过 EDB 断言，设置
    `TQ_REQUIRE_EDB=1` 可将该权限错误作为失败处理。
 
+实盘期货 smoke 需要官方 `tqsdk-ctpse`；若它安装在虚拟环境中，设置
+`TQ_TRADE_CTPSE_PYTHON=/absolute/path/to/python`，并建议同时设置
+`TQ_TRADE_REQUIRE_CLIENT_SYSTEM_INFO=1`，确保采集失败发生在登录 dispatch 前。
+
+### CTP helper 验证
+
+默认离线验证运行 `cargo test -p tqsdk-ctpse-helper`。显式官方库联调设置
+`TQ_TRADE_CTPSE_HELPER=/absolute/path/to/tqsdk-ctpse-helper` 与
+`TQ_TRADE_CTPSE_LIBRARY=/absolute/path/to/official-library`，再以
+`TQ_TRADE_REQUIRE_CLIENT_SYSTEM_INFO=1` 运行已授权的实盘登录 smoke。Python fallback 则设置
+`TQ_TRADE_CTPSE_PYTHON=/absolute/path/to/python`。构建过程不联网；官方 wheel 的下载、审核和再分发
+必须在许可确认后单独执行。
+
 ## V2+ adapter 验收基线
 ### wait adapter
 - 能只靠 `RuntimeReader` / `SnapshotReadGuard` / `UpdateCursor` 实现 `wait_update()`

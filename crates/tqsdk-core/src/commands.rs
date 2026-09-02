@@ -170,6 +170,7 @@ pub struct TradeLoginCommand {
     pub account_id: AccountId,
     pub broker_id: String,
     pub password: String,
+    pub client_mac_address: Option<String>,
     pub account_type: TradeAccountType,
     pub front_broker: Option<String>,
     pub front_url: Option<String>,
@@ -183,11 +184,18 @@ impl std::fmt::Debug for TradeLoginCommand {
             .field("account_id", &self.account_id)
             .field("broker_id", &self.broker_id)
             .field("password", &"[REDACTED]")
+            .field(
+                "client_mac_address",
+                &self.client_mac_address.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("account_type", &self.account_type)
             .field("front_broker", &self.front_broker)
             .field("front_url", &self.front_url)
             .field("client_app_id", &self.client_app_id)
-            .field("client_system_info", &self.client_system_info)
+            .field(
+                "client_system_info",
+                &self.client_system_info.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
@@ -477,12 +485,31 @@ impl std::str::FromStr for CommandStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum OutboundFrame {
     Text(String),
     Binary(Vec<u8>),
     Ping,
     Close,
+}
+
+impl std::fmt::Debug for OutboundFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text(payload) => f
+                .debug_struct("Text")
+                .field("payload", &"[REDACTED]")
+                .field("len", &payload.len())
+                .finish(),
+            Self::Binary(payload) => f
+                .debug_struct("Binary")
+                .field("payload", &"[REDACTED]")
+                .field("len", &payload.len())
+                .finish(),
+            Self::Ping => f.write_str("Ping"),
+            Self::Close => f.write_str("Close"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

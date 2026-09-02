@@ -110,7 +110,8 @@ wait adapter 层未来可以提供：
 - `login_trade_account(...)` 这类 typed login helper 可以作为 wait facade
   的薄便利层存在，用来从用户路径移除 `TradeLoginCommand` 构造；builder
   仍负责 trade route 配置，helper 只提交 runtime trade login command 并等待
-  同一 trade state 分区里的账户对象 ready。
+  同一 trade state 分区里的账户对象 ready。穿透式客户端信息的补齐与校验属于
+  `tqsdk-session` 的登录提交预处理，wait facade 不拥有第二套生成逻辑。
 - `startup_recovery()` 这类启动屏障 helper 可以作为 wait facade 的薄便利层
   存在，用来把 quote 订阅和 trade 初始同步合并成用户级 ready barrier；ready
   判定复用 `tqsdk-session::StartupRecoverySpec`，不得绕过 runtime state tree，

@@ -511,6 +511,7 @@ fn minimal_core_api_covers_v1_capability_matrix() {
             account_id: AccountId::new("simnow"),
             broker_id: "9999".to_string(),
             password: "secret".to_string(),
+            client_mac_address: None,
             account_type: TradeAccountType::Future,
             front_broker: None,
             front_url: None,

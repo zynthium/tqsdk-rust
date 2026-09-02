@@ -12,9 +12,10 @@
 - 调用方必须自己提供 Tokio runtime
 - direct service helper（交易日历、结算价、排名、EDB）也要求当前已经处于 Tokio runtime 中
 
-HTTP auth / direct-query client 明确走直连路径：内部 reqwest client 使用 `no_proxy()`
-和 HTTP/1.1，不读取系统 proxy。少数网络环境下如果 Rust resolver 对官方域名解析不稳定，
-可以显式注入直连 DNS 结果：
+HTTP auth / direct-query client 使用 HTTP/1.1，并遵循标准 `HTTP_PROXY` / `HTTPS_PROXY` /
+`ALL_PROXY` / `NO_PROXY` 环境变量。设置 `TQSDK_HTTP_NO_PROXY=1` 可强制这些 HTTP client
+直连；其他值不改变标准代理行为。少数网络环境下如果 Rust resolver 对官方域名解析不稳定，
+可显式注入直连 DNS 结果：
 
 ```bash
 export TQSDK_DIRECT_RESOLVE_AUTH_SHINNYTECH_COM=<auth-ip>
@@ -22,8 +23,10 @@ export TQSDK_DIRECT_RESOLVE_API_SHINNYTECH_COM=<api-ip>
 export TQSDK_DIRECT_RESOLVE_FILES_SHINNYTECH_COM=<files-ip>
 ```
 
-这些变量只覆盖对应 host 的 reqwest 解析结果，不启用 proxy，也不影响 WebSocket route
-选择。IP 应按运行环境实际解析结果设置。
+这些变量只覆盖对应 host 的 reqwest 直连解析结果，不影响 WebSocket route 选择；走代理时
+目标域名通常由代理解析。IP 应按运行环境实际解析结果设置。代理可能看到目标域名；企业 MITM
+代理若被系统信任，还可看到 TLS 内请求内容，敏感环境应使用可信代理或
+`TQSDK_HTTP_NO_PROXY=1`。
 
 ## 依赖方式
 
@@ -153,6 +156,16 @@ session facade 上并发调用。raw `query_graphql()` 只提交 command id；�
 组合 `query_graphql()` / `wait_command_completed()`，仍需自行保证推进顺序。
 如果要启用官方默认的 live query 语义而不显式覆盖 query endpoint，应调用 `SessionClientBuilder::enable_query()`。
 
+`SessionClient::submit(...)` 会在期货 `TradeCommand::Login` 进入 runtime 前补齐穿透式客户端
+信息。字段优先级为调用方显式字段、`TQ_TRADE_CLIENT_*` 环境变量、官方
+`tqsdk-ctpse` Python 采集器；解释器默认 `python3`，可用
+`TQ_TRADE_CTPSE_PYTHON` 指定。采集器不接收账户或交易密码，输出经过 Base64、长度和 MAC
+校验。默认采集失败仍按官方 Python SDK 的 best-effort 语义提交登录；
+`TQ_TRADE_REQUIRE_CLIENT_SYSTEM_INFO=1` 或显式指定 Python 解释器时，失败会在任何
+dispatch 前返回不可重试错误。
+
+认证、行情地址发现、券商配置和 service HTTP 请求共享上述代理策略。
+
 `SessionClientBuilder` 还提供了命名明确的 market-target 快捷方法：
 
 - `stock_market()`
@@ -191,6 +204,19 @@ session facade 上并发调用。raw `query_graphql()` 只提交 command id；�
 - `tqsdk-session` 负责一次性 direct query / schema / metadata
 - `tqsdk-wait` 负责 `wait_update()` 风格的持续状态消费
 - 多消费者 event/fan-out 风格由调用方基于 `RuntimeReader` / `UpdateCursor` 自建
+
+## CTP 原生 helper
+
+期货 `TradeCommand::Login` 的客户端信息优先级为：调用方显式字段、
+`TQ_TRADE_CLIENT_*`、显式原生 helper（`TQ_TRADE_CTPSE_HELPER`，可选
+`TQ_TRADE_CTPSE_LIBRARY`）、显式 Python（`TQ_TRADE_CTPSE_PYTHON`）、随应用同目录分发的
+helper、默认 `python3` 采集器。原生 helper 在独立进程中动态加载官方库，stdout 只输出系统信息 JSON；
+它和 Python 采集器都不会收到账号或交易密码。session 会验证 Base64、长度与 MAC。
+
+显式 native 配置失败会 fail-closed，即使同时配置 Python 也不会静默切换采集实现；自动发现的 helper
+失败才会回退 Python。`TQ_TRADE_CTPSE_LIBRARY` 必须是绝对路径；`TQ_TRADE_REQUIRE_CLIENT_SYSTEM_INFO=1`
+会把任何采集失败变为登录前错误。嵌入式 bundle 仅能由离线、经许可审核的官方 wheel 构建；当前仓库未
+分发该二进制。要在部署中无感使用 native 路径，发布包必须把 `tqsdk-ctpse-helper` 放在主程序同目录。
 
 ## 示例
 

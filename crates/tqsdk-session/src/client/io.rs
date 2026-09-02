@@ -5,8 +5,8 @@ use tqsdk_core::internal::SessionRuntimeDeps;
 use tqsdk_core::{CommandId, CommitScope, ContractError, ProtocolDomain, SessionRouteEndpoint};
 
 use super::{
-    SessionClient, SessionIoState, SessionProgress, SharedRouteExecutor, prime_route_with_recover,
-    recover_run,
+    SessionClient, SessionIoState, SessionProgress, SharedRouteExecutor,
+    WEBSOCKET_COMMAND_POLL_BUDGET, prime_route_with_recover, recover_run,
 };
 
 impl SessionClient {
@@ -110,11 +110,34 @@ impl SessionClient {
         if self.drive_pending_once_locked(&mut io).await? {
             return Ok(SessionProgress::DrovePending);
         }
-        if self.drive_route_once_locked(&mut io, deadline).await? {
-            return Ok(SessionProgress::DroveRoute);
+        let websocket_routes = io.websocket_route_count();
+        for _ in 0..websocket_routes {
+            if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+                return Ok(SessionProgress::Idle);
+            }
+            let route_deadline = websocket_poll_deadline(deadline)
+                .expect("websocket route polling always has a deadline");
+            let route_budget = route_deadline.saturating_duration_since(Instant::now());
+            let driven = match timeout(
+                route_budget,
+                self.drive_route_once_locked(&mut io, Some(route_deadline)),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(_) => false,
+            };
+            if driven {
+                return Ok(SessionProgress::DroveRoute);
+            }
         }
 
-        Ok(SessionProgress::Idle)
+        let deadline_expired = deadline.is_some_and(|deadline| deadline <= Instant::now());
+        Ok(if websocket_routes == 0 || deadline_expired {
+            SessionProgress::Idle
+        } else {
+            SessionProgress::DroveRoute
+        })
     }
 
     pub(super) async fn drive_route_label_once(
@@ -172,6 +195,7 @@ impl SessionClient {
         }
 
         Ok(flushed
+            || outcome.received_route_input
             || !outcome.dispatches.is_empty()
             || !outcome.commits.is_empty()
             || outcome.recovered)
@@ -274,10 +298,16 @@ impl SessionClient {
         }
 
         Ok(flushed
+            || outcome.received_route_input
             || !outcome.dispatches.is_empty()
             || !outcome.commits.is_empty()
             || outcome.recovered)
     }
+}
+
+fn websocket_poll_deadline(deadline: Option<Instant>) -> Option<Instant> {
+    let poll_deadline = Instant::now() + WEBSOCKET_COMMAND_POLL_BUDGET;
+    Some(deadline.map_or(poll_deadline, |deadline| deadline.min(poll_deadline)))
 }
 
 async fn drive_with_deadline<F, T>(

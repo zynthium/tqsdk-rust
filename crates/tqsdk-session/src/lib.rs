@@ -48,6 +48,7 @@ pub mod testing;
 mod tq_auth;
 #[cfg(feature = "tq-auth")]
 mod tqkq;
+mod trade_client_info;
 
 pub use backtest_history::{
     SERVER_BACKTEST_CANONICAL_DAILY_NS, SERVER_BACKTEST_CANONICAL_MINUTE_NS,

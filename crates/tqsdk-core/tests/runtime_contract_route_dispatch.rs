@@ -403,3 +403,33 @@ where
         .unwrap()
         .block_on(future)
 }
+
+#[test]
+fn missing_route_error_does_not_expose_transport_payload() {
+    run_on_tokio(async {
+        let connector = DefaultRouteConnector::default();
+        let mut connected = SessionBootstrap::new()
+            .connect_topology(&SessionTopology::default(), &connector)
+            .await
+            .unwrap();
+        let secret = "password-must-not-appear";
+        let error = connected
+            .dispatch(OutboundDispatch {
+                command_id: tqsdk_core::CommandId::new(1),
+                domain: ProtocolDomain::Trade,
+                account_id: None,
+                request: tqsdk_core::OutboundRequest::Transport(OutboundFrame::Text(format!(
+                    "{{\"password\":\"{secret}\"}}"
+                ))),
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(
+            error,
+            "validation error: no connected route for trade transport request"
+        );
+        assert!(!error.contains(secret));
+    });
+}

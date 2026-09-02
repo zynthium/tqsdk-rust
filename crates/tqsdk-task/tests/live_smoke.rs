@@ -45,6 +45,7 @@ async fn live_task_host_trade_account_ready_smoke() {
             account_id: AccountId::new(account_id),
             broker_id,
             password,
+            client_mac_address: None,
             account_type: TradeAccountType::Future,
             front_broker: None,
             front_url: None,
@@ -65,38 +66,24 @@ async fn live_task_host_trade_account_ready_smoke() {
             .expect("tqkq login should resolve")
     };
     let account_id = trade_login.account_id.as_str().to_string();
-
-    host.api()
-        .session()
-        .submit(RuntimeCommand::Trade(TradeCommand::Login(trade_login)))
+    let account = host
+        .api_mut()
+        .login_trade_account(
+            &trade_login.broker_id,
+            trade_login.account_id.as_str(),
+            &trade_login.password,
+            trade_login.account_type,
+            Some(tokio::time::Instant::now() + Duration::from_secs(30)),
+        )
         .await
-        .expect("TradeLoginCommand should submit successfully");
+        .expect("trade login and settlement confirmation should succeed");
+    let snapshot = account
+        .snapshot()
+        .expect("account snapshot decode should succeed")
+        .expect("account should be ready after login helper returns");
 
-    let account = host.api().account(account_id.as_str());
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let now = tokio::time::Instant::now();
-        assert!(
-            now < deadline,
-            "timed out waiting for trade account snapshot"
-        );
-
-        let _updated = host
-            .wait_update(Some(now + Duration::from_secs(5)))
-            .await
-            .expect("TaskHost::wait_update should succeed");
-
-        let Some(snapshot) = account
-            .snapshot()
-            .expect("account snapshot decode should succeed")
-        else {
-            continue;
-        };
-
-        assert_eq!(snapshot.user_id, account_id);
-        assert_eq!(snapshot.currency, "CNY");
-        return;
-    }
+    assert_eq!(snapshot.user_id, account_id);
+    assert_eq!(snapshot.currency, "CNY");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -138,6 +125,7 @@ async fn live_insert_cancel_guarded_smoke() {
             account_id: AccountId::new(account_id),
             broker_id,
             password,
+            client_mac_address: None,
             account_type: TradeAccountType::Future,
             front_broker: None,
             front_url: None,
@@ -284,6 +272,7 @@ async fn live_target_pos_roundtrip_smoke() {
             account_id: AccountId::new(account_id),
             broker_id,
             password,
+            client_mac_address: None,
             account_type: TradeAccountType::Future,
             front_broker: None,
             front_url: None,
@@ -386,6 +375,7 @@ async fn live_target_pos_scheduler_roundtrip_smoke() {
             account_id: AccountId::new(account_id),
             broker_id,
             password,
+            client_mac_address: None,
             account_type: TradeAccountType::Future,
             front_broker: None,
             front_url: None,

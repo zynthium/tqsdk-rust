@@ -79,7 +79,7 @@ async fn login_trade_account_submits_typed_login_and_waits_for_account_ready() {
     assert_eq!(account.load().unwrap().currency, "CNY");
 
     let dispatches = api.session().handle().drain_dispatches().unwrap();
-    assert_eq!(dispatches.len(), 1);
+    assert_eq!(dispatches.len(), 2);
     assert_eq!(dispatches[0].domain, ProtocolDomain::Trade);
     assert_eq!(
         dispatches[0].account_id.as_ref().map(|id| id.as_str()),
@@ -91,6 +91,34 @@ async fn login_trade_account_submits_typed_login_and_waits_for_account_ready() {
     assert_eq!(payload["bid"], "9999");
     assert_eq!(payload["user_name"], "sim");
     assert_eq!(payload["password"], "secret");
+
+    let payload = transport_payload(&dispatches[1].request);
+    assert_eq!(payload["aid"], "confirm_settlement");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn login_trade_account_reports_matching_rejection_notification() {
+    let mut api = support::seeded_api();
+    support::seed_trade_login_rejection(&mut api, "notify-login-rejected");
+
+    let result = api
+        .login_trade_account(
+            "9999",
+            "sim",
+            "test-password",
+            TradeAccountType::Future,
+            None,
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("matching login rejection should fail"),
+        Err(error) => error.to_string(),
+    };
+
+    assert!(error.contains("AUTH_FAILED"));
+    assert!(error.contains("[REDACTED_ACCOUNT] login rejected"));
+    assert!(!error.contains("test-password"));
+    assert!(!error.contains("sim login rejected"));
 }
 
 #[tokio::test(flavor = "current_thread")]

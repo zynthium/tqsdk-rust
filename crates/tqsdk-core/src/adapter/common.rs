@@ -101,6 +101,9 @@ pub(super) fn build_login_message(login: &TradeLoginCommand) -> DiffProtocolMess
         login.account_id.as_str(),
         login.password.clone(),
     );
+    request
+        .client_mac_address
+        .clone_from(&login.client_mac_address);
     request.client_app_id.clone_from(&login.client_app_id);
     request
         .client_system_info

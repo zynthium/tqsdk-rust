@@ -1,0 +1,13 @@
+{
+  "version": "1.2.0",
+  "artifacts": {
+    "x86_64-unknown-linux-gnu": {
+      "wheel": "tqsdk_ctpse-1.2.0-<official-linux-tag>.whl",
+      "sha256": "<lowercase-pypi-sha256>",
+      "primary_library": "tqsdk_ctpse-<version>.data/purelib/tqsdk_ctpse/LinuxDataCollect64.so",
+      "files": [
+        "tqsdk_ctpse-<version>.data/purelib/tqsdk_ctpse/LinuxDataCollect64.so"
+      ]
+    }
+  }
+}

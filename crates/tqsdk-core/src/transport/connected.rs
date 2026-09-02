@@ -82,9 +82,9 @@ impl ConnectedTopology {
             .map(|(_score, route)| route)
             .ok_or_else(|| {
                 ContractError::validation(format!(
-                    "no connected route for {} {:?} request",
+                    "no connected route for {} {} request",
                     dispatch.domain.as_str(),
-                    dispatch.request
+                    outbound_request_kind(&dispatch.request)
                 ))
             })?;
 
@@ -179,6 +179,16 @@ impl ConnectedTopology {
             inputs.extend(route.drain_queued_inputs());
         }
         inputs
+    }
+}
+
+fn outbound_request_kind(request: &OutboundRequest) -> &'static str {
+    match request {
+        OutboundRequest::Transport(_) => "transport",
+        OutboundRequest::Http(_) => "http",
+        OutboundRequest::Query(_) => "query",
+        OutboundRequest::Replay(_) => "replay",
+        OutboundRequest::Internal(_) => "internal",
     }
 }
 

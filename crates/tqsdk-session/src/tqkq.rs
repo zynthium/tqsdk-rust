@@ -58,6 +58,7 @@ impl TqKqAccountConfig {
             account_id: self.account_id.clone(),
             broker_id: self.broker_id.clone(),
             password: self.password.clone(),
+            client_mac_address: None,
             account_type: self.account_type,
             front_broker: None,
             front_url: None,

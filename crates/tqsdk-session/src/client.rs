@@ -192,6 +192,18 @@ impl SessionIoState {
         next_route_label(&self.run, &mut self.next_websocket_route, true)
     }
 
+    fn websocket_route_count(&self) -> usize {
+        self.run.as_ref().map_or(0, |run| {
+            run.connected
+                .routes
+                .iter()
+                .filter(|route| {
+                    matches!(route.route.endpoint, SessionRouteEndpoint::WebSocket { .. })
+                })
+                .count()
+        })
+    }
+
     fn clear_pending_peek(&mut self, route_label: &str) {
         self.pending_peek_routes.remove(route_label);
     }

@@ -939,6 +939,48 @@ pub fn seed_notification_commit(api: &mut TqApi, notification_id: &str) {
 }
 
 #[allow(dead_code)]
+pub fn seed_trade_login_rejection(api: &mut TqApi, notification_id: &str) {
+    let commit = api
+        .session()
+        .handle()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade:sim".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                "aid": "rtn_data",
+                "data": [{
+                  "notify": {
+                    "notify-system": {
+                      "code": 324,
+                      "level": "INFO",
+                      "type": "MESSAGE",
+                      "content": "connected",
+                      "bid": "system",
+                      "user_id": "system"
+                    },
+                    notification_id: {
+                      "code": "AUTH_FAILED",
+                                        "level": "ERROR",
+                                        "type": "MESSAGE",
+                                        "content": "sim login rejected",
+                                        "bid": "9999",
+                                        "user_id": "sim"
+                                    }
+                                }
+                            }]
+                        })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed login rejection should produce commit");
+
+    WaitTestDriver::push_deferred_commit(api, commit);
+}
+
+#[allow(dead_code)]
 pub fn seed_security_trade_snapshot(api: &mut TqApi, account_id: &str, symbol: &str) {
     let commit = api
         .session()

@@ -204,6 +204,14 @@
 
 总体上，`tqsdk-session` 的边界是合理的，而且正好承担了 `tqsdk-python` 单体 `TqApi` 中最适合拆出来的一层。
 
+## `tqsdk-ctpse-helper`
+
+这是私有、非发布的进程隔离工具，不是 SDK facade 或 runtime crate。它只负责动态加载经验证的官方
+`tqsdk-ctpse` 原生库、调用系统信息函数，并在 stdout 输出单个 JSON 结果。它不得接收 TQ 登录凭证、
+不得进入 `tqsdk-core`、不得拥有 runtime 状态或 public API。helper 本身不发起网络请求，但官方动态库在当前
+方案中没有 OS sandbox，必须视为受信任代码。`tqsdk-session` 是它唯一的 SDK 消费者，并且仍负责字段验证、
+登录命令构造和 Python fallback。
+
 ## `tqsdk-wait`
 
 ### 正确职责

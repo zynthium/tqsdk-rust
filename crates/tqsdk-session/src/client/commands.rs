@@ -39,6 +39,7 @@ impl SessionClient {
     }
 
     pub async fn submit(&self, command: RuntimeCommand) -> crate::error::Result<CommandId> {
+        let command = crate::trade_client_info::enrich_runtime_command(command).await?;
         Ok(self.handle.submit(command).await?)
     }
 

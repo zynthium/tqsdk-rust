@@ -578,6 +578,82 @@ async fn live_client_progress_once_reports_route_progress_for_websocket_input() 
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn live_client_progress_once_reports_route_progress_for_empty_websocket_input() {
+    let handle = runtime_with_default_adapters();
+    let transport = QueueTransport::with_frame(RawFrame::Text(
+        json!({"aid": "rtn_data", "data": []}).to_string(),
+    ));
+    let sent = Arc::clone(&transport.sent);
+    let client = test_live_client(
+        handle,
+        SessionTopology::default().with_route(SessionRoute {
+            label: "market".to_string(),
+            target: SessionTarget::Shared,
+            domains: vec![ProtocolDomain::Market],
+            endpoint: SessionRouteEndpoint::WebSocket {
+                url: "wss://market.example".to_string(),
+                connect: tqsdk_core::WebSocketConnectOptions::default(),
+            },
+        }),
+        transport,
+        Arc::new(RecordingExecutor::default()),
+    );
+
+    assert_eq!(
+        client
+            .progress_once(Some(Instant::now() + Duration::from_secs(1)))
+            .await
+            .unwrap(),
+        SessionProgress::DroveRoute
+    );
+    assert_eq!(peek_frame_count(&sent), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_client_progress_once_handles_multiple_websocket_routes() {
+    let handle = runtime_with_default_adapters();
+    let transport = QueueTransport::default();
+    transport.recv_queue.lock().unwrap().extend([
+        RawFrame::Pong,
+        RawFrame::Text(json!({"aid": "rtn_data", "data": []}).to_string()),
+    ]);
+    let sent = Arc::clone(&transport.sent);
+    let client = test_live_client(
+        handle,
+        SessionTopology::default()
+            .with_route(SessionRoute {
+                label: "market".to_string(),
+                target: SessionTarget::Shared,
+                domains: vec![ProtocolDomain::Market],
+                endpoint: SessionRouteEndpoint::WebSocket {
+                    url: "wss://market.example".to_string(),
+                    connect: tqsdk_core::WebSocketConnectOptions::default(),
+                },
+            })
+            .with_route(SessionRoute {
+                label: "trade".to_string(),
+                target: SessionTarget::Account(AccountId::new("sim")),
+                domains: vec![ProtocolDomain::Trade],
+                endpoint: SessionRouteEndpoint::WebSocket {
+                    url: "wss://trade.example".to_string(),
+                    connect: tqsdk_core::WebSocketConnectOptions::default(),
+                },
+            }),
+        transport,
+        Arc::new(RecordingExecutor::default()),
+    );
+
+    assert_eq!(
+        client
+            .progress_once(Some(Instant::now() + Duration::from_secs(1)))
+            .await
+            .unwrap(),
+        SessionProgress::DroveRoute
+    );
+    assert_eq!(peek_frame_count(&sent), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn live_client_progress_once_reports_idle_when_no_route_has_work() {
     let client = test_live_client(
         runtime_with_default_adapters(),

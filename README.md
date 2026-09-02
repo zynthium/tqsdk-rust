@@ -337,7 +337,10 @@ TQBN 18:00 分区结束后必须再次运行普通 warmup，完成全日 final �
 `&mut Tq`，策略内使用 `target_pos_default(...)`；`TQ_EXAMPLE_MODE=local-backtest|tqkq-sim|live`
 决定本地 `TqSim` 回测、快期模拟或实盘账户构造。快期模拟可用 `.tqkq_sim()`，实盘可用
 `.trade_account_env()` 自动读取并登录 `TQ_TRADE_BROKER_ID` / `TQ_TRADE_ACCOUNT_ID` /
-`TQ_TRADE_PASSWORD`。若已通过 `tqsdk-session` 查询到合约 metadata，可把
+`TQ_TRADE_PASSWORD`。期货实盘登录会通过当前 `python3` 中官方 `tqsdk-ctpse` 自动生成
+穿透式客户端信息；虚拟环境用 `TQ_TRADE_CTPSE_PYTHON` 指定解释器，严格要求采集成功时
+设置 `TQ_TRADE_REQUIRE_CLIENT_SYSTEM_INFO=1`。若已通过 `tqsdk-session` 查询到合约
+metadata，可把
 `InstrumentSpec` 传入 `instrument_spec(...)`，用于 kline quote synthesis 的
 `price_tick` 和本地撮合合约乘数。
 
@@ -380,6 +383,18 @@ TQ_WAIT_ONCE=1 cargo run -p tqsdk-wait --example quote_wait
 ```bash
 npx skills add https://github.com/zynthium/tqsdk-rust
 ```
+
+## CTP 穿透式客户端信息
+
+期货实盘登录优先使用随应用同目录分发的私有 `tqsdk-ctpse-helper`：它在独立进程动态加载经验证的官方
+库，主 SDK 进程不加载该库。也可显式设置 `TQ_TRADE_CTPSE_HELPER` 和可选的
+`TQ_TRADE_CTPSE_LIBRARY`（绝对路径）。没有 native bundle 或 helper 时，SDK 自动回退到当前 `python3` 的官方
+`tqsdk-ctpse`；虚拟环境由 `TQ_TRADE_CTPSE_PYTHON` 指定。设置
+`TQ_TRADE_REQUIRE_CLIENT_SYSTEM_INFO=1` 可要求任何路径采集成功。
+
+仓库当前不分发官方原生二进制，直到其再分发许可得到确认；这不影响用户提供 `.so`/DLL 或 Python
+fallback。显式 native 配置失败会立即失败，不会静默改用 Python；生产发布若启用 embedded bundle，必须把
+helper 与应用主程序并置。
 
 ## API 形态示例
 

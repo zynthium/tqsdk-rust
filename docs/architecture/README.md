@@ -37,6 +37,10 @@ V1 是：
 - GraphQL / HTTP query
 - schema / metadata / bootstrap 交互
 
+交易登录的 CTP 穿透式责任按边界分工：`tqsdk-core::TradeLoginCommand`
+只承载可选的 MAC、App ID 和系统信息字段；`tqsdk-session` 在命令提交边界使用官方
+`tqsdk-ctpse` 采集、校验和补全字段。facade 只复用 session，不维护第二套采集逻辑。
+
 它明确不提供：
 
 - `TqApi`
@@ -46,6 +50,12 @@ V1 是：
 - 各类高层 view
 - `TargetPosTask`
 - DataFrame / polars / downloader / GUI / report
+
+### CTP 原生采集隔离
+
+`tqsdk-core::TradeLoginCommand` 只承载可选的 MAC、App ID 和系统信息字段。`tqsdk-session` 在命令提交边界
+校验并补全字段；私有 `tqsdk-ctpse-helper` 隔离官方原生库的动态加载，只输出系统信息 JSON。session 不持有
+动态库句柄，并在没有离线 bundle 时回退官方 Python 采集器。helper 不是 facade、runtime 或 public API。
 
 ## 当前实现状态
 当前仓库里的 V1 已经以“极简但协议完整”的 core contract 落地完成。

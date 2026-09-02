@@ -63,6 +63,8 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 - DIFF 协议对象。
 - trade 命令与命令状态。
+- `TradeLoginCommand` 承载可选的 MAC、`client_app_id` 和穿透式
+  `client_system_info` 字段；core 只负责序列化，采集与校验归 `tqsdk-session`。
 - replay / feed 推进。
 - auth / session / system 生命周期控制。
 - GraphQL / HTTP query。

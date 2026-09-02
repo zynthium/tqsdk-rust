@@ -1,9 +1,38 @@
 use serde_json::json;
 use tqsdk_core::{
-    AccountId, ProtocolDomain, RuntimeCommand, TradeAccountType, TradeCommand, TradeLoginCommand,
-    TradeOffset, TradePreInsertOrderCommand, TradePriceType, TradeTimeCondition,
+    AccountId, OutboundFrame, ProtocolDomain, RuntimeCommand, TradeAccountType, TradeCommand,
+    TradeLoginCommand, TradeOffset, TradePreInsertOrderCommand, TradePriceType, TradeTimeCondition,
     TradeVolumeCondition,
 };
+
+#[test]
+fn trade_login_and_transport_debug_redact_credentials_and_device_fingerprint() {
+    let login = TradeLoginCommand {
+        account_id: AccountId::new("debug-account"),
+        broker_id: "debug-broker".to_string(),
+        password: "debug-password-secret".to_string(),
+        client_mac_address: Some("01-23-45-67-89-AB".to_string()),
+        account_type: TradeAccountType::Future,
+        front_broker: None,
+        front_url: None,
+        client_app_id: Some("SHINNY_TQ_1.0".to_string()),
+        client_system_info: Some("debug-system-info-secret".to_string()),
+    };
+    let debug = format!("{login:?}");
+    assert!(!debug.contains("debug-password-secret"));
+    assert!(!debug.contains("01-23-45-67-89-AB"));
+    assert!(!debug.contains("debug-system-info-secret"));
+    assert!(debug.contains("[REDACTED]"));
+
+    let frame = OutboundFrame::Text(
+        r#"{"password":"frame-password-secret","client_system_info":"frame-system-secret"}"#
+            .to_string(),
+    );
+    let debug = format!("{frame:?}");
+    assert!(!debug.contains("frame-password-secret"));
+    assert!(!debug.contains("frame-system-secret"));
+    assert!(debug.contains("[REDACTED]"));
+}
 
 #[test]
 fn trade_command_surface_covers_session_and_control_flows() {
@@ -11,6 +40,7 @@ fn trade_command_surface_covers_session_and_control_flows() {
         account_id: AccountId::new("simnow"),
         broker_id: "9999".to_string(),
         password: "secret".to_string(),
+        client_mac_address: None,
         account_type: TradeAccountType::Future,
         front_broker: Some("9999".to_string()),
         front_url: Some("tcp://127.0.0.1:12345".to_string()),

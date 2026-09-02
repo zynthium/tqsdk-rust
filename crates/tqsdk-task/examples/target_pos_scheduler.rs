@@ -35,6 +35,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             account_id: AccountId::new(account_id.clone()),
             broker_id: read_env("TQ_TRADE_BROKER_ID")?,
             password,
+            client_mac_address: None,
             account_type: TradeAccountType::Future,
             front_broker: None,
             front_url: None,

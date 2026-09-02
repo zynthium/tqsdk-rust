@@ -215,8 +215,20 @@ diff-backed live state surface，不是 session direct query。契约示例见
 [examples/api_contract_s09_startup_state_recovery.rs](examples/api_contract_s09_startup_state_recovery.rs)。
 
 交易登录优先走 `TqApi::login_trade_account(...)`：builder 负责配置 trade route，
-该 helper 负责提交 typed login request 并等待账户对象 ready，业务代码不需要构造
-`TradeLoginCommand`。
+该 helper 会为期货账户按官方 TQSDK 顺序提交 typed login request 和
+`confirm_settlement`，再等待账户对象 ready；业务代码不需要构造
+`TradeLoginCommand`。调用它即授权该结算确认；若只需自行控制确认时机，应只配置
+trade route 并显式调用 `confirm_settlement(...)`。
+
+期货登录缺少 CTP 穿透式监管客户端信息时，底层 `tqsdk-session` 会调用当前
+`python3` 中官方 `tqsdk-ctpse` 包生成，并同时发送 `client_mac_address` 与默认
+`client_app_id=SHINNY_TQ_1.0`。虚拟环境可用
+`TQ_TRADE_CTPSE_PYTHON=/absolute/path/to/python` 指定解释器；显式指定后，采集失败会在
+登录报文提交前返回错误。也可用 `TQ_TRADE_CLIENT_SYSTEM_INFO`、
+`TQ_TRADE_CLIENT_MAC_ADDRESS` 和 `TQ_TRADE_CLIENT_APP_ID` 覆盖自动结果。默认行为与
+官方 Python SDK 一致，采集器不可用时继续尝试登录；设置
+`TQ_TRADE_REQUIRE_CLIENT_SYSTEM_INFO=1` 可改为严格失败。所有穿透信息均不得写入仓库、
+日志或测试快照。
 
 如果需要直接提交市价 / 对手价 / 五档 IOC / 限价单，优先使用 typed `OrderPrice`：
 

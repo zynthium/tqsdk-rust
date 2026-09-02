@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use tqsdk_core::{
-    AccountId, MarketChartCommand, OrderId, RuntimeCommand, Symbol, TradeAccountType, TradeCommand,
-    TradeDirection, TradeInsertOrderCommand, TradeLoginCommand, TradeOffset, TradeVolumeCondition,
+    AccountId, ContractError, MarketChartCommand, OrderId, RuntimeCommand, Symbol,
+    TradeAccountType, TradeCommand, TradeDirection, TradeInsertOrderCommand, TradeLoginCommand,
+    TradeOffset, TradeVolumeCondition,
 };
 use tqsdk_session::SessionClient;
 
@@ -22,6 +23,57 @@ use crate::refs::{
     TickHandle, TradeRef, TradingStatusRef,
 };
 use crate::step::{WaitReadHandle, WaitStep};
+
+fn trade_login_rejection(
+    reader: &WaitReadHandle,
+    broker_id: &str,
+    account_id: &str,
+    password: &str,
+) -> crate::error::Result<Option<String>> {
+    let notifications = reader
+        .reader()
+        .read()
+        .decode_path::<BTreeMap<String, serde_json::Value>>(&["system", "notify"])
+        .map_err(crate::error::WaitFacadeError::from)?;
+
+    let Some(notifications) = notifications else {
+        return Ok(None);
+    };
+
+    Ok(notifications.values().find_map(|notification| {
+        let bid = notification
+            .get("bid")
+            .and_then(serde_json::Value::as_str)?;
+        let user_id = notification
+            .get("user_id")
+            .and_then(serde_json::Value::as_str)?;
+        let content = notification
+            .get("content")
+            .and_then(serde_json::Value::as_str)?;
+        if bid != broker_id || user_id != account_id || content.is_empty() {
+            return None;
+        }
+
+        let code = notification
+            .get("code")
+            .map_or_else(|| "UNKNOWN".to_string(), serde_json::Value::to_string);
+        let level = notification
+            .get("level")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("UNKNOWN");
+        let content = content
+            .replace(password, "[REDACTED]")
+            .replace(account_id, "[REDACTED_ACCOUNT]");
+        let content: String = content
+            .chars()
+            .filter(|character| !character.is_control() || *character == '\n')
+            .take(512)
+            .collect();
+        Some(format!(
+            "trade login rejected (code={code}, level={level}): {content}"
+        ))
+    }))
+}
 
 /// Single-owner wait facade over a shared [`tqsdk_session::SessionClient`].
 ///
@@ -618,26 +670,50 @@ impl TqApi {
         account_type: TradeAccountType,
         deadline: Option<tokio::time::Instant>,
     ) -> crate::error::Result<AccountRef> {
-        self.driver
-            .session
-            .submit(RuntimeCommand::Trade(TradeCommand::Login(
-                TradeLoginCommand {
-                    account_id: AccountId::new(account_id),
-                    broker_id: broker_id.to_owned(),
-                    password: password.to_owned(),
-                    account_type,
-                    front_broker: None,
-                    front_url: None,
-                    client_app_id: None,
-                    client_system_info: None,
-                },
-            )))
-            .await
-            .map_err(crate::error::WaitFacadeError::Session)?;
+        let trade_account_id = AccountId::new(account_id);
+        self.submit_until(
+            RuntimeCommand::Trade(TradeCommand::Login(TradeLoginCommand {
+                account_id: trade_account_id.clone(),
+                broker_id: broker_id.to_owned(),
+                password: password.to_owned(),
+                client_mac_address: None,
+                account_type,
+                front_broker: None,
+                front_url: None,
+                client_app_id: None,
+                client_system_info: None,
+            })),
+            deadline,
+        )
+        .await?;
+
+        if account_type == TradeAccountType::Future {
+            self.submit_until(
+                RuntimeCommand::Trade(TradeCommand::ConfirmSettlement {
+                    account_id: trade_account_id,
+                }),
+                deadline,
+            )
+            .await?;
+        }
 
         let account = self.account(account_id);
-        self.wait_until_ready_until(|| account.is_ready(), deadline, "trade account not ready")
-            .await?;
+        let reader = self.read_handle();
+        self.wait_until_ready_until(
+            || {
+                if let Some(message) =
+                    trade_login_rejection(&reader, broker_id, account_id, password)?
+                {
+                    return Err(crate::error::WaitFacadeError::Core(ContractError::auth(
+                        message,
+                    )));
+                }
+                account.is_ready()
+            },
+            deadline,
+            "trade account not ready",
+        )
+        .await?;
 
         Ok(account)
     }
@@ -750,6 +826,28 @@ impl TqApi {
             .await
             .map_err(crate::error::WaitFacadeError::Session)?;
 
+        Ok(())
+    }
+
+    async fn submit_until(
+        &self,
+        command: RuntimeCommand,
+        deadline: Option<tokio::time::Instant>,
+    ) -> crate::error::Result<()> {
+        let submit = self.driver.session.submit(command);
+        match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, submit)
+                .await
+                .map_err(|_| {
+                    crate::error::WaitFacadeError::Core(ContractError::auth(
+                        "trade login deadline expired before command submission",
+                    ))
+                })?
+                .map_err(crate::error::WaitFacadeError::Session)?,
+            None => submit
+                .await
+                .map_err(crate::error::WaitFacadeError::Session)?,
+        };
         Ok(())
     }
 
@@ -976,4 +1074,50 @@ fn duration_to_ns(duration: Duration) -> crate::error::Result<i64> {
         .ok_or(crate::error::WaitFacadeError::InvalidState(
             "kline duration is too large",
         ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tqsdk_core::{AdapterRegistry, RuntimeHandle, TradeAccountType};
+    use tqsdk_session::testing::ManualSession;
+
+    use super::TqApi;
+
+    fn manual_api() -> (TqApi, ManualSession) {
+        let mut adapters = AdapterRegistry::new();
+        adapters.register_default_adapters();
+        let manual = ManualSession::from_runtime(RuntimeHandle::with_adapters(adapters));
+        (TqApi::new(manual.client_clone()), manual)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn expired_trade_login_deadline_submits_no_commands() {
+        let (mut api, manual) = manual_api();
+        let deadline = tokio::time::Instant::now() - Duration::from_millis(1);
+
+        let result = api
+            .login_trade_account(
+                "test-broker",
+                "test-account",
+                "test-password",
+                TradeAccountType::Future,
+                Some(deadline),
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("expired deadline must stop before login submission"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("deadline expired"));
+        assert!(
+            manual
+                .drain_dispatches()
+                .expect("manual runtime drain")
+                .is_empty(),
+            "expired deadline must not enqueue login or settlement commands"
+        );
+    }
 }

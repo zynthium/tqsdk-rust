@@ -20,7 +20,9 @@ use tqsdk_core::{
 const DEFAULT_AUTH_URL: &str = "https://auth.shinnytech.com";
 const DEFAULT_NAME_SERVICE_URL: &str = "https://api.shinnytech.com/ns";
 const DEFAULT_BROKER_BASE_URL: &str = "https://files.shinnytech.com";
-const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.8.1";
+// Keep the wire identity aligned with the supported official SDK. Legacy trade
+// gateways use this during connection admission, not merely for diagnostics.
+const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.10.2";
 const HTTP_SEND_ATTEMPTS: usize = 6;
 const HTTP_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 // These are ShinnyTech's public OAuth2 client identifiers, not user
@@ -187,6 +189,16 @@ impl TqAuthProvider {
         Ok(headers)
     }
 
+    fn websocket_connect_options(auth: &AuthContext) -> WebSocketConnectOptions {
+        WebSocketConnectOptions::default()
+            .with_header("Authorization", format!("Bearer {}", auth.access_token()))
+            .with_header("Accept", "application/json")
+            .with_header("User-Agent", DEFAULT_USER_AGENT)
+            // Legacy trade gateways reject lowercase `upgrade`, despite RFC 6455
+            // defining this header token as case-insensitive.
+            .with_header("Connection", "Upgrade")
+    }
+
     fn build_auth_context(&self, access_token: String) -> Result<AuthContext> {
         let claims = self.decode_access_token_claims(&access_token)?;
         let mut auth = AuthContext::new(access_token);
@@ -306,10 +318,19 @@ impl TqAuthProvider {
                 .and_then(Value::as_str)
                 .ok_or_else(|| ContractError::auth("trade broker response missing url"))?;
 
-            Ok(url.to_string())
+            normalize_trade_gateway_url(url)
         })
         .await
     }
+}
+
+fn normalize_trade_gateway_url(url: &str) -> Result<String> {
+    let mut url = reqwest::Url::parse(url)
+        .map_err(|error| ContractError::auth(format!("invalid trade broker url: {error}")))?;
+    if url.path() == "/" {
+        url.set_path("/trade");
+    }
+    Ok(url.into())
 }
 
 fn require_tokio_runtime() -> Result<()> {
@@ -341,12 +362,14 @@ fn is_retryable_http_send_error(error: &reqwest::Error) -> bool {
 
 fn format_reqwest_error(context: &str, err: reqwest::Error) -> String {
     format!(
-        "{context} failed: {err}; timeout={}; connect={}; request={}; body={}; decode={}; debug={err:?}",
+        "{context} failed: timeout={}; connect={}; request={}; body={}; decode={}; status={}",
         err.is_timeout(),
         err.is_connect(),
         err.is_request(),
         err.is_body(),
         err.is_decode(),
+        err.status()
+            .map_or_else(|| "none".to_string(), |status| status.as_u16().to_string()),
     )
 }
 
@@ -366,10 +389,7 @@ impl SessionTopologyResolver for TqAuthProvider {
     ) -> Pin<Box<dyn Future<Output = Result<SessionTopology>> + Send + 'a>> {
         Box::pin(async move {
             let mut topology = SessionTopology::default();
-            let connect = WebSocketConnectOptions::default()
-                .with_header("Authorization", format!("Bearer {}", auth.access_token()))
-                .with_header("Accept", "application/json")
-                .with_header("User-Agent", DEFAULT_USER_AGENT);
+            let connect = Self::websocket_connect_options(auth);
 
             let mut market_url = None;
             let mut market_domains = Vec::new();
@@ -558,7 +578,59 @@ mod tests {
     use std::io::{Read, Write};
 
     use super::{PasswordCredentials, TqAuthProvider};
-    use tqsdk_core::ContractError;
+    use tqsdk_core::{AuthContext, ContractError};
+
+    #[test]
+    fn trade_gateway_url_uses_official_trade_path_for_root_endpoint() {
+        assert_eq!(
+            super::normalize_trade_gateway_url("ws://127.0.0.1:37480").unwrap(),
+            "ws://127.0.0.1:37480/trade"
+        );
+        assert_eq!(
+            super::normalize_trade_gateway_url("ws://127.0.0.1:37480/trade").unwrap(),
+            "ws://127.0.0.1:37480/trade"
+        );
+    }
+
+    #[test]
+    fn websocket_connect_options_use_capitalized_upgrade_token() {
+        let options = TqAuthProvider::websocket_connect_options(&AuthContext::new("token"));
+
+        assert!(
+            options
+                .headers
+                .iter()
+                .any(|(name, value)| name == "Connection" && value == "Upgrade")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reqwest_error_format_does_not_expose_sensitive_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _connection = listener.accept().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+        let error = reqwest::Client::builder()
+            .http1_only()
+            .timeout(std::time::Duration::from_millis(10))
+            .build()
+            .unwrap()
+            .get(format!(
+                "http://{address}/broker.json?account_id=sensitive-account&auth=sensitive-password"
+            ))
+            .send()
+            .await
+            .unwrap_err();
+
+        let message = super::format_reqwest_error("trade broker request", error);
+        assert!(message.contains("timeout=true"));
+        assert!(!message.contains("sensitive-account"));
+        assert!(!message.contains("sensitive-password"));
+        assert!(!message.contains("http://"));
+        server.abort();
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn read_json_response_rejects_declared_body_larger_than_auth_limit() {
