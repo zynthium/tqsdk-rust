@@ -1,27 +1,29 @@
 # Official `tqsdk-ctpse` bundle
 
-This directory defines the offline bundle contract used by the private
-`tqsdk-ctpse-helper` process. It intentionally contains **no official wheel,
-`.so`, DLL, framework, credentials, or customer data** in this revision.
+This directory contains the reviewed, version-pinned official artifacts embedded by the private
+`tqsdk-ctpse-helper` process. It contains no credentials or customer data.
 
-The official package currently declares `License: UNKNOWN`. Do not add its
-artifacts to this repository, a release archive, or Git LFS until the project
-has recorded permission to redistribute the exact release. The helper remains
-usable with a user-supplied library through `TQ_TRADE_CTPSE_LIBRARY`.
+The `1.2.0` bundle covers these Cargo targets:
 
-After that approval, a maintainer runs the reviewed, explicit vendor command:
+| Target | Official payload |
+| --- | --- |
+| `x86_64-unknown-linux-gnu` | `LinuxDataCollect64.so` |
+| `x86_64-apple-darwin`, `aarch64-apple-darwin` | universal `MacDataCollect.framework` |
+| `x86_64-pc-windows-msvc` | `WinDataCollect64.dll` |
+| `i686-pc-windows-msvc` | `WinDataCollect32.dll` |
+
+Windows ARM64 is intentionally unsupported because the official release has no matching
+artifact. `build.rs` never downloads: it verifies the wheel SHA-256 declared in
+`1.2.0/manifest.json`, extracts only the listed runtime files, and embeds them into the helper
+for the current Cargo target.
+
+The official package declares `License: UNKNOWN`. The checked-in binaries were added only after
+the repository maintainer explicitly approved redistribution of this exact release. Re-vendoring
+is a maintainer-only supply-chain action:
 
 ```bash
 python3 tools/vendor_ctpse.py --accept-redistribution-license --version 1.2.0
 ```
 
-It fetches the published wheels, verifies each PyPI SHA-256, writes
-`third_party/tqsdk-ctpse/1.2.0/manifest.json`, and leaves only wheels plus the
-manifest for review. `build.rs` is offline: it never downloads. It validates
-the manifest and wheel hash for the current Cargo target, then embeds only the
-declared native files in `tqsdk-ctpse-helper`.
-
-`manifest.example.json` is the checked-in schema. Its placeholder values are
-not a bundle and are deliberately ignored by the build. An actual
-`manifest.json` must be generated from PyPI metadata, reviewed with the wheel
-files, and committed only after redistribution approval.
+The tool fetches published wheels, verifies the PyPI SHA-256 values, excludes test collectors,
+and atomically writes the manifest. `manifest.example.json` is a non-loadable schema example.

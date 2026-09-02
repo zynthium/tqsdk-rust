@@ -20,3 +20,18 @@ absolute `--library` path (normally via `TQ_TRADE_CTPSE_LIBRARY`). The helper
 does not download and does not attempt a pure-Rust reimplementation of the
 collector. Its process boundary isolates the SDK address space and crashes;
 it is not an OS sandbox for the dynamically loaded official library.
+
+## Offline bundle targets
+
+The reviewed `1.2.0` bundle selects an official artifact from Cargo's `TARGET` at build time:
+
+| Cargo target | Official payload |
+| --- | --- |
+| `x86_64-unknown-linux-gnu` | `LinuxDataCollect64.so` |
+| `x86_64-apple-darwin`, `aarch64-apple-darwin` | universal `MacDataCollect.framework` |
+| `x86_64-pc-windows-msvc` | `WinDataCollect64.dll` |
+| `i686-pc-windows-msvc` | `WinDataCollect32.dll` |
+
+Windows ARM64 has no matching official artifact and therefore has no embedded bundle. The helper
+does not fetch binaries while building or running; production packages place the platform-matched
+helper beside the application executable.

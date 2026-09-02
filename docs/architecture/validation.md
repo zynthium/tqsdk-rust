@@ -640,12 +640,9 @@ cargo test -p tqsdk-session instrument_spec_normalizes_contract_metadata_from_sy
 
 ### CTP helper 验证
 
-默认离线验证运行 `cargo test -p tqsdk-ctpse-helper`。显式官方库联调设置
-`TQ_TRADE_CTPSE_HELPER=/absolute/path/to/tqsdk-ctpse-helper` 与
-`TQ_TRADE_CTPSE_LIBRARY=/absolute/path/to/official-library`，再以
-`TQ_TRADE_REQUIRE_CLIENT_SYSTEM_INFO=1` 运行已授权的实盘登录 smoke。Python fallback 则设置
-`TQ_TRADE_CTPSE_PYTHON=/absolute/path/to/python`。构建过程不联网；官方 wheel 的下载、审核和再分发
-必须在许可确认后单独执行。
+默认离线验证运行 `cargo test -p tqsdk-ctpse-helper` 以及 `cargo build -p tqsdk-ctpse-helper --bin tqsdk-ctpse-helper`。`tools/vendor_ctpse.py --accept-redistribution-license --version 1.2.0` 必须生成 Linux x64、macOS universal2（两种 Apple target）、Windows x64/x86 的清单；它校验官方 SHA-256，并排除 wheel 内的测试 collector。
+
+macOS 和 Windows 的加载验证必须在对应原生 CI runner 上运行 helper，不得以 Linux cross-compile 代替。显式官方库联调设置 `TQ_TRADE_CTPSE_HELPER=/absolute/path/to/tqsdk-ctpse-helper` 与 `TQ_TRADE_CTPSE_LIBRARY=/absolute/path/to/official-library`，再以 `TQ_TRADE_REQUIRE_CLIENT_SYSTEM_INFO=1` 运行已授权的实盘登录 smoke。Python fallback 则设置 `TQ_TRADE_CTPSE_PYTHON=/absolute/path/to/python`。构建过程不联网。
 
 ## V2+ adapter 验收基线
 ### wait adapter

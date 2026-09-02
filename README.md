@@ -386,15 +386,9 @@ npx skills add https://github.com/zynthium/tqsdk-rust
 
 ## CTP 穿透式客户端信息
 
-期货实盘登录优先使用随应用同目录分发的私有 `tqsdk-ctpse-helper`：它在独立进程动态加载经验证的官方
-库，主 SDK 进程不加载该库。也可显式设置 `TQ_TRADE_CTPSE_HELPER` 和可选的
-`TQ_TRADE_CTPSE_LIBRARY`（绝对路径）。没有 native bundle 或 helper 时，SDK 自动回退到当前 `python3` 的官方
-`tqsdk-ctpse`；虚拟环境由 `TQ_TRADE_CTPSE_PYTHON` 指定。设置
-`TQ_TRADE_REQUIRE_CLIENT_SYSTEM_INFO=1` 可要求任何路径采集成功。
+期货实盘登录优先使用随应用同目录分发的私有 `tqsdk-ctpse-helper`：它在独立进程动态加载经验证的官方库，主 SDK 进程不加载该库。也可显式设置 `TQ_TRADE_CTPSE_HELPER` 和可选的 `TQ_TRADE_CTPSE_LIBRARY`（绝对路径）；没有 native bundle helper 时，SDK 自动回退到当前 `python3` 的官方 `tqsdk-ctpse`，虚拟环境由 `TQ_TRADE_CTPSE_PYTHON` 指定。设置 `TQ_TRADE_REQUIRE_CLIENT_SYSTEM_INFO=1` 可要求任何路径采集成功。
 
-仓库当前不分发官方原生二进制，直到其再分发许可得到确认；这不影响用户提供 `.so`/DLL 或 Python
-fallback。显式 native 配置失败会立即失败，不会静默改用 Python；生产发布若启用 embedded bundle，必须把
-helper 与应用主程序并置。
+随仓库审核分发的 `1.2.0` 离线 bundle 覆盖 Linux x64、macOS universal2（Intel / Apple Silicon）、Windows x64/x86；Windows ARM64 因官方没有匹配库而不支持 embedded bundle。显式 native 配置失败会立即失败，不会静默改用 Python；生产发布必须把与目标平台匹配的 helper 和应用主程序并置。
 
 ## API 形态示例
 

@@ -195,7 +195,11 @@ fn cache_root() -> Result<PathBuf, HelperError> {
     let base = env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(env::temp_dir);
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    let base = env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join("Library").join("Caches"))
+        .unwrap_or_else(env::temp_dir);
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     let base = env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))

@@ -1,13 +1,51 @@
 {
-  "version": "1.2.0",
   "artifacts": {
+    "aarch64-apple-darwin": {
+      "files": [
+        "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/MacDataCollect.framework/Versions/A/MacDataCollect",
+        "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/MacDataCollect.framework/Versions/A/Headers/DataCollect.h",
+        "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/MacDataCollect.framework/Versions/A/Resources/Info.plist",
+        "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/MacDataCollect.framework/Versions/A/_CodeSignature/CodeResources"
+      ],
+      "primary_library": "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/MacDataCollect.framework/Versions/A/MacDataCollect",
+      "sha256": "ac3ac2c4dda3114a92c11a9c23cbef9e8e2475e310b23b89809d6ca57cacd976",
+      "wheel": "tqsdk_ctpse-1.2.0-py3-none-macosx_10_15_universal2.whl"
+    },
+    "i686-pc-windows-msvc": {
+      "files": [
+        "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/WinDataCollect32.dll"
+      ],
+      "primary_library": "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/WinDataCollect32.dll",
+      "sha256": "89bfa3fb4e6795b64739981c02cc95e62cad373f2d0acdc71f12389f642b5ccd",
+      "wheel": "tqsdk_ctpse-1.2.0-py3-none-win32.whl"
+    },
+    "x86_64-apple-darwin": {
+      "files": [
+        "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/MacDataCollect.framework/Versions/A/MacDataCollect",
+        "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/MacDataCollect.framework/Versions/A/Headers/DataCollect.h",
+        "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/MacDataCollect.framework/Versions/A/Resources/Info.plist",
+        "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/MacDataCollect.framework/Versions/A/_CodeSignature/CodeResources"
+      ],
+      "primary_library": "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/MacDataCollect.framework/Versions/A/MacDataCollect",
+      "sha256": "ac3ac2c4dda3114a92c11a9c23cbef9e8e2475e310b23b89809d6ca57cacd976",
+      "wheel": "tqsdk_ctpse-1.2.0-py3-none-macosx_10_15_universal2.whl"
+    },
+    "x86_64-pc-windows-msvc": {
+      "files": [
+        "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/WinDataCollect64.dll"
+      ],
+      "primary_library": "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/WinDataCollect64.dll",
+      "sha256": "6dc37c78cbdbd07a5d28ba64676cf9f376dd7901aba1c3a78ea40d62d757967b",
+      "wheel": "tqsdk_ctpse-1.2.0-py3-none-win_amd64.whl"
+    },
     "x86_64-unknown-linux-gnu": {
-      "wheel": "tqsdk_ctpse-1.2.0-py3-none-manylinux1_x86_64.whl",
-      "sha256": "e0c6521329a5ad73e4bf25cfe37719385df09748bf87cc65fbb02c1debc9642f",
-      "primary_library": "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/LinuxDataCollect64.so",
       "files": [
         "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/LinuxDataCollect64.so"
-      ]
+      ],
+      "primary_library": "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/LinuxDataCollect64.so",
+      "sha256": "e0c6521329a5ad73e4bf25cfe37719385df09748bf87cc65fbb02c1debc9642f",
+      "wheel": "tqsdk_ctpse-1.2.0-py3-none-manylinux1_x86_64.whl"
     }
-  }
+  },
+  "version": "1.2.0"
 }

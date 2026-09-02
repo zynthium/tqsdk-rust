@@ -33,10 +33,9 @@
 
 ### CTP 原生采集隔离
 
-官方原生 `tqsdk-ctpse` 只能由私有 `tqsdk-ctpse-helper` 子进程动态加载。`tqsdk-session` 只接收并验证
-其窄 JSON 输出，负责补全登录命令与 Python fallback；它不得持有动态库句柄、传递账号/密码，或把 helper
-逻辑复制到 facade。helper 自身不发起网络请求，但官方动态库必须被视为受信任且未受 OS sandbox 限制。wheel
-bundle 构建必须离线且先完成再分发许可确认。
+官方原生 `tqsdk-ctpse` 只能由私有 `tqsdk-ctpse-helper` 子进程动态加载。`tqsdk-session` 只接收并验证其窄 JSON 输出，负责补全登录命令与 Python fallback；它不得持有动态库句柄、传递账号/密码，或把 helper 逻辑复制到 facade。helper 自身不发起网络请求，但官方动态库必须被视为受信任且未受 OS sandbox 限制。
+
+`1.2.0` wheel bundle 由 maintainer 在许可确认后一次性下载并提交；`build.rs` 仅按 Cargo `TARGET` 校验、解压和嵌入 Linux x64、macOS universal2、Windows x64/x86 的已验证官方产物，绝不联网。Windows ARM64 没有官方产物，不能宣称 embedded support。
 
 ## Codex 多代理路由
 

@@ -207,16 +207,9 @@ dispatch 前返回不可重试错误。
 
 ## CTP 原生 helper
 
-期货 `TradeCommand::Login` 的客户端信息优先级为：调用方显式字段、
-`TQ_TRADE_CLIENT_*`、显式原生 helper（`TQ_TRADE_CTPSE_HELPER`，可选
-`TQ_TRADE_CTPSE_LIBRARY`）、显式 Python（`TQ_TRADE_CTPSE_PYTHON`）、随应用同目录分发的
-helper、默认 `python3` 采集器。原生 helper 在独立进程中动态加载官方库，stdout 只输出系统信息 JSON；
-它和 Python 采集器都不会收到账号或交易密码。session 会验证 Base64、长度与 MAC。
+期货 `TradeCommand::Login` 的客户端信息优先级为：调用方显式字段、`TQ_TRADE_CLIENT_*`、显式原生 helper（`TQ_TRADE_CTPSE_HELPER`，可选 `TQ_TRADE_CTPSE_LIBRARY`）、显式 Python（`TQ_TRADE_CTPSE_PYTHON`）、随应用同目录分发的 helper、默认 `python3` 采集器。原生 helper 在独立进程中动态加载官方库，stdout 只输出系统信息 JSON；采集器不会收到账号或交易密码，session 会验证 Base64、长度与 MAC。
 
-显式 native 配置失败会 fail-closed，即使同时配置 Python 也不会静默切换采集实现；自动发现的 helper
-失败才会回退 Python。`TQ_TRADE_CTPSE_LIBRARY` 必须是绝对路径；`TQ_TRADE_REQUIRE_CLIENT_SYSTEM_INFO=1`
-会把任何采集失败变为登录前错误。嵌入式 bundle 仅能由离线、经许可审核的官方 wheel 构建；当前仓库未
-分发该二进制。要在部署中无感使用 native 路径，发布包必须把 `tqsdk-ctpse-helper` 放在主程序同目录。
+审核后的 `1.2.0` embedded bundle 支持 Linux x64、macOS Intel / Apple Silicon、Windows x64/x86；Windows ARM64 无官方库，因此不提供 embedded bundle。显式 native 配置失败会 fail-closed；自动发现的 helper 失败才会回退 Python。`TQ_TRADE_CTPSE_LIBRARY` 必须是绝对路径；`TQ_TRADE_REQUIRE_CLIENT_SYSTEM_INFO=1` 会把任何采集失败变为登录前错误。生产发布必须把目标平台对应的 `tqsdk-ctpse-helper` 放在主程序同目录。
 
 ## 示例
 

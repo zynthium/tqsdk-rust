@@ -164,3 +164,50 @@ jobs:
 
       - name: Build fuzz targets
         run: cargo +nightly fuzz build
+
+  ctpse-helper-platforms:
+    name: CTPSE helper (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-latest
+            target: i686-pc-windows-msvc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build embedded helper
+        run: cargo build -p tqsdk-ctpse-helper --bin tqsdk-ctpse-helper --target ${{ matrix.target }}
+
+      - name: Run embedded helper (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          payload="$(target/${{ matrix.target }}/debug/tqsdk-ctpse-helper)"
+          printf '%s' "$payload" | grep -Eq '^\{"client_system_info":"[^"[:space:]]+"\}$'
+
+      - name: Run embedded helper (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $payload = & "target/${{ matrix.target }}/debug/tqsdk-ctpse-helper.exe"
+          if ($LASTEXITCODE -ne 0) { throw "helper failed with exit code $LASTEXITCODE" }
+          $result = $payload | ConvertFrom-Json
+          if ([string]::IsNullOrWhiteSpace($result.client_system_info)) {
+            throw "helper returned no client_system_info"
+          }

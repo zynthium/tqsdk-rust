@@ -53,9 +53,9 @@ V1 是：
 
 ### CTP 原生采集隔离
 
-`tqsdk-core::TradeLoginCommand` 只承载可选的 MAC、App ID 和系统信息字段。`tqsdk-session` 在命令提交边界
-校验并补全字段；私有 `tqsdk-ctpse-helper` 隔离官方原生库的动态加载，只输出系统信息 JSON。session 不持有
-动态库句柄，并在没有离线 bundle 时回退官方 Python 采集器。helper 不是 facade、runtime 或 public API。
+官方原生 `tqsdk-ctpse` 只能由私有 `tqsdk-ctpse-helper` 子进程动态加载。`tqsdk-session` 只接收并验证其窄 JSON 输出，绝不复制或持有 OS 动态库句柄。审核后的 `1.2.0` 离线 bundle 在构建时按 Cargo `TARGET` 选择官方 Linux x64、macOS universal2、Windows x64/x86 产物；helper 在运行时解压至用户私有缓存。Windows ARM64 无官方产物，自动路径继续回退官方 Python 采集器。
+
+helper 不是 facade、runtime 或 public API；它隔离 SDK 地址空间中的 native crash，但不是对官方库的 OS sandbox。
 
 ## 当前实现状态
 当前仓库里的 V1 已经以“极简但协议完整”的 core contract 落地完成。

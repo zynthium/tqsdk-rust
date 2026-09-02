@@ -48,21 +48,27 @@ def targets_for_wheel(filename: str) -> tuple[str, ...]:
 def bundled_files_and_primary(wheel: Path) -> tuple[list[str], str]:
     with zipfile.ZipFile(wheel) as archive:
         names = archive.namelist()
-    files = [
-        name
-        for name in names
-        if native_relative_path(name) is not None
-        and not name.endswith("/")
-        and not name.endswith((".py", ".pyc"))
-        and ".dist-info/" not in name
-    ]
+        files = [
+            name
+            for name in names
+            if native_relative_path(name) is not None
+            and not name.endswith("/")
+            and not name.endswith((".py", ".pyc"))
+            and ".dist-info/" not in name
+            and not is_test_payload(name)
+        ]
     if not files:
         raise ValueError("wheel has no native tqsdk_ctpse payload")
 
     def likely_primary(name: str) -> bool:
         lower = name.lower()
-        return "collect" in lower and (
-            lower.endswith((".so", ".dll", ".dylib")) or ".framework/" in lower
+        if "collect" not in lower:
+            return False
+        if lower.endswith((".so", ".dll", ".dylib")):
+            return True
+        relative = native_relative_path(name)
+        return relative is not None and relative.as_posix().lower().endswith(
+            ".framework/versions/a/macdatacollect"
         )
 
     primary = next((name for name in files if likely_primary(name)), None)
@@ -73,6 +79,10 @@ def bundled_files_and_primary(wheel: Path) -> tuple[list[str], str]:
         if relative is None or relative.is_absolute() or ".." in relative.parts:
             raise ValueError("wheel native payload has an unsafe path")
     return files, primary
+
+
+def is_test_payload(name: str) -> bool:
+    return any("test" in component.lower() for component in PurePosixPath(name).parts)
 
 
 def native_relative_path(name: str) -> PurePosixPath | None:
@@ -158,7 +168,13 @@ def main() -> int:
                 raise ValueError(f"multiple wheels match Cargo target {target}")
             artifacts[target] = artifact
 
-    required_targets = {"x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"}
+    required_targets = {
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "i686-pc-windows-msvc",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+    }
     missing = required_targets - artifacts.keys()
     if missing:
         raise ValueError(f"release lacks required target wheels: {', '.join(sorted(missing))}")

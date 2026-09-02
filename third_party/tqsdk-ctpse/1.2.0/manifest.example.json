@@ -2,12 +2,22 @@
   "version": "1.2.0",
   "artifacts": {
     "x86_64-unknown-linux-gnu": {
-      "wheel": "tqsdk_ctpse-1.2.0-<official-linux-tag>.whl",
+      "wheel": "tqsdk_ctpse-1.2.0-py3-none-manylinux1_x86_64.whl",
       "sha256": "<lowercase-pypi-sha256>",
-      "primary_library": "tqsdk_ctpse-<version>.data/purelib/tqsdk_ctpse/LinuxDataCollect64.so",
-      "files": [
-        "tqsdk_ctpse-<version>.data/purelib/tqsdk_ctpse/LinuxDataCollect64.so"
-      ]
+      "primary_library": "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/LinuxDataCollect64.so",
+      "files": ["tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/LinuxDataCollect64.so"]
+    },
+    "x86_64-apple-darwin": {
+      "wheel": "tqsdk_ctpse-1.2.0-py3-none-macosx_10_15_universal2.whl",
+      "sha256": "<lowercase-pypi-sha256>",
+      "primary_library": "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/MacDataCollect.framework/Versions/A/MacDataCollect",
+      "files": ["tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/MacDataCollect.framework/Versions/A/MacDataCollect"]
+    },
+    "x86_64-pc-windows-msvc": {
+      "wheel": "tqsdk_ctpse-1.2.0-py3-none-win_amd64.whl",
+      "sha256": "<lowercase-pypi-sha256>",
+      "primary_library": "tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/WinDataCollect64.dll",
+      "files": ["tqsdk_ctpse-1.2.0.data/purelib/tqsdk_ctpse/WinDataCollect64.dll"]
     }
   }
 }
