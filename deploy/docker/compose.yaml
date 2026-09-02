@@ -14,6 +14,10 @@ services:
     environment:
       TQSDK_RELAY_HISTORY_ROOT: /var/lib/tqsdk/history-published
       TZ: ${TQSDK_TIMEZONE:-Asia/Shanghai}
+      # Compose inherits these only from its launch environment; credentials
+      # are intentionally not kept in relay.env or the repository.
+      TQ_AUTH_USER:
+      TQ_AUTH_PASS:
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777,noexec,nosuid
