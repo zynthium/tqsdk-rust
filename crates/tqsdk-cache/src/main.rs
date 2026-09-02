@@ -1639,6 +1639,18 @@ impl ProviderHistoricalUniverseInput {
             Self::V2(input) => input.input_sources_sha256(),
         }
     }
+
+    fn scope_provider_current_bootstrap(
+        &self,
+        acquisition: &tqsdk_data::HistoricalCatalogAcquisition,
+    ) -> tqsdk_data::Result<tqsdk_data::HistoricalCatalogAcquisition> {
+        match self {
+            Self::Legacy(_) => Ok(acquisition.clone()),
+            Self::V2(input) => {
+                tqsdk_data::scope_provider_current_timeline_bootstrap(acquisition, input)
+            }
+        }
+    }
 }
 
 fn prepare_provider_historical_universe(
@@ -1875,11 +1887,16 @@ async fn fill_provider_history_universe(
     let observed_at_ns = chrono::Utc::now()
         .timestamp_nanos_opt()
         .ok_or_else(|| CliError::Usage("current timestamp exceeds nanosecond range".to_string()))?;
-    let acquisition = tqsdk_data::ProviderCurrentHistoricalCatalogAcquirer::new(discovery)
-        .acquire(resolved.window.end_ns, observed_at_ns)
-        .await?;
+    let discovered_acquisition =
+        tqsdk_data::ProviderCurrentHistoricalCatalogAcquirer::new(discovery)
+            .acquire(resolved.window.end_ns, observed_at_ns)
+            .await?;
+    let acquisition = historical.scope_provider_current_bootstrap(&discovered_acquisition)?;
     let store = tqsdk_data::HistoricalUniverseArtifactStore::new(&canonical_cache_dir);
     if !args.dry_run {
+        if acquisition.acquisition_sha256 != discovered_acquisition.acquisition_sha256 {
+            store.publish_acquisition(&discovered_acquisition)?;
+        }
         store.publish_acquisition(&acquisition)?;
         return bootstrap_provider_history_and_fill(ProviderHistoryFillContext {
             canonical_cache_dir,
@@ -1927,11 +1944,15 @@ async fn fill_provider_history_universe(
             "normalized_ast_sha256": historical.normalized_ast_sha256(),
             "input_sources_sha256": historical.input_sources_sha256(),
             "write_policy": args.historical_plan_write_policy.to_string(),
-            "proof": "provider_current_observed",
+                "proof": "provider_current_observed",
                 "source_identity": acquisition.source_identity,
                 "scope_exchanges": tqsdk_data::PROVIDER_CURRENT_PHYSICAL_FUTURES_EXCHANGES,
                 "complete_roster": acquisition.complete,
-            "contracts": acquisition.contracts.len(),
+                "discovery_contracts": discovered_acquisition.contracts.len(),
+                "bootstrap_contracts": acquisition.contracts.len(),
+                "discovery_acquisition_sha256": discovered_acquisition.acquisition_sha256,
+                "bootstrap_acquisition_sha256": acquisition.acquisition_sha256,
+                "contracts": acquisition.contracts.len(),
             "expired_contracts": acquisition.contracts.iter().filter(|contract| contract.expired).count(),
             "active_contracts": acquisition.contracts.iter().filter(|contract| !contract.expired).count(),
             "kind_boundaries_proven": proven_boundaries,
@@ -2086,8 +2107,9 @@ async fn refresh_provider_membership(
             "refresh-provider-membership requires TQ_AUTH_USER and TQ_AUTH_PASS".to_string(),
         )
     })?;
-    let current_before =
+    let discovered_before =
         acquire_provider_membership_current(&user, &pass, acquisition.requested_as_of_ns).await?;
+    let current_before = acquisition.project_provider_current_refresh(&discovered_before)?;
     acquisition.validate_provider_daily_refresh_current(&current_before)?;
 
     let cancellation = BacktestHistoryFillCancellation::new();
@@ -2293,9 +2315,10 @@ async fn refresh_provider_membership(
         }
 
         reporter.planning("revalidating stable provider roster before publishing retry result");
-        let current_after =
+        let discovered_after =
             acquire_provider_membership_current(&user, &pass, acquisition.requested_as_of_ns)
                 .await?;
+        let current_after = acquisition.project_provider_current_refresh(&discovered_after)?;
         acquisition.validate_provider_daily_refresh_current(&current_after)?;
         if cancellation.is_cancelled() {
             progress_session.finish(
@@ -2780,10 +2803,14 @@ async fn bootstrap_provider_history_and_fill(
             tqsdk_data::session_client_builder_for_futures_discovery(&auth_user, &auth_pass)
                 .build()
                 .map_err(tqsdk::Error::from)?;
-        let refreshed =
+        let refreshed_discovery =
             tqsdk_data::ProviderCurrentHistoricalCatalogAcquirer::new(refreshed_discovery)
                 .acquire(bootstrap_end_ns, completed_at_ns)
                 .await?;
+        let refreshed = historical.scope_provider_current_bootstrap(&refreshed_discovery)?;
+        if refreshed.acquisition_sha256 != refreshed_discovery.acquisition_sha256 {
+            store.publish_acquisition(&refreshed_discovery)?;
+        }
         store.publish_acquisition(&refreshed)?;
         if !refreshed.complete
             || acquisition.roster_after != refreshed.roster_after

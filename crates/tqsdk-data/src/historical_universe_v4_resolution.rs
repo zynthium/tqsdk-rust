@@ -7,14 +7,15 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     ActiveInterval, CatalogContract, DataError, DerivedView, DynamicUniverseScope,
-    HistoricalCatalogAcquisition, HistoricalCatalogProof, HistoricalDataKind,
-    HistoricalDependencyRole, HistoricalSemanticCatalog, HistoricalUniverseDependency,
-    HistoricalUniverseKindTarget, HistoricalUniversePlan, HistoricalUniversePlanExecution,
-    HistoricalUniversePlanIdentity, HistoricalUniversePlanV3Execution,
-    HistoricalUniversePlanV3Identity, HistoricalUniversePlanV4, HistoricalUniversePlanV4Execution,
-    HistoricalUniversePlanV4Identity, HistoricalUniversePlanV5, HistoricalUniverseTimeline, Result,
-    UniverseBudget, UniverseInstrumentId, UniverseMemberChange, UniverseMode, UniverseProduct,
-    UniverseSelectorSpec, UniverseSpec, UniverseTarget, UniverseTimelineBatch, UniverseView,
+    ExpandedUniverseInput, HistoricalAcquisitionContract, HistoricalCatalogAcquisition,
+    HistoricalCatalogProof, HistoricalDataKind, HistoricalDependencyRole,
+    HistoricalSemanticCatalog, HistoricalUniverseDependency, HistoricalUniverseKindTarget,
+    HistoricalUniversePlan, HistoricalUniversePlanExecution, HistoricalUniversePlanIdentity,
+    HistoricalUniversePlanV3Execution, HistoricalUniversePlanV3Identity, HistoricalUniversePlanV4,
+    HistoricalUniversePlanV4Execution, HistoricalUniversePlanV4Identity, HistoricalUniversePlanV5,
+    HistoricalUniverseTimeline, Result, UniverseBudget, UniverseInstrumentId, UniverseMemberChange,
+    UniverseMode, UniverseProduct, UniverseSelectorSpec, UniverseSpec, UniverseTarget,
+    UniverseTimelineBatch, UniverseView,
 };
 
 pub const HISTORICAL_UNIVERSE_V3_PROJECTION_CANONICALIZER_ID: &str =
@@ -23,6 +24,269 @@ pub const HISTORICAL_UNIVERSE_V3_PROJECTION_COMPILER_ID: &str =
     "tqsdk.universe.v2-v3-projection.compiler.v1";
 pub const HISTORICAL_UNIVERSE_CONTINUOUS_ID: &str =
     "sha256:cee33b4d6151745c7de17665632ea9c214cb4c636d4c1f20b55f2924634a279a";
+const PROVIDER_TIMELINE_BOOTSTRAP_SCOPE_ID: &str =
+    "tqsdk.provider-history.timeline-bootstrap-closure.v1";
+
+/// Projects a complete provider-current discovery into the smallest physical
+/// roster whose native-daily membership must be observed before compiling a
+/// V2 historical timeline. Full roster discovery remains separate; this
+/// acquisition is deliberately scoped to the timeline's visible physical
+/// members and retained logical-view dependencies.
+#[doc(hidden)]
+pub fn scope_provider_current_timeline_bootstrap(
+    acquisition: &HistoricalCatalogAcquisition,
+    input: &ExpandedUniverseInput,
+) -> Result<HistoricalCatalogAcquisition> {
+    acquisition.validate()?;
+    let spec = input.spec().ok_or_else(|| {
+        DataError::Validation("timeline bootstrap scope requires Universe V2 input".to_string())
+    })?;
+    if spec.mode() != UniverseMode::Timeline {
+        return Err(DataError::Validation(
+            "provider bootstrap scope requires timeline(...) Universe V2 mode".to_string(),
+        ));
+    }
+    if spec
+        .includes()
+        .iter()
+        .any(|selector| matches!(selector.view(), UniverseView::Main | UniverseView::Top(_)))
+    {
+        return Err(DataError::Validation(
+            "timeline main/top requires historical ranking before provider bootstrap".to_string(),
+        ));
+    }
+
+    let required_symbols = provider_timeline_bootstrap_symbols(
+        &acquisition.contracts,
+        spec,
+        input.expanded_symbols(),
+    )?;
+    let discovered_symbols = acquisition
+        .contracts
+        .iter()
+        .map(|contract| contract.symbol.as_str())
+        .collect::<BTreeSet<_>>();
+    if required_symbols.len() == discovered_symbols.len()
+        && required_symbols
+            .iter()
+            .all(|symbol| discovered_symbols.contains(symbol.as_str()))
+    {
+        return Ok(acquisition.clone());
+    }
+    let source_identity = format!(
+        "{}+{}",
+        acquisition.source_identity, PROVIDER_TIMELINE_BOOTSTRAP_SCOPE_ID
+    );
+    let canonical_universe = format!(
+        "timeline-bootstrap-closure:v1:{}:{}",
+        spec.canonical_ast_hash(),
+        input.input_sources_sha256().unwrap_or("none"),
+    );
+    acquisition.project_provider_current_bootstrap(
+        source_identity,
+        canonical_universe,
+        &required_symbols,
+    )
+}
+
+#[derive(Debug, Clone)]
+struct ProviderTimelineBootstrapOccurrence {
+    symbol: String,
+    physical_symbol: Option<String>,
+    provenance: UniverseView,
+    exchange: String,
+    product: String,
+}
+
+fn provider_timeline_bootstrap_symbols(
+    contracts: &[HistoricalAcquisitionContract],
+    spec: &UniverseSpec,
+    expanded_symbols: &[String],
+) -> Result<BTreeSet<String>> {
+    let products = contracts
+        .iter()
+        .map(|contract| UniverseProduct::new(&contract.exchange_id, &contract.product_id))
+        .collect::<BTreeSet<_>>();
+    let mut occurrences = Vec::new();
+
+    for selector in spec.includes() {
+        match selector.view() {
+            UniverseView::Contract => {
+                for target in selector.targets() {
+                    for contract in contracts
+                        .iter()
+                        .filter(|contract| bootstrap_contract_matches_target(contract, target))
+                    {
+                        occurrences.push(physical_bootstrap_occurrence(
+                            contract,
+                            UniverseView::Contract,
+                        ));
+                    }
+                }
+            }
+            view @ (UniverseView::Continuous | UniverseView::Index) => {
+                for product in matching_products(&products, selector.targets()) {
+                    occurrences.push(logical_bootstrap_occurrence(view, product));
+                }
+            }
+            UniverseView::Symbol => {
+                for symbol in selector.targets().iter().filter_map(|target| match target {
+                    UniverseTarget::Symbol { symbol } => Some(symbol),
+                    _ => None,
+                }) {
+                    include_bootstrap_symbol(&mut occurrences, contracts, &products, symbol)?;
+                }
+            }
+            UniverseView::Main | UniverseView::Top(_) => {
+                unreachable!("timeline ranking selectors are rejected before bootstrap scoping")
+            }
+        }
+    }
+    for symbol in expanded_symbols {
+        include_bootstrap_symbol(&mut occurrences, contracts, &products, symbol)?;
+    }
+
+    occurrences.retain(|occurrence| {
+        let excluded_by_view = spec.excludes().iter().any(|selector| {
+            if selector.view() == UniverseView::Symbol {
+                return selector.targets().iter().any(|target| {
+                    matches!(target, UniverseTarget::Symbol { symbol } if symbol == &occurrence.symbol)
+                });
+            }
+            selector.view() == occurrence.provenance
+                && selector
+                    .targets()
+                    .iter()
+                    .any(|target| bootstrap_occurrence_matches_target(occurrence, target))
+        });
+        !excluded_by_view
+            && !spec
+                .global_filters()
+                .iter()
+                .any(|target| bootstrap_occurrence_matches_target(occurrence, target))
+    });
+
+    let mut required_symbols = BTreeSet::new();
+    for occurrence in occurrences {
+        if let Some(symbol) = occurrence.physical_symbol {
+            required_symbols.insert(symbol);
+            continue;
+        }
+        required_symbols.extend(
+            contracts
+                .iter()
+                .filter(|contract| {
+                    contract.exchange_id == occurrence.exchange
+                        && contract.product_id == occurrence.product
+                })
+                .map(|contract| contract.symbol.clone()),
+        );
+    }
+    if required_symbols.is_empty() {
+        return Err(DataError::Validation(
+            "historical timeline bootstrap scope has no physical candidates".to_string(),
+        ));
+    }
+    Ok(required_symbols)
+}
+
+fn include_bootstrap_symbol(
+    occurrences: &mut Vec<ProviderTimelineBootstrapOccurrence>,
+    contracts: &[HistoricalAcquisitionContract],
+    products: &BTreeSet<UniverseProduct>,
+    symbol: &str,
+) -> Result<()> {
+    if let Some(contract) = contracts.iter().find(|contract| contract.symbol == symbol) {
+        occurrences.push(physical_bootstrap_occurrence(
+            contract,
+            UniverseView::Symbol,
+        ));
+        return Ok(());
+    }
+    let Some((view, product)) = classify_logical_symbol(symbol) else {
+        return Err(DataError::Validation(format!(
+            "historical Universe symbol {symbol} cannot be classified or proven"
+        )));
+    };
+    if !products.contains(&product) {
+        return Err(DataError::Validation(format!(
+            "historical Universe symbol {symbol} references an unknown product"
+        )));
+    }
+    let mut occurrence = logical_bootstrap_occurrence(view, &product);
+    occurrence.symbol = symbol.to_string();
+    occurrence.provenance = UniverseView::Symbol;
+    occurrences.push(occurrence);
+    Ok(())
+}
+
+fn physical_bootstrap_occurrence(
+    contract: &HistoricalAcquisitionContract,
+    provenance: UniverseView,
+) -> ProviderTimelineBootstrapOccurrence {
+    ProviderTimelineBootstrapOccurrence {
+        symbol: contract.symbol.clone(),
+        physical_symbol: Some(contract.symbol.clone()),
+        provenance,
+        exchange: contract.exchange_id.clone(),
+        product: contract.product_id.clone(),
+    }
+}
+
+fn logical_bootstrap_occurrence(
+    view: UniverseView,
+    product: &UniverseProduct,
+) -> ProviderTimelineBootstrapOccurrence {
+    let symbol = match view {
+        UniverseView::Continuous => format!("KQ.m@{}.{}", product.exchange(), product.product()),
+        UniverseView::Index => format!("KQ.i@{}.{}", product.exchange(), product.product()),
+        _ => unreachable!("bootstrap logical occurrence requires a derived view"),
+    };
+    ProviderTimelineBootstrapOccurrence {
+        symbol,
+        physical_symbol: None,
+        provenance: view,
+        exchange: product.exchange().to_string(),
+        product: product.product().to_string(),
+    }
+}
+
+fn bootstrap_contract_matches_target(
+    contract: &HistoricalAcquisitionContract,
+    target: &UniverseTarget,
+) -> bool {
+    match target {
+        UniverseTarget::All => true,
+        UniverseTarget::Exchange { exchange } => contract.exchange_id == *exchange,
+        UniverseTarget::Product { exchange, product } => {
+            contract.exchange_id == *exchange && contract.product_id == *product
+        }
+        UniverseTarget::Contract {
+            exchange,
+            contract: suffix,
+        } => contract.exchange_id == *exchange && contract.symbol == format!("{exchange}.{suffix}"),
+        UniverseTarget::Symbol { symbol } => contract.symbol == *symbol,
+    }
+}
+
+fn bootstrap_occurrence_matches_target(
+    occurrence: &ProviderTimelineBootstrapOccurrence,
+    target: &UniverseTarget,
+) -> bool {
+    match target {
+        UniverseTarget::All => true,
+        UniverseTarget::Exchange { exchange } => occurrence.exchange == *exchange,
+        UniverseTarget::Product { exchange, product } => {
+            occurrence.exchange == *exchange && occurrence.product == *product
+        }
+        UniverseTarget::Contract { exchange, contract } => {
+            occurrence.physical_symbol.is_some()
+                && occurrence.exchange == *exchange
+                && occurrence.symbol == format!("{exchange}.{contract}")
+        }
+        UniverseTarget::Symbol { symbol } => occurrence.symbol == *symbol,
+    }
+}
 
 /// Compatibility policy for legacy V4/V3 write-set construction.
 ///

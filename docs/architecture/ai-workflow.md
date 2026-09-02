@@ -25,7 +25,7 @@
 - `tqsdk-core` 拥有 protocol runtime、状态、commit/revision、cursor、adapter 与底层 contract；交易登录命令仅承载可选的穿透式字段，不负责采集客户端信息，也不拥有 facade、direct query、task 或 data 语义。
 - `tqsdk` 仅是默认入口、prelude、轻量 wrapper 和 curated re-export；不拥有第二棵状态树或第二套 runtime。
 - `tqsdk-session` 拥有 shared session、one-shot request/response、direct query、GraphQL、metadata、calendar、ranking、EDB、auth refresh 与 replay control；它在命令提交边界使用官方 `tqsdk-ctpse` 采集、校验并补全 CTP 穿透式客户端信息，`tqsdk-wait` 不复制该逻辑。
-- `tqsdk-wait` 仅做 single-owner continuous consumption；`tqsdk-task` 是执行层，`tqsdk-data` 是 research/offline data 层。
+- `tqsdk-wait` 仅做 single-owner continuous consumption；`tqsdk-task` 是执行层，`tqsdk-data` 是 research/offline data 层，并拥有 V2 timeline 的 bootstrap closure、历史 proof/catalog/plan 语义；`tqsdk-cache` 不得自行解释 exclusion 或 derived dependency。
 - `tqsdk-relay` 是可选 CacheOnly market relay；不进入默认 SDK 依赖路径，不扩展为通用代理或 provider 聚合。
 - 可见状态变化只能走 `RuntimeHandle -> StateStore -> CommitResult -> RuntimeReader/UpdateCursor`；禁止旁路通知、私有 revision 或第二棵状态树。
 - domain 写入经过 `MutationSource`；command/order 遵守 runtime 状态机，禁止 adapter 本地字符串判断绕过转换校验。

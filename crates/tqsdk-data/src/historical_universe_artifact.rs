@@ -621,6 +621,113 @@ impl HistoricalCatalogAcquisition {
         Ok(acquisition)
     }
 
+    /// Derives a stable provider-current acquisition for one explicit bootstrap
+    /// closure. The source roster was observed in full before this projection;
+    /// the projected roster contains only symbols whose native-daily membership
+    /// must be proven for the requested historical universe.
+    #[doc(hidden)]
+    pub fn project_provider_current_bootstrap(
+        &self,
+        source_identity: impl Into<String>,
+        canonical_universe: impl Into<String>,
+        required_symbols: &BTreeSet<String>,
+    ) -> Result<Self> {
+        self.validate()?;
+        if self.proof != HistoricalCatalogProof::ProviderCurrentObserved || !self.complete {
+            return Err(validation(
+                "provider bootstrap projection requires complete provider-current acquisition",
+            ));
+        }
+        if required_symbols.is_empty() {
+            return Err(validation(
+                "provider bootstrap projection requires at least one symbol",
+            ));
+        }
+
+        let acquired = self
+            .contracts
+            .iter()
+            .map(|contract| contract.symbol.as_str())
+            .collect::<BTreeSet<_>>();
+        if !required_symbols
+            .iter()
+            .all(|symbol| acquired.contains(symbol.as_str()))
+        {
+            return Err(validation(
+                "provider bootstrap projection references symbol outside provider roster",
+            ));
+        }
+
+        let roster_before = self
+            .roster_before
+            .iter()
+            .filter(|symbol| required_symbols.contains(*symbol))
+            .cloned()
+            .collect::<Vec<_>>();
+        let roster_after = self
+            .roster_after
+            .iter()
+            .filter(|symbol| required_symbols.contains(*symbol))
+            .cloned()
+            .collect::<Vec<_>>();
+        let contracts = self
+            .contracts
+            .iter()
+            .filter(|contract| required_symbols.contains(&contract.symbol))
+            .cloned()
+            .collect::<Vec<_>>();
+        if roster_before.len() != required_symbols.len()
+            || roster_after.len() != required_symbols.len()
+            || contracts.len() != required_symbols.len()
+        {
+            return Err(validation(
+                "provider bootstrap projection does not cover its requested symbols",
+            ));
+        }
+
+        Self::new(
+            HistoricalCatalogProof::ProviderCurrentObserved,
+            source_identity,
+            canonical_universe,
+            self.requested_as_of_ns,
+            self.observed_at_ns,
+            true,
+            roster_before,
+            roster_after,
+            contracts,
+        )
+    }
+
+    /// Rebuilds this acquisition's pinned provider-current scope from a fresh
+    /// full provider discovery. Maintenance deliberately preserves the prior
+    /// bootstrap closure instead of reinterpreting its universe expression.
+    #[doc(hidden)]
+    pub fn project_provider_current_refresh(&self, current: &Self) -> Result<Self> {
+        self.validate()?;
+        if self.proof != HistoricalCatalogProof::ProviderHistoryObserved || !self.complete {
+            return Err(validation(
+                "provider bootstrap refresh requires complete provider-history acquisition",
+            ));
+        }
+        let daily_suffix = format!("+{PROVIDER_DAILY_HISTORY_SOURCE_IDENTITY}");
+        let source_identity = self
+            .source_identity
+            .strip_suffix(&daily_suffix)
+            .ok_or_else(|| {
+                validation("provider-history acquisition has unknown bootstrap source identity")
+            })?;
+        let required_symbols = self
+            .contracts
+            .iter()
+            .map(|contract| contract.symbol.clone())
+            .collect::<BTreeSet<_>>();
+        current.project_provider_current_bootstrap(
+            source_identity,
+            self.canonical_universe.clone(),
+            &required_symbols,
+        )
+    }
+
     pub(crate) fn promote_provider_daily_history(
         mut self,
         source_identity: impl Into<String>,

@@ -32,9 +32,18 @@ metadata、观察时间和 source identity；scope 固定为
 `CFFEX,SHFE,DCE,CZCE,INE,GFEX`。`complete=true` 只表示前后 roster 稳定且每个成员都有
 metadata。roster 漂移或缺 metadata 时保存 `complete=false` 的审计 acquisition，但不得执行。
 
+V2 `timeline(...)` 在完整 discovery 后、native-daily 请求前按 normalized AST 计算本次
+bootstrap closure。closure 包含保留的物理 contract，以及保留的 continuous/index/logical-symbol
+view 所需的同品种物理成员；`except(contract:CZCE.RI)` 只移除 contract provenance，不能移除
+仍为 derived view 所需的 RI 依赖。closure 小于完整 discovery 时另存为 scoped
+`provider_current_observed` acquisition；完整 closure 复用既有全量 acquisition，
+identity 固定包含 `tqsdk.provider-history.timeline-bootstrap-closure.v1` 与 V2 AST/input-source
+identity。完整 discovery acquisition 仍保留作审计；legacy `physical:all` 与 legacy timeline
+不投影，仍使用全量 roster。
+
 ### `provider_history_observed`
 
-稳定 roster 的每个成员请求 `[1990-01-01, as_of)` 原生 1d，并持久化
+稳定 bootstrap roster 的每个成员请求 `[1990-01-01, as_of)` 原生 1d，并持久化
 `HistoricalDailyObservation`：
 
 - `complete + first_row_ns=Some(...)`：进入数据 membership catalog；
@@ -43,7 +52,9 @@ metadata。roster 漂移或缺 metadata 时保存 `complete=false` 的审计 acq
   纳秒值随 observation 持久化。
 
 观测表必须与 acquisition roster 精确等键，观测区间必须与 bootstrap 合同一致，所有状态均参与
-acquisition SHA-256。完成探测后再次查询 roster/metadata；任何漂移都拒绝升级。
+acquisition SHA-256。完成探测后再次进行全量 discovery，再投影为相同 bootstrap closure；closure
+内的 roster/metadata 漂移会拒绝升级。被本次 closure 排除的合约不会发 native-daily 请求，也不会
+影响该 scoped provider-history proof。
 
 CLI 强制 daily bootstrap 的 symbol batch size 为 1，使每个 scheduler 终态精确归属于一个候选。
 调用方未显式设置 `--batch-timeout-secs` 时，单候选观察默认使用 15 秒 wall-clock 上限。精确 timeout
@@ -119,7 +130,8 @@ tqsdk-cache --cache-dir DIR refresh-provider-membership \
 `--kind`。`--dry-run` 只选择 due candidates，不认证、不请求 provider、不创建 lock 或文件。
 真实执行持有 cache-root operation lock，在每轮候选前以已完成合约的 isolated-cache remote
 canary 验证 provider；canary、认证、传输、取消或非精确-timeout 失败都不发布 proof 或推进
-receipt。探测前后必须重新获得与 pinned acquisition 相同的 stable roster/metadata，且
+receipt。探测前后必须重新获得全量 discovery，并投影为与 pinned acquisition 相同的 stable bootstrap
+roster/metadata，且
 `requested_as_of_ns` 必须完全相同；任何漂移或新 cutoff 都要求完整 bootstrap。
 canary 选择成熟的未到期 complete observation，并只请求其已知首行所在的一日窗口；默认给 canary
 30 秒以区分 provider 慢启动与单合约 timeout，真实候选仍保持 15 秒上限。显式
@@ -171,7 +183,7 @@ tqsdk-cache fill --kind tick|minute|daily \
 本次启动时最新可用闭市边界。dry-run 只审计稳定 provider roster，返回
 `preparation_required`/exit 1，因为生成数据 membership 必须写 native-daily cache。
 
-`tqsdk-data` 拥有 spec、proof、catalog、plan、验证和 artifact store；`tqsdk-cache` 只负责认证、采集/填充
+`tqsdk-data` 拥有 spec、bootstrap closure、proof、catalog、plan、验证和 artifact store；`tqsdk-cache` 只负责认证、采集/填充
 编排、进度、report、取消与退出码；`tqsdk-session` 提供 query/metadata 和 server-history substrate；
 `tqsdk-task`/`tqsdk` 只消费已验证的 timeline/plan。`BacktestBuilder::historical_universe_artifact`
 验证 V5 自身、区间和 acquisition/catalog chain；timeline 控制可见 instrument，V5 tick targets

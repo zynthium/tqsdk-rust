@@ -51,6 +51,8 @@ structural-target-list := structural-target ("," structural-target)*
 structural-target := EXCHANGE ".*"
                    | EXCHANGE "." PRODUCT
                    | EXCHANGE "." CONTRACT
+                   | EXCHANGE ".{" structural-value ("," structural-value)* "}"
+structural-value  := "*" | PRODUCT | CONTRACT
 symbol-list       := provider-symbol ("," provider-symbol)*
 ```
 
@@ -66,6 +68,17 @@ symbol-list       := provider-symbol ("," provider-symbol)*
 国内 structural exchange 固定为 `CFFEX`、`SHFE`、`INE`、`DCE`、`CZCE`、`GFEX`。
 exchange 大小写不敏感并规范化为大写；product、contract 尾部和 opaque provider symbol 除 trim
 外保留原字节。无法按国内合约结构识别的代码必须写成 `symbol:<provider-symbol>`。
+
+同一交易所的多个 structural value 可使用分组语法，parser 会在规范化前展开；组不支持嵌套：
+
+```text
+CZCE.{ZC,CY,RI,RS,PM,WH,JR,LR}
+DCE.{rr,lg,fb,bb}
+```
+
+它们分别等价于逐项写出的 `CZCE.ZC,CZCE.CY,...` 与 `DCE.rr,DCE.lg,...`，可用于
+`contract:`、`main:`、`continuous:`、`index:`、`top:N:` 和 `except(...)` 的 structural target
+list，不能用于 `symbol:`。
 
 V2 不接受 `active`、`physical`、`exchange:`、`product:`、bare 自动识别、`file:` 或 `~`。
 `cont` 只作为输入别名，规范化输出使用 `continuous`。`physical:all` 是 cache historical
@@ -91,6 +104,11 @@ timeline(contract:all;except(contract:CFFEX.*,CZCE.ZC,CZCE.CY,DCE.rr,SHFE.wr))
 `KQD` 外盘不生成不存在的 `KQ.m@...` 或 `KQ.i@...`。Timeline 的生命周期依据 provider
 数据 membership，不追求交易所法定挂牌日；详见
 [历史 Universe Catalog](historical-universe-catalog.md)。
+
+`tqsdk-cache fill --universe 'timeline(...)'` 会先完整发现当前 provider roster 与 metadata，随后
+在 native-daily membership bootstrap 前计算物理 bootstrap closure。纯
+`contract:all;except(contract:CZCE.RI)` 不请求 RI 的 native-daily；但若保留
+`continuous:CZCE.RI`、`index:CZCE.RI` 或对应 logical symbol，RI 物理合约仍属于其必要 closure。
 
 ## 集合与排除规则
 
@@ -132,6 +150,7 @@ hash 输出使用 `sha256:<lowercase-hex>`。public Rust struct 的任意 serde 
 wire 字段、tag 或排序变化必须提升 language/canonicalizer version。
 
 `except(...)` 仅在 parser 层展开为既有 `!` selector/global filter；canonical text、canonical AST、hash、language version 和 canonicalizer id 都保持旧表示。因此同义的旧/新写法可复用同一 artifact identity。
+`EXCHANGE.{...}` 同样只在 parser 层展开为既有 structural target，故不会改变这些 identity。
 
 ## Legacy-first 兼容路由
 

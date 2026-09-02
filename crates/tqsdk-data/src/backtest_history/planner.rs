@@ -201,7 +201,10 @@ pub(crate) fn plan_request(
             )
         }
     };
+    let physical_minute_request = matches!(base_source, PlannedBaseSource::CanonicalMinute)
+        && !request.symbol.starts_with("KQ.");
     if !is_direct_native_daily
+        && !physical_minute_request
         && !segments_cover_range(
             physical_segments.as_slice(),
             (request.start_ns, effective_end_ns),
@@ -255,6 +258,37 @@ pub(crate) fn plan_request(
             )?,
             physical_rank: 0,
         }],
+        PlannedBaseSource::CanonicalMinute if physical_minute_request => source_mapping_segments
+            .iter()
+            .filter_map(|segment| {
+                let requested_start_ns = segment.start_ns.max(request.start_ns);
+                let requested_end_ns = segment.end_ns.min(effective_end_ns);
+                (requested_start_ns < requested_end_ns)
+                    .then_some((segment, (requested_start_ns, requested_end_ns)))
+            })
+            .enumerate()
+            .map(|(rank, (segment, requested))| {
+                let expanded = expand_minute_source_range(
+                    requested,
+                    request.duration_ns.unwrap_or(MINUTE_KLINE_DURATION_NS),
+                    &session,
+                )?;
+                let range = (
+                    expanded.0.max(segment.start_ns),
+                    expanded.1.min(segment.end_ns),
+                );
+                if range.0 >= range.1 {
+                    return Err(DataError::InvalidState(
+                        "physical contract cannot supply expanded canonical-minute source range",
+                    ));
+                }
+                Ok(PlannedSourceSlice {
+                    cache_symbol: request.symbol.clone(),
+                    range,
+                    physical_rank: rank,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
         PlannedBaseSource::CanonicalMinute => vec![PlannedSourceSlice {
             cache_symbol: request.symbol.clone(),
             range: expand_minute_source_range(
@@ -731,6 +765,102 @@ mod tests {
         .unwrap();
 
         assert_eq!(plan.snapshot_hash, retained.snapshot_hash);
+    }
+
+    #[test]
+    fn canonical_minute_physical_plan_clips_to_metadata_coverage() {
+        let root = temp_dir("minute-physical-metadata-coverage");
+        let symbol = "CZCE.AP401";
+        let requested_start_ns = utc_ns(2024, 1, 1, 0, 0, 0);
+        let source_start_ns = utc_ns(2024, 1, 3, 0, 0, 0);
+        let requested_end_ns = utc_ns(2024, 2, 1, 0, 0, 0);
+        let cache = BacktestHistoryMetadataCache::open(&root).unwrap();
+        let snapshot = cache
+            .store_snapshot(BacktestHistoryMetadataSnapshot {
+                schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+                market_kind: BacktestHistoryMarketKind::Futures,
+                logical_symbol: symbol.to_string(),
+                captured_at_ns: requested_end_ns,
+                trading_days: vec![trading_day("2024-01-03", true, source_start_ns)],
+                session: KlineSessionTemplate::cst_trading_day(),
+                physical_segments: vec![BacktestHistoryPhysicalSegment {
+                    physical_symbol: symbol.to_string(),
+                    start_ns: source_start_ns,
+                    end_ns: requested_end_ns,
+                }],
+                snapshot_hash: String::new(),
+            })
+            .unwrap();
+
+        let plan = plan_request(
+            &root,
+            BacktestHistoryRequest::kline(
+                1,
+                symbol,
+                Duration::from_secs(60),
+                requested_start_ns,
+                requested_end_ns,
+            )
+            .validate()
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(plan.snapshot_hash, snapshot.snapshot_hash);
+        assert_eq!(plan.source_slices.len(), 1);
+        assert_eq!(plan.source_slices[0].cache_symbol, symbol);
+        assert_eq!(
+            plan.source_slices[0].range,
+            (source_start_ns, requested_end_ns)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn canonical_minute_logical_plan_rejects_narrow_metadata_sidecar() {
+        let root = temp_dir("minute-logical-narrow-metadata");
+        let symbol = "KQ.i@CZCE.AP";
+        let requested_start_ns = utc_ns(2024, 1, 1, 0, 0, 0);
+        let source_start_ns = utc_ns(2024, 1, 3, 0, 0, 0);
+        let requested_end_ns = utc_ns(2024, 2, 1, 0, 0, 0);
+        let cache = BacktestHistoryMetadataCache::open(&root).unwrap();
+        cache
+            .store_snapshot(BacktestHistoryMetadataSnapshot {
+                schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+                market_kind: BacktestHistoryMarketKind::Futures,
+                logical_symbol: symbol.to_string(),
+                captured_at_ns: requested_end_ns,
+                trading_days: vec![trading_day("2024-01-03", true, source_start_ns)],
+                session: KlineSessionTemplate::cst_trading_day(),
+                physical_segments: vec![BacktestHistoryPhysicalSegment {
+                    physical_symbol: symbol.to_string(),
+                    start_ns: source_start_ns,
+                    end_ns: requested_end_ns,
+                }],
+                snapshot_hash: String::new(),
+            })
+            .unwrap();
+
+        let error = plan_request(
+            &root,
+            BacktestHistoryRequest::kline(
+                1,
+                symbol,
+                Duration::from_secs(60),
+                requested_start_ns,
+                requested_end_ns,
+            )
+            .validate()
+            .unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("metadata does not cover the requested range")
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

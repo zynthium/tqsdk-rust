@@ -198,7 +198,7 @@ pub use historical_universe_v4_resolution::{
     HISTORICAL_UNIVERSE_V3_PROJECTION_COMPILER_ID, HistoricalPlanWritePolicy,
     HistoricalRankedMembership, HistoricalRankingCapabilities, HistoricalUniversePlanWriteSet,
     HistoricalUniverseResolutionV4, HistoricalUniverseV4Error, TimelineCapabilities,
-    compile_historical_universe_resolution_v4,
+    compile_historical_universe_resolution_v4, scope_provider_current_timeline_bootstrap,
 };
 pub use historical_universe_v5::{
     HISTORICAL_UNIVERSE_PLAN_VERSION, HistoricalUniversePlan as HistoricalUniversePlanV5,

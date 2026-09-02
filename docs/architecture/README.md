@@ -289,6 +289,9 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
 - historical fill 保留 legacy `physical:all` / legacy timeline 的 V3 路径；V2
   `timeline(...)` 默认发布 V5 并随后按 `--kind` 执行 targets。旧
   `v4-with-v3-rollback` token 仅作隐藏兼容；V4 artifact 先验证完整 V4/V3 chain 后迁移为 V5
+- V2 timeline 在全量 provider discovery 后、native-daily membership bootstrap 前由 `tqsdk-data`
+  计算 scoped physical closure；contract exclusion 不产生日线请求，仍保留的 derived view 则保留其
+  underlying。完整 discovery 与 scoped proof 都是 immutable audit artifact
 - 复用 `tqsdk` facade / `tqsdk-data` store，不定义或拥有任何缓存格式、session、状态树、live
   recording loop、回测推进或 relay 服务；不进入 Cargo default-members
 - `tqsdk-relay`

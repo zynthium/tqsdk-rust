@@ -208,6 +208,7 @@ cargo test -p tqsdk-data --test historical_universe_artifact
 cargo test -p tqsdk-data --test historical_universe_resolution
 cargo test -p tqsdk-data --test universe_spec
 cargo test -p tqsdk-data --test universe_except
+cargo test -p tqsdk-data --test provider_timeline_bootstrap_scope
 cargo test -p tqsdk-data --test universe_spec_compiler
 cargo test -p tqsdk-data --test universe_compatibility
 cargo test -p tqsdk-data --test universe_input

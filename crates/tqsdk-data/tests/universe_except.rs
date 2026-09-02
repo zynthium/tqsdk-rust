@@ -110,6 +110,41 @@ fn except_syntax_accepts_the_cache_fill_product_list() {
 }
 
 #[test]
+fn grouped_exchange_products_expand_to_existing_targets_and_identity() {
+    let expanded = UniverseSpec::parse_v2(
+        "timeline(contract:all;continuous:all;index:all;except(all:CFFEX.*,CZCE.ZC,CZCE.CY,CZCE.RI,CZCE.RS,CZCE.PM,CZCE.WH,CZCE.JR,CZCE.LR,DCE.rr,DCE.lg,DCE.fb,DCE.bb,SHFE.wr))",
+    )
+    .expect("expanded expression parses");
+    let grouped = UniverseSpec::parse_v2(
+        "timeline(contract:all;continuous:all;index:all;except(all:CFFEX.*,CZCE.{ZC,CY,RI,RS,PM,WH,JR,LR},DCE.{rr,lg,fb,bb},SHFE.{wr}))",
+    )
+    .expect("grouped expression parses");
+
+    assert_eq!(grouped, expanded);
+    assert_eq!(
+        grouped.canonical_ast_json_bytes(),
+        expanded.canonical_ast_json_bytes()
+    );
+    assert_eq!(grouped.canonical_ast_hash(), expanded.canonical_ast_hash());
+    assert_eq!(grouped.canonical_text(), expanded.canonical_text());
+}
+
+#[test]
+fn grouped_exchange_products_work_for_include_and_view_scoped_except() {
+    let expanded = UniverseSpec::parse_v2(
+        "timeline(contract:CZCE.ZC,CZCE.CY,DCE.rr,DCE.lg;except(contract:CZCE.RI,CZCE.RS))",
+    )
+    .expect("expanded expression parses");
+    let grouped = UniverseSpec::parse_v2(
+        "timeline(contract:CZCE.{ZC, CY},DCE.{rr,lg};except(contract:CZCE.{RI,RS}))",
+    )
+    .expect("grouped expression parses");
+
+    assert_eq!(grouped, expanded);
+    assert_eq!(grouped.canonical_ast_hash(), expanded.canonical_ast_hash());
+}
+
+#[test]
 fn except_syntax_reaches_historical_compatibility_dispatch() {
     let dispatch =
         parse_historical_universe_compatible("timeline(contract:all;except(all:CFFEX.*,CZCE.ZC))")

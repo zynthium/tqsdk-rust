@@ -133,10 +133,7 @@ fn parse_except_clause(value: &str) -> Result<RawClause, UniverseSpecError> {
             })?;
 
     if scope.trim() == "all" {
-        let targets = values
-            .split(',')
-            .map(|value| parse_structural_target(value.trim(), false))
-            .collect::<Result<Vec<_>, _>>()?;
+        let targets = parse_structural_targets(values, false)?;
         return Ok(RawClause {
             exclude: true,
             view: None,
@@ -155,10 +152,7 @@ fn parse_view_clause(
     let targets = if view == UniverseView::Symbol {
         parse_symbol_targets(values)?
     } else {
-        values
-            .split(',')
-            .map(|value| parse_structural_target(value.trim(), true))
-            .collect::<Result<Vec<_>, _>>()?
+        parse_structural_targets(values, true)?
     };
     if targets.is_empty() {
         return Err(UniverseSpecError::InvalidTarget {
@@ -222,6 +216,99 @@ fn parse_symbol_targets(values: &str) -> Result<Vec<UniverseTarget>, UniverseSpe
             })
         })
         .collect()
+}
+
+fn parse_structural_targets(
+    values: &str,
+    allow_all: bool,
+) -> Result<Vec<UniverseTarget>, UniverseSpecError> {
+    let mut targets = Vec::new();
+    for value in split_structural_target_list(values)? {
+        let value = value.trim();
+        if let Some((exchange, grouped_values)) = value.split_once(".{") {
+            let grouped_values = grouped_values.strip_suffix('}').ok_or_else(|| {
+                UniverseSpecError::InvalidTarget {
+                    target: value.to_string(),
+                    reason: "grouped structural target must end `}`",
+                }
+            })?;
+            if grouped_values.is_empty() || grouped_values.contains(['{', '}']) {
+                return Err(UniverseSpecError::InvalidTarget {
+                    target: value.to_string(),
+                    reason: "grouped structural target requires a flat non-empty value list",
+                });
+            }
+            for grouped_value in grouped_values.split(',') {
+                let grouped_value = grouped_value.trim();
+                if grouped_value.is_empty() {
+                    return Err(UniverseSpecError::InvalidTarget {
+                        target: value.to_string(),
+                        reason: "grouped structural target must not contain an empty value",
+                    });
+                }
+                targets.push(parse_structural_target(
+                    &format!("{exchange}.{grouped_value}"),
+                    allow_all,
+                )?);
+            }
+        } else {
+            if value.contains(['{', '}']) {
+                return Err(UniverseSpecError::InvalidTarget {
+                    target: value.to_string(),
+                    reason: "structural target braces require EXCHANGE.{value,...}",
+                });
+            }
+            targets.push(parse_structural_target(value, allow_all)?);
+        }
+    }
+    Ok(targets)
+}
+
+fn split_structural_target_list(values: &str) -> Result<Vec<&str>, UniverseSpecError> {
+    let mut targets = Vec::new();
+    let mut group_depth = 0_u8;
+    let mut start = 0;
+    for (index, character) in values.char_indices() {
+        match character {
+            '{' => {
+                group_depth =
+                    group_depth
+                        .checked_add(1)
+                        .ok_or_else(|| UniverseSpecError::InvalidTarget {
+                            target: values.to_string(),
+                            reason: "structural target group nesting is not supported",
+                        })?;
+                if group_depth != 1 {
+                    return Err(UniverseSpecError::InvalidTarget {
+                        target: values.to_string(),
+                        reason: "structural target group nesting is not supported",
+                    });
+                }
+            }
+            '}' => {
+                if group_depth == 0 {
+                    return Err(UniverseSpecError::InvalidTarget {
+                        target: values.to_string(),
+                        reason: "structural target group has an unmatched `}`",
+                    });
+                }
+                group_depth -= 1;
+            }
+            ',' if group_depth == 0 => {
+                targets.push(&values[start..index]);
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if group_depth != 0 {
+        return Err(UniverseSpecError::InvalidTarget {
+            target: values.to_string(),
+            reason: "structural target group must end `}`",
+        });
+    }
+    targets.push(&values[start..]);
+    Ok(targets)
 }
 
 fn parse_structural_target(

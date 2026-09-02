@@ -112,16 +112,18 @@ dashboard 还会展示 backfilling 已持续时间、frame 速率和最近 frame
 Universe Language V2，typed API 接受 `UniverseSpec`。live/facade/relay 会在触网前拒绝
 `timeline(...)`。历史 cache fill 直接在 `--universe` 使用
 `timeline(contract:all)` 并默认发布 V5；legacy `physical:all` 仍兼容写 v3。默认 provider
-路径会稳定获取全物理合约 roster，首次补齐
-原生 1d 历史，并以第一条 daily 行作为数据 membership 起点，再在 cache 内部生成内容寻址的
-acquisition、semantic catalog 和 pinned plan。终态空数据和隔离的 provider-unavailable 候选不进入
+路径会稳定获取全物理合约 roster 与 metadata；V2 timeline 会在日线请求前按其 normalized AST
+投影 bootstrap closure，只补齐保留 physical contract 与 retained derived view 必需 underlying 的原生
+1d 历史，并以第一条 daily 行作为数据 membership 起点，再在 cache 内部生成内容寻址的 acquisition、
+semantic catalog 和 pinned plan。终态空数据和隔离的 provider-unavailable 候选不进入
 universe；该路径不查询或推断交易所挂牌日期。V2 timeline 默认发布 current V5 artifact；已有 V4
 artifact 须先验证完整 V4/V3 chain 后以 `migrate-universe` 迁移，源文件保持不变。旧
 `--universe-plan` 只作为隐藏兼容入口保留。
 
-少量 `provider-unavailable` 不需要重新扫描全部 roster：可用 `tqsdk-cache
+少量 `provider-unavailable` 不需要重新请求全部 native-daily：可用 `tqsdk-cache
 refresh-provider-membership --acquisition-sha256 sha256:... --max-symbols 4` 对 pinned acquisition
-做有退避的小批 native-daily 重试。它先做 provider-health canary，timeout 仅推进独立 retry receipt；
+做有退避的小批 native-daily 重试。它仍会重新发现全量 roster/metadata 以验证 pinned scope，先做
+provider-health canary，timeout 仅推进独立 retry receipt；
 只有找到首行或终态空结果才发布新的 acquisition/catalog，随后由相同 universe/cutoff 的普通 `fill`
 生成新 plan。详见 [`tqsdk-cache` README](crates/tqsdk-cache/README.md)。
 
@@ -133,7 +135,7 @@ refresh-provider-membership --acquisition-sha256 sha256:... --max-symbols 4` 对
 V2 静态完整合约文件通过 DSL 外的 `--universe-file` / `universe_symbol_file(s)` 接入；legacy
 `file:<path>` 继续兼容。
 
-Universe V2 可用 `except(...)` 合并多个排除项：`except(contract:CFFEX.*,CZCE.ZC,CZCE.CY)` 只排 contract view，`except(all:CFFEX.*,CZCE.ZC,CZCE.CY)` 排所有可分类 view。它会规范化为既有 `!` 形式，故不会改变 canonical AST/hash 或已发布历史 artifact identity。
+Universe V2 可用 `except(...)` 合并多个排除项：`except(contract:CFFEX.*,CZCE.ZC,CZCE.CY)` 只排 contract view，`except(all:CFFEX.*,CZCE.ZC,CZCE.CY)` 排所有可分类 view。同交易所 target 可缩写为 `CZCE.{ZC,CY,RI,RS}`；parser 会展开为既有逐项 target。两种写法都会规范化为既有 `!` 形式，故不会改变 canonical AST/hash 或已发布历史 artifact identity。
 
 ## 快速开始
 

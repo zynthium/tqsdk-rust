@@ -94,6 +94,9 @@ Universe 只选 instrument，不选择数据流。V2 `file:` 被拒绝，外部 
 [历史 Universe Catalog](../../docs/architecture/historical-universe-catalog.md)。
 
 批量排除可写 `except(contract:CFFEX.*,CZCE.ZC,CZCE.CY)`；若要对全部 view 生效，写 `except(all:CFFEX.*,CZCE.ZC,CZCE.CY)`。它们都会规范化为既有 `!` 表示，因此不会改变 V2 AST/hash 或历史 artifact identity。
+同一交易所的 target 可写成分组语法，例如
+`except(all:CFFEX.*,CZCE.{ZC,CY,RI,RS},DCE.{rr,lg,fb,bb})`；它在 parser 层展开为既有逐项 target，
+同样不改变 AST/hash 或 artifact identity。
 
 ## 回测历史查询
 
@@ -104,8 +107,10 @@ fill、进程内 single-flight、跨进程 per-series fill lease、shared cache-
 server-history chart substrate，`tqsdk-task` 仅消费结果来安排 replay event。
 
 历史全合约/动态 membership 不复用 current universe grammar。`HistoricalFillUniverseSpec`
-接受 `physical:all` 或受限的 `timeline(...)`。默认 acquisition 先记录稳定 provider roster，再由
-每个成员 `[1990-01-01, as_of)` 的 native-1d 观测升级为 `provider_history_observed`：第一条
+接受 `physical:all` 或受限的 `timeline(...)`。默认 acquisition 先记录稳定的完整 provider roster；
+V2 timeline 再根据 normalized AST 投影出 physical bootstrap closure，仅为保留 physical contract 和
+保留 derived view 的必要 underlying 进行 `[1990-01-01, as_of)` native-1d 观测，并升级为
+`provider_history_observed`：第一条
 日线是数据 membership 起点，终态空区间和隔离的 `provider_unavailable` 候选不进入 universe；
 默认路径不读取或推断交易所挂牌日期。tick/minute 从 `max(用户起点, membership 起点)` 发起请求，
 实际首行和空前缀仍由各自 cache coverage 记录。`HistoricalUniverseArtifactStore` 内容寻址保存 acquisition、semantic catalog 和

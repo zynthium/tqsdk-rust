@@ -24,8 +24,12 @@ CLI 在兼容位置解析，新示例始终放在子命令之后。
 `CFFEX,SHFE,DCE,CZCE,INE,GFEX`。legacy `physical:all` 和既有
 `timeline(active:all;cont:all)` 继续兼容并写 plan v3。
 
-首次运行会稳定查询前后 roster 和完整 metadata，再为 roster 的每个合约补齐从
-1990-01-01 到 cutoff 的原生 1d 历史。第一条 native-1d 行形成有效 membership 起点；没有行但
+首次运行会稳定查询前后全量 roster 和完整 metadata。V2 `timeline(...)` 随后计算本次物理
+bootstrap closure：仅为保留的 physical contract 及保留 continuous/index/logical view 的必要
+underlying 补齐从 1990-01-01 到 cutoff 的原生 1d 历史。纯
+`except(contract:CZCE.RI)` 不请求 RI；若仍保留 RI 的 derived view，则其 physical dependency
+仍会 bootstrap。legacy `physical:all` 和 legacy timeline 保持每个 roster 合约都 bootstrap 的旧行为。
+第一条 native-1d 行形成有效 membership 起点；没有行但
 服务端终态完成的前缀记录为空覆盖。随后 CLI 在 `<cache-dir>/historical-universe-v1/` 内部发布
 内容寻址的 acquisition 与 semantic catalog。legacy 输入发布 v3 plan；V2 timeline 从同一
 execution 直接发布 current V5 plan，再用统一 executor 下载选定 kind。已有 V4 plan 在完整
@@ -60,7 +64,7 @@ tqsdk-cache fill \
 tqsdk-cache fill \
   --cache-dir /var/lib/tqsdk/history \
   --kind daily \
-  --universe 'timeline(contract:all;except(contract:CFFEX.*,CZCE.ZC,CZCE.CY,CZCE.RI,CZCE.RS,CZCE.PM,CZCE.WH,CZCE.JR,DCE.rr,DCE.lg,DCE.fb,DCE.bb,SHFE.wr))' \
+  --universe 'timeline(contract:all;except(contract:CFFEX.*,CZCE.{ZC,CY,RI,RS,PM,WH,JR},DCE.{rr,lg,fb,bb},SHFE.{wr}))' \
   --start-day 2023-01-01 \
   --symbol-concurrency 2
 ```
@@ -268,8 +272,8 @@ tick fill 按 trading day 顺序执行，以 8192 rows 缓冲追加；取消会 
 
 ### Provider-unavailable membership maintenance
 
-当 `fill --universe 'timeline(contract:all)'` 的初始 provider 探测留下少量
-`provider_unavailable` 时，不要反复完整扫描全部合约。使用 pinned acquisition 的小批维护：
+当 `fill --universe 'timeline(contract:all)'` 的初始 scoped provider bootstrap 留下少量
+`provider_unavailable` 时，不要反复请求全部日线合约。使用 pinned acquisition 的小批维护：
 
 ```bash
 # 只选 due candidates；不认证、不请求远端、也不写入 cache/artifact。
