@@ -362,11 +362,11 @@ struct FillArgs {
     /// Report destination. Normal fills otherwise create a report under <cache-dir>/reports/.
     #[arg(long, value_name = "PATH")]
     report: Option<PathBuf>,
-    /// Progress rendering mode for this fill; defaults to dynamic tty bars.
-    #[arg(long, value_enum, default_value_t = ProgressMode::Tty)]
+    /// Progress rendering mode; auto uses TTY bars interactively and plain logs otherwise.
+    #[arg(long, value_enum, default_value_t = ProgressMode::Auto)]
     progress: ProgressMode,
     /// Maximum active symbol bars in TTY mode; zero keeps only the global bar.
-    #[arg(long, value_name = "COUNT", default_value_t = 8)]
+    #[arg(long, value_name = "COUNT", default_value_t = 4)]
     progress_max_bars: usize,
 }
 
@@ -393,8 +393,8 @@ struct ProviderMembershipRefreshArgs {
     /// Override native-daily batch timeout; zero disables timeout.
     #[arg(long, value_name = "SECONDS")]
     batch_timeout_secs: Option<u64>,
-    /// Progress rendering mode; defaults to dynamic TTY bars.
-    #[arg(long, value_enum, default_value_t = ProgressMode::Tty)]
+    /// Progress rendering mode; auto uses TTY bars interactively and plain logs otherwise.
+    #[arg(long, value_enum, default_value_t = ProgressMode::Auto)]
     progress: ProgressMode,
     /// Maximum active symbol bars in TTY mode; zero keeps only global bar.
     #[arg(long, value_name = "COUNT", default_value_t = 4)]
@@ -3442,6 +3442,9 @@ async fn fill_daily(
             "fill requires at least one --symbol or --universe expression".to_string(),
         ));
     }
+    let progress_session = FillProgressSession::new(args.progress, args.progress_max_bars, "daily");
+    let reporter = progress_session.observer();
+    reporter.planning("resolving native daily fill window and universe");
     let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
     let mut resolved =
         resolve_fill_window(&canonical_cache_dir, &args.days, args.dry_run, false).await?;
@@ -3453,12 +3456,32 @@ async fn fill_daily(
     debug_assert!(resolved.provisional.is_none());
     let window = resolved.window;
     let symbols = resolve_minute_fill_symbols(explicit_symbols, universe.as_deref()).await?;
+    if resolved.calendar.snapshot.is_some() {
+        reporter.calendar_ready(resolved.calendar.progress_calendar(&window)?);
+    } else {
+        reporter.calendar_unavailable(
+            "coverage uses TQBN partition days; pass --calendar for exchange-calendar totals",
+        );
+    }
+    reporter.set_scope(&symbols, (window.start_ns, window.end_ns));
 
     if args.dry_run {
         let before = daily_cache_statuses(&canonical_cache_dir, &symbols, &window)?;
         let complete = before
             .iter()
             .all(tqsdk_data::DailyKlineCacheStatus::is_complete);
+        progress_session.finish(
+            if complete {
+                ProgressTerminalStatus::Complete
+            } else {
+                ProgressTerminalStatus::Failed
+            },
+            if complete {
+                "daily dry-run complete; local native daily coverage verified"
+            } else {
+                "daily dry-run found missing native daily coverage"
+            },
+        );
         return Ok(CommandOutcome {
             value: json!({
                 "schema_version": REPORT_SCHEMA_VERSION,
@@ -3482,9 +3505,6 @@ async fn fill_daily(
         .policy(BacktestHistoryPolicy::RemoteOnMiss)
         .auth_env();
     let client = builder.build()?;
-    let progress_session = FillProgressSession::new(args.progress, args.progress_max_bars, "daily");
-    let reporter = progress_session.observer();
-    reporter.planning("materializing final native daily coverage");
     let report_path = args
         .report
         .clone()
@@ -3547,6 +3567,20 @@ async fn fill_daily(
     );
     let complete =
         coverage_complete && matches!(report.status(), BacktestHistoryFillTerminalStatus::Complete);
+    let daily_report = UnifiedFillReport::from_history_fill(
+        "daily",
+        &canonical_cache_dir,
+        window.clone(),
+        market.as_str(),
+        &report,
+    );
+    if let Err(error) = write_unified_fill_report(&report_path, &daily_report) {
+        progress_session.finish(
+            ProgressTerminalStatus::Failed,
+            "daily fill failed; report could not be persisted",
+        );
+        return Err(error.into());
+    }
     progress_session.finish(
         match report.status() {
             BacktestHistoryFillTerminalStatus::Complete if complete => {
@@ -3564,14 +3598,6 @@ async fn fill_daily(
             "daily fill completed with missing native daily coverage"
         },
     );
-    let daily_report = UnifiedFillReport::from_history_fill(
-        "daily",
-        &canonical_cache_dir,
-        window.clone(),
-        market.as_str(),
-        &report,
-    );
-    write_unified_fill_report(&report_path, &daily_report)?;
 
     Ok(CommandOutcome {
         value: json!({
@@ -3646,6 +3672,10 @@ async fn fill_minute(
                 .to_string(),
         ));
     }
+    let progress_session =
+        FillProgressSession::new(args.progress, args.progress_max_bars, "minute");
+    let reporter = progress_session.observer();
+    reporter.planning("resolving canonical-minute fill window and universe");
     let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
     let mut resolved =
         resolve_fill_window(&canonical_cache_dir, &args.days, args.dry_run, false).await?;
@@ -3663,6 +3693,14 @@ async fn fill_minute(
         symbols: selector_symbols,
         universe,
     };
+    if resolved.calendar.snapshot.is_some() {
+        reporter.calendar_ready(resolved.calendar.progress_calendar(&window)?);
+    } else {
+        reporter.calendar_unavailable(
+            "coverage uses TQBN partition days; pass --calendar required for exchange-calendar totals",
+        );
+    }
+    reporter.set_scope(&symbols, (window.start_ns, window.end_ns));
     if args.dry_run {
         if args.report.is_some() {
             return Err(CliError::Usage(
@@ -3691,6 +3729,19 @@ async fn fill_minute(
             calendar_report,
             statuses,
         );
+        reporter.final_minute_report(&report);
+        progress_session.finish(
+            if report.complete {
+                ProgressTerminalStatus::Complete
+            } else {
+                ProgressTerminalStatus::Failed
+            },
+            if report.complete {
+                "minute dry-run complete; local canonical-minute coverage verified"
+            } else {
+                "minute dry-run found missing canonical-minute coverage"
+            },
+        );
         return Ok(CommandOutcome {
             value: json!({
                 "schema_version": REPORT_SCHEMA_VERSION,
@@ -3706,13 +3757,6 @@ async fn fill_minute(
         });
     }
 
-    let progress_session =
-        FillProgressSession::new(args.progress, args.progress_max_bars, "minute");
-    let reporter = progress_session.observer();
-    reporter.planning("inspecting final canonical-minute coverage");
-    if resolved.calendar.snapshot.is_some() {
-        reporter.calendar_ready(resolved.calendar.progress_calendar(&window)?);
-    }
     if args.repair_stale {
         reporter.planning(
             "checking explicitly requested stale canonical-minute partitions under remote-fill lock",
@@ -3806,11 +3850,20 @@ async fn fill_minute(
     )
     .with_selector(selector)
     .with_calendar(calendar_report);
+    reporter.final_minute_report(&report);
     let completion_summary = if report.complete {
         "minute fill complete; final canonical-minute coverage verified"
     } else {
         "minute fill completed with missing canonical-minute coverage"
     };
+    let persisted_report = UnifiedFillReport::from_minute_fill(&report);
+    if let Err(error) = write_unified_fill_report(&report_path, &persisted_report) {
+        progress_session.finish(
+            ProgressTerminalStatus::Failed,
+            "minute fill failed; report could not be persisted",
+        );
+        return Err(error.into());
+    }
     progress_session.finish(
         if report.complete {
             ProgressTerminalStatus::Complete
@@ -3819,8 +3872,6 @@ async fn fill_minute(
         },
         completion_summary,
     );
-    let persisted_report = UnifiedFillReport::from_minute_fill(&report);
-    write_unified_fill_report(&report_path, &persisted_report)?;
     Ok(CommandOutcome {
         value: json!({
             "schema_version": REPORT_SCHEMA_VERSION,
@@ -3967,6 +4018,9 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
             "fill requires at least one --symbol or --universe expression".to_string(),
         ));
     }
+    let progress_session = FillProgressSession::new(args.progress, args.progress_max_bars, "tick");
+    let reporter = progress_session.observer();
+    reporter.planning("resolving strict tick fill window and universe");
     let (cache, canonical_cache_dir) = if args.dry_run {
         open_read_only_cache(cache_dir)?
     } else {
@@ -3992,6 +4046,14 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
         symbols: symbols.clone(),
         universe: universe.clone(),
     };
+    if resolved.calendar.snapshot.is_some() {
+        reporter.calendar_ready(resolved.calendar.progress_calendar(&window)?);
+    } else {
+        reporter.calendar_unavailable(
+            "coverage uses TQBN partition days; pass --calendar for exchange-calendar totals",
+        );
+    }
+    reporter.set_scope(&symbols, (window.start_ns, operation_end_ns));
     if args.dry_run {
         if args.report.is_some() {
             return Err(CliError::Usage(
@@ -4023,6 +4085,18 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
             },
         )?;
         let complete = fill_operation_complete(&report, resolved.provisional);
+        progress_session.finish(
+            if complete {
+                ProgressTerminalStatus::Complete
+            } else {
+                ProgressTerminalStatus::Failed
+            },
+            if complete {
+                "tick dry-run complete; strict local coverage verified"
+            } else {
+                "tick dry-run found incomplete strict local coverage"
+            },
+        );
         return Ok(CommandOutcome {
             value: json!({
                 "schema_version": REPORT_SCHEMA_VERSION,
@@ -4036,12 +4110,6 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
         });
     }
 
-    let progress_session = FillProgressSession::new(args.progress, args.progress_max_bars, "tick");
-    let reporter = progress_session.observer();
-    reporter.planning("resolving universe and inspecting strict cache coverage");
-    if resolved.calendar.snapshot.is_some() {
-        reporter.calendar_ready(resolved.calendar.progress_calendar(&window)?);
-    }
     let report_path = args
         .report
         .clone()
@@ -4194,10 +4262,27 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
     } else {
         "fill complete; strict local coverage verified"
     };
-    progress_session.finish(ProgressTerminalStatus::Complete, completion_summary);
     let persisted_report = UnifiedFillReport::from_tick_fill(&report);
-    write_unified_fill_report(&report_path, &persisted_report)?;
     let complete = fill_operation_complete(&report, resolved.provisional);
+    if let Err(error) = write_unified_fill_report(&report_path, &persisted_report) {
+        progress_session.finish(
+            ProgressTerminalStatus::Failed,
+            "fill failed; report could not be persisted",
+        );
+        return Err(error.into());
+    }
+    progress_session.finish(
+        if complete {
+            ProgressTerminalStatus::Complete
+        } else {
+            ProgressTerminalStatus::Failed
+        },
+        if complete {
+            completion_summary
+        } else {
+            "fill completed with incomplete strict local coverage"
+        },
+    );
     Ok(CommandOutcome {
         value: json!({
             "schema_version": REPORT_SCHEMA_VERSION,
@@ -5962,11 +6047,21 @@ fn spawn_shutdown_signal_handler(
             None
         }
     };
+    let hangup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+        Ok(hangup) => Some(hangup),
+        Err(error) => {
+            eprintln!(
+                "tqsdk-cache: SIGHUP handler unavailable ({error}); waiting for SIGINT/SIGTERM"
+            );
+            None
+        }
+    };
     Ok(tokio::spawn(wait_for_shutdown_signal(
         cancellation,
         kind,
         interrupt,
         terminate,
+        hangup,
     )))
 }
 
@@ -5984,11 +6079,12 @@ async fn wait_for_shutdown_signal(
     kind: CacheKind,
     mut interrupt: tokio::signal::unix::Signal,
     mut terminate: Option<tokio::signal::unix::Signal>,
+    mut hangup: Option<tokio::signal::unix::Signal>,
 ) {
-    wait_for_one_shutdown_signal(&mut interrupt, terminate.as_mut()).await;
+    wait_for_one_shutdown_signal(&mut interrupt, terminate.as_mut(), hangup.as_mut()).await;
     cancellation.cancel();
     eprintln!("{}", shutdown_cancellation_message(kind));
-    wait_for_one_shutdown_signal(&mut interrupt, terminate.as_mut()).await;
+    wait_for_one_shutdown_signal(&mut interrupt, terminate.as_mut(), hangup.as_mut()).await;
     eprintln!("tqsdk-cache: second shutdown signal received; exiting immediately");
     std::process::exit(130);
 }
@@ -5997,15 +6093,29 @@ async fn wait_for_shutdown_signal(
 async fn wait_for_one_shutdown_signal(
     interrupt: &mut tokio::signal::unix::Signal,
     terminate: Option<&mut tokio::signal::unix::Signal>,
+    hangup: Option<&mut tokio::signal::unix::Signal>,
 ) {
-    match terminate {
-        Some(terminate) => {
+    match (terminate, hangup) {
+        (Some(terminate), Some(hangup)) => {
+            tokio::select! {
+                _ = interrupt.recv() => {},
+                _ = terminate.recv() => {},
+                _ = hangup.recv() => {},
+            }
+        }
+        (Some(terminate), None) => {
             tokio::select! {
                 _ = interrupt.recv() => {},
                 _ = terminate.recv() => {},
             }
         }
-        None => {
+        (None, Some(hangup)) => {
+            tokio::select! {
+                _ = interrupt.recv() => {},
+                _ = hangup.recv() => {},
+            }
+        }
+        (None, None) => {
             let _ = interrupt.recv().await;
         }
     }
@@ -6477,7 +6587,7 @@ mod tests {
     }
 
     #[test]
-    fn fill_progress_defaults_to_tty() {
+    fn fill_progress_defaults_to_auto_and_all_active_symbol_bars() {
         let cli = Cli::try_parse_from([
             "tqsdk-cache",
             "fill",
@@ -6493,7 +6603,8 @@ mod tests {
         let Command::Fill(args) = cli.command else {
             panic!("expected fill command");
         };
-        assert_eq!(args.progress, ProgressMode::Tty);
+        assert_eq!(args.progress, ProgressMode::Auto);
+        assert_eq!(args.progress_max_bars, 4);
     }
 
     #[test]

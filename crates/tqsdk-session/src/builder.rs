@@ -28,6 +28,7 @@ pub struct SessionClientBuilder {
     query_enabled: bool,
     market_target: MarketSessionTarget,
     trade_targets: Vec<TradeSessionTarget>,
+    commit_log_retention: Option<usize>,
 }
 
 impl SessionClientBuilder {
@@ -48,7 +49,19 @@ impl SessionClientBuilder {
             query_enabled: false,
             market_target: MarketSessionTarget::stock_live(),
             trade_targets: Vec::new(),
+            commit_log_retention: None,
         }
+    }
+
+    /// Overrides the target retained runtime commit count for this session.
+    ///
+    /// Values below one are clamped to one. The default runtime retention is
+    /// preserved when this method is not called. An active lagging cursor can
+    /// temporarily keep more commits so required revisions are not truncated.
+    #[must_use]
+    pub fn commit_log_retention(mut self, max_entries: usize) -> Self {
+        self.commit_log_retention = Some(max_entries.max(1));
+        self
     }
 
     #[must_use]
@@ -218,11 +231,17 @@ impl SessionClientBuilder {
             query_enabled,
             market_target,
             trade_targets,
+            commit_log_retention,
         } = self;
         validate_trade_targets(&trade_targets)?;
         let mut adapters = AdapterRegistry::new();
         adapters.register_default_adapters();
-        let handle = RuntimeHandle::with_adapters(adapters);
+        let handle = match commit_log_retention {
+            Some(max_entries) => {
+                RuntimeHandle::with_adapters_and_commit_log_retention(adapters, max_entries)
+            }
+            None => RuntimeHandle::with_adapters(adapters),
+        };
         let config = session_config(
             endpoints.clone(),
             query_enabled,
@@ -418,4 +437,55 @@ fn session_config(
     }
 
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tqsdk_core::{CommitScope, InputPayload, IoEvent, ProtocolDomain, Revision, RuntimeInput};
+
+    use super::SessionClientBuilder;
+
+    #[test]
+    fn configured_commit_log_retention_bounds_built_session() {
+        let session = SessionClientBuilder::new("test-user", "test-pass")
+            .commit_log_retention(2)
+            .build()
+            .unwrap();
+
+        for last_price in [601.0, 602.0, 603.0] {
+            session
+                .handle()
+                .ingest(
+                    RuntimeInput::Io(IoEvent {
+                        route: "market.shared".to_string(),
+                        domains: vec![ProtocolDomain::Market],
+                        payload: InputPayload::Json(json!({
+                            "aid": "rtn_data",
+                            "data": [{
+                                "quotes": {
+                                    "SHFE.au2602": {"last_price": last_price}
+                                }
+                            }]
+                        })),
+                    }),
+                    vec![],
+                    CommitScope::RealtimeUpdate,
+                )
+                .unwrap();
+        }
+
+        let reader = session.reader();
+        let mut stale_cursor = session.handle().cursor_from(Revision::new(1));
+        let mut retained_cursor = session.handle().cursor_from(Revision::new(2));
+        assert!(reader.next(&mut stale_cursor).is_none());
+        assert_eq!(
+            reader.next(&mut retained_cursor).unwrap().revision,
+            Revision::new(2)
+        );
+        assert_eq!(
+            reader.next(&mut retained_cursor).unwrap().revision,
+            Revision::new(3)
+        );
+    }
 }

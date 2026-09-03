@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, IsTerminal, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,13 +12,16 @@ use tqsdk::{
     BacktestRemoteFillPhase, BacktestRemoteFillProgress, BacktestRemoteFillTelemetry,
     RemoteFillPlan,
 };
-use tqsdk_cache::{FillReport, FillReportSymbolDayStats};
+use tqsdk_cache::{FillReport, FillReportSymbolDayStats, MinuteFillReport};
 use tqsdk_data::{
     BacktestHistoryFillProgress, BacktestHistoryPhase, backtest_tick_trading_day_for_timestamp_ns,
     backtest_tick_trading_day_range,
 };
 
 const RENDER_INTERVAL: Duration = Duration::from_millis(100);
+const PLAIN_RENDER_INTERVAL: Duration = Duration::from_secs(1);
+const TTY_RENDER_HZ: u8 = 1;
+const TTY_SPINNER_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ProgressMode {
@@ -38,11 +41,23 @@ pub(crate) struct ProgressCalendar {
 #[derive(Clone)]
 pub(crate) struct FillProgress {
     shared: Option<Arc<Mutex<ProgressState>>>,
+    jsonl_tx: Option<mpsc::Sender<JsonlEvent>>,
 }
 
 pub(crate) struct FillProgressSession {
     progress: FillProgress,
     renderer: Option<thread::JoinHandle<()>>,
+    jsonl_writer: Option<JsonlWriter>,
+}
+
+enum JsonlEvent {
+    Record(Value),
+    Finish,
+}
+
+struct JsonlWriter {
+    tx: mpsc::Sender<JsonlEvent>,
+    worker: thread::JoinHandle<()>,
 }
 
 impl FillProgressSession {
@@ -50,8 +65,12 @@ impl FillProgressSession {
         let mode = resolve_mode(mode);
         if matches!(mode, ResolvedProgressMode::Off) {
             return Self {
-                progress: FillProgress { shared: None },
+                progress: FillProgress {
+                    shared: None,
+                    jsonl_tx: None,
+                },
                 renderer: None,
+                jsonl_writer: None,
             };
         }
 
@@ -65,11 +84,18 @@ impl FillProgressSession {
             }
             ResolvedProgressMode::Jsonl | ResolvedProgressMode::Off => None,
         };
+        let jsonl_writer = matches!(mode, ResolvedProgressMode::Jsonl).then(|| {
+            let (tx, rx) = mpsc::channel();
+            let worker = thread::spawn(move || render_jsonl(rx));
+            JsonlWriter { tx, worker }
+        });
         Self {
             progress: FillProgress {
                 shared: Some(shared),
+                jsonl_tx: jsonl_writer.as_ref().map(|writer| writer.tx.clone()),
             },
             renderer,
+            jsonl_writer,
         }
     }
 
@@ -82,6 +108,9 @@ impl FillProgressSession {
         if let Some(renderer) = self.renderer.take() {
             let _ = renderer.join();
         }
+        if let Some(writer) = self.jsonl_writer.take() {
+            writer.finish();
+        }
     }
 }
 
@@ -90,12 +119,22 @@ impl Drop for FillProgressSession {
         if !self.progress.is_finished() {
             self.progress.finish(
                 ProgressTerminalStatus::Failed,
-                "fill ended before a final progress summary",
+                "fill failed before operation completed",
             );
         }
         if let Some(renderer) = self.renderer.take() {
             let _ = renderer.join();
         }
+        if let Some(writer) = self.jsonl_writer.take() {
+            writer.finish();
+        }
+    }
+}
+
+impl JsonlWriter {
+    fn finish(self) {
+        let _ = self.tx.send(JsonlEvent::Finish);
+        let _ = self.worker.join();
     }
 }
 
@@ -115,6 +154,10 @@ impl FillProgress {
         self.with_state(|state| state.calendar_error = Some(message.into()));
     }
 
+    pub(crate) fn set_scope(&self, symbols: &[String], requested_range: (i64, i64)) {
+        self.with_state(|state| state.set_scope(symbols, requested_range));
+    }
+
     pub(crate) fn observe_progress(&self, event: &BacktestRemoteFillProgress) {
         self.with_state(|state| state.apply_progress(event));
     }
@@ -129,6 +172,10 @@ impl FillProgress {
 
     pub(crate) fn final_report(&self, report: &FillReport) {
         self.with_state(|state| state.apply_final_report(report));
+    }
+
+    pub(crate) fn final_minute_report(&self, report: &MinuteFillReport) {
+        self.with_state(|state| state.apply_final_minute_report(report));
     }
 
     fn finish(&self, status: ProgressTerminalStatus, summary: impl Into<String>) {
@@ -152,10 +199,15 @@ impl FillProgress {
         let Ok(mut state) = shared.lock() else {
             return;
         };
+        if state.finished.is_some() {
+            return;
+        }
         update(&mut state);
         state.revision = state.revision.saturating_add(1);
         if matches!(state.mode, ResolvedProgressMode::Jsonl) {
-            write_jsonl_progress(&state.jsonl_record());
+            if let Some(tx) = &self.jsonl_tx {
+                let _ = tx.send(JsonlEvent::Record(state.jsonl_record()));
+            }
         }
     }
 }
@@ -214,6 +266,7 @@ struct ProgressState {
     symbols: BTreeMap<String, SymbolProgress>,
     completed_batches: BTreeSet<usize>,
     history_rows_by_batch: BTreeMap<usize, usize>,
+    final_rows: Option<usize>,
     total_batches: usize,
     history_fill: bool,
     history_batch_started: bool,
@@ -250,8 +303,11 @@ struct SymbolProgress {
     history_day_counts: Option<HistoryDayCounts>,
     history_received_ranges: Vec<(i64, i64)>,
     rows_by_stream: BTreeMap<(usize, usize, i64, i64), usize>,
+    final_rows: Option<usize>,
+    active_batches: BTreeSet<usize>,
     active: bool,
     phase: Option<BacktestRemoteFillPhase>,
+    error: Option<String>,
     last_event_sequence: u64,
     latest_trading_day: Option<NaiveDate>,
     retries: usize,
@@ -260,6 +316,7 @@ struct SymbolProgress {
 
 #[derive(Clone, Copy, Default)]
 struct HistoryDayCounts {
+    covered: usize,
     planned: usize,
     missing: usize,
     received: usize,
@@ -269,7 +326,12 @@ impl SymbolProgress {
     fn day_counts(&self, history_fill: bool) -> (usize, usize, usize, usize) {
         if history_fill {
             let counts = self.history_day_counts.unwrap_or_default();
-            (0, counts.planned, counts.received, counts.missing)
+            (
+                counts.covered,
+                counts.planned,
+                counts.received,
+                counts.missing,
+            )
         } else {
             (
                 self.covered_days.len(),
@@ -304,6 +366,7 @@ impl ProgressState {
             symbols: BTreeMap::new(),
             completed_batches: BTreeSet::new(),
             history_rows_by_batch: BTreeMap::new(),
+            final_rows: None,
             total_batches: 0,
             history_fill: false,
             history_batch_started: false,
@@ -314,17 +377,94 @@ impl ProgressState {
         }
     }
 
+    fn set_scope(&mut self, symbols: &[String], requested_range: (i64, i64)) {
+        if self.history_fill {
+            return;
+        }
+        for symbol in symbols {
+            let entry = self.symbols.entry(symbol.clone()).or_default();
+            if entry.requested_ranges.is_empty() {
+                entry.requested_ranges.push(requested_range);
+            }
+            if entry.missing_ranges.is_empty() {
+                entry.missing_ranges.push(requested_range);
+            }
+        }
+        self.recalculate_days();
+    }
+
+    fn apply_plan_symbol_ranges(
+        &mut self,
+        physical_symbol: &str,
+        requested_ranges: &[(i64, i64)],
+        missing_ranges: &[(i64, i64)],
+    ) {
+        let entry = self.symbols.entry(physical_symbol.to_string()).or_default();
+        if entry.requested_ranges.is_empty() {
+            entry.requested_ranges = requested_ranges.to_vec();
+        }
+        entry.missing_ranges = missing_ranges.to_vec();
+    }
+
     fn apply_progress(&mut self, event: &BacktestRemoteFillProgress) {
         match event {
             BacktestRemoteFillProgress::FillStarted { total_batches, .. } => {
                 self.total_batches = *total_batches;
             }
-            BacktestRemoteFillProgress::BatchFinished { batch_number, .. } => {
-                self.completed_batches.insert(*batch_number);
+            BacktestRemoteFillProgress::BatchStarted {
+                batch_number,
+                requested_range,
+                symbols,
+                ..
+            } => {
+                for symbol in symbols {
+                    let entry = self.symbols.entry(symbol.clone()).or_default();
+                    entry.active_batches.insert(*batch_number);
+                    entry.active = true;
+                    entry.phase = Some(BacktestRemoteFillPhase::Started);
+                    entry.last_event_sequence = self.revision;
+                    entry
+                        .rows_by_stream
+                        .entry((*batch_number, 0, requested_range.0, requested_range.1))
+                        .or_default();
+                }
             }
-            BacktestRemoteFillProgress::BatchFailed { .. } => self.failed = true,
-            BacktestRemoteFillProgress::BatchStarted { .. }
-            | BacktestRemoteFillProgress::TickObserved { .. } => {}
+            BacktestRemoteFillProgress::BatchFinished {
+                batch_number,
+                symbols,
+                ..
+            } => {
+                self.completed_batches.insert(*batch_number);
+                for symbol in symbols {
+                    if let Some(entry) = self.symbols.get_mut(symbol) {
+                        entry.active_batches.remove(batch_number);
+                        entry.active = !entry.active_batches.is_empty();
+                        if !entry.active {
+                            entry.phase = Some(BacktestRemoteFillPhase::Finished);
+                        }
+                        entry.last_event_sequence = self.revision;
+                    }
+                }
+            }
+            BacktestRemoteFillProgress::BatchFailed {
+                batch_number,
+                symbols,
+                error,
+                ..
+            } => {
+                self.failed = true;
+                for symbol in symbols {
+                    let entry = self.symbols.entry(symbol.clone()).or_default();
+                    entry.active_batches.remove(batch_number);
+                    entry.active = !entry.active_batches.is_empty();
+                    if !entry.active {
+                        entry.phase = Some(BacktestRemoteFillPhase::Failed);
+                    }
+                    entry.error = Some(error.clone());
+                    entry.last_event_sequence = self.revision;
+                }
+            }
+            BacktestRemoteFillProgress::TickObserved { .. } => {}
         }
     }
 
@@ -352,6 +492,7 @@ impl ProgressState {
                         if !entry.missing_ranges.contains(requested_range) {
                             entry.missing_ranges.push(*requested_range);
                         }
+                        entry.active_batches.insert(*batch_number);
                         entry.active = true;
                         entry.phase = Some(BacktestRemoteFillPhase::Started);
                         entry.last_event_sequence = self.revision;
@@ -371,6 +512,7 @@ impl ProgressState {
             } => {
                 self.history_batch_started = true;
                 let entry = self.symbols.entry(event.symbol.clone()).or_default();
+                entry.active_batches.insert(*batch_number);
                 entry.active = true;
                 entry.phase = Some(history_phase(event.phase));
                 entry.last_event_sequence = self.revision;
@@ -395,8 +537,11 @@ impl ProgressState {
                     .insert(*batch_number, *rows_written);
                 for symbol in symbols {
                     if let Some(entry) = self.symbols.get_mut(symbol) {
-                        entry.active = false;
-                        entry.phase = Some(BacktestRemoteFillPhase::Finished);
+                        entry.active_batches.remove(batch_number);
+                        entry.active = !entry.active_batches.is_empty();
+                        if !entry.active {
+                            entry.phase = Some(BacktestRemoteFillPhase::Finished);
+                        }
                         entry
                             .received_days
                             .extend(entry.missing_days.iter().copied());
@@ -415,13 +560,23 @@ impl ProgressState {
                     );
                 }
             }
-            BacktestHistoryFillProgress::BatchFailed { symbols, .. } => {
+            BacktestHistoryFillProgress::BatchFailed {
+                batch_number,
+                symbols,
+                error,
+                ..
+            } => {
                 self.history_batch_started = true;
                 self.failed = true;
                 for symbol in symbols {
                     if let Some(entry) = self.symbols.get_mut(symbol) {
-                        entry.active = false;
-                        entry.phase = Some(BacktestRemoteFillPhase::Failed);
+                        entry.active_batches.remove(batch_number);
+                        entry.active = !entry.active_batches.is_empty();
+                        if !entry.active {
+                            entry.phase = Some(BacktestRemoteFillPhase::Failed);
+                        }
+                        entry.error = Some(error.clone());
+                        entry.last_event_sequence = self.revision;
                     }
                 }
             }
@@ -452,15 +607,11 @@ impl ProgressState {
             self.inspection = None;
             self.plan = Some(plan.clone());
             self.total_batches = plan.logical_batches();
-            self.symbols.clear();
             for plan_symbol in plan.physical_symbols() {
-                self.symbols.insert(
-                    plan_symbol.physical_symbol().to_string(),
-                    SymbolProgress {
-                        requested_ranges: plan_symbol.requested_ranges().to_vec(),
-                        missing_ranges: plan_symbol.missing_ranges().to_vec(),
-                        ..SymbolProgress::default()
-                    },
+                self.apply_plan_symbol_ranges(
+                    plan_symbol.physical_symbol(),
+                    plan_symbol.requested_ranges(),
+                    plan_symbol.missing_ranges(),
                 );
             }
             self.recalculate_days();
@@ -477,12 +628,20 @@ impl ProgressState {
         let entry = self.symbols.entry(symbol.to_string()).or_default();
         entry.phase = Some(event.phase());
         entry.last_event_sequence = event_sequence;
-        entry.active = !matches!(
+        let terminal = matches!(
             event.phase(),
             BacktestRemoteFillPhase::Finished
                 | BacktestRemoteFillPhase::Failed
                 | BacktestRemoteFillPhase::Cancelled
         );
+        if let Some(batch_id) = event.logical_batch_id() {
+            if terminal {
+                entry.active_batches.remove(&batch_id);
+            } else {
+                entry.active_batches.insert(batch_id);
+            }
+        }
+        entry.active = !entry.active_batches.is_empty() || !terminal;
         if matches!(event.phase(), BacktestRemoteFillPhase::Retrying) {
             entry.retries = entry.retries.saturating_add(1);
         }
@@ -491,6 +650,9 @@ impl ProgressState {
         }
         if matches!(event.phase(), BacktestRemoteFillPhase::Failed) {
             self.failed = true;
+        }
+        if let Some(error) = event.error() {
+            entry.error = Some(error.to_string());
         }
         if let Some(batch_id) = event.logical_batch_id() {
             entry.rows_by_stream.insert(
@@ -524,6 +686,21 @@ impl ProgressState {
                 continue;
             };
             self.apply_day_stats(stats);
+        }
+    }
+
+    fn apply_final_minute_report(&mut self, report: &MinuteFillReport) {
+        self.final_rows = Some(report.rows_written);
+        for symbol in &report.symbols {
+            let entry = self.symbols.entry(symbol.symbol.clone()).or_default();
+            entry.final_rows = Some(symbol.rows_written);
+            entry.active_batches.clear();
+            entry.active = false;
+            entry.phase = Some(if symbol.after.complete {
+                BacktestRemoteFillPhase::Finished
+            } else {
+                BacktestRemoteFillPhase::Failed
+            });
         }
     }
 
@@ -571,6 +748,7 @@ impl ProgressState {
             return;
         };
         symbol.history_day_counts = Some(HistoryDayCounts {
+            covered: day_count_for_ranges(&symbol.history_received_ranges, calendar),
             planned: day_count_for_ranges(&symbol.requested_ranges, calendar),
             missing: day_count_for_ranges(&symbol.missing_ranges, calendar),
             received: day_count_for_ranges(&symbol.history_received_ranges, calendar),
@@ -633,15 +811,37 @@ impl ProgressState {
             planned += symbol_planned;
             received += symbol_received;
             missing += symbol_missing;
-            if !self.history_fill {
+            if self.history_fill {
+                rows += symbol
+                    .rows_by_stream
+                    .iter()
+                    .filter(|((batch_number, ..), _)| {
+                        !self.completed_batches.contains(batch_number)
+                    })
+                    .map(|(_, rows)| *rows)
+                    .sum::<usize>();
+            } else {
                 rows += symbol.rows_by_stream.values().copied().sum::<usize>();
             }
         }
         (covered, planned, received, missing, rows)
     }
 
+    fn display_rows(&self, rows: usize) -> Option<usize> {
+        self.final_rows
+            .or_else(|| (self.cache_kind != "minute").then_some(rows))
+    }
+
+    fn display_symbol_rows(&self, symbol: &SymbolProgress) -> Option<usize> {
+        symbol.final_rows.or_else(|| {
+            (self.cache_kind != "minute")
+                .then(|| symbol.rows_by_stream.values().copied().sum::<usize>())
+        })
+    }
+
     fn jsonl_record(&self) -> Value {
         let (covered, planned, received, missing, rows) = self.coverage_counts();
+        let display_rows = self.display_rows(rows);
         let (event, status, summary) = match &self.finished {
             Some(completion) => (
                 "complete",
@@ -683,7 +883,8 @@ impl ProgressState {
                 "planned_days": planned,
                 "received_days": received,
                 "missing_days": missing,
-                "rows": rows,
+                "rows": display_rows,
+                "rows_known": display_rows.is_some(),
             },
             "calendar": {
                 "source": self
@@ -708,7 +909,7 @@ impl ProgressState {
             "symbols": self
                 .symbols
                 .iter()
-                .filter(|(_, state)| state.active)
+                .filter(|(_, state)| state.active || state.error.is_some())
             .map(|(symbol, state)| {
                 let (covered, planned, received, missing) = state.day_counts(self.history_fill);
                 json!({
@@ -721,14 +922,24 @@ impl ProgressState {
                     "received": received,
                     "missing": missing,
                     },
-                    "rows": state.rows_by_stream.values().copied().sum::<usize>(),
+                    "rows": self.display_symbol_rows(state),
                     "attempt_retries": state.retries,
                     "split_fallback": state.split_fallback,
+                    "error": state.error,
                 })
             })
                 .collect::<Vec<_>>(),
             "summary": summary,
         })
+    }
+}
+
+fn render_jsonl(rx: mpsc::Receiver<JsonlEvent>) {
+    while let Ok(event) = rx.recv() {
+        match event {
+            JsonlEvent::Record(record) => write_jsonl_progress(&record),
+            JsonlEvent::Finish => return,
+        }
     }
 }
 
@@ -864,6 +1075,7 @@ fn render_loop(shared: Arc<Mutex<ProgressState>>) {
 
 fn render_plain(shared: Arc<Mutex<ProgressState>>) {
     let mut rendered_revision = u64::MAX;
+    let mut last_rendered_at = None;
     loop {
         thread::sleep(RENDER_INTERVAL);
         let snapshot = match shared.lock() {
@@ -871,9 +1083,19 @@ fn render_plain(shared: Arc<Mutex<ProgressState>>) {
             Err(_) => return,
         };
         if snapshot.revision != rendered_revision {
+            if snapshot.finished.is_none()
+                && last_rendered_at.is_some_and(|rendered_at: Instant| {
+                    rendered_at.elapsed() < PLAIN_RENDER_INTERVAL
+                })
+            {
+                continue;
+            }
             rendered_revision = snapshot.revision;
+            last_rendered_at = Some(Instant::now());
             let (covered, planned, received, missing, rows) = snapshot.coverage_counts();
-            let rows_per_second = rows_per_second(rows, snapshot.started_at);
+            let display_rows = snapshot.display_rows(rows);
+            let rows_per_second =
+                display_rows.map(|rows| rows_per_second(rows, snapshot.started_at));
             if let Some(inspection) = &snapshot.inspection {
                 eprintln!(
                     "tqsdk-cache: phase=inspection checked_ranges={}/{} complete_ranges={} incomplete_ranges={} symbol={} range=[{}, {})",
@@ -889,7 +1111,7 @@ fn render_plain(shared: Arc<Mutex<ProgressState>>) {
                 eprintln!("tqsdk-cache: phase=planning message={}", snapshot.planning);
             } else {
                 eprintln!(
-                    "tqsdk-cache: phase=fill status={} batches={}/{} coverage_days={}/{} received_days={}/{} rows={} rows_per_sec={} calendar={}{}",
+                    "tqsdk-cache: phase=fill status={} batches={}/{} coverage_days={}/{} received_days={}/{} rows={} avg_rows_per_sec={} calendar={}{}",
                     if snapshot.failed { "failed" } else { "running" },
                     snapshot.completed_batches.len(),
                     snapshot.total_batches,
@@ -897,8 +1119,12 @@ fn render_plain(shared: Arc<Mutex<ProgressState>>) {
                     planned,
                     received,
                     missing,
-                    rows,
-                    rows_per_second,
+                    display_rows
+                        .map(|rows| rows.to_string())
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    rows_per_second
+                        .map(|rate| rate.to_string())
+                        .unwrap_or_else(|| "n/a".to_string()),
                     snapshot
                         .calendar
                         .as_ref()
@@ -910,7 +1136,11 @@ fn render_plain(shared: Arc<Mutex<ProgressState>>) {
                         .map(|error| format!(" calendar_error={error:?}"))
                         .unwrap_or_default(),
                 );
-                for (symbol, state) in snapshot.symbols.iter().filter(|(_, state)| state.active) {
+                for (symbol, state) in snapshot
+                    .symbols
+                    .iter()
+                    .filter(|(_, state)| state.active || state.error.is_some())
+                {
                     let trading_day = state
                         .latest_trading_day
                         .map(|day| day.to_string())
@@ -918,7 +1148,7 @@ fn render_plain(shared: Arc<Mutex<ProgressState>>) {
                     let (covered, planned, received, missing) =
                         state.day_counts(snapshot.history_fill);
                     eprintln!(
-                        "tqsdk-cache: phase=symbol symbol={} state={} trading_day={} coverage_days={}/{} received_days={}/{} rows={} attempt_retries={} split_fallback={}",
+                        "tqsdk-cache: phase=symbol symbol={} state={} trading_day={} coverage_days={}/{} received_days={}/{} rows={} attempt_retries={} split_fallback={}{}",
                         symbol,
                         state.phase.map(phase_name).unwrap_or("pending"),
                         trading_day,
@@ -926,16 +1156,25 @@ fn render_plain(shared: Arc<Mutex<ProgressState>>) {
                         planned,
                         received,
                         missing,
-                        state.rows_by_stream.values().copied().sum::<usize>(),
+                        snapshot
+                            .display_symbol_rows(state)
+                            .map(|rows| rows.to_string())
+                            .unwrap_or_else(|| "n/a".to_string()),
                         state.retries,
                         state.split_fallback,
+                        state
+                            .error
+                            .as_deref()
+                            .map(|error| format!(" error={error:?}"))
+                            .unwrap_or_default(),
                     );
                 }
             }
         }
         if let Some(completion) = snapshot.finished {
             eprintln!(
-                "tqsdk-cache: phase=complete summary={:?}",
+                "tqsdk-cache: phase=complete status={} summary={:?}",
+                completion.status.as_str(),
                 completion.summary
             );
             return;
@@ -944,10 +1183,10 @@ fn render_plain(shared: Arc<Mutex<ProgressState>>) {
 }
 
 fn render_tty(shared: Arc<Mutex<ProgressState>>) {
-    let multi = MultiProgress::with_draw_target(ProgressDrawTarget::stderr_with_hz(8));
+    let multi = MultiProgress::with_draw_target(ProgressDrawTarget::stderr_with_hz(TTY_RENDER_HZ));
     let planning = multi.add(ProgressBar::new_spinner());
     planning.set_style(spinner_style());
-    planning.enable_steady_tick(Duration::from_millis(120));
+    planning.enable_steady_tick(TTY_SPINNER_INTERVAL);
     let mut planning_visible = true;
     let mut inspection = None;
     let mut global = None;
@@ -1010,13 +1249,20 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
                     global = Some(bar);
                 }
                 if let Some(global) = &global {
-                    let (covered, planned, received, missing, rows) = snapshot.coverage_counts();
+                    let (covered, planned, received, missing, raw_rows) =
+                        snapshot.coverage_counts();
+                    let display_rows = snapshot.display_rows(raw_rows);
+                    let rows = display_rows
+                        .map(|rows| rows.to_string())
+                        .unwrap_or_else(|| "n/a".to_string());
+                    let rate = display_rows
+                        .map(|rows| rows_per_second(rows, snapshot.started_at).to_string())
+                        .unwrap_or_else(|| "n/a".to_string());
                     global.set_length(snapshot.total_batches as u64);
                     global.set_position(snapshot.completed_batches.len() as u64);
                     global.set_message(format!(
-                        "{} | 覆盖 {covered}/{planned} | 本轮接收 {received}/{missing} | {rows} rows | {}/s{}",
+                    "{} | 覆盖 {covered}/{planned} | 本轮接收 {received}/{missing} | {rows} rows | avg {rate}/s{}",
                         if snapshot.failed { "failed" } else { "running" },
-                        rows_per_second(rows, snapshot.started_at),
                         if additional_active == 0 {
                             String::new()
                         } else {
@@ -1039,7 +1285,7 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
                     let state = &snapshot.symbols[symbol];
                     let (covered, planned, received, missing) =
                         state.day_counts(snapshot.history_fill);
-                    bar.set_prefix(symbol.clone());
+                    bar.set_prefix(display_symbol(symbol));
                     bar.set_length(missing as u64);
                     bar.set_position(received as u64);
                     let retry = if state.retries > 0 {
@@ -1053,16 +1299,24 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
                         .map(|day| day.to_string())
                         .unwrap_or_else(|| "-".to_string());
                     bar.set_message(format!(
-                        "{} | {} | 覆盖 {}/{} | 本轮接收 {}/{} | {} rows{}{}",
+                        "{} | {} | 覆盖 {}/{} | 本轮接收 {}/{} | {} rows{}{}{}",
                         state.phase.map(phase_name).unwrap_or("pending"),
                         trading_day,
                         covered,
                         planned,
                         received,
                         missing,
-                        state.rows_by_stream.values().copied().sum::<usize>(),
+                        snapshot
+                            .display_symbol_rows(state)
+                            .map(|rows| rows.to_string())
+                            .unwrap_or_else(|| "n/a".to_string()),
                         retry,
                         split,
+                        state
+                            .error
+                            .as_deref()
+                            .map(|error| format!(" | {error}"))
+                            .unwrap_or_default(),
                     ));
                 }
             }
@@ -1082,10 +1336,25 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
                     planning.finish_and_clear();
                     multi.remove(&planning);
                 }
-                let _ = multi.println(completion.summary);
+                let _ = multi.println(format!(
+                    "{}: {}",
+                    completion.status.as_str(),
+                    completion.summary
+                ));
             }
             return;
         }
+    }
+}
+
+fn display_symbol(symbol: &str) -> String {
+    const MAX_CHARS: usize = 18;
+    let mut chars = symbol.chars();
+    let prefix = chars.by_ref().take(MAX_CHARS - 1).collect::<String>();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
     }
 }
 
@@ -1189,6 +1458,97 @@ mod tests {
     }
 
     #[test]
+    fn history_finished_ranges_count_as_covered() {
+        let mut state = ProgressState::new(ResolvedProgressMode::Plain, 8);
+        let symbol = "SHFE.au2608".to_string();
+        let range = backtest_tick_trading_day_range(
+            NaiveDate::from_ymd_opt(2026, 7, 20).expect("valid test day"),
+        )
+        .expect("valid test range");
+        let requested_range = (range.start_ns, range.end_ns);
+
+        state.apply_history_progress(&BacktestHistoryFillProgress::BatchStarted {
+            family: BacktestHistoryFillFamily::Daily,
+            batch_number: 1,
+            total_batches: 1,
+            requested_range,
+            pending_batches: 0,
+            active_batches: 1,
+            symbols: vec![symbol.clone()],
+        });
+        state.apply_history_progress(&BacktestHistoryFillProgress::BatchFinished {
+            family: BacktestHistoryFillFamily::Daily,
+            batch_number: 1,
+            total_batches: 1,
+            requested_range,
+            symbols: vec![symbol.clone()],
+            rows_written: 37,
+            elapsed: Duration::from_secs(1),
+        });
+
+        assert_eq!(state.symbols[&symbol].day_counts(true), (1, 1, 1, 1));
+        assert_eq!(state.coverage_counts(), (1, 1, 1, 1, 37));
+    }
+
+    #[test]
+    fn history_symbol_remains_active_until_its_last_batch_finishes() {
+        let mut state = ProgressState::new(ResolvedProgressMode::Plain, 8);
+        let symbol = "SHFE.au2608".to_string();
+        let first = backtest_tick_trading_day_range(
+            NaiveDate::from_ymd_opt(2026, 7, 20).expect("valid first test day"),
+        )
+        .expect("valid first test range");
+        let second = backtest_tick_trading_day_range(
+            NaiveDate::from_ymd_opt(2026, 7, 21).expect("valid second test day"),
+        )
+        .expect("valid second test range");
+        let first_range = (first.start_ns, first.end_ns);
+        let second_range = (second.start_ns, second.end_ns);
+
+        for (batch_number, requested_range) in [(1, first_range), (2, second_range)] {
+            state.apply_history_progress(&BacktestHistoryFillProgress::BatchStarted {
+                family: BacktestHistoryFillFamily::Daily,
+                batch_number,
+                total_batches: 2,
+                requested_range,
+                pending_batches: 2 - batch_number,
+                active_batches: batch_number,
+                symbols: vec![symbol.clone()],
+            });
+        }
+        state.apply_history_progress(&BacktestHistoryFillProgress::BatchFinished {
+            family: BacktestHistoryFillFamily::Daily,
+            batch_number: 1,
+            total_batches: 2,
+            requested_range: first_range,
+            symbols: vec![symbol.clone()],
+            rows_written: 1,
+            elapsed: Duration::from_secs(1),
+        });
+
+        assert!(state.symbols[&symbol].active);
+
+        state.apply_history_progress(&BacktestHistoryFillProgress::BatchFailed {
+            family: BacktestHistoryFillFamily::Daily,
+            batch_number: 2,
+            total_batches: 2,
+            requested_range: second_range,
+            symbols: vec![symbol.clone()],
+            error: "provider timeout".to_string(),
+        });
+
+        assert!(!state.symbols[&symbol].active);
+        assert_eq!(
+            state.symbols[&symbol].error.as_deref(),
+            Some("provider timeout")
+        );
+        assert_eq!(
+            state.jsonl_record()["symbols"][0]["error"],
+            "provider timeout"
+        );
+    }
+
+    #[test]
     fn history_progress_keeps_long_day_ranges_compact() {
         let first_day = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
         let last_day = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
@@ -1264,6 +1624,73 @@ mod tests {
                 0,
             )
         );
+    }
+
+    #[test]
+    fn minute_scope_stabilizes_the_denominator_before_telemetry_arrives() {
+        let mut state =
+            ProgressState::new_with_cache_kind(ResolvedProgressMode::Plain, 8, "minute");
+        let day = NaiveDate::from_ymd_opt(2026, 7, 20).expect("valid test day");
+        let range = backtest_tick_trading_day_range(day).expect("valid test range");
+        let symbols = vec!["SHFE.au2608".to_string(), "DCE.i2609".to_string()];
+
+        state.set_scope(&symbols, (range.start_ns, range.end_ns));
+        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 0));
+
+        // Repeated planning callbacks must not re-expand an already fixed scope.
+        state.set_scope(&symbols, (range.start_ns, range.end_ns));
+        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 0));
+    }
+
+    #[test]
+    fn minute_remote_plan_keeps_the_user_requested_denominator() {
+        let mut state =
+            ProgressState::new_with_cache_kind(ResolvedProgressMode::Plain, 8, "minute");
+        let first_day = NaiveDate::from_ymd_opt(2026, 7, 20).expect("valid first test day");
+        let second_day = NaiveDate::from_ymd_opt(2026, 7, 21).expect("valid second test day");
+        let first_range =
+            backtest_tick_trading_day_range(first_day).expect("valid first test range");
+        let second_range =
+            backtest_tick_trading_day_range(second_day).expect("valid second test range");
+        let symbol = "SHFE.au2608".to_string();
+
+        state.set_scope(
+            std::slice::from_ref(&symbol),
+            (first_range.start_ns, second_range.end_ns),
+        );
+        state.apply_plan_symbol_ranges(
+            &symbol,
+            &[(first_range.start_ns, first_range.end_ns)],
+            &[(first_range.start_ns, first_range.end_ns)],
+        );
+        state.recalculate_days();
+
+        assert_eq!(state.coverage_counts(), (1, 2, 0, 1, 0));
+    }
+
+    #[test]
+    fn minute_rows_wait_for_the_canonical_terminal_report() {
+        let mut state =
+            ProgressState::new_with_cache_kind(ResolvedProgressMode::Plain, 8, "minute");
+        let symbol = "SHFE.au2608".to_string();
+        state
+            .symbols
+            .entry(symbol.clone())
+            .or_default()
+            .rows_by_stream
+            .insert((1, 1, 0, 1), 88);
+
+        assert_eq!(state.display_rows(88), None);
+        assert_eq!(state.display_symbol_rows(&state.symbols[&symbol]), None);
+
+        state.final_rows = Some(71);
+        state
+            .symbols
+            .get_mut(&symbol)
+            .expect("symbol exists")
+            .final_rows = Some(70);
+        assert_eq!(state.display_rows(88), Some(71));
+        assert_eq!(state.display_symbol_rows(&state.symbols[&symbol]), Some(70));
     }
 
     #[test]

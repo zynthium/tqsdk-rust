@@ -173,6 +173,11 @@ coverage。fill-only materialization 不回读刚写入的 cache，物理写入�
 chart cleanup 成功后，同一 session 可顺序服务后续 trading-day/minute slices。pool 饱和时 overflow
 不等待且不回池；取消、source error 或 cleanup error 也会丢弃 lane。coverage 仍按 slice 独立提交，
 因此连接复用不改变中断恢复粒度。
+每条专用 lane 把 runtime commit retention 收窄到 8；消费后的 Tick/Kline page data 也立即经正常
+runtime commit 清理。这样保留 cursor/revision 语义，同时避免默认 8192-entry commit history 持有
+大页 `ChangeSet`。canonical-minute 和 native-daily 仍只在服务端明确 terminal 后发布 final coverage；
+为避免终态前整段驻留，minute 子区间最多覆盖 10,000 分钟，daily 子区间最多覆盖 1,024 天，多个
+子区间连续且不重叠。
 
 其中：
 

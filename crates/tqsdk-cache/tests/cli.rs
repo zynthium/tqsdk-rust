@@ -780,8 +780,8 @@ fn daily_fill_jsonl_progress_and_report_use_the_shared_terminal_contract() {
 
 #[cfg(unix)]
 #[test]
-fn daily_fill_sigint_persists_one_interrupted_terminal_report() {
-    let cache_dir = temp_dir("daily-fill-sigint-v3");
+fn daily_fill_sighup_persists_one_interrupted_terminal_report() {
+    let cache_dir = temp_dir("daily-fill-sighup-v3");
     let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
     DailyKlineCache::open(&cache_dir)
         .unwrap()
@@ -838,7 +838,7 @@ fn daily_fill_sigint_persists_one_interrupted_terminal_report() {
     }
     assert!(
         Command::new("kill")
-            .args(["-INT", &child.id().to_string()])
+            .args(["-HUP", &child.id().to_string()])
             .status()
             .unwrap()
             .success()
@@ -1959,6 +1959,14 @@ fn minute_fill_progress_jsonl_uses_v2_and_identifies_the_cache_kind() {
         "minute fill should leave the planning phase after receiving its plan telemetry"
     );
     assert_eq!(records.last().unwrap()["event"], "complete");
+    assert!(
+        records
+            .iter()
+            .any(|record| record["coverage"]["rows"].is_null()),
+        "minute telemetry must not present non-canonical accepted rows as cache writes"
+    );
+    assert_eq!(records.last().unwrap()["coverage"]["rows"], 0);
+    assert_eq!(records.last().unwrap()["coverage"]["rows_known"], true);
 
     let _ = std::fs::remove_dir_all(cache_dir);
 }
@@ -2196,7 +2204,7 @@ fn fill_progress_off_keeps_stderr_quiet_and_stdout_machine_readable() {
 }
 
 #[test]
-fn fill_progress_plain_keeps_stdout_json_and_emits_structured_stderr() {
+fn fill_progress_auto_falls_back_to_plain_when_stderr_is_captured() {
     let cache_dir = temp_dir("progress-plain");
     let cache = BacktestTickCache::open(&cache_dir).unwrap();
     let start = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
@@ -2214,12 +2222,13 @@ fn fill_progress_plain_keeps_stdout_json_and_emits_structured_stderr() {
         "2020-01-02",
         "--end-day",
         "2020-01-02",
-        "--progress",
-        "plain",
     ]);
 
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("tqsdk-cache: phase=complete"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("tqsdk-cache: phase=complete status=complete")
+    );
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     let result = v3_result(&json, "fill", "success", 0);
     assert_eq!(result["report"]["complete"], true);
@@ -2249,6 +2258,7 @@ fn fill_progress_plain_reports_a_specific_failure_summary() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("fill failed; strict local coverage was not committed"));
+    assert!(stderr.contains("tqsdk-cache: phase=complete status=failed"));
     assert!(!stderr.contains("fill ended before a final progress summary"));
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     let _ = v3_result(&json, "fill", "error", 1);

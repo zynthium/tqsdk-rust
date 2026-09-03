@@ -74,6 +74,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 - 多个 cursor 必须能独立推进，不互相污染
 - `CommitLog` 不得因为 revision 扫描而在长会话中退化为线性读取
 - `CommitLog` 必须有 retention 策略，且不能截断仍被活动 cursor 需要的提交
+- `SessionClientBuilder` 的显式 commit retention 必须传播到所建 runtime；未配置时保持 core 默认值
 
 ### adapter 边界
 - adapter 可以编解码和保留短期协议态
@@ -355,7 +356,10 @@ atomic replacement、streaming reader、Refresh 只移除
 `backtest_history_query`、`facade_contract` 与 `tqsdk-cache` CLI tests 还覆盖 active metadata pointer
 前移后，完整历史 minute 分区继续离线读取；滚动 snapshot 扩展必须复用语义相同的缓存前缀、只报告新增
 尾部缺口，并在追加 final minute 后原子迁移当前月 header。真实 physical mapping 冲突必须仍进入 stale
-repair 或 fail closed；`RemoteOnMiss` 完整命中不得读取 auth。`verify` 必须使用 metadata-backed snapshot，
+repair 或 fail closed；`RemoteOnMiss` 完整命中不得读取 auth。远端 minute/daily fill 必须保持终态前
+内存有界：minute 子区间不超过 10,000 分钟，daily 子区间不超过 1,024 天；消费后的两类 Kline page
+data 必须从专用 session runtime state 清理，同时 final coverage 仍只能在明确 terminal 后发布。
+`verify` 必须使用 metadata-backed snapshot，
 而不是固定 CST 默认值；缺失 sidecar、session/交易日/映射变化、损坏或混合分区仍必须 fail closed。
 显式 `fill --repair-stale` 仅在 active snapshot 覆盖完整窗口时，才 purge 与它冲突的整月分区；该 purge
 必须在同一 root remote-fill lock 和 repair 所需 auth preflight 成功后发生。lock busy 或认证缺失必须保留

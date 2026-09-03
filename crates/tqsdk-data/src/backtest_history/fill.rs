@@ -20,6 +20,8 @@ use fs2::FileExt;
 use tokio::sync::Notify;
 #[cfg(all(feature = "live", feature = "services"))]
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+#[cfg(all(feature = "live", feature = "services"))]
+use tqsdk_core::{CommitScope, FieldMutation, MutationSource, NormalizedMutation, StatePath};
 use tqsdk_core::{Kline, Tick};
 use tqsdk_session::{
     ServerBacktestHistoryChart, ServerBacktestHistoryEvent, ServerBacktestHistoryKind,
@@ -42,7 +44,13 @@ use super::request::{
 use super::telemetry::TelemetryHub;
 
 const TICK_WRITE_BUFFER_ROWS: usize = 8_192;
+#[cfg(all(feature = "live", feature = "services"))]
+const SERVER_HISTORY_COMMIT_LOG_RETENTION: usize = 8;
+// Each canonical-minute slice can contain at most one row per minute.
 const MINUTE_FILL_MAX_SPAN_NS: i64 = 10_000 * 60_000_000_000;
+// Bound the otherwise whole-range daily terminal buffer while keeping
+// ordinary multi-year fills coarse-grained.
+const DAILY_FILL_MAX_SPAN_NS: i64 = 1_024 * 86_400_000_000_000;
 const CROSS_PROCESS_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
 const EXTERNAL_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const REMOTE_FILL_RETRY_ATTEMPTS: usize = 3;
@@ -438,6 +446,7 @@ impl ServerHistorySessionPool {
                     credentials.pass.clone(),
                 )
                 .futures_backtest_market()
+                .commit_log_retention(SERVER_HISTORY_COMMIT_LOG_RETENTION)
                 .build()?;
                 #[cfg(test)]
                 self.created_sessions.fetch_add(1, Ordering::AcqRel);
@@ -494,12 +503,18 @@ impl ServerHistorySourceFactory for SessionServerHistorySourceFactory {
     ) -> OpenServerHistorySourceFuture<'a> {
         Box::pin(async move {
             let lease = self.pool.acquire(credentials)?;
+            let chart_kinds = request
+                .charts
+                .iter()
+                .map(|chart| (chart.chart_id.clone(), chart.kind))
+                .collect();
             let stream =
                 tqsdk_session::ServerBacktestHistoryStream::open(lease.session().clone(), request)
                     .await?;
             Ok(Box::new(SessionServerHistorySource {
                 stream: Some(stream),
                 lease: Some(lease),
+                chart_kinds,
             }) as Box<dyn ServerHistorySource>)
         })
     }
@@ -509,6 +524,7 @@ impl ServerHistorySourceFactory for SessionServerHistorySourceFactory {
 struct SessionServerHistorySource {
     stream: Option<tqsdk_session::ServerBacktestHistoryStream>,
     lease: Option<ServerHistorySessionLease>,
+    chart_kinds: BTreeMap<String, ServerBacktestHistoryKind>,
 }
 
 #[cfg(all(feature = "live", feature = "services"))]
@@ -518,7 +534,11 @@ impl ServerHistorySource for SessionServerHistorySource {
             let stream = self.stream.as_mut().ok_or(DataError::InvalidState(
                 "server-history source was already closed",
             ))?;
-            stream.next_event(None).await.map_err(Into::into)
+            let event = stream.next_event(None).await.map_err(DataError::from)?;
+            if let (Some(event), Some(lease)) = (&event, &self.lease) {
+                prune_consumed_server_history_page(lease.session(), &self.chart_kinds, event)?;
+            }
+            Ok(event)
         })
     }
 
@@ -538,6 +558,67 @@ impl ServerHistorySource for SessionServerHistorySource {
             cleanup_result
         })
     }
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn prune_consumed_server_history_page(
+    session: &tqsdk_session::SessionClient,
+    chart_kinds: &BTreeMap<String, ServerBacktestHistoryKind>,
+    event: &ServerBacktestHistoryEvent,
+) -> Result<()> {
+    let (symbol, kind) = match event {
+        ServerBacktestHistoryEvent::Ticks { symbol, .. } => {
+            (symbol, ServerBacktestHistoryKind::Tick)
+        }
+        ServerBacktestHistoryEvent::CanonicalMinutes { symbol, .. } => {
+            (symbol, ServerBacktestHistoryKind::CanonicalMinute)
+        }
+        ServerBacktestHistoryEvent::CanonicalDaily { symbol, .. } => {
+            (symbol, ServerBacktestHistoryKind::CanonicalDaily)
+        }
+        ServerBacktestHistoryEvent::ChartCompleted {
+            chart_id, symbol, ..
+        } => {
+            let kind = chart_kinds
+                .get(chart_id)
+                .copied()
+                .ok_or(DataError::InvalidState(
+                    "completed server-history chart kind was not retained",
+                ))?;
+            (symbol, kind)
+        }
+        ServerBacktestHistoryEvent::StreamCompleted => return Ok(()),
+    };
+    let path = match kind {
+        ServerBacktestHistoryKind::Tick => StatePath::new(["ticks".to_string(), symbol.clone()]),
+        ServerBacktestHistoryKind::CanonicalMinute => StatePath::new([
+            "klines".to_string(),
+            symbol.clone(),
+            tqsdk_session::SERVER_BACKTEST_CANONICAL_MINUTE_NS.to_string(),
+        ]),
+        ServerBacktestHistoryKind::CanonicalDaily => StatePath::new([
+            "klines".to_string(),
+            symbol.clone(),
+            tqsdk_session::SERVER_BACKTEST_CANONICAL_DAILY_NS.to_string(),
+        ]),
+    };
+    session
+        .handle()
+        .ingest_presorted_market_mutations(
+            [NormalizedMutation {
+                path,
+                object: None,
+                fields: vec![FieldMutation {
+                    field: "data".to_string(),
+                    value: serde_json::Value::Null,
+                }],
+                source: MutationSource::MarketDiff,
+            }],
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .map_err(|error| DataError::Session(error.into()))?;
+    Ok(())
 }
 
 #[cfg(not(all(feature = "live", feature = "services")))]
@@ -664,19 +745,21 @@ impl RemoteFillCoordinator {
             }
             return Ok(slices);
         }
-        if request.family == FillFamily::CanonicalDaily {
-            return Ok(vec![request.with_range(range)]);
-        }
+        let max_span_ns = match request.family {
+            FillFamily::CanonicalMinute => MINUTE_FILL_MAX_SPAN_NS,
+            FillFamily::CanonicalDaily => DAILY_FILL_MAX_SPAN_NS,
+            FillFamily::Tick => unreachable!("Tick fill returned after trading-day splitting"),
+        };
         let mut slices = Vec::new();
         let mut start_ns = range.0;
         while start_ns < range.1 {
             let end_ns = start_ns
-                .checked_add(MINUTE_FILL_MAX_SPAN_NS)
+                .checked_add(max_span_ns)
                 .unwrap_or(i64::MAX)
                 .min(range.1);
             if end_ns <= start_ns {
                 return Err(DataError::InvalidState(
-                    "canonical-minute fill slice did not advance",
+                    "canonical Kline fill slice did not advance",
                 ));
             }
             slices.push(request.with_range((start_ns, end_ns)));
@@ -2017,6 +2100,290 @@ mod tests {
         third.close(false).await.unwrap();
     }
 
+    #[cfg(all(feature = "live", feature = "services"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_source_prunes_consumed_tick_page_from_runtime_state() {
+        use serde_json::json;
+        use tqsdk_core::{
+            AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
+            RuntimeInput,
+        };
+        use tqsdk_session::testing::ManualSession;
+
+        let mut adapters = AdapterRegistry::new();
+        adapters.register_default_adapters();
+        let manual = ManualSession::from_runtime(RuntimeHandle::with_adapters(adapters));
+        let session = manual.client_clone();
+        let request = ServerBacktestHistoryRequest {
+            market_kind: ServerBacktestMarketKind::Futures,
+            start_ns: 1_000,
+            end_ns: 2_000,
+            charts: vec![ServerBacktestHistoryChart {
+                chart_id: "ticks-au".to_string(),
+                symbol: "SHFE.au2608".to_string(),
+                kind: ServerBacktestHistoryKind::Tick,
+            }],
+        };
+        let stream = tqsdk_session::ServerBacktestHistoryStream::open(session.clone(), request)
+            .await
+            .unwrap();
+        let pool = Arc::new(ServerHistorySessionPool::new(1));
+        let lease = ServerHistorySessionLease {
+            pool,
+            entry: Some(IdleServerHistorySession {
+                credentials: ServerHistorySessionCredentials {
+                    user: "test-user".to_string(),
+                    pass: "test-pass".to_string(),
+                },
+                session: session.clone(),
+            }),
+            permit: None,
+        };
+        let mut source = SessionServerHistorySource {
+            stream: Some(stream),
+            lease: Some(lease),
+            chart_kinds: BTreeMap::from([(
+                "ticks-au".to_string(),
+                ServerBacktestHistoryKind::Tick,
+            )]),
+        };
+        let _ = manual.drain_dispatches().unwrap();
+
+        session
+            .handle()
+            .ingest(
+                RuntimeInput::Io(IoEvent {
+                    route: "market".to_string(),
+                    domains: vec![ProtocolDomain::Market],
+                    payload: InputPayload::Json(json!({
+                        "aid": "rtn_data",
+                        "data": [{
+                            "mdhis_more_data": false,
+                            "charts": {
+                                "ticks-au": {
+                                    "state": {
+                                        "aid": "set_chart",
+                                        "chart_id": "ticks-au",
+                                        "ins_list": "SHFE.au2608",
+                                        "duration": 0,
+                                        "view_width": 10_000,
+                                        "focus_datetime": 1_000,
+                                        "focus_position": 0
+                                    },
+                                    "left_id": 1,
+                                    "right_id": 3,
+                                    "ready": true,
+                                    "more_data": false
+                                }
+                            },
+                            "ticks": {
+                                "SHFE.au2608": {
+                                    "last_id": 2,
+                                    "data": {
+                                        "1": {"id": 1, "datetime": 1_001},
+                                        "2": {"id": 2, "datetime": 1_002}
+                                    }
+                                }
+                            }
+                        }]
+                    })),
+                }),
+                vec![],
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap();
+
+        let event = source.next_event().await.unwrap().unwrap();
+        assert!(matches!(event, ServerBacktestHistoryEvent::Ticks { .. }));
+        assert!(
+            session
+                .reader()
+                .read_market_state()
+                .get_path(&["ticks", "SHFE.au2608", "data"])
+                .is_none(),
+            "consumed tick page must not remain in the pooled session state tree"
+        );
+        source.close(false).await.unwrap();
+    }
+
+    #[cfg(all(feature = "live", feature = "services"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_source_prunes_filtered_terminal_tick_page() {
+        use serde_json::json;
+        use tqsdk_core::{
+            AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
+            RuntimeInput,
+        };
+        use tqsdk_session::testing::ManualSession;
+
+        let mut adapters = AdapterRegistry::new();
+        adapters.register_default_adapters();
+        let manual = ManualSession::from_runtime(RuntimeHandle::with_adapters(adapters));
+        let session = manual.client_clone();
+        let request = ServerBacktestHistoryRequest {
+            market_kind: ServerBacktestMarketKind::Futures,
+            start_ns: 1_000,
+            end_ns: 2_000,
+            charts: vec![ServerBacktestHistoryChart {
+                chart_id: "ticks-au".to_string(),
+                symbol: "SHFE.au2608".to_string(),
+                kind: ServerBacktestHistoryKind::Tick,
+            }],
+        };
+        let stream = tqsdk_session::ServerBacktestHistoryStream::open(session.clone(), request)
+            .await
+            .unwrap();
+        let pool = Arc::new(ServerHistorySessionPool::new(1));
+        let lease = ServerHistorySessionLease {
+            pool,
+            entry: Some(IdleServerHistorySession {
+                credentials: ServerHistorySessionCredentials {
+                    user: "test-user".to_string(),
+                    pass: "test-pass".to_string(),
+                },
+                session: session.clone(),
+            }),
+            permit: None,
+        };
+        let mut source = SessionServerHistorySource {
+            stream: Some(stream),
+            lease: Some(lease),
+            chart_kinds: BTreeMap::from([(
+                "ticks-au".to_string(),
+                ServerBacktestHistoryKind::Tick,
+            )]),
+        };
+        let _ = manual.drain_dispatches().unwrap();
+
+        session
+            .handle()
+            .ingest(
+                RuntimeInput::Io(IoEvent {
+                    route: "market".to_string(),
+                    domains: vec![ProtocolDomain::Market],
+                    payload: InputPayload::Json(json!({
+                        "aid": "rtn_data",
+                        "data": [{
+                            "mdhis_more_data": false,
+                            "charts": {
+                                "ticks-au": {
+                                    "state": {
+                                        "aid": "set_chart",
+                                        "chart_id": "ticks-au",
+                                        "ins_list": "SHFE.au2608",
+                                        "duration": 0,
+                                        "view_width": 10_000,
+                                        "focus_datetime": 1_000,
+                                        "focus_position": 0
+                                    },
+                                    "left_id": 1,
+                                    "right_id": 2,
+                                    "ready": true,
+                                    "more_data": false
+                                }
+                            },
+                            "ticks": {
+                                "SHFE.au2608": {
+                                    "last_id": 1,
+                                    "data": {
+                                        "1": {"id": 1, "datetime": 999}
+                                    }
+                                }
+                            }
+                        }]
+                    })),
+                }),
+                vec![],
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap();
+
+        let event = source.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            event,
+            ServerBacktestHistoryEvent::ChartCompleted { .. }
+        ));
+        assert!(
+            session
+                .reader()
+                .read_market_state()
+                .get_path(&["ticks", "SHFE.au2608", "data"])
+                .is_none(),
+            "filtered terminal tick page must not remain in the pooled session state tree"
+        );
+        source.close(true).await.unwrap();
+    }
+
+    #[cfg(all(feature = "live", feature = "services"))]
+    #[test]
+    fn consumed_minute_and_daily_pages_are_pruned_from_runtime_state() {
+        use serde_json::json;
+        use tqsdk_core::{AdapterRegistry, RuntimeHandle};
+        use tqsdk_session::testing::ManualSession;
+
+        let mut adapters = AdapterRegistry::new();
+        adapters.register_default_adapters();
+        let manual = ManualSession::from_runtime(RuntimeHandle::with_adapters(adapters));
+        let session = manual.client_clone();
+        let symbol = "KQ.i@SHFE.au";
+        let cases = [
+            (
+                ServerBacktestHistoryKind::CanonicalMinute,
+                tqsdk_session::SERVER_BACKTEST_CANONICAL_MINUTE_NS,
+                ServerBacktestHistoryEvent::CanonicalMinutes {
+                    chart_id: "minute-au".to_string(),
+                    symbol: symbol.to_string(),
+                    rows: vec![kline(1, 1_000)],
+                },
+            ),
+            (
+                ServerBacktestHistoryKind::CanonicalDaily,
+                tqsdk_session::SERVER_BACKTEST_CANONICAL_DAILY_NS,
+                ServerBacktestHistoryEvent::CanonicalDaily {
+                    chart_id: "daily-au".to_string(),
+                    symbol: symbol.to_string(),
+                    rows: vec![kline(1, 1_000)],
+                },
+            ),
+        ];
+
+        for (kind, duration_ns, event) in cases {
+            let path = StatePath::new([
+                "klines".to_string(),
+                symbol.to_string(),
+                duration_ns.to_string(),
+            ]);
+            session
+                .handle()
+                .ingest_presorted_market_mutations(
+                    [NormalizedMutation {
+                        path,
+                        object: None,
+                        fields: vec![FieldMutation {
+                            field: "data".to_string(),
+                            value: json!({"1": {"id": 1, "datetime": 1_000}}),
+                        }],
+                        source: MutationSource::MarketDiff,
+                    }],
+                    vec![],
+                    CommitScope::RealtimeUpdate,
+                )
+                .unwrap();
+
+            prune_consumed_server_history_page(&session, &BTreeMap::new(), &event).unwrap();
+
+            let duration = duration_ns.to_string();
+            assert!(
+                session
+                    .reader()
+                    .read_market_state()
+                    .get_path(&["klines", symbol, duration.as_str(), "data"])
+                    .is_none(),
+                "consumed {kind:?} page must not remain in the pooled session state tree"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn completed_daily_slices_close_their_sources_as_reusable() {
         let root = temporary_root("daily-source-recycle");
@@ -2272,6 +2639,86 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn canonical_daily_fill_ranges_have_a_bounded_terminal_buffer() {
+        let start_ns = 1_000;
+        let end_ns = start_ns + DAILY_FILL_MAX_SPAN_NS * 2 + 1;
+        let request = BacktestHistoryFillRequest::canonical_daily(
+            "KQ.i@SHFE.au",
+            (start_ns, end_ns),
+            MinuteKlineCacheSnapshot::cst_v1(),
+            Some(7),
+            "KQ.i@SHFE.au",
+        );
+        let coordinator = coordinator(
+            temporary_root("daily-bounded-slices"),
+            Arc::new(ScriptedFactory::new(
+                Arc::new(AtomicUsize::new(0)),
+                Vec::new(),
+                Duration::ZERO,
+            )),
+            Arc::new(CountingAuth::new(Arc::new(AtomicUsize::new(0)))),
+        );
+
+        let slices = coordinator
+            .split_fill_range(&request, request.range)
+            .unwrap();
+
+        assert_eq!(slices.len(), 3);
+        assert_eq!(slices.first().unwrap().range.0, start_ns);
+        assert_eq!(slices.last().unwrap().range.1, end_ns);
+        assert!(
+            slices
+                .windows(2)
+                .all(|pair| pair[0].range.1 == pair[1].range.0)
+        );
+        assert!(
+            slices
+                .iter()
+                .all(|slice| slice.range.1 - slice.range.0 <= DAILY_FILL_MAX_SPAN_NS)
+        );
+    }
+
+    #[test]
+    fn canonical_minute_fill_ranges_have_a_bounded_terminal_buffer() {
+        let start_ns = 1_000;
+        let end_ns = start_ns + MINUTE_FILL_MAX_SPAN_NS * 2 + 1;
+        let request = BacktestHistoryFillRequest::canonical_minute(
+            "KQ.i@SHFE.au",
+            (start_ns, end_ns),
+            MinuteKlineCacheSnapshot::cst_v1(),
+            Some(7),
+            "KQ.i@SHFE.au",
+        );
+        let coordinator = coordinator(
+            temporary_root("minute-bounded-slices"),
+            Arc::new(ScriptedFactory::new(
+                Arc::new(AtomicUsize::new(0)),
+                Vec::new(),
+                Duration::ZERO,
+            )),
+            Arc::new(CountingAuth::new(Arc::new(AtomicUsize::new(0)))),
+        );
+
+        let slices = coordinator
+            .split_fill_range(&request, request.range)
+            .unwrap();
+
+        assert_eq!(slices.len(), 3);
+        assert_eq!(slices.first().unwrap().range.0, start_ns);
+        assert_eq!(slices.last().unwrap().range.1, end_ns);
+        assert!(
+            slices
+                .windows(2)
+                .all(|pair| pair[0].range.1 == pair[1].range.0)
+        );
+        assert!(
+            slices
+                .iter()
+                .all(|slice| slice.range.1 - slice.range.0 <= MINUTE_FILL_MAX_SPAN_NS)
         );
     }
 

@@ -139,6 +139,8 @@ cache directory、coverage、metadata sidecar、缺口规划、K 线聚合或 re
 leases 完成释放；直接 Drop 仍会请求异步 best-effort cleanup。高周期和 sub-minute K 的本地派生也不应
 回流到 session。
 
+`SessionClientBuilder::commit_log_retention(max_entries)` 允许专用、单消费者 session 收窄 runtime commit history；未调用时仍使用 core 默认值，且活动 cursor 需要的 commit 不会被截断。server-history cache fill 使用较小 retention，避免大批 Tick 的字段级 `ChangeSet` 在长任务中按默认窗口累积。
+
 交易日历的 holiday JSON 是官方公开静态文件，请求时不会携带天勤鉴权 token。
 同一个 `SessionClient` 会缓存已解析的 holiday payload，重复
 `get_trading_calendar(...)` 不会反复下载同一文件。返回的 `TradingCalendarDay.date`

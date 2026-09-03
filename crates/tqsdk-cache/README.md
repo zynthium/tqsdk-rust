@@ -508,7 +508,7 @@ prefix，之后从 opened-file snapshot 读取；首次初始化用 sync + atomi
 fill 恢复，无 checkpoint 的旧文件严格全量校验。该协议不保证新旧 binary 进程长期混跑。
 
 query 的 shared gate 在 `collect_all()` 和 terminal/coverage 验证完成后释放；JSONL/LLM payload 渲染与
-stdout/文件发布不持锁。第一次 Ctrl-C/SIGTERM 请求协作取消：停止新任务，tick flush 已接受短尾但不
+stdout/文件发布不持锁。第一次 Ctrl-C/SIGTERM/SIGHUP 请求协作取消：停止新任务，tick flush 已接受短尾但不
 提交未完成 coverage，minute 不提交未 terminal buffer，收敛后返回 130。第二次信号立即退出 130。
 
 ### 原始节假日日历
@@ -536,15 +536,23 @@ closed trading day。显式 `--start-day/--end-day` 的数据窗口仍由 TQBN �
 
 ## 报告与进度
 
+进度的 coverage 分母在 universe 解析后固定为用户请求范围；远端 plan 只更新待补缺口，不会让整体或合约总量回退或跳变。未加载交易日历时会明确标注采用 TQBN partition-day 计数。minute 的 remote telemetry 不等于 canonical cache 实际写入行数，因此运行中 rows/rate 显示 `n/a`（JSONL 为 `null`）；只有最终 canonical report 生成后才显示真实 rows。
+
 新生成的 tick、minute、daily fill report 都使用 schema v3：包含 `cache_kind`、统一 terminal status、
 请求窗口、逐 symbol rows/error/interruption 结果与调度配置。默认目录分别是
 `<cache-root>/reports/tick/`、`<cache-root>/reports/minute/`、`<cache-root>/reports/daily/`。
 对应的 `verify --report` 以 report 记录的 canonical root、range 和 symbols 为准。reader 保持兼容
 tick schema v1/v2、minute schema v1 和 daily schema v1；新报告不再写这些旧 schema。
 
-进度总是写 stderr。`--progress jsonl` 对 tick、minute 与 daily fill 都输出 schema-v2
-`tqsdk-cache.progress` JSONL，并带 `cache_kind: "tick" | "minute" | "daily"`；不要再按旧 schema-v1
-解析。tick 的 progress 以 physical cache symbol 展示，minute 与 daily 则以 logical symbol 展示。
+进度总是写 stderr。默认 `--progress auto` 在交互终端使用动态 TTY bars，在 pipe、CI 或重定向时退化为
+plain；显式 `tty` 只适用于终端。TTY 默认显示全局条及全部活跃 symbol（并发上限为 4），且至多每秒
+原地重绘一次；可用 `--progress-max-bars COUNT` 限制明细，传 `0` 仅保留全局条。plain 至多每秒刷新
+一次，但终态必定立即输出 `status=complete | failed |
+interrupted`。`--progress jsonl` 对 tick、minute 与 daily fill 都输出 schema-v2
+`tqsdk-cache.progress` JSONL，并带 `cache_kind: "tick" | "minute" | "daily"`；JSONL 写入在独立线程，
+不会阻塞 remote-fill 回调，session 结束前会写完终态。不要再按旧 schema-v1 解析。tick 的 progress 以
+physical cache symbol 展示，minute 与 daily 则以 logical symbol 展示；仍在执行的 symbol 和失败 symbol
+都会保留，失败项带 `error`。
 
 ## 显式破坏性维护
 
