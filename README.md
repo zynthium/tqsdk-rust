@@ -33,7 +33,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、task-owned replay source、streaming local backtest execution、Python-compatible local backtest sim、kline default price tick、cash/equity drawdown summary、低延迟 trading desk profile |
 | [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、`BacktestHistoryClient` 异步缓存查询、TQBN daily v3 (`.tqbn`) tick cache、canonical final-60s K cache、native final-1d K cache、tick companion-lock repair API 和共享 universe selector |
 | [`tqsdk-cache`](crates/tqsdk-cache) | 可选 tick / canonical-minute / native-daily cache 运维与区间查询 CLI：统一 fill progress/schema-v3 report、proof-pinned 历史 universe plan、默认文本摘要、按需 versioned JSON、lossless JSONL / token-aware LLM CSV、inventory/inspect/verify/doctor/purge，以及显式 `--history-root` 的 immutable snapshot clone/import、prewarm/query-smoke、publish/recover/rollback/scrub 和 lease-aware GC；不进入默认策略 hot path |
-| [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端，并可在独立 listener/runtime 上启用只读 CacheOnly history sibling；未配置 relay 时 SDK 仍直连天勤 |
+| [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端，并可在独立 listener/runtime 上启用默认 wildcard CORS 的只读 CacheOnly history sibling；未配置 relay 时 SDK 仍直连天勤 |
 
 一般使用建议：
 

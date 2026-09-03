@@ -13,7 +13,7 @@ use serde_json::Value;
 const IDENTITY_HEADER: &str = "X-Tqsdk-Relay-Identity";
 
 #[test]
-fn configured_history_listener_serves_typed_schema_without_cors() {
+fn configured_history_listener_serves_typed_schema_with_default_cors() {
     let downstream = free_loopback_addr();
     let metrics = free_loopback_addr();
     let history = free_loopback_addr();
@@ -23,7 +23,13 @@ fn configured_history_listener_serves_typed_schema_without_cors() {
     let mut child = spawn_relay(downstream, metrics, Some((history, &history_root)));
     let response = wait_for_history_response(history, &mut child, true);
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
-    assert!(!response.to_ascii_lowercase().contains("access-control-"));
+    let response_headers = response.to_ascii_lowercase();
+    assert!(response_headers.contains("\r\naccess-control-allow-origin: *\r\n"));
+    assert!(response_headers.contains("\r\naccess-control-allow-methods: get, options\r\n"));
+    assert!(response_headers.contains("\r\naccess-control-allow-headers: if-none-match\r\n"));
+    assert!(!response_headers.contains("access-control-allow-headers: x-tqsdk-relay-identity"));
+    assert!(response_headers.contains("\r\naccess-control-expose-headers: etag\r\n"));
+    assert!(!response_headers.contains("access-control-allow-credentials"));
     let body = response.split_once("\r\n\r\n").unwrap().1;
     let schema: Value = serde_json::from_str(body).unwrap();
     assert_eq!(schema["wire_version"], "tqsdk-history-http/1");
@@ -40,6 +46,35 @@ fn configured_history_listener_serves_typed_schema_without_cors() {
     let body = missing_identity.split_once("\r\n\r\n").unwrap().1;
     let error: Value = serde_json::from_str(body).unwrap();
     assert_eq!(error["error"]["code"], "missing_identity");
+    assert!(
+        missing_identity
+            .to_ascii_lowercase()
+            .contains("\r\naccess-control-allow-origin: *\r\n")
+    );
+
+    for path in [
+        "/v1/history/schema",
+        "/v1/history/query?symbol=SHFE.au2608&series=tick&start=2026-08-01T09%3A00%3A00%2B08%3A00&end=2026-08-01T10%3A00%3A00%2B08%3A00",
+        "/v1/history/coverage?symbol=SHFE.au2608&series=tick&start=2026-08-01T09%3A00%3A00%2B08%3A00&end=2026-08-01T10%3A00%3A00%2B08%3A00",
+    ] {
+        let preflight = wait_for_history_preflight(history, &mut child, path);
+        assert!(preflight.starts_with("HTTP/1.1 200 OK\r\n"), "{preflight}");
+        let preflight_headers = preflight.to_ascii_lowercase();
+        assert!(preflight_headers.contains("\r\naccess-control-allow-origin: *\r\n"));
+        assert!(preflight_headers.contains("\r\naccess-control-max-age: 600\r\n"));
+        assert!(!preflight_headers.contains("missing_identity"));
+    }
+
+    let unknown_preflight = wait_for_history_preflight(history, &mut child, "/v1/history/missing");
+    assert!(
+        unknown_preflight.starts_with("HTTP/1.1 404 Not Found\r\n"),
+        "{unknown_preflight}"
+    );
+    assert!(
+        unknown_preflight
+            .to_ascii_lowercase()
+            .contains("\r\naccess-control-allow-origin: *\r\n")
+    );
 }
 
 #[test]
@@ -120,6 +155,29 @@ fn wait_for_history_response(
             };
             let request = format!(
                 "GET /v1/history/schema HTTP/1.1\r\nHost: {addr}\r\n{identity}Connection: close\r\n\r\n"
+            );
+            stream.write_all(request.as_bytes()).unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            return response;
+        }
+        assert!(Instant::now() < deadline, "history listener did not start");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_history_preflight(addr: SocketAddr, child: &mut ChildGuard, path: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait() {
+            panic!("relay binary exited before history preflight response: {status}");
+        }
+        if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let request = format!(
+                "OPTIONS {path} HTTP/1.1\r\nHost: {addr}\r\nOrigin: https://example.test\r\nAccess-Control-Request-Method: GET\r\nAccess-Control-Request-Headers: If-None-Match\r\nConnection: close\r\n\r\n"
             );
             stream.write_all(request.as_bytes()).unwrap();
             let mut response = String::new();

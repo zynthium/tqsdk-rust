@@ -135,7 +135,7 @@ acquisition 的 `--dry-run`，后者不得认证、请求 provider 或写 cache/
 | data schema、typed failure、strict inspect、manifest、lease/pinning | `crates/tqsdk-data/tests/backtest_history_snapshot.rs` |
 | publisher role-aware clone/import、prewarm、strict inspect + real query smoke、publish crash/recover、rollback/scrub、tombstone/lease-aware GC | `crates/tqsdk-cache/tests/snapshot_cli.rs` |
 | HTTP grammar、JSON、error、ETag、gzip、limits/cancel | `crates/tqsdk-relay/tests/history_http.rs` |
-| dedicated runtime、market-lock isolation、reload、generation health | `crates/tqsdk-relay/tests/history_runtime.rs` |
+| dedicated runtime、market-lock isolation、reload、generation health、默认 wildcard CORS 与无 identity `OPTIONS` preflight | `crates/tqsdk-relay/tests/history_runtime.rs` |
 | readiness/reload/query/buffer/compression metrics、单条结构化 audit | `crates/tqsdk-relay/src/history/observability.rs`、`crates/tqsdk-relay/src/metrics_http_impl.rs` 单元测试 |
 | market send-to-downstream p99、顺序/无丢失、gzip/fallback 容量特征 | `crates/tqsdk-relay/tests/history_isolation_gate.rs` ignored same-spec candidate gate；非阻塞，不作为低并发功能验收 |
 

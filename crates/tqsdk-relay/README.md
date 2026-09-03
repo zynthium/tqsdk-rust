@@ -219,7 +219,10 @@ coverage/query 只读取 `CURRENT` 指向的 immutable CacheOnly generation；�
 last-good snapshot，旧请求通过 generation lease 继续固定旧快照。query 在 terminal success
 前不会发送 partial body，并执行 8 个 active request、100 ms queue、10 秒 total timeout、
 Tick 50,000/Kline 10,000 rows、32 MiB response 和 512 MiB daemon-global buffer 限制。
-identity JSON 成功响应带 strong ETag，支持 `If-None-Match`/304；默认不发送 CORS header。
+identity JSON 成功响应带 strong ETag，支持 `If-None-Match`/304。所有响应默认发送 wildcard CORS
+header；已知 history path 的 `OPTIONS` 无需 identity，实际 `GET` 仍要求受控网关注入的 identity
+header。identity header 必须为 `X-*`，且不会被列入 CORS allow-headers；网关必须剥离客户端同名
+header 后再注入可信值。CORS 不启用 credential，生产网关仍应限制可达范围。
 缺少或无效 `CURRENT` 只让 history 返回 typed `503 history_unavailable`，不改变 market readiness。
 
 Linux Docker Compose 部署模板位于

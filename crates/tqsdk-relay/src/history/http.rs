@@ -347,6 +347,18 @@ async fn route_request(
             json!({}),
         );
     };
+    if parsed.method == "OPTIONS" {
+        if !is_known_path(parsed.path) {
+            return error_response(
+                404,
+                "route_not_found",
+                "unknown history endpoint",
+                request_id,
+                json!({}),
+            );
+        }
+        return Response::success(json!({}), request_id);
+    }
     if !has_exactly_one_identity(&parsed.headers, identity_header) {
         return error_response(
             400,
@@ -1508,6 +1520,11 @@ async fn write_prepared_response(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
     );
+    headers.push_str("Access-Control-Allow-Origin: *\r\n");
+    headers.push_str("Access-Control-Allow-Methods: GET, OPTIONS\r\n");
+    headers.push_str("Access-Control-Allow-Headers: If-None-Match\r\n");
+    headers.push_str("Access-Control-Expose-Headers: ETag\r\n");
+    headers.push_str("Access-Control-Max-Age: 600\r\n");
     if let Some(etag) = etag {
         headers.push_str(&format!("ETag: {etag}\r\n"));
     }
@@ -2228,6 +2245,14 @@ mod tests {
         assert_eq!(
             test_header(&not_modified, "content-encoding"),
             Some("gzip".to_string())
+        );
+        assert_eq!(
+            test_header(&not_modified, "access-control-allow-origin"),
+            Some("*".to_string())
+        );
+        assert_eq!(
+            test_header(&not_modified, "access-control-allow-credentials"),
+            None
         );
         assert!(test_body(&not_modified).is_empty());
         pool.shutdown().unwrap();

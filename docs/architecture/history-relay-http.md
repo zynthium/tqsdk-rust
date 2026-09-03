@@ -12,7 +12,8 @@
 - `GET /v1/history/schema`
 
 不支持 POST、批量 symbol、分页、cursor 或 streaming response。未知 path 返回 404；已知 path 的
-非 GET 方法返回 400 stable error。OPTIONS 不产生 CORS opt-in。
+实际数据请求只接受 GET。已知 path 的 `OPTIONS` 忽略 query，并在 identity 校验前返回 200
+CORS preflight；其他方法返回 400 stable error。
 
 ## 通用请求规则
 
@@ -217,7 +218,13 @@ active generation 首次检测到运行时损坏并赢得 relay-local atomic `he
 
 ## CORS、审计与取消
 
-- 默认不发送 `Access-Control-Allow-*`；
+- 所有响应默认发送 `Access-Control-Allow-Origin: *`、`Access-Control-Allow-Methods: GET, OPTIONS`、
+  `Access-Control-Allow-Headers: If-None-Match`、
+  `Access-Control-Expose-Headers: ETag` 与 `Access-Control-Max-Age: 600`；
+- 不发送 `Access-Control-Allow-Credentials`；wildcard CORS 不提供 cookie/browser credential flow；
+- 已知 path 的 `OPTIONS` 忽略 query、不要求 identity header，实际 `GET` 仍要求该 header 恰好出现一次；
+- identity header 必须为 ASCII `X-*` HTTP token，且不会出现在 CORS allow-headers 中；浏览器不能
+  自行声明可信身份，受控网关必须先剥离客户端同名 header 再注入可信值；
 - client disconnect 或 total timeout 必须取消 run，但 snapshot shared lease 保留到 coordinator 和
   blocking scan 全部结束；
 - audit 不使用 symbol 作为 metrics label，不写入 secret；

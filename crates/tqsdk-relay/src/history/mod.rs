@@ -108,7 +108,7 @@ impl HistoryConfig {
         validate_history_root(self.root.as_path())?;
         if !is_trusted_identity_header(&self.identity_header) {
             return Err(RelayError::invalid_config(
-                "TQSDK_RELAY_HISTORY_IDENTITY_HEADER must be a non-sensitive ASCII HTTP token",
+                "TQSDK_RELAY_HISTORY_IDENTITY_HEADER must be a non-sensitive ASCII X-* HTTP token",
             ));
         }
         if self.runtime_threads == 0 {
@@ -408,6 +408,9 @@ fn is_trusted_identity_header(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value.bytes().all(is_http_token_byte)
+        && value
+            .get(..2)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("x-"))
         && !matches!(
             value.to_ascii_lowercase().as_str(),
             "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
@@ -472,6 +475,8 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, RelayError::InvalidConfig(_)));
         assert!(!is_trusted_identity_header("Authorization"));
+        assert!(!is_trusted_identity_header("Origin"));
+        assert!(!is_trusted_identity_header("If-None-Match"));
         assert!(!is_trusted_identity_header("x bad"));
         assert!(is_trusted_identity_header("X-Trusted-Identity"));
 

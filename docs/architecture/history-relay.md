@@ -136,7 +136,8 @@ relay 增量消费 `BacktestHistoryRun::next()`，但必须先缓存在有界私
 ## 安全与运维
 
 - 服务只允许部署在受控网关后，由配置的可信 peer 提供 identity header 和 client quota；
-- 默认不返回 CORS header，不提供 browser credential flow；
+- 默认返回 wildcard CORS header，并处理已知 history path 的 `OPTIONS`；不启用
+  `Access-Control-Allow-Credentials`，实际 `GET` 继续要求可信 identity header；
 - audit 至少记录 request id、trusted identity、endpoint、snapshot id、series、period、range、
   projected field count、rows、bytes、duration、status/error code；不得记录 auth secret；
 - metrics 不得使用 symbol 作为 label；
@@ -176,7 +177,7 @@ p99 SLO，应先做分段、分因素基准，再评估 relay 私有 `HistoryExe
 - batch POST、多 symbol、分页、cursor、streaming body；
 - CSV、Arrow、Parquet、gRPC；
 - provisional success；
-- 默认 CORS；
+- credentialed CORS 或 origin allowlist；
 - generation pin query parameter；
 - relay 侧 snapshot GC。
 
