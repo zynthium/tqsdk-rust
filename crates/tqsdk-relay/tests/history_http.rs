@@ -174,6 +174,30 @@ fn live_cache_observes_committed_coverage_without_publish_or_restart() {
 }
 
 #[test]
+fn range_starting_in_future_is_rejected_before_snapshot_lookup() {
+    let history_root = temp_dir("future-start");
+    fs::create_dir_all(&history_root).unwrap();
+    let downstream = free_loopback_addr();
+    let metrics = free_loopback_addr();
+    let history = free_loopback_addr();
+    let mut child = spawn_relay(downstream, metrics, history, &history_root);
+
+    for endpoint in ["coverage", "query"] {
+        let path = format!(
+            "/v1/history/{endpoint}?symbol=KQ.m%40SHFE.au&series=tick&start=2099-01-01T00:00:00Z&end=2099-01-02T00:00:00Z"
+        );
+        let response = request(history, &mut child, &path, None);
+
+        assert_status(&response, "409 Conflict");
+        let body = json_body(&response);
+        assert_eq!(body["error"]["code"], "coverage_incomplete");
+        assert_eq!(body["error"]["details"]["reason"], "range_starts_in_future");
+        assert_eq!(body["error"]["details"]["retryable"], true);
+        assert!(body["error"]["details"]["server_time"].is_string());
+    }
+}
+
+#[test]
 fn absent_or_invalid_current_is_history_unavailable() {
     for (name, current) in [
         ("missing-current", None),

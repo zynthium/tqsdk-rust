@@ -224,6 +224,8 @@ live-cache 模式下，coverage/query 每次都读取实际缓存的最新原子
 query 在 terminal success
 前不会发送 partial body，并执行 8 个 active request、100 ms queue、10 秒 total timeout、
 Tick 50,000/Kline 10,000 rows、32 MiB response 和 512 MiB daemon-global buffer 限制。
+请求起点若比服务器时间晚超过 5 秒，会在排队和 cache/snapshot 读取前快速返回
+`409 coverage_incomplete`（`details.reason=range_starts_in_future`），不会伪装成空的 `200`。
 identity JSON 成功响应带 strong ETag，支持 `If-None-Match`/304。所有响应默认发送 wildcard CORS
 header；已知 history path 的 `OPTIONS` 无需 identity，实际 `GET` 仍要求受控网关注入的 identity
 header。identity header 必须为 `X-*`，且不会被列入 CORS allow-headers；网关必须剥离客户端同名

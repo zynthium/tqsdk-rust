@@ -700,3 +700,7 @@ identity/gzip ETag、304、`Vary`、q=0 和 timeout（压缩计入 10 s）。512
 scan、JSON 和 compression buffers。生产同规格性能 gate 是非阻塞容量特征项，不得由单元测试
 或 affinity 配置本身宣称通过。2026-08-29 当前生产宿主机未达到该 p99 目标；需要高并发或明确
 p99 SLO 时必须重新实测并单独验收。
+
+无有效 snapshot 的集成测试还必须证明：请求起点晚于服务器时间超过 5 秒时，coverage/query
+在 admission 与 source lookup 之前返回 `409 coverage_incomplete`，且
+`details.reason=range_starts_in_future`；与当前时间重叠的区间仍执行正常 coverage/finality 校验。

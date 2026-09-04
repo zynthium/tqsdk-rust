@@ -71,11 +71,15 @@ description: Use when 用户需要 Rust 量化 SDK 或 TQSDK Rust 能力：实�
   已有 facade/data cache 合同，不是 relay、守护进程或 custom store；normal fill/query 的 complete cache
   hit 不需 auth，缺口才使用 `TQ_AUTH_USER` / `TQ_AUTH_PASS`。默认输出摘要；管理命令需要脚本 JSON 时显式
   使用 `--output-format json`，query raw rows 则使用 `jsonl` / `llm-csv`，stderr 才是诊断或进度；
-  `fill --dry-run` 不加锁、不写文件、不远端补数，V1 拒绝 current open day。operator 需要最近
+  `fill --dry-run` 不加锁、不写文件、不远端补数。tick 保留当前交易日 provisional checkpoint；minute
+  默认包含 current open day，也可显式 `--include-open-day`，但只把固定 as-of 前完整闭合的 60s bars
+  写入 provisional sidecar，不冒充 final coverage；需要纯 final 时使用 `--require-final`。operator 需要最近
   N 日时优先用 `fill --last-trading-days N --calendar auto`；它先复用 root 的
   `meta/trading-calendar-v1.json`，日历只用于 selector/进度，不是 coverage truth。`--calendar off`
-  拒绝该 selector，`required` 禁止 fallback；`--progress off` 保持 stderr 安静，普通模式显示当前
-  physical symbol、trading day 和完整分区日计数。
+  拒绝该 selector，`required` 禁止 fallback；进度只写 stderr，TTY 默认展开全部活跃 symbol，至多每秒
+  原地重绘一次，不累计历史日志；`--progress-max-bars 0` 仅显示全局条，`--progress off` 完全关闭。
+  tick/minute/daily 的速率使用最近 60 秒已接受 rows，不被早期空等永久拉低；fill 终态始终输出
+  `Trading days: START to END`，实际完整性仍以 `Coverage` / `complete` 为准。
 - Tick TQBN 缺失 legacy `<partition>/.tqbn.lock` 或逐文件 `<file>.tqbn.lock` companion lock 时，不能用
   `fill`、`RemoteOnMiss` 或 `--compact-cache-only`“修复”。由可写 cache owner 停止同一 root 的
   reader/writer、先确认 `doctor` clean 后，运行

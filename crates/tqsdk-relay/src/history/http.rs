@@ -49,6 +49,7 @@ const GZIP_OUTPUT_OVERHEAD: usize = 64 * 1024;
 const SCHEMA_PATH: &str = "/v1/history/schema";
 const QUERY_PATH: &str = "/v1/history/query";
 const COVERAGE_PATH: &str = "/v1/history/coverage";
+const FUTURE_START_TOLERANCE_NS: i64 = 5_000_000_000;
 const SECOND_NS: u64 = 1_000_000_000;
 const MINUTE_NS: u64 = 60 * SECOND_NS;
 const DAY_NS: u64 = 24 * 60 * MINUTE_NS;
@@ -410,6 +411,23 @@ async fn route_request(
             .map(HistoryColumn::canonical_name)
             .collect(),
     );
+    if let Some(server_time_ns) = Utc::now().timestamp_nanos_opt() {
+        if request_starts_in_future(data.start_ns, server_time_ns) {
+            return error_response(
+                409,
+                "coverage_incomplete",
+                "history request range starts after server time",
+                request_id,
+                json!({
+                    "reason": "range_starts_in_future",
+                    "requested_start": data.start,
+                    "server_time": format_ns(server_time_ns),
+                    "retryable": true,
+                    "clock_skew_tolerance_seconds": 5,
+                }),
+            );
+        }
+    }
     let queue_gauge = state.observability.request_queued();
     let admission = match timeout(QUEUE_TIMEOUT, state.active.clone().acquire_owned()).await {
         Ok(Ok(permit)) => {
@@ -694,6 +712,7 @@ struct ParsedDataRequest {
     symbol: String,
     series: BacktestHistorySchemaSeries,
     period: Option<String>,
+    start_ns: i64,
     start: String,
     end: String,
     columns: Vec<HistoryColumn>,
@@ -787,11 +806,16 @@ fn parse_data_request(
         symbol,
         series,
         period,
+        start_ns,
         start: format_ns(start_ns),
         end: format_ns(end_ns),
         columns,
         include_provenance,
     })
+}
+
+fn request_starts_in_future(start_ns: i64, server_time_ns: i64) -> bool {
+    start_ns > server_time_ns.saturating_add(FUTURE_START_TOLERANCE_NS)
 }
 
 fn parse_projection(
@@ -1966,6 +1990,24 @@ mod tests {
 
     use super::super::observability::{HistoryObservability, MemoryAuditSink};
     use super::*;
+
+    #[test]
+    fn future_start_check_allows_clock_skew_but_rejects_later_ranges() {
+        let server_time_ns = 1_000_000_000_000;
+
+        assert!(!request_starts_in_future(
+            server_time_ns + FUTURE_START_TOLERANCE_NS,
+            server_time_ns,
+        ));
+        assert!(request_starts_in_future(
+            server_time_ns + FUTURE_START_TOLERANCE_NS + 1,
+            server_time_ns,
+        ));
+        assert!(!request_starts_in_future(
+            server_time_ns - 1,
+            server_time_ns,
+        ));
+    }
 
     #[tokio::test]
     async fn malformed_request_is_audited_once() {

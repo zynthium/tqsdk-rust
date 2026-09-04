@@ -167,6 +167,12 @@ relay 增量消费 run chunks，但在 terminal success 前不发送 body。term
 默认限制为 active 8、queue 100 ms、total timeout 10 s、Kline 10,000 rows、Tick 50,000 rows、
 uncompressed 32 MiB、daemon-global buffer 512 MiB。
 
+若请求起点晚于 relay 捕获的服务器时间超过 5 秒，整个区间尚未发生。listener 必须在进入
+admission queue、读取 live cache 或 pinned snapshot 之前直接返回
+`409 coverage_incomplete`；`details.reason` 固定为 `range_starts_in_future`，并携带
+`requested_start`、`server_time`、`retryable=true` 和时钟偏差容忍值。与当前时间重叠的区间
+仍走既有 coverage/finality 校验，不得因此返回空的 `200`。
+
 ## Stable errors
 
 错误体固定为：
