@@ -132,9 +132,9 @@ acquisition 的 `--dry-run`，后者不得认证、请求 provider 或写 cache/
 
 | 验证面 | 主要验证文件 |
 | --- | --- |
-| data schema、typed failure、strict inspect、manifest、lease/pinning | `crates/tqsdk-data/tests/backtest_history_snapshot.rs` |
+| data schema、typed failure、strict inspect、prepared live plan、shared root gate lifecycle、manifest、lease/pinning | `crates/tqsdk-data/tests/backtest_history_snapshot.rs`、`crates/tqsdk-data/src/backtest_history/snapshot.rs` 单元测试 |
 | publisher role-aware clone/import、prewarm、strict inspect + real query smoke、publish crash/recover、rollback/scrub、tombstone/lease-aware GC | `crates/tqsdk-cache/tests/snapshot_cli.rs` |
-| HTTP grammar、JSON、error、ETag、gzip、limits/cancel | `crates/tqsdk-relay/tests/history_http.rs` |
+| HTTP grammar、JSON、error、ETag、gzip、limits/cancel，以及 live cache commit 无发布/重启即时可见、maintenance 互斥恢复 | `crates/tqsdk-relay/tests/history_http.rs` |
 | dedicated runtime、market-lock isolation、reload、generation health、默认 wildcard CORS 与无 identity `OPTIONS` preflight | `crates/tqsdk-relay/tests/history_runtime.rs` |
 | readiness/reload/query/buffer/compression metrics、单条结构化 audit | `crates/tqsdk-relay/src/history/observability.rs`、`crates/tqsdk-relay/src/metrics_http_impl.rs` 单元测试 |
 | market send-to-downstream p99、顺序/无丢失、gzip/fallback 容量特征 | `crates/tqsdk-relay/tests/history_isolation_gate.rs` ignored same-spec candidate gate；非阻塞，不作为低并发功能验收 |
@@ -255,6 +255,7 @@ rtk cargo test -p tqsdk-data --test backtest_history_api
 rtk cargo test -p tqsdk-data --test backtest_history_metadata
 rtk cargo test -p tqsdk-data --test backtest_history_query
 rtk cargo test -p tqsdk-cache
+rtk cargo test -p tqsdk-cache history_streaming_cursor_advances_received_without_committing_coverage
 rtk cargo test -p tqsdk-cache --test cli query_
 rtk cargo test -p tqsdk-cache --test cli repair_locks
 rtk cargo clippy -p tqsdk-cache --all-targets -- -D warnings
@@ -317,6 +318,10 @@ size-limit maintenance，以及通过
 trading day。
 `backtest_tick_cache_ops` 还覆盖 provisional checkpoint 不进入 final coverage、最新 checkpoint
 round-trip、compaction 保留，以及 final coverage 覆盖后立即隐藏并物理淘汰。
+`minute_kline_cache` 单元测试覆盖 minute provisional sidecar 不进入 final coverage、显式 reader
+可见、未闭合 60s bar 过滤、final 对账后清理，以及 session close + grace 后冻结 observed rows、
+空 full-day fallback 不提前 final；`tqsdk-cache` bin test 还证明后续 fill 在远端请求前优先冻结
+满足条件的遗留 sidecar。snapshot manifest 测试保证 `.tqmp` 永不发布。
 `backtest_tick_cache_ops` 与 `tqsdk-cache` tests 覆盖 TQBN CST `18:00` 交易日边界、read-only
 inspection、fast inventory、deep diagnostic、shared ordinary fill/exclusive maintenance root gate、minute
 verify/doctor/真实 purge 在并发 shared fill 时返回 `cache_busy`/75、purge dry-run 不取 gate、closed-day

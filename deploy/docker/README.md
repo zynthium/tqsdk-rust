@@ -4,17 +4,19 @@ This deployment packages the existing same-process relay/history design. It impr
 permission, restart, and rollout control; it does not turn history into a worker process or provide
 stronger market-latency isolation.
 
-The supported layout uses Linux host networking and two local bind mounts:
+The supported layout uses Linux host networking and local bind mounts:
 
-- `relay` is the long-running service and mounts the published history root read-only;
-- `publisher` is an explicit one-shot profile and mounts both writable and published roots read/write.
+- `relay` is the long-running service and mounts the actively filled cache root read-only, observing each
+  atomically committed coverage update without publication or restart;
+- `publisher` is an optional legacy/rollback profile and mounts both writable and published roots read/write.
 
 Do not use NFS, an object-store mount, or a remote volume driver. Snapshot publication requires the
 documented local-filesystem rename, fsync, advisory-lock, and same-filesystem semantics.
 
 ## Prepare host paths and configuration
 
-Create the two paths before starting Compose. Their owner must match `TQSDK_CONTAINER_UID` and
+Set `TQSDK_LIVE_CACHE_ROOT` to the cache root used by `tqsdk-cache fill`. Create the configured paths
+before starting Compose. Their owner must match `TQSDK_CONTAINER_UID` and
 `TQSDK_CONTAINER_GID`; do not recursively change ownership of an existing cache without checking its
 current writer.
 
@@ -54,7 +56,10 @@ track the workspace `Cargo.lock`; a clean image build generates one and then use
 remaining build. Deploy the resulting immutable image digest rather than assuming a later rebuild of
 the same source resolves identical dependency versions.
 
-## Publish the first snapshot
+## Optional published-snapshot compatibility path
+
+The default relay does not require this section. Use it only when operating the retained
+`TQSDK_RELAY_HISTORY_ROOT` compatibility adapter or testing rollback artifacts.
 
 Start with the read-only clone plan:
 
@@ -133,8 +138,8 @@ curl --fail-with-body --silent --show-error \
 ```
 
 The Compose healthcheck only proves metrics-listener liveness. The second health command above is the
-external history-readiness gate. A missing or invalid `CURRENT` intentionally leaves market alive while
-history query and coverage return `503 history_unavailable`.
+external history-readiness gate. In default live-cache mode, a missing operation lock or unreadable
+cache root leaves market alive while history query and coverage return `503 history_unavailable`.
 
 ## Operations and limits
 

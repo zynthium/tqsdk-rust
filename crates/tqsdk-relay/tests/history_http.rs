@@ -81,6 +81,99 @@ fn current_snapshot_serves_strict_coverage_query_and_etag_contracts() {
 }
 
 #[test]
+fn live_cache_observes_committed_coverage_without_publish_or_restart() {
+    let cache_dir = temp_dir("live-cache-progress");
+    fs::create_dir_all(&cache_dir).unwrap();
+    let downstream = free_loopback_addr();
+    let metrics = free_loopback_addr();
+    let history = free_loopback_addr();
+    let mut child = spawn_live_relay(downstream, metrics, history, &cache_dir);
+    let coverage_path =
+        format!("/v1/history/coverage?symbol=KQ.m%40SHFE.au&series=tick&start={START}&end={END}");
+
+    let before_initialization = request(history, &mut child, &coverage_path, None);
+    assert_status(&before_initialization, "503 Service Unavailable");
+    assert_eq!(
+        json_body(&before_initialization)["error"]["code"],
+        "history_unavailable"
+    );
+
+    drop(
+        BacktestTickCache::open(&cache_dir)
+            .unwrap()
+            .try_acquire_remote_fill_shared_lock()
+            .unwrap(),
+    );
+    BacktestHistoryMetadataCache::open(&cache_dir)
+        .unwrap()
+        .store_snapshot(backtest_history_support::snapshot(
+            LOGICAL_SYMBOL,
+            DAY_END_NS,
+            vec![backtest_history_support::segment(
+                PHYSICAL_SYMBOL,
+                DAY_START_NS,
+                DAY_END_NS,
+            )],
+        ))
+        .unwrap();
+
+    let before = (0..100)
+        .find_map(|_| {
+            let response = request(history, &mut child, &coverage_path, None);
+            if response.starts_with("HTTP/1.1 503 Service Unavailable") {
+                std::thread::sleep(Duration::from_millis(10));
+                None
+            } else {
+                Some(response)
+            }
+        })
+        .expect("live cache view must become ready");
+    assert_status(&before, "409 Conflict");
+    assert_eq!(json_body(&before)["error"]["code"], "coverage_incomplete");
+
+    BacktestTickCache::open(&cache_dir)
+        .unwrap()
+        .store_ticks(
+            PHYSICAL_SYMBOL,
+            DAY_START_NS,
+            DAY_END_NS,
+            [Tick {
+                id: 7,
+                datetime: ROW_TIMESTAMP_NS,
+                last_price: 123.5,
+                ..Tick::default()
+            }],
+        )
+        .unwrap();
+
+    let after = request(history, &mut child, &coverage_path, None);
+    assert_status(&after, "200 OK");
+    assert_eq!(json_body(&after)["snapshot_id"], "live");
+    assert_eq!(json_body(&after)["source_mode"], "live-cache");
+    assert_eq!(json_body(&after)["complete"], true);
+
+    let query_path = format!(
+        "/v1/history/query?symbol=KQ.m%40SHFE.au&series=tick&start={START}&end={END}&fields=time,id,last_price,tns"
+    );
+    let query = request(history, &mut child, &query_path, None);
+    assert_status(&query, "200 OK");
+    assert_eq!(json_body(&query)["snapshot_id"], "live");
+    assert_eq!(json_body(&query)["source_mode"], "live-cache");
+    assert_eq!(json_body(&query)["rows"].as_array().unwrap().len(), 1);
+
+    let maintenance = BacktestTickCache::open(&cache_dir)
+        .unwrap()
+        .try_acquire_consistency_read_lock()
+        .unwrap();
+    let during_maintenance = request(history, &mut child, &coverage_path, None);
+    assert_status(&during_maintenance, "503 Service Unavailable");
+    drop(maintenance);
+
+    let recovered = request(history, &mut child, &coverage_path, None);
+    assert_status(&recovered, "200 OK");
+}
+
+#[test]
 fn absent_or_invalid_current_is_history_unavailable() {
     for (name, current) in [
         ("missing-current", None),
@@ -167,6 +260,29 @@ fn spawn_relay(
         .env("TQSDK_RELAY_METRICS_LISTEN", metrics.to_string())
         .env("TQSDK_RELAY_HISTORY_LISTEN", history.to_string())
         .env("TQSDK_RELAY_HISTORY_ROOT", history_root)
+        .env_remove("TQSDK_RELAY_HISTORY_CACHE_DIR")
+        .env("TQSDK_RELAY_HISTORY_IDENTITY_HEADER", IDENTITY_HEADER)
+        .env_remove("TQSDK_RELAY_FUTURES_UNIVERSE")
+        .env_remove("TQ_AUTH_USER")
+        .env_remove("TQ_AUTH_PASS");
+    ChildGuard {
+        child: command.spawn().unwrap(),
+    }
+}
+
+fn spawn_live_relay(
+    downstream: SocketAddr,
+    metrics: SocketAddr,
+    history: SocketAddr,
+    cache_dir: &Path,
+) -> ChildGuard {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tqsdk-relay"));
+    command
+        .env("TQSDK_RELAY_DOWNSTREAM_LISTEN", downstream.to_string())
+        .env("TQSDK_RELAY_METRICS_LISTEN", metrics.to_string())
+        .env("TQSDK_RELAY_HISTORY_LISTEN", history.to_string())
+        .env("TQSDK_RELAY_HISTORY_CACHE_DIR", cache_dir)
+        .env_remove("TQSDK_RELAY_HISTORY_ROOT")
         .env("TQSDK_RELAY_HISTORY_IDENTITY_HEADER", IDENTITY_HEADER)
         .env_remove("TQSDK_RELAY_FUTURES_UNIVERSE")
         .env_remove("TQ_AUTH_USER")

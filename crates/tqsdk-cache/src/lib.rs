@@ -26,7 +26,7 @@ use tqsdk_data::{
 pub const REPORT_SCHEMA_VERSION: u32 = 2;
 pub const MINUTE_FILL_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const DAILY_FILL_REPORT_SCHEMA_VERSION: u32 = 1;
-pub const UNIFIED_FILL_REPORT_SCHEMA_VERSION: u32 = 3;
+pub const UNIFIED_FILL_REPORT_SCHEMA_VERSION: u32 = 4;
 pub const TRADING_CALENDAR_SCHEMA_VERSION: u32 = 1;
 pub const TRADING_CALENDAR_HOLIDAYS_SCHEMA_VERSION: u32 = 1;
 
@@ -914,7 +914,14 @@ pub struct MinuteFillReport {
     pub symbols: Vec<MinuteFillReportSymbol>,
     pub remote_used: bool,
     pub rows_written: usize,
+    /// Final-only coverage result. Provisional sidecars never make this true.
     pub complete: bool,
+    #[serde(default)]
+    pub provisional_as_of_ns: Option<i64>,
+    #[serde(default)]
+    pub provisional_complete_through_ns: Option<i64>,
+    #[serde(default)]
+    pub provisional_complete: bool,
     pub dry_run: bool,
 }
 
@@ -947,6 +954,9 @@ impl MinuteFillReport {
             remote_used: warmup.remote_minute_kline_used,
             rows_written: warmup.minute_kline_rows_written,
             complete,
+            provisional_as_of_ns: None,
+            provisional_complete_through_ns: None,
+            provisional_complete: false,
             dry_run,
         }
     }
@@ -960,6 +970,19 @@ impl MinuteFillReport {
     #[must_use]
     pub fn with_calendar(mut self, calendar: FillReportCalendar) -> Self {
         self.calendar = Some(calendar);
+        self
+    }
+
+    #[must_use]
+    pub fn with_provisional(
+        mut self,
+        as_of_ns: i64,
+        complete_through_ns: Option<i64>,
+        complete: bool,
+    ) -> Self {
+        self.provisional_as_of_ns = Some(as_of_ns);
+        self.provisional_complete_through_ns = complete_through_ns;
+        self.provisional_complete = complete;
         self
     }
 
@@ -1091,7 +1114,17 @@ pub enum UnifiedFillReportStatus {
     Interrupted,
 }
 
-/// One logical cache symbol in a schema-v3 fill report.
+/// Durable coverage finality represented by a unified fill report.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnifiedFillCoverageState {
+    Final,
+    Provisional,
+    #[default]
+    Incomplete,
+}
+
+/// One logical cache symbol in a schema-v4 fill report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnifiedFillReportSymbol {
     pub symbol: String,
@@ -1118,13 +1151,27 @@ pub struct UnifiedFillReport {
     pub symbols: Vec<UnifiedFillReportSymbol>,
     pub remote_used: bool,
     pub rows_written: usize,
+    /// True only when ordinary durable final coverage is complete.
     pub complete: bool,
+    #[serde(default)]
+    pub final_complete: bool,
+    #[serde(default)]
+    pub coverage_state: UnifiedFillCoverageState,
+    #[serde(default)]
+    pub provisional_as_of_ns: Option<i64>,
+    #[serde(default)]
+    pub complete_through_ns: Option<i64>,
 }
 
 impl UnifiedFillReport {
     #[must_use]
     pub fn from_tick_fill(report: &FillReport) -> Self {
-        let status = if report.complete {
+        let provisional_complete = report.coverage_state == "provisional"
+            && report
+                .complete_through_ns
+                .is_some_and(|through| through >= report.requested_range.1);
+        let operation_complete = report.complete || provisional_complete;
+        let status = if operation_complete {
             UnifiedFillReportStatus::Complete
         } else {
             UnifiedFillReportStatus::Failed
@@ -1134,7 +1181,7 @@ impl UnifiedFillReport {
             .iter()
             .map(|symbol| UnifiedFillReportSymbol {
                 symbol: symbol.symbol.clone(),
-                status: if symbol.after.complete {
+                status: if symbol.after.complete || provisional_complete {
                     UnifiedFillReportStatus::Complete
                 } else {
                     UnifiedFillReportStatus::Failed
@@ -1159,13 +1206,24 @@ impl UnifiedFillReport {
             symbols,
             remote_used: report.remote_used,
             rows_written: report.rows_written,
-            complete: report.complete,
+            complete: report.day_complete,
+            final_complete: report.day_complete,
+            coverage_state: if report.day_complete {
+                UnifiedFillCoverageState::Final
+            } else if provisional_complete {
+                UnifiedFillCoverageState::Provisional
+            } else {
+                UnifiedFillCoverageState::Incomplete
+            },
+            provisional_as_of_ns: provisional_complete.then_some(report.requested_range.1),
+            complete_through_ns: report.complete_through_ns,
         }
     }
 
     #[must_use]
     pub fn from_minute_fill(report: &MinuteFillReport) -> Self {
-        let status = if report.complete {
+        let operation_complete = report.complete || report.provisional_complete;
+        let status = if operation_complete {
             UnifiedFillReportStatus::Complete
         } else {
             UnifiedFillReportStatus::Failed
@@ -1175,7 +1233,7 @@ impl UnifiedFillReport {
             .iter()
             .map(|symbol| UnifiedFillReportSymbol {
                 symbol: symbol.symbol.clone(),
-                status: if symbol.after.complete {
+                status: if symbol.after.complete || report.provisional_complete {
                     UnifiedFillReportStatus::Complete
                 } else {
                     UnifiedFillReportStatus::Failed
@@ -1201,6 +1259,16 @@ impl UnifiedFillReport {
             remote_used: report.remote_used,
             rows_written: report.rows_written,
             complete: report.complete,
+            final_complete: report.complete,
+            coverage_state: if report.complete {
+                UnifiedFillCoverageState::Final
+            } else if report.provisional_complete {
+                UnifiedFillCoverageState::Provisional
+            } else {
+                UnifiedFillCoverageState::Incomplete
+            },
+            provisional_as_of_ns: report.provisional_as_of_ns,
+            complete_through_ns: report.provisional_complete_through_ns,
         }
     }
 
@@ -1241,6 +1309,14 @@ impl UnifiedFillReport {
             remote_used: false,
             rows_written: 0,
             complete: matches!(status, UnifiedFillReportStatus::Complete),
+            final_complete: matches!(status, UnifiedFillReportStatus::Complete),
+            coverage_state: if matches!(status, UnifiedFillReportStatus::Complete) {
+                UnifiedFillCoverageState::Final
+            } else {
+                UnifiedFillCoverageState::Incomplete
+            },
+            provisional_as_of_ns: None,
+            complete_through_ns: None,
         }
     }
 
@@ -1294,6 +1370,14 @@ impl UnifiedFillReport {
             remote_used: report.symbols().iter().any(|symbol| symbol.remote_used),
             rows_written: report.rows_written(),
             complete: matches!(status, UnifiedFillReportStatus::Complete),
+            final_complete: matches!(status, UnifiedFillReportStatus::Complete),
+            coverage_state: if matches!(status, UnifiedFillReportStatus::Complete) {
+                UnifiedFillCoverageState::Final
+            } else {
+                UnifiedFillCoverageState::Incomplete
+            },
+            provisional_as_of_ns: None,
+            complete_through_ns: None,
         }
     }
 
@@ -1309,7 +1393,7 @@ impl UnifiedFillReport {
         symbols.dedup();
         if symbols.is_empty() {
             return Err(DataError::Validation(
-                "schema-v3 fill report contains no logical cache symbols".to_string(),
+                "unified fill report contains no logical cache symbols".to_string(),
             ));
         }
         Ok(symbols)
@@ -1482,16 +1566,25 @@ pub fn read_persisted_fill_report(path: &Path) -> Result<PersistedFillReport, Da
     let file = File::open(path)?;
     let value: serde_json::Value = serde_json::from_reader(BufReader::new(file))
         .map_err(|error| DataError::InvalidResponse(error.to_string()))?;
-    if value
+    let schema_version = value
         .get("schema_version")
-        .and_then(serde_json::Value::as_u64)
-        == Some(u64::from(UNIFIED_FILL_REPORT_SCHEMA_VERSION))
+        .and_then(serde_json::Value::as_u64);
+    if schema_version == Some(3)
+        || schema_version == Some(u64::from(UNIFIED_FILL_REPORT_SCHEMA_VERSION))
     {
-        let report: UnifiedFillReport = serde_json::from_value(value)
+        let mut report: UnifiedFillReport = serde_json::from_value(value)
             .map_err(|error| DataError::InvalidResponse(error.to_string()))?;
+        if report.schema_version == 3 {
+            report.final_complete = report.complete;
+            report.coverage_state = if report.complete {
+                UnifiedFillCoverageState::Final
+            } else {
+                UnifiedFillCoverageState::Incomplete
+            };
+        }
         if !matches!(report.cache_kind.as_str(), "tick" | "minute" | "daily") {
             return Err(DataError::Validation(format!(
-                "unsupported schema-v3 fill report cache kind {:?}",
+                "unsupported unified fill report cache kind {:?}",
                 report.cache_kind
             )));
         }
@@ -1621,13 +1714,101 @@ mod tests {
 
     use super::{
         CacheCoverageSnapshot, FillConfigReport, FillReport, FillReportSymbol,
-        FillReportSymbolDayStats, FillSelectorReport, PersistedFillReport, REPORT_SCHEMA_VERSION,
-        TradingCalendarHolidaysSnapshot, TradingCalendarSnapshot, TradingDayWindow,
-        read_fill_report, read_persisted_fill_report, read_trading_calendar_holidays_snapshot,
+        FillReportSymbolDayStats, FillSelectorReport, MinuteFillReport, PersistedFillReport,
+        REPORT_SCHEMA_VERSION, TradingCalendarHolidaysSnapshot, TradingCalendarSnapshot,
+        TradingDayWindow, UnifiedFillCoverageState, UnifiedFillReport, read_fill_report,
+        read_persisted_fill_report, read_trading_calendar_holidays_snapshot,
         read_trading_calendar_snapshot, write_trading_calendar_holidays_snapshot,
         write_trading_calendar_snapshot,
     };
     use tqsdk_data::{TradingCalendarHolidays, TradingCalendarRow};
+
+    #[test]
+    fn minute_provisional_completion_is_preserved_in_the_unified_report() {
+        let window = TradingDayWindow::from_days(
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap(),
+        )
+        .unwrap();
+        let report = MinuteFillReport {
+            schema_version: super::MINUTE_FILL_REPORT_SCHEMA_VERSION,
+            cache_kind: "minute".to_string(),
+            generated_at: "2026-07-29T00:00:00Z".to_string(),
+            cache_dir: "/tmp/cache".to_string(),
+            requested_days: window.clone(),
+            requested_range: (window.start_ns, window.end_ns),
+            selector: FillSelectorReport::default(),
+            calendar: None,
+            market: "futures".to_string(),
+            logical_symbols: Vec::new(),
+            symbols: Vec::new(),
+            remote_used: true,
+            rows_written: 10,
+            complete: false,
+            provisional_as_of_ns: None,
+            provisional_complete_through_ns: None,
+            provisional_complete: false,
+            dry_run: false,
+        }
+        .with_provisional(window.start_ns + 120, Some(window.start_ns + 60), true);
+
+        let unified = UnifiedFillReport::from_minute_fill(&report);
+        assert!(!unified.complete);
+        assert!(!unified.final_complete);
+        assert_eq!(
+            unified.coverage_state,
+            UnifiedFillCoverageState::Provisional
+        );
+        assert_eq!(unified.provisional_as_of_ns, report.provisional_as_of_ns);
+        assert!(!report.complete);
+        assert!(report.provisional_complete);
+    }
+
+    #[test]
+    fn tick_provisional_completion_does_not_claim_final_coverage() {
+        let window = TradingDayWindow::from_days(
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap(),
+        )
+        .unwrap();
+        let report = FillReport {
+            schema_version: REPORT_SCHEMA_VERSION,
+            generated_at: "2026-07-29T00:00:00Z".to_string(),
+            cache_dir: "/tmp/cache".to_string(),
+            requested_days: window.clone(),
+            requested_range: (window.start_ns, window.end_ns),
+            selector: FillSelectorReport::default(),
+            resolved_range: None,
+            calendar: None,
+            logical_symbols: Vec::new(),
+            physical_symbols: Vec::new(),
+            fill_config: FillConfigReport {
+                symbol_batch_size: 1,
+                symbol_concurrency: 1,
+                idle_timeout_secs: 60,
+                batch_timeout_secs: None,
+                slice_secs: None,
+                allow_empty_idle: false,
+            },
+            remote_used: true,
+            rows_written: 10,
+            complete: false,
+            dry_run: false,
+            coverage_state: "provisional".to_string(),
+            complete_through_ns: Some(window.end_ns),
+            day_complete: false,
+        };
+
+        let unified = UnifiedFillReport::from_tick_fill(&report);
+        assert_eq!(unified.status, super::UnifiedFillReportStatus::Complete);
+        assert!(!unified.complete);
+        assert!(!unified.final_complete);
+        assert_eq!(
+            unified.coverage_state,
+            UnifiedFillCoverageState::Provisional
+        );
+        assert_eq!(unified.provisional_as_of_ns, Some(window.end_ns));
+    }
 
     #[test]
     fn trading_day_window_normalizes_weekend_and_keeps_evening_boundary() {
@@ -1963,7 +2144,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(read_persisted_fill_report(&path).is_ok());
+        let PersistedFillReport::Unified(report) = read_persisted_fill_report(&path).unwrap()
+        else {
+            panic!("expected unified report");
+        };
+        assert!(report.final_complete);
+        assert_eq!(report.coverage_state, UnifiedFillCoverageState::Final);
         let _ = fs::remove_dir_all(root);
     }
 

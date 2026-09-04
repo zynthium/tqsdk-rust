@@ -1,26 +1,32 @@
 //! Validated read-only snapshot handle and strict no-row inspection.
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use super::executor::{StrictInspectionFailure, strict_inspect_request};
+use super::executor::{
+    StrictInspectionFailure, plan_request_for_execution, strict_inspect_plan,
+    strict_inspect_request,
+};
 use super::metadata::{StrictMetadataErrorKind, validate_active_snapshot_strict};
 use super::planner;
 use super::report::{
     BacktestHistoryChunk, BacktestHistoryCollected, BacktestHistoryEvent,
     BacktestHistoryFailureReason, BacktestHistoryRequestReport,
 };
-use super::request::{BacktestHistoryPolicy, BacktestHistoryRequest};
+use super::request::{
+    BacktestHistoryPolicy, BacktestHistoryRequest, ValidatedBacktestHistoryRequest,
+};
 use super::snapshot_manifest::{
     BacktestHistorySnapshotFileRole, BacktestHistorySnapshotManifestBuilder, SnapshotManifestError,
     SnapshotManifestErrorKind, ValidatedSnapshotManifest, open_current_manifest,
     open_generation_manifest,
 };
 use super::{
-    BacktestHistoryClient, BacktestHistoryFailureReasons, BacktestHistoryRun,
-    BacktestHistorySnapshotQueryResources, classify_snapshot_failure,
+    BacktestHistoryClient, BacktestHistoryFailureReasons, BacktestHistoryLifecyclePin,
+    BacktestHistoryRun, BacktestHistorySnapshotQueryResources, classify_snapshot_failure,
 };
-use crate::DataError;
+use crate::{BacktestTickCache, DataError};
 
 /// Typed failure returned by the strict snapshot seam.
 #[derive(Debug, Clone)]
@@ -85,6 +91,162 @@ impl BacktestHistoryInspection {
     #[must_use]
     pub fn into_report(self) -> BacktestHistoryRequestReport {
         self.report
+    }
+}
+
+/// CacheOnly live view of a writable history cache.
+///
+/// Each prepared read holds the cache-root shared operation gate and captures
+/// one metadata/source plan. Normal fills may continue concurrently, while
+/// destructive maintenance remains excluded until the read fully exits.
+#[derive(Clone)]
+pub struct BacktestHistoryLiveCache {
+    cache_dir: PathBuf,
+    client: BacktestHistoryClient,
+}
+
+impl fmt::Debug for BacktestHistoryLiveCache {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BacktestHistoryLiveCache")
+            .field("cache_dir", &self.cache_dir)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BacktestHistoryLiveCache {
+    /// Opens a cache root without enabling remote reads or writes.
+    ///
+    /// The operation lock is intentionally acquired by [`Self::prepare`], so
+    /// a reader started before the first fill can recover without reopening.
+    pub fn open(cache_dir: impl AsRef<Path>) -> Result<Self, BacktestHistorySnapshotError> {
+        let cache_dir = cache_dir.as_ref().to_path_buf();
+        let client = BacktestHistoryClient::builder(&cache_dir)
+            .policy(BacktestHistoryPolicy::CacheOnly)
+            .logical_concurrency(1)
+            .build()
+            .map_err(|error| {
+                BacktestHistorySnapshotError::new(
+                    BacktestHistoryFailureReason::SnapshotUnavailable,
+                    None,
+                    None,
+                    error.to_string(),
+                )
+            })?;
+        Ok(Self { cache_dir, client })
+    }
+
+    /// Captures one request-scoped metadata/source plan under a shared root gate.
+    pub async fn prepare(
+        &self,
+        request: BacktestHistoryRequest,
+    ) -> Result<BacktestHistoryPreparedRead, BacktestHistorySnapshotError> {
+        let validated = request.validate().map_err(|error| {
+            BacktestHistorySnapshotError::new(
+                BacktestHistoryFailureReason::InvalidRequest,
+                None,
+                None,
+                error.to_string(),
+            )
+        })?;
+        let request_id = validated.request_id;
+        let symbol = validated.symbol.clone();
+        planner::validate_source_policy(&validated).map_err(|error| {
+            BacktestHistorySnapshotError::new(
+                BacktestHistoryFailureReason::InvalidRequest,
+                Some(request_id),
+                Some(symbol.clone()),
+                error.to_string(),
+            )
+        })?;
+        let root_gate = BacktestTickCache::open_read_only(&self.cache_dir)
+            .try_acquire_live_read_shared_lock()
+            .map_err(|error| {
+                BacktestHistorySnapshotError::new(
+                    BacktestHistoryFailureReason::SnapshotUnavailable,
+                    Some(request_id),
+                    Some(symbol.clone()),
+                    error.to_string(),
+                )
+            })?;
+        let plan = plan_request_for_execution(&self.client.config, validated.clone())
+            .await
+            .map_err(|error| {
+                let (reason, message) = map_planning_error(error);
+                BacktestHistorySnapshotError::new(
+                    reason,
+                    Some(request_id),
+                    Some(symbol.clone()),
+                    message,
+                )
+            })?;
+        let report = strict_inspect_plan(self.client.config.as_ref(), &plan)
+            .map_err(|failure| map_inspection_failure(request_id, symbol.as_str(), failure))?;
+        Ok(BacktestHistoryPreparedRead {
+            client: self.client.clone(),
+            validated,
+            plan,
+            inspection: BacktestHistoryInspection { report },
+            lifecycle_pin: Arc::new(root_gate),
+        })
+    }
+}
+
+/// Request-scoped live cache read prepared from one immutable in-memory plan.
+pub struct BacktestHistoryPreparedRead {
+    client: BacktestHistoryClient,
+    validated: ValidatedBacktestHistoryRequest,
+    plan: planner::PlannedBacktestHistoryRequest,
+    inspection: BacktestHistoryInspection,
+    lifecycle_pin: BacktestHistoryLifecyclePin,
+}
+
+impl fmt::Debug for BacktestHistoryPreparedRead {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BacktestHistoryPreparedRead")
+            .field("request_id", &self.validated.request_id)
+            .field("symbol", &self.validated.symbol)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BacktestHistoryPreparedRead {
+    #[must_use]
+    pub const fn inspection(&self) -> &BacktestHistoryInspection {
+        &self.inspection
+    }
+
+    #[must_use]
+    pub fn metadata_snapshot_hash(&self) -> &str {
+        self.inspection.report.snapshot_hash.as_str()
+    }
+
+    /// Starts the row scan without reloading metadata or rebuilding its source plan.
+    pub fn query_with_resources(
+        self,
+        resources: BacktestHistorySnapshotQueryResources,
+    ) -> Result<BacktestHistorySnapshotRun, BacktestHistorySnapshotError> {
+        let request_id = self.validated.request_id;
+        let symbol = self.validated.symbol.clone();
+        let run = self
+            .client
+            .start_prepared_run_with_resources(
+                self.validated,
+                self.plan,
+                self.lifecycle_pin,
+                Some(resources),
+            )
+            .map_err(|error| {
+                let (reason, message) = map_planning_error(error);
+                BacktestHistorySnapshotError::new(
+                    reason,
+                    Some(request_id),
+                    Some(symbol.clone()),
+                    message,
+                )
+            })?;
+        Ok(BacktestHistorySnapshotRun::new(run, request_id, symbol))
     }
 }
 
@@ -531,6 +693,7 @@ mod resource_tests {
 
     use super::*;
     use crate::{DailyKlineCache, DailyKlineCacheSnapshot};
+    use tqsdk_core::Tick;
 
     struct RejectingBudget;
 
@@ -644,6 +807,67 @@ mod resource_tests {
             BacktestHistoryFailureReason::ResponseTooLarge { limit_bytes: 0, .. }
         ));
         assert_eq!(daily_reader_opens.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn live_prepared_read_holds_shared_root_gate() {
+        let cache_dir = std::env::temp_dir().join(format!(
+            "tqsdk-live-prepared-root-gate-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let symbol = "SHFE.au2612";
+        let source_start_ns = 1_767_348_000_000_000_000_i64;
+        let start_ns = 1_767_572_800_000_000_000_i64;
+        let end_ns = 1_767_659_200_000_000_000_i64;
+        BacktestTickCache::open(&cache_dir)
+            .unwrap()
+            .store_ticks(
+                symbol,
+                source_start_ns,
+                end_ns,
+                [Tick {
+                    id: 1,
+                    datetime: start_ns + 1_000_000_000,
+                    last_price: 1.0,
+                    ..Tick::default()
+                }],
+            )
+            .unwrap();
+        drop(
+            BacktestTickCache::open(&cache_dir)
+                .unwrap()
+                .try_acquire_remote_fill_shared_lock()
+                .unwrap(),
+        );
+        let live = BacktestHistoryLiveCache::open(&cache_dir).unwrap();
+        let prepared = live
+            .prepare(BacktestHistoryRequest::tick(1, symbol, start_ns, end_ns))
+            .await
+            .unwrap();
+        assert!(
+            !prepared
+                .inspection()
+                .report()
+                .coverage
+                .cached_ranges
+                .is_empty()
+        );
+
+        let error = BacktestTickCache::open(&cache_dir)
+            .unwrap()
+            .try_acquire_consistency_read_lock()
+            .unwrap_err();
+        assert!(matches!(error, DataError::CacheBusy { .. }));
+
+        drop(prepared);
+        BacktestTickCache::open(&cache_dir)
+            .unwrap()
+            .try_acquire_consistency_read_lock()
+            .unwrap();
     }
 
     #[tokio::test]

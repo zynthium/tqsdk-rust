@@ -61,8 +61,9 @@ pub use schema::{
     backtest_history_schema_fields,
 };
 pub use snapshot::{
-    BacktestHistoryInspection, BacktestHistorySnapshot, BacktestHistorySnapshotError,
-    BacktestHistorySnapshotEvent, BacktestHistorySnapshotRun,
+    BacktestHistoryInspection, BacktestHistoryLiveCache, BacktestHistoryPreparedRead,
+    BacktestHistorySnapshot, BacktestHistorySnapshotError, BacktestHistorySnapshotEvent,
+    BacktestHistorySnapshotRun,
 };
 pub use snapshot_manifest::{
     BacktestHistorySnapshotFileDisposition, BacktestHistorySnapshotFileRole,
@@ -77,6 +78,7 @@ pub use snapshot_resources::{
 pub use telemetry::BacktestHistoryTelemetryStream;
 
 use executor::{BacktestHistoryExecutionMode, BacktestHistoryExecutionState};
+use planner::PlannedBacktestHistoryRequest;
 use request::{BacktestHistoryClientConfig, ValidatedBacktestHistoryRequest};
 
 pub(crate) type BacktestHistoryLifecyclePin = Arc<dyn Send + Sync + 'static>;
@@ -273,6 +275,42 @@ impl BacktestHistoryClient {
         lifecycle_pin: Option<BacktestHistoryLifecyclePin>,
         resources: Option<BacktestHistorySnapshotQueryResources>,
     ) -> Result<BacktestHistoryRun> {
+        self.start_run_with_resources_and_plan(
+            requests,
+            mode,
+            root_gate,
+            lifecycle_pin,
+            resources,
+            None,
+        )
+    }
+
+    fn start_prepared_run_with_resources(
+        &self,
+        request: ValidatedBacktestHistoryRequest,
+        plan: PlannedBacktestHistoryRequest,
+        lifecycle_pin: BacktestHistoryLifecyclePin,
+        resources: Option<BacktestHistorySnapshotQueryResources>,
+    ) -> Result<BacktestHistoryRun> {
+        self.start_run_with_resources_and_plan(
+            vec![request],
+            BacktestHistoryExecutionMode::Query,
+            None,
+            Some(lifecycle_pin),
+            resources,
+            Some(plan),
+        )
+    }
+
+    fn start_run_with_resources_and_plan(
+        &self,
+        requests: Vec<ValidatedBacktestHistoryRequest>,
+        mode: BacktestHistoryExecutionMode,
+        root_gate: Option<Arc<BacktestTickCacheOperationLock>>,
+        lifecycle_pin: Option<BacktestHistoryLifecyclePin>,
+        resources: Option<BacktestHistorySnapshotQueryResources>,
+        prepared_plan: Option<PlannedBacktestHistoryRequest>,
+    ) -> Result<BacktestHistoryRun> {
         let root_gate = match self.config.policy {
             BacktestHistoryPolicy::CacheOnly => None,
             BacktestHistoryPolicy::RemoteOnMiss => {
@@ -320,12 +358,18 @@ impl BacktestHistoryClient {
                 telemetry_for_task.clone(),
                 cancellation_for_task,
                 mode,
-                BacktestHistoryExecutionState::new(
-                    lifecycle_pin,
-                    failure_reasons_for_task,
-                    resources,
-                    task_event_reservations,
-                ),
+                {
+                    let state = BacktestHistoryExecutionState::new(
+                        lifecycle_pin,
+                        failure_reasons_for_task,
+                        resources,
+                        task_event_reservations,
+                    );
+                    match prepared_plan {
+                        Some(plan) => state.with_prepared_plan(plan),
+                        None => state,
+                    }
+                },
             )
             .await;
             telemetry_for_task.close();

@@ -99,6 +99,10 @@ planner、official server-backtest cache fill、single-flight 协调、bounded c
 同一个 `BacktestHistoryClient` 也拥有 tick、minute、daily fill scheduling：默认 symbol batch size 1、
 concurrency 2、idle timeout 60 秒、无 batch timeout；batch size/concurrency 都只接受 `1..=4`。
 它统一产生 planning、batch、telemetry、terminal progress，facade 与 CLI 只适配该合同。
+`BacktestHistoryTelemetryEvent` 的 `latest_cursor_ns` 与 `completed_rows` 属于同一 best-effort
+snapshot；producer 只用已接受行推进 cursor，`completed_rows` 跨同一 logical request 的 source
+slice 累计，coalescing 与 consumer 都必须保持单调。
+streaming cursor 只能推进 provisional received-through；final coverage 仍只由成功 terminal 提升。
 
 | 用户请求 | durable source | 派生和持久化 |
 | --- | --- | --- |
@@ -108,6 +112,13 @@ concurrency 2、idle timeout 60 秒、无 batch timeout；batch size/concurrency
 | `N × 60s`（`N > 1` 且 `<1d`） | 同一 canonical-minute partition | 只从 closed 60s rows 按固定 CST `18:00` trading-day grid 聚合；仅内存中存在 |
 | `1d` K | `daily-kline-v1/<escaped-logical-symbol>.tqdk` native-daily v1 file | durable K 线；单 logical symbol 文件、不按时间分区 |
 | `2d` 到 `28d` K | 同一 native-daily file | 只从 complete final 1d rows 按 native timestamp phase 聚合；仅内存中存在 |
+
+`BacktestHistoryRequest::with_provisional_as_of_ns(...)` 接受 Tick、sub-minute，以及精确 60s
+请求；`N × 60s`（`N > 1`）和 daily 仍拒绝。60s provisional rows 写入独立 `.tqmp`
+sidecar，只含 as-of 前已闭合 bar，普通 final reader/coverage 不可见。非空 metadata session
+可以在最后一个 window close、checkpoint `complete_through` 已到 close 且 grace 已过后，将 observed
+sidecar 原子冻结为 final `.tqmk`；这一步是 as-traded freeze，不是 vendor history reconciliation。
+空的 full-day fallback session 不提供提前 final 的证明。
 
 `61s`、`90s` 等既非 sub-minute、也非 60s 整数倍的周期会被拒绝；非整数日和大于 `28d` 的日周期同样
 直接 validation error。Tick、canonical-minute 与 native-daily cache 都没有 automatic retention、max-byte
@@ -136,6 +147,13 @@ native-daily 缺失、损坏或 coverage 不完整时必须失败，不允许以
 `query()` 返回 snapshot-owned `BacktestHistorySnapshotRun`；其 `next()`、`collect()` 和 `finish()`
 在 reader 已启动后仍返回 typed `BacktestHistoryFailureReason`。legacy `BacktestHistoryRun`、
 `BacktestHistoryEvent` 和 `BacktestHistoryRequestFailure` 的字段与字符串行为保持不变。
+
+`BacktestHistoryLiveCache` 是同一 CacheOnly 执行器上的 live read adapter。`prepare()` 在共享
+cache-root operation gate 下验证请求、加载 metadata、生成 source plan 并 strict inspect 一次；
+`BacktestHistoryPreparedRead::query_with_resources()` 必须复用该 plan，不能再次解析 active metadata
+pointer。gate 作为 lifecycle pin 保留到 coordinator 和 detached blocking scan 全部退出，所以普通 fill
+可并发提交后续原子分区，exclusive maintenance 则与请求互斥。live adapter 不遍历文件推断覆盖；
+只读取 cache 已持久化的 coverage/finality，未提交 rows 和 provisional minute checkpoint 不构成 HTTP final。
 `BacktestHistoryRequestReport::snapshot_hash` 继续表示现有 per-symbol metadata cache identity，
 两者用途不同，调用方不得直接按字符串相等比较。
 
@@ -178,9 +196,11 @@ adapter，不属于 query/read path：它在 exclusive root remote-fill gate 内
 不改写 Tick 或 minute cache，也不使 `CacheOnly` 联网或接受未覆盖的 metadata。
 
 每个 canonical-minute 月文件绑定写入时的 immutable metadata snapshot。active pointer 变更不单独使
-旧分区不可读：当且仅当保留 snapshot 覆盖整个请求窗口、schema/session identity 与 active snapshot
-一致，并能精确验证现存月文件时，planner 才选择它。缺少保留 snapshot、session 变化、损坏文件或不能由
-同一 snapshot 解释的混合分区保持 fail-closed；此路径不自动 purge、重写或合并数据。
+旧分区不可读：当且仅当保留 snapshot 覆盖所需 metadata 窗口、schema/session identity 与 active snapshot
+一致，并能精确验证现存月文件时，planner 才选择它。物理合约的窗口按完整 CST trading month 计算；
+`KQ.*` 逻辑分钟序列还必须保留早于月界的原始 trading-cycle 起点，避免休市边界被收缩后形成假覆盖。
+缺少保留 snapshot、session 变化、损坏文件或不能由同一 snapshot 解释的混合分区保持 fail-closed；
+此路径不自动 purge、重写或合并数据。
 
 执行图是 async orchestration 加有界 `spawn_blocking` reader：文件读取、TQBN 解压和记录解码仍是
 CPU/blocking 工作，不能仅把 API 换成 `tokio::fs` 就宣称性能提升。

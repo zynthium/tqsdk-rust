@@ -1,6 +1,8 @@
 //! Deterministic source selection and cache-range expansion for backtest
 //! history requests.
 
+use chrono::{Datelike, NaiveDate, Weekday};
+
 use crate::aggregation::{KlineSessionPosition, KlineSessionTemplate};
 use crate::backtest_tick_cache::{
     backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
@@ -47,6 +49,7 @@ pub(crate) struct PlannedBacktestHistoryRequest {
     pub(crate) effective_end_ns: i64,
     pub(crate) expanded_source_range: (i64, i64),
     pub(crate) source_slices: Vec<PlannedSourceSlice>,
+    pub(crate) proven_empty_ranges: Vec<(i64, i64)>,
     pub(crate) physical_segments: Vec<BacktestHistoryPhysicalSegment>,
     pub(crate) session: KlineSessionTemplate,
     pub(crate) minute_snapshot: MinuteKlineCacheSnapshot,
@@ -84,9 +87,12 @@ impl PlannedBacktestHistoryRequest {
 /// Validates public source policy before an asynchronous run begins.
 pub(crate) fn validate_source_policy(request: &ValidatedBacktestHistoryRequest) -> Result<()> {
     let base_source = classify_request(request)?;
-    if request.provisional_as_of_ns.is_some() && base_source != PlannedBaseSource::Tick {
+    if request.provisional_as_of_ns.is_some()
+        && base_source != PlannedBaseSource::Tick
+        && request.duration_ns != Some(crate::MINUTE_KLINE_DURATION_NS)
+    {
         return Err(DataError::Validation(
-            "provisional_as_of_ns is supported only for Tick and sub-minute Kline requests"
+            "provisional_as_of_ns is supported only for Tick and Kline requests up to 60 seconds"
                 .to_string(),
         ));
     }
@@ -311,6 +317,19 @@ pub(crate) fn plan_request(
         .ok_or(DataError::InvalidState(
             "backtest history plan has no source slices",
         ))?;
+    let proven_empty_ranges = if base_source == PlannedBaseSource::Tick {
+        known_non_trading_tick_ranges(
+            trading_days.as_deref().unwrap_or_default(),
+            expanded_source_range,
+        )?
+    } else {
+        Vec::new()
+    };
+    let source_segments = if proven_empty_ranges.is_empty() {
+        source_segments
+    } else {
+        exclude_proven_empty_tick_ranges(source_segments, proven_empty_ranges.as_slice())
+    };
 
     Ok(PlannedBacktestHistoryRequest {
         request_id: request.request_id,
@@ -322,6 +341,7 @@ pub(crate) fn plan_request(
         effective_end_ns,
         expanded_source_range,
         source_slices: source_segments,
+        proven_empty_ranges,
         physical_segments,
         session,
         minute_snapshot,
@@ -332,6 +352,86 @@ pub(crate) fn plan_request(
                 BacktestHistoryFinality::Provisional { as_of_ns }
             }),
     })
+}
+
+fn known_non_trading_tick_ranges(
+    trading_days: &[BacktestHistoryTradingDay],
+    requested_range: (i64, i64),
+) -> Result<Vec<(i64, i64)>> {
+    let mut ranges = Vec::new();
+    for day in trading_days.iter().filter(|day| !day.is_trading_day) {
+        let date = NaiveDate::parse_from_str(day.date.as_str(), "%Y-%m-%d").map_err(|error| {
+            DataError::InvalidResponse(format!(
+                "invalid trading calendar date {}: {error}",
+                day.date
+            ))
+        })?;
+        if matches!(date.weekday(), Weekday::Sat | Weekday::Sun) {
+            continue;
+        }
+        let day_range = backtest_tick_trading_day_range(date)?;
+        let range = (
+            day_range.start_ns.max(requested_range.0),
+            day_range.end_ns.min(requested_range.1),
+        );
+        if range.0 < range.1 {
+            ranges.push(range);
+        }
+    }
+    Ok(merge_adjacent_ranges(ranges))
+}
+
+fn exclude_proven_empty_tick_ranges(
+    slices: Vec<PlannedSourceSlice>,
+    proven_empty_ranges: &[(i64, i64)],
+) -> Vec<PlannedSourceSlice> {
+    slices
+        .into_iter()
+        .flat_map(|slice| {
+            let mut remaining = vec![slice.range];
+            for &empty in proven_empty_ranges {
+                remaining = remaining
+                    .into_iter()
+                    .flat_map(|range| subtract_range(range, empty))
+                    .collect();
+            }
+            remaining.into_iter().map(move |range| PlannedSourceSlice {
+                cache_symbol: slice.cache_symbol.clone(),
+                range,
+                physical_rank: slice.physical_rank,
+            })
+        })
+        .collect()
+}
+
+fn subtract_range(range: (i64, i64), excluded: (i64, i64)) -> Vec<(i64, i64)> {
+    let overlap = (range.0.max(excluded.0), range.1.min(excluded.1));
+    if overlap.0 >= overlap.1 {
+        return vec![range];
+    }
+    let mut remaining = Vec::with_capacity(2);
+    if range.0 < overlap.0 {
+        remaining.push((range.0, overlap.0));
+    }
+    if overlap.1 < range.1 {
+        remaining.push((overlap.1, range.1));
+    }
+    remaining
+}
+
+fn merge_adjacent_ranges(mut ranges: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
+    ranges.sort_unstable();
+    let mut merged: Vec<(i64, i64)> = Vec::new();
+    for range in ranges {
+        if let Some(previous) = merged.last_mut()
+            && range.0 <= previous.1
+        {
+            previous.1 = previous.1.max(range.1);
+        } else {
+            merged.push(range);
+        }
+    }
+    merged
 }
 
 pub(crate) fn classify_duration(duration_ns: i64) -> Result<PlannedBaseSource> {
@@ -588,6 +688,54 @@ mod tests {
     }
 
     #[test]
+    fn tick_source_slices_exclude_metadata_proven_weekday_holidays() {
+        let april_3 = chrono::NaiveDate::from_ymd_opt(2024, 4, 3).unwrap();
+        let april_4 = chrono::NaiveDate::from_ymd_opt(2024, 4, 4).unwrap();
+        let april_5 = chrono::NaiveDate::from_ymd_opt(2024, 4, 5).unwrap();
+        let april_8 = chrono::NaiveDate::from_ymd_opt(2024, 4, 8).unwrap();
+        let start_ns = backtest_tick_trading_day_range(april_3).unwrap().start_ns;
+        let end_ns = backtest_tick_trading_day_range(april_8).unwrap().end_ns;
+        let holidays = vec![
+            trading_day("2024-04-04", false, utc_ns(2024, 4, 3, 16, 0, 0)),
+            trading_day("2024-04-05", false, utc_ns(2024, 4, 4, 16, 0, 0)),
+            trading_day("2024-04-06", false, utc_ns(2024, 4, 5, 16, 0, 0)),
+            trading_day("2024-04-07", false, utc_ns(2024, 4, 6, 16, 0, 0)),
+        ];
+
+        let proven_empty =
+            known_non_trading_tick_ranges(holidays.as_slice(), (start_ns, end_ns)).unwrap();
+        assert_eq!(
+            proven_empty,
+            vec![(
+                backtest_tick_trading_day_range(april_4).unwrap().start_ns,
+                backtest_tick_trading_day_range(april_5).unwrap().end_ns,
+            )]
+        );
+
+        let slices = exclude_proven_empty_tick_ranges(
+            vec![PlannedSourceSlice {
+                cache_symbol: "SHFE.cu2502".to_string(),
+                range: (start_ns, end_ns),
+                physical_rank: 0,
+            }],
+            proven_empty.as_slice(),
+        );
+        assert_eq!(slices.len(), 2);
+        assert_eq!(slices[0].range.1, proven_empty[0].0);
+        assert_eq!(slices[1].range.0, proven_empty[0].1);
+
+        let holiday_only = exclude_proven_empty_tick_ranges(
+            vec![PlannedSourceSlice {
+                cache_symbol: "SHFE.cu2502".to_string(),
+                range: proven_empty[0],
+                physical_rank: 0,
+            }],
+            proven_empty.as_slice(),
+        );
+        assert!(holiday_only.is_empty());
+    }
+
+    #[test]
     fn daily_periods_use_native_daily_base_and_cap_at_twenty_eight_days() {
         const DAY_NS: i64 = 86_400_000_000_000;
         for days in [1, 2, 5, 28] {
@@ -602,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn provisional_policy_rejects_canonical_minute_and_larger_periods() {
+    fn provisional_policy_accepts_canonical_minute_and_rejects_larger_periods() {
         let sub_minute =
             BacktestHistoryRequest::kline(1, "SHFE.au2608", Duration::from_secs(15), 1, 2)
                 .with_provisional_as_of_ns(2)
@@ -614,7 +762,14 @@ mod tests {
             .with_provisional_as_of_ns(2)
             .validate()
             .unwrap();
-        assert!(validate_source_policy(&minute).is_err());
+        assert!(validate_source_policy(&minute).is_ok());
+
+        let larger =
+            BacktestHistoryRequest::kline(1, "SHFE.au2608", Duration::from_secs(120), 1, 2)
+                .with_provisional_as_of_ns(2)
+                .validate()
+                .unwrap();
+        assert!(validate_source_policy(&larger).is_err());
     }
 
     #[test]

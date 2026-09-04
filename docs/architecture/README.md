@@ -135,9 +135,12 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
     分区；缺失历史 snapshot、session 变化、损坏或混合分区均 fail closed，且不会自动删除、重写或拼接数据
 - `PreparedBacktest::tick_sources()` 只读暴露上述 logical-to-physical 投影及各自有效区间，
   供调用方自有多资产回放器并行读取；跨品种 barrier、截面调度和策略状态不下沉到 facade
-  - `.provisional_open_day_fill(day_start_ns, as_of_ns)?` 只为固定 as-of 的当前交易日 warmup
-    提交 non-final checkpoint；普通 coverage/cache-hit 仍视为缺口，TQBN 18:00 分区结束后必须
-    走普通 final warmup 全日重对账
+- `.provisional_open_day_fill(day_start_ns, as_of_ns)?` 为固定 as-of 的当前交易日 warmup
+  提交 non-final checkpoint。Tick 使用 TQBN provisional record；canonical 60s minute 使用独立
+  `.tqmp` sidecar 并过滤未闭合 bar。两者都不进入普通 final coverage/cache-hit。canonical-minute
+  若非空 metadata session 证明最后一个 window 已结束，且 checkpoint 已到 close + grace，则原子冻结
+  observed rows 为 final `.tqmk`，不会再下载盘后 vendor revision；缺少可靠 session 或完整收盘
+  checkpoint 时不能声称严格 as-traded
   - cache-backed backtest 的显式 `.tick(...)` / `.kline(...)` serial 声明使用同一套
   本地 replay runtime：`<60s` 的 K 线从 tick cache 本地合成，`60s` 至 `<1d` 的整数分钟从 canonical
   minute cache 读取/聚合，`1d` 读取 native daily cache，`2d` 至 `28d` 由 data 查询从 final 1d rows 聚合；
@@ -228,7 +231,7 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
   - `DataClient`
 - `BacktestHistoryClient`：metadata sidecar、source planner、single-flight official fill、统一的
   tick/minute/daily batch/concurrency/timeout/progress 调度、bounded async scan 与 query terminal report
-  的唯一 owner；tick 服务 tick 与 `<60s`，canonical minute 服务 `60s..<1d`，native daily 服务
+  的唯一 owner；progress telemetry 同时发布累计接收行数和最新已接受源行 cursor，供 CLI 在流式阶段只推进已完整结束的交易日；coverage 仅在成功 terminal 后提交；tick 服务 tick 与 `<60s`，canonical minute 服务 `60s..<1d`，native daily 服务
   `1d..=28d`，daily miss 不回退到 minute；公开
   `RemoteOnMiss` run 自动持有 shared cache-root gate，facade 已持锁时传递同一守卫，避免嵌套自锁
 - Universe Language V2 的 parser、normalized AST、纯 snapshot/timeline compiler、typed exclusion、
@@ -278,7 +281,7 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
   revalidation 和 remote canary 处理，不改写原 proof，也不隐式生成 plan
 - tick 保留 remote-on-miss / current-day provisional / `--require-final`、calendar-aware
    `--last-trading-days` 等合同；三类 fill 共享 batch/concurrency/timeout defaults 和 selectable stderr
-   progress（plain/TTY/JSONL）。新 fill report 统一写 schema v3 与 `cache_kind`，默认目录为
+progress（plain/TTY/JSONL）。新 fill report 统一写 schema v4 与 `cache_kind`，默认目录为
    `reports/tick/`、`reports/minute/`、`reports/daily/`；reader 兼容 tick v1/v2、minute v1、daily v1
  - tick purge 删除相交 trading-day partitions，minute purge 删除相交整月，daily purge 删除整 symbol
    文件；真实 purge 均要求 `--yes` 与 exclusive root gate，三类缓存都没有自动 eviction/retention
@@ -482,7 +485,7 @@ Universe Language V2 的 `except(...)` 是 `tqsdk-data` parser 输入糖：`exce
 10. [Python / Rust facade 范式对比](facade-paradigms.md)
 11. [当前 crate 边界审计](crate-boundaries.md)
 12. [未来 crate 蓝图与能力映射](crate-blueprint.md)
-13. [Relay 内置只读历史查询 ADR](history-relay.md)
+13. [Relay 内置只读历史查询 ADR](history-relay.md)：默认读取 live cache 已提交进度，published snapshot 仅作兼容回滚
 14. [Relay History HTTP v1 Contract](history-relay-http.md)
 15. [History Snapshot Manifest v1](history-snapshot-manifest.md)
 16. [Universe Language V2](universe-language.md)

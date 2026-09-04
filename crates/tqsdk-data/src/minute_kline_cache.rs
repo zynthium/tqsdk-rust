@@ -4,20 +4,21 @@
 //! 60-second Kline is the durable canonical Kline input for the local backtest
 //! path; higher periods are derived by `tqsdk-task` at replay time.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use fs2::FileExt;
+use serde::{Deserialize, Serialize};
 use tqsdk_core::Kline;
 
 use crate::backtest_history::minute_cache_snapshots_are_compatible;
 use crate::backtest_tick_cache::{
     backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
 };
-use crate::{DataError, Result};
+use crate::{DataError, KlineSessionTemplate, Result};
 
 /// The only durable Kline period accepted by [`MinuteKlineCache`].
 pub const MINUTE_KLINE_DURATION_NS: i64 = 60_000_000_000;
@@ -29,6 +30,12 @@ pub const MINUTE_KLINE_CACHE_FORMAT_ID: &str = "tqsdk.minute-kline.monthly.v5";
 pub const MINUTE_KLINE_CACHE_SCHEMA_VERSION: u32 = 5;
 
 const ROOT_DIR_NAME: &str = "minute-kline-v3";
+const PROVISIONAL_ROOT_DIR_NAME: &str = "minute-kline-provisional-v1";
+const PROVISIONAL_FILE_EXTENSION: &str = "tqmp";
+const PROVISIONAL_FILE_MAGIC: [u8; 4] = *b"TQMP";
+const PROVISIONAL_FILE_VERSION: u16 = 1;
+const PROVISIONAL_FILE_HEADER_BYTES: usize = 26;
+const MAX_PROVISIONAL_ROWS: usize = 2_000;
 const FILE_EXTENSION: &str = "tqmk";
 const FILE_MAGIC: [u8; 4] = *b"TQMK";
 const FILE_VERSION: u16 = 5;
@@ -56,11 +63,92 @@ std::thread_local! {
 /// symbol, session, trading days, and physical mapping are identical in that
 /// coverage. Every other mismatch is an error, never a best-effort cache miss:
 /// aggregation boundaries would no longer be trustworthy.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MinuteKlineCacheSnapshot {
     pub version: u32,
     pub calendar_hash: String,
     pub session_hash: String,
+}
+
+/// Explicit, non-final canonical-minute checkpoint for one trading day.
+///
+/// Provisional rows never contribute to [`MinuteKlineCache::coverage`] and are
+/// visible only through the provisional APIs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MinuteKlineProvisionalCheckpoint {
+    pub cache_dir: PathBuf,
+    pub symbol: String,
+    pub range_start_ns: i64,
+    pub range_end_ns: i64,
+    pub complete_through_ns: i64,
+    pub as_of_ns: i64,
+    pub rows: usize,
+}
+
+/// Materialized reader for one explicitly requested provisional-minute view.
+pub struct MinuteKlineProvisionalReader {
+    rows: std::vec::IntoIter<Kline>,
+}
+
+impl MinuteKlineProvisionalReader {
+    pub fn next_kline(&mut self) -> Option<Kline> {
+        self.rows.next()
+    }
+
+    pub fn next_kline_chunk(&mut self, target_bytes: usize) -> Result<Vec<Kline>> {
+        if target_bytes == 0 {
+            return Err(DataError::Validation(
+                "minute kline chunk target must be positive".to_string(),
+            ));
+        }
+        let rows_per_chunk = (target_bytes / std::mem::size_of::<Kline>()).max(1);
+        Ok(self.rows.by_ref().take(rows_per_chunk).collect())
+    }
+}
+
+pub(crate) struct MinuteKlineHistoryReader {
+    segments: VecDeque<MinuteKlineHistorySegment>,
+}
+
+enum MinuteKlineHistorySegment {
+    Final(Box<MinuteKlineReader>),
+    Provisional(MinuteKlineProvisionalReader),
+}
+
+impl MinuteKlineHistoryReader {
+    pub(crate) fn next_kline_chunk(&mut self, target_bytes: usize) -> Result<Vec<Kline>> {
+        while let Some(segment) = self.segments.front_mut() {
+            let rows = match segment {
+                MinuteKlineHistorySegment::Final(reader) => {
+                    reader.next_kline_chunk(target_bytes)?
+                }
+                MinuteKlineHistorySegment::Provisional(reader) => {
+                    reader.next_kline_chunk(target_bytes)?
+                }
+            };
+            if !rows.is_empty() {
+                return Ok(rows);
+            }
+            self.segments.pop_front();
+        }
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProvisionalMetadata {
+    symbol: String,
+    trading_day: String,
+    range_start_ns: i64,
+    range_end_ns: i64,
+    complete_through_ns: i64,
+    as_of_ns: i64,
+    snapshot: MinuteKlineCacheSnapshot,
+}
+
+struct ProvisionalFile {
+    metadata: ProvisionalMetadata,
+    rows: Vec<Kline>,
 }
 
 impl MinuteKlineCacheSnapshot {
@@ -615,6 +703,390 @@ impl MinuteKlineCache {
         )
     }
 
+    /// Atomically replace the explicit provisional view for one open trading day.
+    ///
+    /// Only complete 60-second bars are retained. An older `as_of_ns` never
+    /// downgrades a newer checkpoint.
+    pub fn store_provisional_range(
+        &self,
+        symbol: impl AsRef<str>,
+        range_start_ns: i64,
+        range_end_ns: i64,
+        as_of_ns: i64,
+        snapshot: &MinuteKlineCacheSnapshot,
+        rows: &[Kline],
+    ) -> Result<MinuteKlineProvisionalCheckpoint> {
+        self.ensure_writable()?;
+        let symbol = symbol.as_ref();
+        validate_range(symbol, range_start_ns, range_end_ns)?;
+        snapshot.validate()?;
+        if range_end_ns > as_of_ns {
+            return Err(DataError::Validation(
+                "provisional minute range must not extend beyond its as-of timestamp".to_string(),
+            ));
+        }
+
+        let trading_day = backtest_tick_trading_day_for_timestamp_ns(as_of_ns)?;
+        let range_last_ns = range_end_ns.checked_sub(1).ok_or_else(|| {
+            DataError::Validation("provisional minute range underflow".to_string())
+        })?;
+        if backtest_tick_trading_day_for_timestamp_ns(range_start_ns)? != trading_day
+            || backtest_tick_trading_day_for_timestamp_ns(range_last_ns)? != trading_day
+        {
+            return Err(DataError::Validation(
+                "provisional minute range must stay within its as-of trading day".to_string(),
+            ));
+        }
+
+        let as_of_complete_through_ns = as_of_ns - as_of_ns.rem_euclid(MINUTE_KLINE_DURATION_NS);
+        let range_complete_through_ns =
+            range_end_ns - range_end_ns.rem_euclid(MINUTE_KLINE_DURATION_NS);
+        let complete_through_ns = as_of_complete_through_ns.min(range_complete_through_ns);
+        let mut rows_by_datetime = BTreeMap::new();
+        for row in rows {
+            let row_end_ns = row
+                .datetime
+                .checked_add(MINUTE_KLINE_DURATION_NS)
+                .ok_or_else(|| {
+                    DataError::Validation("provisional minute row end overflow".to_string())
+                })?;
+            if row.datetime >= range_start_ns
+                && row.datetime < range_end_ns
+                && row_end_ns <= complete_through_ns
+                && backtest_tick_trading_day_for_timestamp_ns(row.datetime)? == trading_day
+            {
+                rows_by_datetime.insert(row.datetime, row.clone());
+            }
+        }
+
+        let path = self.provisional_file_path_unchecked(symbol);
+        let trading_month = trading_day.format("%Y%m").to_string();
+        let month_path = self.month_file_path_unchecked(symbol, trading_month.as_str());
+        let _lock = MonthFileLock::acquire(month_path.as_path(), self.root_dir.as_path())?;
+        let _provisional_lock = MonthFileLock::acquire(path.as_path(), self.root_dir.as_path())?;
+        let mut checkpoint_start_ns = range_start_ns;
+        let mut checkpoint_end_ns = range_end_ns;
+        let existing = match load_provisional_file(path.as_path()) {
+            Ok(existing) => existing,
+            Err(_) => {
+                match fs::remove_file(path.as_path()) {
+                    Ok(()) => {
+                        if let Some(parent) = path.parent() {
+                            File::open(parent)?.sync_all()?;
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+                None
+            }
+        };
+        if let Some(existing) = existing {
+            let same_day =
+                existing.metadata.trading_day == trading_day.format("%Y-%m-%d").to_string();
+            if same_day {
+                validate_provisional_identity(
+                    path.as_path(),
+                    &existing.metadata,
+                    symbol,
+                    snapshot,
+                )?;
+                if existing.metadata.as_of_ns > as_of_ns {
+                    return Ok(provisional_checkpoint(self.root_dir.as_path(), existing));
+                }
+                if existing.metadata.complete_through_ns > complete_through_ns {
+                    return Ok(provisional_checkpoint(self.root_dir.as_path(), existing));
+                }
+                checkpoint_start_ns = checkpoint_start_ns.min(existing.metadata.range_start_ns);
+                checkpoint_end_ns = checkpoint_end_ns.max(existing.metadata.range_end_ns);
+                for row in existing.rows {
+                    if row.datetime < range_start_ns {
+                        rows_by_datetime.entry(row.datetime).or_insert(row);
+                    }
+                }
+            }
+        }
+
+        let file = ProvisionalFile {
+            metadata: ProvisionalMetadata {
+                symbol: symbol.to_string(),
+                trading_day: trading_day.format("%Y-%m-%d").to_string(),
+                range_start_ns: checkpoint_start_ns,
+                range_end_ns: checkpoint_end_ns,
+                complete_through_ns,
+                as_of_ns,
+                snapshot: snapshot.clone(),
+            },
+            rows: rows_by_datetime.into_values().collect(),
+        };
+        write_provisional_atomically(path.as_path(), &file)?;
+        Ok(provisional_checkpoint(self.root_dir.as_path(), file))
+    }
+
+    /// Return a validated provisional checkpoint without exposing it as final coverage.
+    pub fn provisional_checkpoint(
+        &self,
+        symbol: impl AsRef<str>,
+        snapshot: &MinuteKlineCacheSnapshot,
+    ) -> Result<Option<MinuteKlineProvisionalCheckpoint>> {
+        let symbol = symbol.as_ref();
+        validate_symbol(symbol)?;
+        snapshot.validate()?;
+        let path = self.provisional_file_path_unchecked(symbol);
+        let Some(file) = load_provisional_file(path.as_path())? else {
+            return Ok(None);
+        };
+        validate_provisional_identity(path.as_path(), &file.metadata, symbol, snapshot)?;
+        Ok(Some(provisional_checkpoint(self.root_dir.as_path(), file)))
+    }
+
+    /// Freeze an observed open-day checkpoint after the symbol's last session closes.
+    ///
+    /// This preserves the bars visible during the trading day. It deliberately does
+    /// not fetch or apply a later vendor revision. A full-day fallback session has no
+    /// independently provable early close and therefore remains provisional.
+    pub fn finalize_provisional_after_session_close(
+        &self,
+        symbol: impl AsRef<str>,
+        snapshot: &MinuteKlineCacheSnapshot,
+        session: &KlineSessionTemplate,
+        now_ns: i64,
+        grace_ns: i64,
+    ) -> Result<Option<MinuteKlineCacheWriteReport>> {
+        self.ensure_writable()?;
+        let symbol = symbol.as_ref();
+        validate_symbol(symbol)?;
+        snapshot.validate()?;
+        if grace_ns < 0 {
+            return Err(DataError::Validation(
+                "minute kline session-close grace must not be negative".to_string(),
+            ));
+        }
+        if session.snapshot_hash() != snapshot.session_hash {
+            return Err(DataError::Validation(
+                "minute kline session template does not match cache snapshot".to_string(),
+            ));
+        }
+        let Some(last_window) = session.windows().last() else {
+            return Ok(None);
+        };
+
+        let provisional_path = self.provisional_file_path_unchecked(symbol);
+        let Some(unlocked_file) = load_provisional_file(provisional_path.as_path())? else {
+            return Ok(None);
+        };
+        validate_provisional_identity(
+            provisional_path.as_path(),
+            &unlocked_file.metadata,
+            symbol,
+            snapshot,
+        )?;
+        let trading_day =
+            backtest_tick_trading_day_for_timestamp_ns(unlocked_file.metadata.as_of_ns)?;
+        let day_range = backtest_tick_trading_day_range(trading_day)?;
+        let session_close_ns = day_range
+            .start_ns
+            .checked_add(last_window.end_offset_ns)
+            .ok_or_else(|| {
+                DataError::Validation("minute kline session close timestamp overflow".to_string())
+            })?;
+        if session_close_ns > day_range.end_ns {
+            return Err(DataError::Validation(
+                "minute kline session close exceeds canonical trading day".to_string(),
+            ));
+        }
+        let final_after_ns = session_close_ns.checked_add(grace_ns).ok_or_else(|| {
+            DataError::Validation("minute kline finality timestamp overflow".to_string())
+        })?;
+        if now_ns < final_after_ns || unlocked_file.metadata.complete_through_ns < session_close_ns
+        {
+            return Ok(None);
+        }
+
+        let trading_month = trading_day.format("%Y%m").to_string();
+        let month_path = self.month_file_path_unchecked(symbol, trading_month.as_str());
+        let _month_lock = MonthFileLock::acquire(month_path.as_path(), self.root_dir.as_path())?;
+        let _provisional_lock =
+            MonthFileLock::acquire(provisional_path.as_path(), self.root_dir.as_path())?;
+        let Some(file) = load_provisional_file(provisional_path.as_path())? else {
+            return Ok(None);
+        };
+        validate_provisional_identity(
+            provisional_path.as_path(),
+            &file.metadata,
+            symbol,
+            snapshot,
+        )?;
+        if file.metadata.as_of_ns != unlocked_file.metadata.as_of_ns
+            || file.metadata.complete_through_ns < session_close_ns
+            || now_ns < final_after_ns
+        {
+            return Ok(None);
+        }
+
+        let coverage = (file.metadata.range_start_ns, day_range.end_ns);
+        let incoming_rows = file.rows.len();
+        let rows = file.rows;
+        let month = self.store_one_month_locked(
+            month_path.as_path(),
+            symbol,
+            trading_month.as_str(),
+            coverage,
+            snapshot,
+            rows,
+        )?;
+        match fs::remove_file(provisional_path.as_path()) {
+            Ok(()) => {
+                if let Some(parent) = provisional_path.parent() {
+                    File::open(parent)?.sync_all()?;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        Ok(Some(MinuteKlineCacheWriteReport {
+            cache_dir: self.root_dir.clone(),
+            symbol: symbol.to_string(),
+            range_start_ns: coverage.0,
+            range_end_ns: coverage.1,
+            rows: incoming_rows,
+            months: vec![month],
+        }))
+    }
+
+    /// Open an explicit provisional view. Final readers never call this path.
+    pub fn open_provisional_reader(
+        &self,
+        symbol: impl AsRef<str>,
+        range_start_ns: i64,
+        range_end_ns: i64,
+        snapshot: &MinuteKlineCacheSnapshot,
+    ) -> Result<MinuteKlineProvisionalReader> {
+        let symbol = symbol.as_ref();
+        validate_range(symbol, range_start_ns, range_end_ns)?;
+        snapshot.validate()?;
+        let path = self.provisional_file_path_unchecked(symbol);
+        let file = load_provisional_file(path.as_path())?.ok_or(DataError::InvalidState(
+            "minute kline provisional checkpoint is missing",
+        ))?;
+        validate_provisional_identity(path.as_path(), &file.metadata, symbol, snapshot)?;
+        if range_start_ns < file.metadata.range_start_ns
+            || range_end_ns > file.metadata.range_end_ns
+        {
+            return Err(DataError::InvalidState(
+                "minute kline provisional checkpoint does not cover requested range",
+            ));
+        }
+        Ok(MinuteKlineProvisionalReader {
+            rows: file
+                .rows
+                .into_iter()
+                .filter(|row| row.datetime >= range_start_ns && row.datetime < range_end_ns)
+                .collect::<Vec<_>>()
+                .into_iter(),
+        })
+    }
+
+    pub(crate) fn open_history_query_reader(
+        &self,
+        symbol: impl AsRef<str>,
+        range_start_ns: i64,
+        range_end_ns: i64,
+        snapshot: &MinuteKlineCacheSnapshot,
+        provisional_as_of_ns: Option<i64>,
+    ) -> Result<MinuteKlineHistoryReader> {
+        let symbol = symbol.as_ref();
+        let Some(as_of_ns) = provisional_as_of_ns else {
+            return Ok(MinuteKlineHistoryReader {
+                segments: VecDeque::from([MinuteKlineHistorySegment::Final(Box::new(
+                    self.open_reader(symbol, range_start_ns, range_end_ns, snapshot)?,
+                ))]),
+            });
+        };
+        let mut final_status = self.coverage(symbol, range_start_ns, range_end_ns, snapshot)?;
+        if final_status.is_complete() {
+            return Ok(MinuteKlineHistoryReader {
+                segments: VecDeque::from([MinuteKlineHistorySegment::Final(Box::new(
+                    self.open_reader(symbol, range_start_ns, range_end_ns, snapshot)?,
+                ))]),
+            });
+        }
+        let provisional_day =
+            backtest_tick_trading_day_range(backtest_tick_trading_day_for_timestamp_ns(as_of_ns)?)?;
+        if range_end_ns <= provisional_day.start_ns {
+            return Ok(MinuteKlineHistoryReader {
+                segments: VecDeque::from([MinuteKlineHistorySegment::Final(Box::new(
+                    self.open_reader(symbol, range_start_ns, range_end_ns, snapshot)?,
+                ))]),
+            });
+        }
+        let path = self.provisional_file_path_unchecked(symbol);
+        let file = match load_provisional_file(path.as_path()) {
+            Ok(Some(file)) => file,
+            missing_or_invalid => {
+                final_status = self.coverage(symbol, range_start_ns, range_end_ns, snapshot)?;
+                if final_status.is_complete() {
+                    return Ok(MinuteKlineHistoryReader {
+                        segments: VecDeque::from([MinuteKlineHistorySegment::Final(Box::new(
+                            self.open_reader(symbol, range_start_ns, range_end_ns, snapshot)?,
+                        ))]),
+                    });
+                }
+                return match missing_or_invalid {
+                    Ok(None) => Err(DataError::InvalidState(
+                        "minute kline provisional checkpoint is missing",
+                    )),
+                    Err(error) => Err(error),
+                    Ok(Some(_)) => unreachable!("matched above"),
+                };
+            }
+        };
+        validate_provisional_identity(path.as_path(), &file.metadata, symbol, snapshot)?;
+        if file.metadata.trading_day != provisional_day.trading_day.format("%Y-%m-%d").to_string()
+            || file.metadata.as_of_ns < as_of_ns
+            || range_end_ns > file.metadata.range_end_ns
+        {
+            return Err(DataError::InvalidState(
+                "minute kline provisional checkpoint is older than the requested view",
+            ));
+        }
+
+        final_status = self.coverage(symbol, range_start_ns, range_end_ns, snapshot)?;
+        let mut segments = Vec::new();
+        for (start_ns, end_ns) in final_status.cached_ranges {
+            segments.push((
+                start_ns,
+                MinuteKlineHistorySegment::Final(Box::new(
+                    self.open_reader(symbol, start_ns, end_ns, snapshot)?,
+                )),
+            ));
+        }
+        for (start_ns, end_ns) in final_status.missing_ranges {
+            if start_ns < file.metadata.range_start_ns || end_ns > file.metadata.range_end_ns {
+                return Err(DataError::InvalidState(
+                    "minute kline final and provisional coverage do not cover the requested view",
+                ));
+            }
+            segments.push((
+                start_ns,
+                MinuteKlineHistorySegment::Provisional(MinuteKlineProvisionalReader {
+                    rows: file
+                        .rows
+                        .iter()
+                        .filter(|row| row.datetime >= start_ns && row.datetime < end_ns)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .into_iter(),
+                }),
+            ));
+        }
+        segments.sort_by_key(|(start_ns, _)| *start_ns);
+        Ok(MinuteKlineHistoryReader {
+            segments: segments.into_iter().map(|(_, segment)| segment).collect(),
+        })
+    }
+
     /// Open a bounded-memory reader after verifying final coverage.
     ///
     /// Opening validates every selected monthly file in a streaming pass.  The
@@ -705,6 +1177,13 @@ impl MinuteKlineCache {
                 Err(error) => return Err(error.into()),
             }
         }
+        if let Some((bytes, label)) =
+            self.remove_provisional_for_range(symbol, Some((range_start_ns, range_end_ns)))?
+        {
+            removed_files = removed_files.saturating_add(1);
+            removed_bytes = removed_bytes.saturating_add(bytes);
+            removed_months.push(label);
+        }
         Ok(MinuteKlineCachePurgeReport {
             cache_dir: self.root_dir.clone(),
             symbol: symbol.to_string(),
@@ -724,13 +1203,18 @@ impl MinuteKlineCache {
         let entries = match fs::read_dir(namespace.as_path()) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let (removed_files, removed_bytes, removed_months) =
+                    match self.remove_provisional_for_range(symbol, None)? {
+                        Some((bytes, label)) => (1, bytes, vec![label]),
+                        None => (0, 0, Vec::new()),
+                    };
                 return Ok(MinuteKlineCachePurgeReport {
                     cache_dir: self.root_dir.clone(),
                     symbol: symbol.to_string(),
                     requested_range: None,
-                    removed_files: 0,
-                    removed_bytes: 0,
-                    removed_months: Vec::new(),
+                    removed_files,
+                    removed_bytes,
+                    removed_months,
                 });
             }
             Err(error) => return Err(error.into()),
@@ -766,6 +1250,11 @@ impl MinuteKlineCache {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
+        }
+        if let Some((bytes, label)) = self.remove_provisional_for_range(symbol, None)? {
+            removed_files = removed_files.saturating_add(1);
+            removed_bytes = removed_bytes.saturating_add(bytes);
+            removed_months.push(label);
         }
         removed_months.sort();
         Ok(MinuteKlineCachePurgeReport {
@@ -862,6 +1351,27 @@ impl MinuteKlineCache {
         incoming_rows: Vec<Kline>,
     ) -> Result<MinuteKlineCacheMonthReport> {
         let _lock = MonthFileLock::acquire(path, self.root_dir.as_path())?;
+        let report = self.store_one_month_locked(
+            path,
+            symbol,
+            trading_month,
+            coverage,
+            snapshot,
+            incoming_rows,
+        )?;
+        self.remove_provisional_if_finalized(symbol, report.cached_ranges.as_slice());
+        Ok(report)
+    }
+
+    fn store_one_month_locked(
+        &self,
+        path: &Path,
+        symbol: &str,
+        trading_month: &str,
+        coverage: (i64, i64),
+        snapshot: &MinuteKlineCacheSnapshot,
+        incoming_rows: Vec<Kline>,
+    ) -> Result<MinuteKlineCacheMonthReport> {
         // Rewriting replaces the snapshot header for the whole monthly file.
         // Authenticate every existing coverage range before carrying any old
         // rows or finality claims into that new identity.
@@ -925,6 +1435,61 @@ impl MinuteKlineCache {
         Ok(())
     }
 
+    fn remove_provisional_if_finalized(&self, symbol: &str, final_coverage: &[(i64, i64)]) {
+        let path = self.provisional_file_path_unchecked(symbol);
+        let Ok(_provisional_lock) = MonthFileLock::acquire(path.as_path(), self.root_dir.as_path())
+        else {
+            return;
+        };
+        let Ok(Some(file)) = load_provisional_file(path.as_path()) else {
+            return;
+        };
+        let finalized = final_coverage.iter().any(|range| {
+            range.0 <= file.metadata.range_start_ns && range.1 >= file.metadata.complete_through_ns
+        });
+        if finalized {
+            if fs::remove_file(path.as_path()).is_err() {
+                return;
+            }
+            if let Some(parent) = path.parent() {
+                let _ = File::open(parent).and_then(|directory| directory.sync_all());
+            }
+        }
+    }
+
+    fn remove_provisional_for_range(
+        &self,
+        symbol: &str,
+        requested_range: Option<(i64, i64)>,
+    ) -> Result<Option<(u64, String)>> {
+        let path = self.provisional_file_path_unchecked(symbol);
+        let _provisional_lock = MonthFileLock::acquire(path.as_path(), self.root_dir.as_path())?;
+        let Some(file) = load_provisional_file(path.as_path())? else {
+            return Ok(None);
+        };
+        if requested_range.is_some_and(|requested| {
+            requested.1 <= file.metadata.range_start_ns || file.metadata.range_end_ns <= requested.0
+        }) {
+            return Ok(None);
+        }
+        let metadata = match fs::metadata(path.as_path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.is_file() {
+            return Err(format_error(path.as_path(), "path is not a regular file"));
+        }
+        fs::remove_file(path.as_path())?;
+        if let Some(parent) = path.parent() {
+            File::open(parent)?.sync_all()?;
+        }
+        Ok(Some((
+            metadata.len(),
+            format!("provisional-{}", file.metadata.trading_day),
+        )))
+    }
+
     fn month_file_path_unchecked(&self, symbol: &str, trading_month: &str) -> PathBuf {
         self.namespace_dir()
             .join(format!("trading-{trading_month}"))
@@ -933,6 +1498,14 @@ impl MinuteKlineCache {
                 escape_symbol_path_component(symbol),
                 FILE_EXTENSION
             ))
+    }
+
+    fn provisional_file_path_unchecked(&self, symbol: &str) -> PathBuf {
+        self.root_dir.join(PROVISIONAL_ROOT_DIR_NAME).join(format!(
+            "{}.{}",
+            escape_symbol_path_component(symbol),
+            PROVISIONAL_FILE_EXTENSION
+        ))
     }
 
     fn month_files(&self) -> Result<Vec<MonthFilePath>> {
@@ -1631,6 +2204,236 @@ fn load_legacy_v4_month_file(path: &Path, symbol: &str, trading_month: &str) -> 
         coverage,
         rows,
     })
+}
+
+fn provisional_checkpoint(
+    cache_dir: &Path,
+    file: ProvisionalFile,
+) -> MinuteKlineProvisionalCheckpoint {
+    MinuteKlineProvisionalCheckpoint {
+        cache_dir: cache_dir.to_path_buf(),
+        symbol: file.metadata.symbol,
+        range_start_ns: file.metadata.range_start_ns,
+        range_end_ns: file.metadata.range_end_ns,
+        complete_through_ns: file.metadata.complete_through_ns,
+        as_of_ns: file.metadata.as_of_ns,
+        rows: file.rows.len(),
+    }
+}
+
+fn validate_provisional_identity(
+    path: &Path,
+    metadata: &ProvisionalMetadata,
+    symbol: &str,
+    snapshot: &MinuteKlineCacheSnapshot,
+) -> Result<()> {
+    if metadata.symbol != symbol {
+        return Err(format_error(path, "provisional symbol metadata mismatch"));
+    }
+    if metadata.snapshot != *snapshot {
+        return Err(format_error(path, "provisional snapshot metadata mismatch"));
+    }
+    Ok(())
+}
+
+fn load_provisional_file(path: &Path) -> Result<Option<ProvisionalFile>> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let file_len = file.metadata()?.len();
+    if file_len < PROVISIONAL_FILE_HEADER_BYTES as u64 {
+        return Err(format_error(path, "truncated provisional header"));
+    }
+    let mut header = [0_u8; PROVISIONAL_FILE_HEADER_BYTES];
+    read_exact_format(&mut file, &mut header, path, "provisional header")?;
+    if header[..4] != PROVISIONAL_FILE_MAGIC {
+        return Err(format_error(path, "unexpected provisional magic"));
+    }
+    if u16::from_le_bytes([header[4], header[5]]) != PROVISIONAL_FILE_VERSION {
+        return Err(format_error(path, "unsupported provisional version"));
+    }
+    let metadata_len = u32::from_le_bytes(header[6..10].try_into().expect("fixed slice")) as usize;
+    let row_count_u64 = u64::from_le_bytes(header[10..18].try_into().expect("fixed slice"));
+    let expected_checksum = u64::from_le_bytes(header[18..26].try_into().expect("fixed slice"));
+    let row_count = usize::try_from(row_count_u64)
+        .map_err(|_| format_error(path, "provisional row count overflow"))?;
+    if metadata_len > MAX_METADATA_BYTES || row_count > MAX_PROVISIONAL_ROWS {
+        return Err(format_error(
+            path,
+            "provisional file count exceeds safety limit",
+        ));
+    }
+    let rows_len = row_count
+        .checked_mul(KLINE_ROW_BYTES)
+        .ok_or_else(|| format_error(path, "provisional row bytes overflow"))?;
+    let expected_len = PROVISIONAL_FILE_HEADER_BYTES
+        .checked_add(metadata_len)
+        .and_then(|value| value.checked_add(rows_len))
+        .ok_or_else(|| format_error(path, "provisional file size overflow"))?;
+    if file_len != expected_len as u64 {
+        return Err(format_error(path, "provisional file length mismatch"));
+    }
+
+    let mut metadata_bytes = vec![0_u8; metadata_len];
+    read_exact_format(&mut file, &mut metadata_bytes, path, "provisional metadata")?;
+    let metadata: ProvisionalMetadata = serde_json::from_slice(metadata_bytes.as_slice())
+        .map_err(|error| format_error(path, format!("invalid provisional metadata: {error}")))?;
+    let range_span_ns = metadata
+        .range_end_ns
+        .checked_sub(metadata.range_start_ns)
+        .ok_or_else(|| format_error(path, "invalid provisional range span"))?;
+    let max_slots = range_span_ns
+        .checked_add(MINUTE_KLINE_DURATION_NS - 1)
+        .ok_or_else(|| format_error(path, "provisional slot count overflow"))?
+        / MINUTE_KLINE_DURATION_NS;
+    if row_count_u64 > u64::try_from(max_slots).unwrap_or(u64::MAX) {
+        return Err(format_error(
+            path,
+            "provisional row count exceeds its minute range",
+        ));
+    }
+    let mut checksum = checksum_bytes(FNV_OFFSET_BASIS, metadata_bytes.as_slice());
+    let mut rows = Vec::with_capacity(row_count);
+    for _ in 0..row_count {
+        let mut bytes = [0_u8; KLINE_ROW_BYTES];
+        read_exact_format(&mut file, &mut bytes, path, "provisional row")?;
+        checksum = checksum_bytes(checksum, bytes.as_slice());
+        rows.push(decode_kline(bytes.as_slice()));
+    }
+    if checksum != expected_checksum {
+        return Err(format_error(path, "provisional checksum mismatch"));
+    }
+    validate_provisional_file(path, &metadata, rows.as_slice())?;
+    Ok(Some(ProvisionalFile { metadata, rows }))
+}
+
+fn validate_provisional_file(
+    path: &Path,
+    metadata: &ProvisionalMetadata,
+    rows: &[Kline],
+) -> Result<()> {
+    validate_symbol(metadata.symbol.as_str())?;
+    metadata.snapshot.validate()?;
+    validate_timestamp_range(metadata.range_start_ns, metadata.range_end_ns)?;
+    let expected_complete_through_ns = (metadata.as_of_ns
+        - metadata.as_of_ns.rem_euclid(MINUTE_KLINE_DURATION_NS))
+    .min(metadata.range_end_ns - metadata.range_end_ns.rem_euclid(MINUTE_KLINE_DURATION_NS));
+    if metadata.range_end_ns > metadata.as_of_ns
+        || metadata.complete_through_ns != expected_complete_through_ns
+        || metadata.complete_through_ns > metadata.range_end_ns
+        || metadata
+            .complete_through_ns
+            .rem_euclid(MINUTE_KLINE_DURATION_NS)
+            != 0
+    {
+        return Err(format_error(path, "invalid provisional time bounds"));
+    }
+    let as_of_day = backtest_tick_trading_day_for_timestamp_ns(metadata.as_of_ns)?;
+    if metadata.trading_day != as_of_day.format("%Y-%m-%d").to_string() {
+        return Err(format_error(path, "provisional trading day mismatch"));
+    }
+    let trading_month = as_of_day.format("%Y%m").to_string();
+    validate_stored_rows(path, trading_month.as_str(), rows)?;
+    for row in rows {
+        let row_end_ns = row
+            .datetime
+            .checked_add(MINUTE_KLINE_DURATION_NS)
+            .ok_or_else(|| format_error(path, "provisional row end overflow"))?;
+        if row.datetime < metadata.range_start_ns
+            || row.datetime >= metadata.range_end_ns
+            || row_end_ns > metadata.complete_through_ns
+            || backtest_tick_trading_day_for_timestamp_ns(row.datetime)? != as_of_day
+        {
+            return Err(format_error(
+                path,
+                "provisional row outside checkpoint bounds",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn write_provisional_atomically(path: &Path, file: &ProvisionalFile) -> Result<()> {
+    validate_provisional_file(path, &file.metadata, file.rows.as_slice())?;
+    let metadata = serde_json::to_vec(&file.metadata).map_err(|error| {
+        DataError::InvalidResponse(format!(
+            "cannot encode provisional minute metadata: {error}"
+        ))
+    })?;
+    if metadata.len() > MAX_METADATA_BYTES || file.rows.len() > MAX_PROVISIONAL_ROWS {
+        return Err(DataError::Validation(
+            "provisional minute file exceeds safety limit".to_string(),
+        ));
+    }
+    let mut row_bytes = Vec::with_capacity(file.rows.len().saturating_mul(KLINE_ROW_BYTES));
+    for row in &file.rows {
+        encode_kline(&mut row_bytes, row);
+    }
+    let checksum = checksum_bytes(
+        checksum_bytes(FNV_OFFSET_BASIS, metadata.as_slice()),
+        row_bytes.as_slice(),
+    );
+    let metadata_len = u32::try_from(metadata.len())
+        .map_err(|_| DataError::InvalidResponse("provisional metadata too large".to_string()))?;
+    let row_count = u64::try_from(file.rows.len())
+        .map_err(|_| DataError::InvalidResponse("provisional row count overflow".to_string()))?;
+    let mut bytes =
+        Vec::with_capacity(PROVISIONAL_FILE_HEADER_BYTES + metadata.len() + row_bytes.len());
+    bytes.extend_from_slice(&PROVISIONAL_FILE_MAGIC);
+    bytes.extend_from_slice(&PROVISIONAL_FILE_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&metadata_len.to_le_bytes());
+    bytes.extend_from_slice(&row_count.to_le_bytes());
+    bytes.extend_from_slice(&checksum.to_le_bytes());
+    bytes.extend_from_slice(metadata.as_slice());
+    bytes.extend_from_slice(row_bytes.as_slice());
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| format_error(path, "provisional path has no parent directory"))?;
+    fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format_error(path, "provisional path has no file name"))?
+        .to_string_lossy();
+    let mut temp_path = None;
+    let mut temp_file = None;
+    for attempt in 0_u32..128 {
+        let candidate = parent.join(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            attempt
+        ));
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(candidate.as_path())
+        {
+            Ok(file) => {
+                temp_path = Some(candidate);
+                temp_file = Some(file);
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let temp_path = temp_path
+        .ok_or_else(|| format_error(path, "cannot allocate provisional atomic temp file"))?;
+    let write_result = (|| -> Result<()> {
+        let mut output = temp_file.expect("temp path and file are created together");
+        output.write_all(bytes.as_slice())?;
+        output.sync_all()?;
+        drop(output);
+        fs::rename(temp_path.as_path(), path)?;
+        File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(temp_path.as_path());
+    }
+    write_result
 }
 
 fn write_month_atomically(path: &Path, month: &MonthFile) -> Result<()> {
@@ -2521,6 +3324,416 @@ mod tests {
 
         assert_eq!(scans, 1, "inspect should decode each selected month once");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provisional_minutes_are_explicit_and_drop_the_open_bar() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tqsdk-minute-provisional-{nanos}"));
+        let cache = MinuteKlineCache::open(&root).unwrap();
+        let snapshot = MinuteKlineCacheSnapshot::cst_v1();
+        let start = utc_ns(2026, 7, 29, 2, 0);
+        let as_of = start + 150_000_000_000;
+        let rows = (0_i64..3)
+            .map(|index| Kline {
+                id: index,
+                datetime: start + index * MINUTE_KLINE_DURATION_NS,
+                close: index as f64,
+                ..Kline::default()
+            })
+            .collect::<Vec<_>>();
+
+        let checkpoint = cache
+            .store_provisional_range("SHFE.rb2610", start, as_of, as_of, &snapshot, &rows)
+            .unwrap();
+        assert_eq!(checkpoint.rows, 2);
+        assert_eq!(checkpoint.complete_through_ns, start + 120_000_000_000);
+        let narrower = cache
+            .store_provisional_range(
+                "SHFE.rb2610",
+                start,
+                start + MINUTE_KLINE_DURATION_NS,
+                as_of,
+                &snapshot,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(narrower.complete_through_ns, checkpoint.complete_through_ns);
+        assert!(
+            !cache
+                .coverage("SHFE.rb2610", start, as_of, &snapshot)
+                .unwrap()
+                .is_complete()
+        );
+        assert!(
+            cache
+                .open_reader("SHFE.rb2610", start, as_of, &snapshot)
+                .is_err()
+        );
+        let mut reader = cache
+            .open_provisional_reader("SHFE.rb2610", start, as_of, &snapshot)
+            .unwrap();
+        assert_eq!(reader.next_kline().unwrap().id, 0);
+        assert_eq!(reader.next_kline().unwrap().id, 1);
+        assert!(reader.next_kline().is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn final_minutes_replace_and_remove_the_provisional_sidecar() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tqsdk-minute-finalize-{nanos}"));
+        let cache = MinuteKlineCache::open(&root).unwrap();
+        let snapshot = MinuteKlineCacheSnapshot::cst_v1();
+        let start = utc_ns(2026, 7, 29, 2, 0);
+        let end = start + 120_000_000_000;
+        let rows = vec![Kline {
+            id: 1,
+            datetime: start,
+            close: 1.0,
+            ..Kline::default()
+        }];
+        cache
+            .store_provisional_range("SHFE.rb2610", start, end, end, &snapshot, &rows)
+            .unwrap();
+        let current_day = backtest_tick_trading_day_for_timestamp_ns(start).unwrap();
+        let next_day_ns = backtest_tick_trading_day_range(current_day).unwrap().end_ns;
+        cache
+            .store_final_range_at("SHFE.rb2610", start, end, &snapshot, &rows, next_day_ns)
+            .unwrap();
+        assert!(
+            cache
+                .provisional_checkpoint("SHFE.rb2610", &snapshot)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache
+                .coverage("SHFE.rb2610", start, end, &snapshot)
+                .unwrap()
+                .is_complete()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn history_reader_merges_final_prefix_with_provisional_suffix() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tqsdk-minute-mixed-{nanos}"));
+        let cache = MinuteKlineCache::open(&root).unwrap();
+        let snapshot = MinuteKlineCacheSnapshot::cst_v1();
+        let as_of = utc_ns(2026, 7, 29, 2, 2);
+        let day = backtest_tick_trading_day_for_timestamp_ns(as_of).unwrap();
+        let day_range = backtest_tick_trading_day_range(day).unwrap();
+        let final_start = day_range.start_ns - MINUTE_KLINE_DURATION_NS;
+        cache
+            .store_final_range_at(
+                "SHFE.rb2610",
+                final_start,
+                day_range.start_ns,
+                &snapshot,
+                &[Kline {
+                    id: 1,
+                    datetime: final_start,
+                    ..Kline::default()
+                }],
+                day_range.end_ns,
+            )
+            .unwrap();
+        cache
+            .store_provisional_range(
+                "SHFE.rb2610",
+                day_range.start_ns,
+                as_of,
+                as_of,
+                &snapshot,
+                &[Kline {
+                    id: 2,
+                    datetime: day_range.start_ns,
+                    ..Kline::default()
+                }],
+            )
+            .unwrap();
+
+        let mut reader = cache
+            .open_history_query_reader("SHFE.rb2610", final_start, as_of, &snapshot, Some(as_of))
+            .unwrap();
+        let mut ids = Vec::new();
+        loop {
+            let rows = reader.next_kline_chunk(80).unwrap();
+            if rows.is_empty() {
+                break;
+            }
+            ids.extend(rows.into_iter().map(|row| row.id));
+        }
+        assert_eq!(ids, vec![1, 2]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn final_coverage_wins_over_a_residual_sidecar_and_next_day_replaces_it() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tqsdk-minute-rollover-{nanos}"));
+        let cache = MinuteKlineCache::open(&root).unwrap();
+        let snapshot = MinuteKlineCacheSnapshot::cst_v1();
+        let start = utc_ns(2026, 7, 29, 2, 0);
+        let end = start + MINUTE_KLINE_DURATION_NS;
+        let final_row = Kline {
+            id: 9,
+            datetime: start,
+            ..Kline::default()
+        };
+        let day = backtest_tick_trading_day_for_timestamp_ns(start).unwrap();
+        let day_range = backtest_tick_trading_day_range(day).unwrap();
+        cache
+            .store_final_range_at(
+                "SHFE.rb2610",
+                start,
+                end,
+                &snapshot,
+                std::slice::from_ref(&final_row),
+                day_range.end_ns,
+            )
+            .unwrap();
+        cache
+            .store_provisional_range(
+                "SHFE.rb2610",
+                start,
+                end,
+                end,
+                &snapshot,
+                &[Kline {
+                    id: 1,
+                    datetime: start,
+                    ..Kline::default()
+                }],
+            )
+            .unwrap();
+        let mut reader = cache
+            .open_history_query_reader("SHFE.rb2610", start, end, &snapshot, Some(end))
+            .unwrap();
+        assert_eq!(reader.next_kline_chunk(80).unwrap()[0].id, final_row.id);
+
+        let next_start = start + 24 * 60 * MINUTE_KLINE_DURATION_NS;
+        let next_end = next_start + MINUTE_KLINE_DURATION_NS;
+        cache
+            .store_provisional_range(
+                "SHFE.rb2610",
+                next_start,
+                next_end,
+                next_end,
+                &snapshot,
+                &[Kline {
+                    id: 2,
+                    datetime: next_start,
+                    ..Kline::default()
+                }],
+            )
+            .unwrap();
+        let checkpoint = cache
+            .provisional_checkpoint("SHFE.rb2610", &snapshot)
+            .unwrap()
+            .unwrap();
+        assert_eq!(checkpoint.range_start_ns, next_start);
+        let mut provisional = cache
+            .open_provisional_reader("SHFE.rb2610", next_start, next_end, &snapshot)
+            .unwrap();
+        assert_eq!(provisional.next_kline().unwrap().id, 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provisional_store_recovers_a_corrupt_sidecar() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tqsdk-minute-corrupt-{nanos}"));
+        let cache = MinuteKlineCache::open(&root).unwrap();
+        let snapshot = MinuteKlineCacheSnapshot::cst_v1();
+        let start = utc_ns(2026, 7, 29, 2, 0);
+        let end = start + MINUTE_KLINE_DURATION_NS;
+        let path = cache.provisional_file_path_unchecked("SHFE.rb2610");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"broken").unwrap();
+
+        let checkpoint = cache
+            .store_provisional_range(
+                "SHFE.rb2610",
+                start,
+                end,
+                end,
+                &snapshot,
+                &[Kline {
+                    id: 3,
+                    datetime: start,
+                    ..Kline::default()
+                }],
+            )
+            .unwrap();
+        assert_eq!(checkpoint.rows, 1);
+        let mut reader = cache
+            .open_provisional_reader("SHFE.rb2610", start, end, &snapshot)
+            .unwrap();
+        assert_eq!(reader.next_kline().unwrap().id, 3);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn session_close_freezes_observed_minutes_without_vendor_revision() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tqsdk-minute-session-final-{nanos}"));
+        let cache = MinuteKlineCache::open(&root).unwrap();
+        let snapshot = MinuteKlineCacheSnapshot::new(1, "calendar-v1", "session-v1").unwrap();
+        let sample = utc_ns(2026, 7, 29, 2, 0);
+        let day = backtest_tick_trading_day_for_timestamp_ns(sample).unwrap();
+        let day_range = backtest_tick_trading_day_range(day).unwrap();
+        let close_ns = day_range.start_ns + 2 * MINUTE_KLINE_DURATION_NS;
+        let session = KlineSessionTemplate::new(
+            "session-v1",
+            vec![crate::KlineSessionWindow::new(0, 2 * MINUTE_KLINE_DURATION_NS).unwrap()],
+        )
+        .unwrap();
+        let rows = vec![
+            Kline {
+                id: 1,
+                datetime: day_range.start_ns,
+                close: 10.0,
+                ..Kline::default()
+            },
+            Kline {
+                id: 2,
+                datetime: day_range.start_ns + MINUTE_KLINE_DURATION_NS,
+                close: 11.0,
+                ..Kline::default()
+            },
+        ];
+        cache
+            .store_provisional_range(
+                "SHFE.rb2610",
+                day_range.start_ns,
+                close_ns,
+                close_ns,
+                &snapshot,
+                &rows,
+            )
+            .unwrap();
+
+        assert!(
+            cache
+                .finalize_provisional_after_session_close(
+                    "SHFE.rb2610",
+                    &snapshot,
+                    &session,
+                    close_ns + 4_000_000_000,
+                    5_000_000_000,
+                )
+                .unwrap()
+                .is_none()
+        );
+        let report = cache
+            .finalize_provisional_after_session_close(
+                "SHFE.rb2610",
+                &snapshot,
+                &session,
+                close_ns + 5_000_000_000,
+                5_000_000_000,
+            )
+            .unwrap()
+            .expect("closed session should freeze the observed checkpoint");
+        assert_eq!(report.range_start_ns, day_range.start_ns);
+        assert_eq!(report.range_end_ns, day_range.end_ns);
+        assert_eq!(report.rows, 2);
+        assert!(
+            cache
+                .provisional_checkpoint("SHFE.rb2610", &snapshot)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache
+                .coverage(
+                    "SHFE.rb2610",
+                    day_range.start_ns,
+                    day_range.end_ns,
+                    &snapshot,
+                )
+                .unwrap()
+                .is_complete()
+        );
+        let mut reader = cache
+            .open_reader(
+                "SHFE.rb2610",
+                day_range.start_ns,
+                day_range.end_ns,
+                &snapshot,
+            )
+            .unwrap();
+        assert_eq!(reader.next_kline().unwrap().unwrap().close, 10.0);
+        assert_eq!(reader.next_kline().unwrap().unwrap().close, 11.0);
+        assert!(reader.next_kline().unwrap().is_none());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn full_day_fallback_session_cannot_finalize_early() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tqsdk-minute-session-fallback-{nanos}"));
+        let cache = MinuteKlineCache::open(&root).unwrap();
+        let snapshot = MinuteKlineCacheSnapshot::cst_v1();
+        let sample = utc_ns(2026, 7, 29, 2, 0);
+        let day = backtest_tick_trading_day_for_timestamp_ns(sample).unwrap();
+        let day_range = backtest_tick_trading_day_range(day).unwrap();
+        cache
+            .store_provisional_range(
+                "SHFE.rb2610",
+                day_range.start_ns,
+                sample,
+                sample,
+                &snapshot,
+                &[],
+            )
+            .unwrap();
+
+        assert!(
+            cache
+                .finalize_provisional_after_session_close(
+                    "SHFE.rb2610",
+                    &snapshot,
+                    &KlineSessionTemplate::cst_trading_day(),
+                    day_range.end_ns,
+                    0,
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache
+                .provisional_checkpoint("SHFE.rb2610", &snapshot)
+                .unwrap()
+                .is_some()
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     fn utc_ns(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {

@@ -5,21 +5,19 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::NaiveDate;
+use chrono::{Datelike, FixedOffset, NaiveDate, TimeZone};
 #[cfg(all(feature = "live", feature = "services"))]
-use chrono::{Datelike, Days, FixedOffset, TimeZone, Utc};
+use chrono::{Days, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 #[cfg(all(feature = "live", feature = "services"))]
 use tqsdk_core::TradingTime;
 
+use crate::trading_month_for_timestamp_ns;
 use crate::{DataError, KlineSessionTemplate, MinuteKlineCache, MinuteKlineCacheSnapshot, Result};
 #[cfg(all(feature = "live", feature = "services"))]
-use crate::{
-    HistoricalContUnderlyingSegment, KlineSessionWindow, TradingCalendarRow,
-    trading_month_for_timestamp_ns,
-};
+use crate::{HistoricalContUnderlyingSegment, KlineSessionWindow, TradingCalendarRow};
 
 use super::{
     BacktestHistoryAuthProvider, BacktestHistoryCredentials, BacktestHistoryPhysicalSegment,
@@ -595,11 +593,31 @@ pub fn resolve_minute_cache_metadata_snapshot(
     end_ns: i64,
 ) -> Result<Option<BacktestHistoryMetadataSnapshot>> {
     let metadata_cache = BacktestHistoryMetadataCache::open_read_only(cache_dir);
-    let Some(active) =
-        resolve_backtest_metadata_snapshot(cache_dir, logical_symbol, start_ns, end_ns)?
-    else {
-        return Ok(None);
+    let canonical_range = if logical_symbol.starts_with("KQ.") {
+        minute_metadata_refresh_range(logical_symbol, start_ns, end_ns)?
+    } else {
+        (start_ns, end_ns)
     };
+    let canonical = resolve_backtest_metadata_snapshot(
+        cache_dir,
+        logical_symbol,
+        canonical_range.0,
+        canonical_range.1,
+    )?;
+    let (active, required_metadata_range) = match canonical {
+        Some(snapshot) if snapshot.covers_range(canonical_range) => (snapshot, canonical_range),
+        _ => {
+            let Some(snapshot) =
+                resolve_backtest_metadata_snapshot(cache_dir, logical_symbol, start_ns, end_ns)?
+            else {
+                return Ok(None);
+            };
+            (snapshot, (start_ns, end_ns))
+        }
+    };
+    if !active.covers_range(required_metadata_range) {
+        return Ok(Some(active));
+    }
     let minute_cache = MinuteKlineCache::open_read_only(cache_dir);
     let active_snapshot = minute_cache_snapshot_from_metadata(&active)?;
     let active_error =
@@ -613,7 +631,7 @@ pub fn resolve_minute_cache_metadata_snapshot(
         if historical.snapshot_hash == active.snapshot_hash
             || historical.schema_version != active.schema_version
             || historical.session.snapshot_hash() != active.session.snapshot_hash()
-            || !historical.covers_range((start_ns, end_ns))
+            || !historical.covers_range(required_metadata_range)
         {
             continue;
         }
@@ -827,7 +845,7 @@ pub(crate) async fn ensure_metadata_for_remote_miss(
 ) -> Result<BacktestHistoryMetadataSnapshot> {
     validate_metadata_refresh_request(symbol, start_ns, end_ns)?;
     #[cfg(all(feature = "live", feature = "services"))]
-    let metadata_range = canonical_minute_metadata_range(start_ns, end_ns)?;
+    let metadata_range = minute_metadata_refresh_range(symbol, start_ns, end_ns)?;
     #[cfg(not(all(feature = "live", feature = "services")))]
     let metadata_range = (start_ns, end_ns);
     let read_only = BacktestHistoryMetadataCache::open_read_only(cache_dir);
@@ -895,7 +913,6 @@ fn existing_snapshot_for_remote_range(
     Ok(None)
 }
 
-#[cfg(all(feature = "live", feature = "services"))]
 fn canonical_minute_metadata_range(start_ns: i64, end_ns: i64) -> Result<(i64, i64)> {
     let start_month = trading_month_for_timestamp_ns(start_ns)?;
     let end_timestamp_ns = end_ns
@@ -910,7 +927,19 @@ fn canonical_minute_metadata_range(start_ns: i64, end_ns: i64) -> Result<(i64, i
     ))
 }
 
-#[cfg(all(feature = "live", feature = "services"))]
+pub(crate) fn minute_metadata_refresh_range(
+    symbol: &str,
+    start_ns: i64,
+    end_ns: i64,
+) -> Result<(i64, i64)> {
+    let canonical = canonical_minute_metadata_range(start_ns, end_ns)?;
+    if symbol.starts_with("KQ.") {
+        Ok((canonical.0.min(start_ns), canonical.1.max(end_ns)))
+    } else {
+        Ok(canonical)
+    }
+}
+
 fn trading_month_start_date(month: &str) -> Result<NaiveDate> {
     if month.len() != 6 || !month.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(DataError::Validation(format!(
@@ -932,7 +961,6 @@ fn trading_month_start_date(month: &str) -> Result<NaiveDate> {
     })
 }
 
-#[cfg(all(feature = "live", feature = "services"))]
 fn next_trading_month_start_date(month: &str) -> Result<NaiveDate> {
     let start = trading_month_start_date(month)?;
     let (year, month_number) = if start.month() == 12 {
@@ -1419,7 +1447,6 @@ fn cst_date_from_timestamp_ns(timestamp_ns: i64) -> Result<NaiveDate> {
     Ok(timestamp.with_timezone(&cst_offset()).date_naive())
 }
 
-#[cfg(all(feature = "live", feature = "services"))]
 fn cst_datetime_ns(date: NaiveDate, hour: u32, minute: u32, second: u32) -> Result<i64> {
     let local = date.and_hms_opt(hour, minute, second).ok_or_else(|| {
         DataError::InvalidResponse("failed to build CST metadata timestamp".to_string())
@@ -1434,7 +1461,6 @@ fn cst_datetime_ns(date: NaiveDate, hour: u32, minute: u32, second: u32) -> Resu
         .ok_or_else(|| DataError::InvalidResponse("CST metadata timestamp overflowed".to_string()))
 }
 
-#[cfg(all(feature = "live", feature = "services"))]
 fn cst_offset() -> FixedOffset {
     FixedOffset::east_opt(8 * 60 * 60).expect("China Standard Time offset must be valid")
 }
@@ -2403,6 +2429,27 @@ mod tests {
             (
                 cst_datetime_ns(date("2026-07-01"), 18, 0, 0).unwrap(),
                 cst_datetime_ns(date("2026-08-01"), 18, 0, 0).unwrap(),
+            )
+        );
+    }
+
+    #[test]
+    fn logical_minute_metadata_range_preserves_a_prior_trading_cycle_boundary() {
+        let start_ns = cst_datetime_ns(date("2023-12-29"), 18, 0, 0).unwrap();
+        let end_ns = cst_datetime_ns(date("2026-09-03"), 18, 0, 0).unwrap();
+
+        assert_eq!(
+            minute_metadata_refresh_range("KQ.i@CZCE.AP", start_ns, end_ns).unwrap(),
+            (
+                start_ns,
+                cst_datetime_ns(date("2026-10-01"), 18, 0, 0).unwrap(),
+            )
+        );
+        assert_eq!(
+            minute_metadata_refresh_range("CZCE.AP401", start_ns, end_ns).unwrap(),
+            (
+                cst_datetime_ns(date("2024-01-01"), 18, 0, 0).unwrap(),
+                cst_datetime_ns(date("2026-10-01"), 18, 0, 0).unwrap(),
             )
         );
     }

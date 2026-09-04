@@ -8,6 +8,10 @@
 publisher 是 `tqsdk-cache`；validator/reader primitives 位于 `tqsdk-data`；relay 只能通过这些
 primitives 只读打开 generation。
 
+该协议现在是可选的 published-snapshot 兼容与回滚路径，不再是 relay history 的默认数据源。
+默认部署通过 `BacktestHistoryLiveCache` 直接只读观察 writable cache 的最新已提交进度；它不读取
+`CURRENT`，也不改变本文对显式 snapshot/publisher 命令的兼容合同。
+
 ## Root layout
 
 ```text
@@ -118,6 +122,7 @@ coverage_summary 是审计/运维摘要，不是 query 或 `/coverage` 的 autho
 - `.tqbn.lock`、`.tqmk.lock`、`.tqdk.lock`、`.metadata.lock`；
 - cache-root operation lock 和 `lease.lock`；
 - temp、partial、recovery 或 writer sidecar。
+- `minute-kline-provisional-v1/*.tqmp` open-day sidecar；它是显式非 final、可重建状态。
 
 symlink、device、FIFO、socket、absolute path、`..` escape、重复 normalized path、大小/hash 不符、
 未知 role 全部 fail closed。禁止未经分类的 `cp -al`。

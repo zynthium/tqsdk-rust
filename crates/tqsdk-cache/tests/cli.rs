@@ -756,7 +756,7 @@ fn daily_fill_jsonl_progress_and_report_use_the_shared_terminal_contract() {
     assert!(records.iter().all(|record| record["cache_kind"] == "daily"));
 
     let report: Value = serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
-    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["schema_version"], 4);
     assert_eq!(report["cache_kind"], "daily");
     assert_eq!(report["status"], "complete");
     assert_eq!(report["interrupted"], false);
@@ -869,7 +869,7 @@ fn daily_fill_sighup_persists_one_interrupted_terminal_report() {
         1
     );
     let report: Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
-    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["schema_version"], 4);
     assert_eq!(report["cache_kind"], "daily");
     assert_eq!(report["status"], "interrupted");
     assert_eq!(report["interrupted"], true);
@@ -929,7 +929,7 @@ fn daily_fill_failure_persists_one_failed_terminal_report() {
         1
     );
     let report: Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
-    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["schema_version"], 4);
     assert_eq!(report["cache_kind"], "daily");
     assert_eq!(report["status"], "failed");
     assert_eq!(report["interrupted"], false);
@@ -1590,14 +1590,14 @@ fn minute_fill_reuses_complete_coverage_without_auth_and_writes_a_minute_report(
     assert_eq!(result["report"]["symbols"][0]["symbol"], "SHFE.rb2601");
     assert!(report_path.exists());
     let persisted: Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
-    assert_eq!(persisted["schema_version"], 3);
+    assert_eq!(persisted["schema_version"], 4);
     assert_eq!(persisted["cache_kind"], "minute");
 
     let _ = std::fs::remove_dir_all(cache_dir);
 }
 
 #[test]
-fn tick_and_minute_auth_failures_after_planning_persist_v3_reports() {
+fn tick_and_minute_auth_failures_after_planning_persist_v4_reports() {
     for kind in ["tick", "minute"] {
         let cache_dir = temp_dir(&format!("{kind}-failed-report-v3"));
         BacktestTickCache::open(&cache_dir).unwrap();
@@ -1620,7 +1620,7 @@ fn tick_and_minute_auth_failures_after_planning_persist_v3_reports() {
 
         assert!(!output.status.success(), "kind={kind}");
         let report: Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
-        assert_eq!(report["schema_version"], 3, "kind={kind}");
+        assert_eq!(report["schema_version"], 4, "kind={kind}");
         assert_eq!(report["cache_kind"], kind);
         assert_eq!(report["status"], "failed");
         assert_eq!(report["interrupted"], false);
@@ -2101,7 +2101,7 @@ fn fill_reuses_complete_cache_without_auth_and_report_binds_its_root() {
     );
     assert!(report_path.exists());
     let persisted: Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
-    assert_eq!(persisted["schema_version"], 3);
+    assert_eq!(persisted["schema_version"], 4);
     assert_eq!(persisted["cache_kind"], "tick");
 
     let verified = run_without_auth_json(["verify", "--report", report_path.to_str().unwrap()]);
@@ -2587,6 +2587,8 @@ fn fill_tick_accepts_a_pinned_historical_universe_plan() {
     let result = v3_result(&json, "fill", "incomplete", 1);
     assert_eq!(result["plan_sha256"], plan.plan_sha256);
     assert_eq!(result["symbols_warmed"], 1);
+    assert_eq!(result["requested_days"]["start_day"], "1970-01-01");
+    assert_eq!(result["requested_days"]["end_day"], "1970-01-01");
 
     let _ = fs::remove_dir_all(cache_dir);
 }

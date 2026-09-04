@@ -2527,6 +2527,7 @@ impl BacktestBuilder {
                 self.cache_policy,
                 BacktestCachePolicy::RemoteOnMiss | BacktestCachePolicy::Refresh
             )
+            && self.provisional_open_day_fill.is_none()
             && !minute_range_can_claim_final_coverage(self.end_ns)?
         {
             return Err(data_validation(
@@ -2715,15 +2716,24 @@ impl BacktestBuilder {
             let before =
                 minute_cache.inspect(symbol, self.start_ns, self.end_ns, &input.snapshot)?;
             if refresh || !before.is_complete() {
-                minute_fill_requests.extend(before.missing_ranges.iter().map(
-                    |(start_ns, end_ns)| {
-                        backtest_remote::BacktestMinuteKlineFillRequest::new(
-                            symbol.clone(),
-                            *start_ns,
-                            *end_ns,
-                        )
-                    },
-                ));
+                if let Some(provisional) = self.provisional_open_day_fill {
+                    minute_fill_requests.extend(provisional_minute_fill_requests_from_status(
+                        &minute_cache,
+                        &before,
+                        &input.snapshot,
+                        provisional,
+                    )?);
+                } else {
+                    minute_fill_requests.extend(before.missing_ranges.iter().map(
+                        |(start_ns, end_ns)| {
+                            backtest_remote::BacktestMinuteKlineFillRequest::new(
+                                symbol.clone(),
+                                *start_ns,
+                                *end_ns,
+                            )
+                        },
+                    ));
+                }
             }
             minute_before_by_symbol.insert(symbol.clone(), (before, input.snapshot.clone()));
         }
@@ -3245,7 +3255,7 @@ impl BacktestBuilder {
                 }
             }
         }
-        if (!prepared_inputs.minute_klines.is_empty() || !prepared_inputs.daily_klines.is_empty())
+        if !prepared_inputs.daily_klines.is_empty()
             && matches!(
                 self.cache_policy,
                 BacktestCachePolicy::RemoteOnMiss | BacktestCachePolicy::Refresh
@@ -3253,7 +3263,19 @@ impl BacktestBuilder {
             && !minute_range_can_claim_final_coverage(self.end_ns)?
         {
             return Err(data_validation(
-                "canonical 60-second Kline cache cannot fill a current or future trading day; retry after that trading day closes",
+                "native daily Kline cache cannot fill a current or future trading day; retry after that trading day closes",
+            ));
+        }
+        if !prepared_inputs.minute_klines.is_empty()
+            && matches!(
+                self.cache_policy,
+                BacktestCachePolicy::RemoteOnMiss | BacktestCachePolicy::Refresh
+            )
+            && self.provisional_open_day_fill.is_none()
+            && !minute_range_can_claim_final_coverage(self.end_ns)?
+        {
+            return Err(data_validation(
+                "canonical 60-second Kline cache cannot fill a current or future trading day without provisional_open_day_fill",
             ));
         }
         if refresh {
@@ -3300,23 +3322,32 @@ impl BacktestBuilder {
             if !seen_minute_symbols.insert(input.spec.symbol.as_str()) {
                 continue;
             }
-            let coverage = minute_cache.coverage(
+            let status = minute_cache.inspect(
                 &input.spec.symbol,
                 self.start_ns,
                 self.end_ns,
                 &input.snapshot,
             )?;
-            if !coverage.is_complete() {
-                for (start_ns, end_ns) in &coverage.missing_ranges {
-                    minute_fill_requests.push(
-                        backtest_remote::BacktestMinuteKlineFillRequest::new(
-                            input.spec.symbol.clone(),
-                            *start_ns,
-                            *end_ns,
-                        ),
-                    );
+            if !status.is_complete() {
+                if let Some(provisional) = self.provisional_open_day_fill {
+                    minute_fill_requests.extend(provisional_minute_fill_requests_from_status(
+                        &minute_cache,
+                        &status,
+                        &input.snapshot,
+                        provisional,
+                    )?);
+                } else {
+                    for (start_ns, end_ns) in &status.missing_ranges {
+                        minute_fill_requests.push(
+                            backtest_remote::BacktestMinuteKlineFillRequest::new(
+                                input.spec.symbol.clone(),
+                                *start_ns,
+                                *end_ns,
+                            ),
+                        );
+                    }
                 }
-                missing_minute_series.push((input.spec.clone(), coverage.missing_ranges));
+                missing_minute_series.push((input.spec.clone(), status.missing_ranges));
             }
         }
         let daily_cache = if matches!(self.cache_policy, BacktestCachePolicy::CacheOnly) {
@@ -3551,6 +3582,59 @@ fn provisional_fill_requests_from_status(
             ),
         );
     }
+    Ok(requests)
+}
+
+fn provisional_minute_fill_requests_from_status(
+    cache: &tqsdk_data::MinuteKlineCache,
+    status: &tqsdk_data::MinuteKlineCacheStatus,
+    snapshot: &tqsdk_data::MinuteKlineCacheSnapshot,
+    provisional: ProvisionalOpenDayFill,
+) -> Result<Vec<backtest_remote::BacktestMinuteKlineFillRequest>> {
+    let mut requests = Vec::new();
+    for &(start_ns, end_ns) in &status.missing_ranges {
+        let closed_end_ns = end_ns.min(provisional.day_start_ns);
+        if start_ns < closed_end_ns {
+            requests.push(backtest_remote::BacktestMinuteKlineFillRequest::new(
+                status.symbol.clone(),
+                start_ns,
+                closed_end_ns,
+            ));
+        }
+    }
+
+    let provisional_start_ns = status.range_start_ns.max(provisional.day_start_ns);
+    let provisional_end_ns = status.range_end_ns.min(provisional.as_of_ns);
+    if provisional_start_ns >= provisional_end_ns
+        || !status.missing_ranges.iter().any(|&(start_ns, end_ns)| {
+            start_ns < provisional_end_ns && provisional_start_ns < end_ns
+        })
+    {
+        return Ok(requests);
+    }
+
+    let checkpoint = cache.provisional_checkpoint(status.symbol.as_str(), snapshot)?;
+    if checkpoint
+        .as_ref()
+        .is_some_and(|checkpoint| checkpoint.as_of_ns >= provisional.as_of_ns)
+    {
+        return Ok(requests);
+    }
+    let resume_ns = checkpoint.map_or(provisional_start_ns, |checkpoint| {
+        checkpoint
+            .complete_through_ns
+            .saturating_sub(provisional.overlap_ns)
+            .max(provisional_start_ns)
+    });
+    requests.push(
+        backtest_remote::BacktestMinuteKlineFillRequest::provisional(
+            status.symbol.clone(),
+            resume_ns,
+            provisional_end_ns,
+            provisional_start_ns,
+            provisional.as_of_ns,
+        ),
+    );
     Ok(requests)
 }
 

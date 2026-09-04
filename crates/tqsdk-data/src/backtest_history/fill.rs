@@ -125,6 +125,7 @@ impl BacktestHistoryFillRequest {
         cache_symbol: impl Into<String>,
         range: (i64, i64),
         snapshot: MinuteKlineCacheSnapshot,
+        provisional_as_of_ns: Option<i64>,
         request_id: Option<BacktestHistoryRequestId>,
         telemetry_symbol: impl Into<String>,
     ) -> Self {
@@ -133,7 +134,7 @@ impl BacktestHistoryFillRequest {
             cache_symbol: cache_symbol.into(),
             range,
             minute_snapshot: Some(snapshot),
-            provisional_as_of_ns: None,
+            provisional_as_of_ns,
             request_id,
             telemetry_symbol: telemetry_symbol.into(),
         }
@@ -186,9 +187,18 @@ impl BacktestHistoryFillRequest {
                         "canonical Kline fill requires a cache snapshot".to_string(),
                     ));
                 }
-                if self.provisional_as_of_ns.is_some() {
+                if self.family == FillFamily::CanonicalDaily && self.provisional_as_of_ns.is_some()
+                {
                     return Err(DataError::Validation(
-                        "canonical Kline fill does not support provisional coverage".to_string(),
+                        "canonical daily fill does not support provisional coverage".to_string(),
+                    ));
+                }
+                if let Some(as_of_ns) = self.provisional_as_of_ns
+                    && as_of_ns < self.range.1
+                {
+                    return Err(DataError::Validation(
+                        "provisional minute fill range must not extend beyond its as-of timestamp"
+                            .to_string(),
                     ));
                 }
             }
@@ -204,10 +214,19 @@ impl BacktestHistoryFillRequest {
     }
 
     fn with_range(&self, range: (i64, i64)) -> Self {
-        Self {
+        let mut next = Self {
             range,
             ..self.clone()
+        };
+        if next.family == FillFamily::CanonicalMinute
+            && let Some(as_of_ns) = next.provisional_as_of_ns
+            && let Ok(day) = backtest_tick_trading_day_for_timestamp_ns(as_of_ns)
+            && let Ok(day_range) = backtest_tick_trading_day_range(day)
+            && range.1 <= day_range.start_ns
+        {
+            next.provisional_as_of_ns = None;
         }
+        next
     }
 
     fn server_request(&self) -> ServerBacktestHistoryRequest {
@@ -753,10 +772,19 @@ impl RemoteFillCoordinator {
         let mut slices = Vec::new();
         let mut start_ns = range.0;
         while start_ns < range.1 {
-            let end_ns = start_ns
+            let mut end_ns = start_ns
                 .checked_add(max_span_ns)
                 .unwrap_or(i64::MAX)
                 .min(range.1);
+            if request.family == FillFamily::CanonicalMinute
+                && let Some(as_of_ns) = request.provisional_as_of_ns
+            {
+                let day = backtest_tick_trading_day_for_timestamp_ns(as_of_ns)?;
+                let day_range = backtest_tick_trading_day_range(day)?;
+                if start_ns < day_range.start_ns {
+                    end_ns = end_ns.min(day_range.start_ns);
+                }
+            }
             if end_ns <= start_ns {
                 return Err(DataError::InvalidState(
                     "canonical Kline fill slice did not advance",
@@ -881,6 +909,7 @@ impl RemoteFillCoordinator {
         let mut fill = StreamingTickFill::new(request.cache_symbol.clone(), request.range);
         let mut pending_rows = Vec::with_capacity(TICK_WRITE_BUFFER_ROWS);
         let mut completed_rows = 0usize;
+        let mut latest_cursor_ns: Option<i64> = None;
         let mut written_rows = 0usize;
         self.emit(
             request,
@@ -903,6 +932,10 @@ impl RemoteFillCoordinator {
                     }
                     for row in rows {
                         if fill.push(chart_id.as_str(), &row)? {
+                            latest_cursor_ns = Some(
+                                latest_cursor_ns
+                                    .map_or(row.datetime, |latest| latest.max(row.datetime)),
+                            );
                             pending_rows.push(row);
                             if pending_rows.len() >= TICK_WRITE_BUFFER_ROWS {
                                 self.ensure_not_cancelled(shared)?;
@@ -915,10 +948,11 @@ impl RemoteFillCoordinator {
                             completed_rows = completed_rows.saturating_add(1);
                         }
                     }
-                    self.emit(
+                    self.emit_with_cursor(
                         request,
                         BacktestHistoryPhase::Fill,
                         completed_rows,
+                        latest_cursor_ns,
                         "writing partial Tick rows",
                     );
                     Ok(false)
@@ -987,7 +1021,9 @@ impl RemoteFillCoordinator {
         request: &BacktestHistoryFillRequest,
         shared: &SharedFill,
     ) -> Result<usize> {
-        ensure_final_tick_range_is_closed(request.range)?;
+        if request.provisional_as_of_ns.is_none() {
+            ensure_final_tick_range_is_closed(request.range)?;
+        }
         let snapshot = request
             .minute_snapshot
             .as_ref()
@@ -1015,10 +1051,14 @@ impl RemoteFillCoordinator {
                         rows_by_datetime.insert(row.datetime, row);
                     }
                 }
-                self.emit(
+                let latest_cursor_ns = rows_by_datetime
+                    .last_key_value()
+                    .map(|(datetime, _)| *datetime);
+                self.emit_with_cursor(
                     request,
                     BacktestHistoryPhase::Fill,
                     rows_by_datetime.len(),
+                    latest_cursor_ns,
                     "buffering canonical-minute rows until the server terminal",
                 );
                 Ok(false)
@@ -1041,13 +1081,24 @@ impl RemoteFillCoordinator {
 
         self.ensure_not_cancelled(shared)?;
         let rows = rows_by_datetime.into_values().collect::<Vec<_>>();
-        cache.store_final_range(
-            request.cache_symbol.as_str(),
-            request.range.0,
-            request.range.1,
-            snapshot,
-            rows.as_slice(),
-        )?;
+        if let Some(as_of_ns) = request.provisional_as_of_ns {
+            cache.store_provisional_range(
+                request.cache_symbol.as_str(),
+                request.range.0,
+                request.range.1,
+                as_of_ns,
+                snapshot,
+                rows.as_slice(),
+            )?;
+        } else {
+            cache.store_final_range(
+                request.cache_symbol.as_str(),
+                request.range.0,
+                request.range.1,
+                snapshot,
+                rows.as_slice(),
+            )?;
+        }
         self.emit_terminal(
             request,
             rows.len(),
@@ -1227,16 +1278,23 @@ impl RemoteFillCoordinator {
                     .ok_or(DataError::InvalidState(
                         "canonical-minute fill was missing its cache snapshot",
                     ))?;
-                Ok(
-                    MinuteKlineCache::open_read_only(self.config.cache_dir.as_path())
-                        .coverage(
-                            request.cache_symbol.as_str(),
-                            request.range.0,
-                            request.range.1,
-                            snapshot,
-                        )?
-                        .missing_ranges,
-                )
+                let cache = MinuteKlineCache::open_read_only(self.config.cache_dir.as_path());
+                let mut cached_ranges = cache
+                    .coverage(
+                        request.cache_symbol.as_str(),
+                        request.range.0,
+                        request.range.1,
+                        snapshot,
+                    )?
+                    .cached_ranges;
+                if let Some(as_of_ns) = request.provisional_as_of_ns
+                    && let Some(checkpoint) =
+                        cache.provisional_checkpoint(request.cache_symbol.as_str(), snapshot)?
+                    && checkpoint.as_of_ns >= as_of_ns
+                {
+                    cached_ranges.push((checkpoint.range_start_ns, checkpoint.range_end_ns));
+                }
+                Ok(subtract_ranges(request.range, cached_ranges))
             }
             FillFamily::CanonicalDaily => {
                 let snapshot = request
@@ -1307,11 +1365,23 @@ impl RemoteFillCoordinator {
         completed_rows: usize,
         message: impl Into<String>,
     ) {
+        self.emit_with_cursor(request, phase, completed_rows, None, message);
+    }
+
+    fn emit_with_cursor(
+        &self,
+        request: &BacktestHistoryFillRequest,
+        phase: BacktestHistoryPhase,
+        completed_rows: usize,
+        latest_cursor_ns: Option<i64>,
+        message: impl Into<String>,
+    ) {
         self.telemetry.emit(BacktestHistoryTelemetryEvent {
             request_id: request.request_id,
             symbol: request.telemetry_symbol.clone(),
             phase,
             completed_rows,
+            latest_cursor_ns,
             message: message.into(),
         });
     }
@@ -1327,6 +1397,7 @@ impl RemoteFillCoordinator {
             symbol: request.telemetry_symbol.clone(),
             phase: BacktestHistoryPhase::Fill,
             completed_rows,
+            latest_cursor_ns: None,
             message: message.into(),
         });
     }
@@ -1667,7 +1738,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use chrono::{Duration as ChronoDuration, Utc};
+    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
     use tqsdk_core::Tick;
 
     use super::*;
@@ -1929,12 +2000,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tick_fill_telemetry_uses_only_accepted_cursor() {
+        let root = temporary_root("tick-telemetry-cursor");
+        let range = closed_range();
+        let accepted_cursor = range.0.saturating_add(1);
+        let telemetry = TelemetryHub::new();
+        let mut telemetry_stream = telemetry.stream();
+        let coordinator = coordinator_with_telemetry(
+            root,
+            Arc::new(ScriptedFactory::new(
+                Arc::new(AtomicUsize::new(0)),
+                vec![
+                    ServerBacktestHistoryEvent::Ticks {
+                        chart_id: "tick".to_string(),
+                        symbol: "SHFE.au2608".to_string(),
+                        rows: vec![tick(1, accepted_cursor), tick(1, range.1.saturating_add(1))],
+                    },
+                    ServerBacktestHistoryEvent::StreamCompleted,
+                ],
+                Duration::ZERO,
+            )),
+            Arc::new(CountingAuth::new(Arc::new(AtomicUsize::new(0)))),
+            telemetry,
+        );
+
+        coordinator
+            .ensure_coverage(BacktestHistoryFillRequest::tick(
+                "SHFE.au2608",
+                range,
+                None,
+                Some(1),
+                "SHFE.au2608",
+            ))
+            .await
+            .unwrap();
+
+        let terminal = telemetry_stream.next().await.expect("terminal telemetry");
+        assert_eq!(terminal.latest_cursor_ns, None);
+        let streaming = telemetry_stream.next().await.expect("streaming telemetry");
+        assert_eq!(streaming.completed_rows, 1);
+        assert_eq!(streaming.latest_cursor_ns, Some(accepted_cursor));
+    }
+
+    #[tokio::test]
     async fn minute_rows_become_final_only_after_stream_terminal() {
         let root = temporary_root("minute-terminal");
         let range = closed_range();
         let snapshot = MinuteKlineCacheSnapshot::cst_v1();
         let opens = Arc::new(AtomicUsize::new(0));
-        let coordinator = coordinator(
+        let telemetry = TelemetryHub::new();
+        let mut telemetry_stream = telemetry.stream();
+        let coordinator = coordinator_with_telemetry(
             root.clone(),
             Arc::new(ScriptedFactory::new(
                 Arc::clone(&opens),
@@ -1942,13 +2058,18 @@ mod tests {
                     ServerBacktestHistoryEvent::CanonicalMinutes {
                         chart_id: "minute".to_string(),
                         symbol: "KQ.i@SHFE.au".to_string(),
-                        rows: vec![kline(1, range.0.saturating_add(60_000_000_000))],
+                        rows: vec![
+                            kline(1, range.0.saturating_add(60_000_000_000)),
+                            kline(2, range.0.saturating_add(60_000_000_000)),
+                            kline(2, range.1.saturating_add(60_000_000_000)),
+                        ],
                     },
                     ServerBacktestHistoryEvent::StreamCompleted,
                 ],
                 Duration::ZERO,
             )),
             Arc::new(CountingAuth::new(Arc::new(AtomicUsize::new(0)))),
+            telemetry,
         );
 
         coordinator
@@ -1956,11 +2077,21 @@ mod tests {
                 "KQ.i@SHFE.au",
                 range,
                 snapshot.clone(),
+                None,
                 Some(1),
                 "KQ.i@SHFE.au",
             ))
             .await
             .unwrap();
+
+        let terminal = telemetry_stream.next().await.expect("terminal telemetry");
+        assert_eq!(terminal.latest_cursor_ns, None);
+        let streaming = telemetry_stream.next().await.expect("streaming telemetry");
+        assert_eq!(streaming.completed_rows, 1);
+        assert_eq!(
+            streaming.latest_cursor_ns,
+            Some(range.0.saturating_add(60_000_000_000))
+        );
 
         assert!(
             MinuteKlineCache::open_read_only(root)
@@ -2393,7 +2524,9 @@ mod tests {
         let opens = Arc::new(AtomicUsize::new(0));
         let reusable_closes = Arc::new(AtomicUsize::new(0));
         let discarded_closes = Arc::new(AtomicUsize::new(0));
-        let coordinator = coordinator(
+        let telemetry = TelemetryHub::new();
+        let mut telemetry_stream = telemetry.stream();
+        let coordinator = coordinator_with_telemetry(
             root,
             Arc::new(CloseTrackingFactory {
                 opens: Arc::clone(&opens),
@@ -2402,6 +2535,7 @@ mod tests {
                 symbol: "SHFE.au2608".to_string(),
             }),
             Arc::new(CountingAuth::new(Arc::new(AtomicUsize::new(0)))),
+            telemetry,
         );
 
         coordinator
@@ -2418,12 +2552,37 @@ mod tests {
         assert_eq!(opens.load(Ordering::SeqCst), 2);
         assert_eq!(reusable_closes.load(Ordering::SeqCst), 2);
         assert_eq!(discarded_closes.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            telemetry_stream
+                .next()
+                .await
+                .expect("first slice terminal telemetry")
+                .completed_rows,
+            1
+        );
+        assert_eq!(
+            telemetry_stream
+                .next()
+                .await
+                .expect("second slice terminal telemetry")
+                .completed_rows,
+            2
+        );
     }
 
     fn coordinator(
         root: PathBuf,
         source_factory: Arc<dyn ServerHistorySourceFactory>,
         auth_provider: Arc<dyn BacktestHistoryAuthProvider>,
+    ) -> RemoteFillCoordinator {
+        coordinator_with_telemetry(root, source_factory, auth_provider, TelemetryHub::new())
+    }
+
+    fn coordinator_with_telemetry(
+        root: PathBuf,
+        source_factory: Arc<dyn ServerHistorySourceFactory>,
+        auth_provider: Arc<dyn BacktestHistoryAuthProvider>,
+        telemetry: TelemetryHub,
     ) -> RemoteFillCoordinator {
         RemoteFillCoordinator::new(
             Arc::new(BacktestHistoryClientConfig {
@@ -2436,7 +2595,7 @@ mod tests {
                 auth_provider: Some(auth_provider),
                 source_factory,
             }),
-            TelemetryHub::new(),
+            telemetry,
         )
     }
 
@@ -2690,6 +2849,7 @@ mod tests {
             "KQ.i@SHFE.au",
             (start_ns, end_ns),
             MinuteKlineCacheSnapshot::cst_v1(),
+            None,
             Some(7),
             "KQ.i@SHFE.au",
         );
@@ -2720,6 +2880,47 @@ mod tests {
                 .iter()
                 .all(|slice| slice.range.1 - slice.range.0 <= MINUTE_FILL_MAX_SPAN_NS)
         );
+    }
+
+    #[test]
+    fn provisional_minute_fill_splits_closed_ranges_before_the_open_day() {
+        let as_of_ns = chrono::Utc
+            .with_ymd_and_hms(2026, 7, 29, 2, 2, 30)
+            .single()
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let day = backtest_tick_trading_day_for_timestamp_ns(as_of_ns).unwrap();
+        let day_range = backtest_tick_trading_day_range(day).unwrap();
+        let request = BacktestHistoryFillRequest::canonical_minute(
+            "KQ.i@SHFE.au",
+            (
+                day_range.start_ns - crate::minute_kline_cache::MINUTE_KLINE_DURATION_NS,
+                as_of_ns,
+            ),
+            MinuteKlineCacheSnapshot::cst_v1(),
+            Some(as_of_ns),
+            Some(7),
+            "KQ.i@SHFE.au",
+        );
+        let coordinator = coordinator(
+            temporary_root("minute-provisional-day-split"),
+            Arc::new(ScriptedFactory::new(
+                Arc::new(AtomicUsize::new(0)),
+                Vec::new(),
+                Duration::ZERO,
+            )),
+            Arc::new(CountingAuth::new(Arc::new(AtomicUsize::new(0)))),
+        );
+
+        let slices = coordinator
+            .split_fill_range(&request, request.range)
+            .unwrap();
+        assert_eq!(slices.len(), 2);
+        assert_eq!(slices[0].range.1, day_range.start_ns);
+        assert!(slices[0].provisional_as_of_ns.is_none());
+        assert_eq!(slices[1].range.0, day_range.start_ns);
+        assert_eq!(slices[1].provisional_as_of_ns, Some(as_of_ns));
     }
 
     struct CountingAuth {

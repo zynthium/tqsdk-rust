@@ -1,5 +1,6 @@
 //! Async request scheduler and cache-reader execution for backtest history.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,8 +18,11 @@ use crate::{
     BacktestHistoryMetadataCache, DataError, Result, resolve_minute_cache_metadata_snapshot,
 };
 
+use super::BacktestHistoryRequestId;
 use super::fill::{BacktestHistoryFillRequest, RemoteFillCoordinator};
-use super::metadata::{ensure_metadata_for_remote_miss, metadata_snapshot_covers_range};
+use super::metadata::{
+    ensure_metadata_for_remote_miss, metadata_snapshot_covers_range, minute_metadata_refresh_range,
+};
 use super::planner::{
     PlannedBacktestHistoryRequest, PlannedBaseSource, bar_end_ns, classify_request,
     is_direct_native_daily_cache_request, plan_request,
@@ -55,6 +59,7 @@ pub(crate) struct BacktestHistoryExecutionState {
     failure_reasons: super::BacktestHistoryFailureReasons,
     resources: Option<super::BacktestHistorySnapshotQueryResources>,
     event_reservations: BacktestHistoryRunReservations,
+    prepared_plans: BTreeMap<BacktestHistoryRequestId, PlannedBacktestHistoryRequest>,
 }
 
 impl BacktestHistoryExecutionState {
@@ -69,7 +74,13 @@ impl BacktestHistoryExecutionState {
             failure_reasons,
             resources,
             event_reservations,
+            prepared_plans: BTreeMap::new(),
         }
+    }
+
+    pub(crate) fn with_prepared_plan(mut self, plan: PlannedBacktestHistoryRequest) -> Self {
+        self.prepared_plans.insert(plan.request_id, plan);
+        self
     }
 }
 
@@ -366,6 +377,7 @@ fn spawn_base_scan(spec: BaseScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 symbol: spec.cache_symbol,
                 range: spec.range,
                 snapshot: spec.minute_snapshot,
+                provisional_as_of_ns: spec.provisional_as_of_ns,
                 target_bytes: spec.chunk_bytes,
                 cancellation: spec.cancellation,
                 permits: spec.blocking_permits,
@@ -418,12 +430,14 @@ pub(crate) async fn execute_batch(
         failure_reasons,
         resources,
         event_reservations,
+        mut prepared_plans,
     } = execution_state;
     let logical_permits = Arc::new(Semaphore::new(config.logical_concurrency));
     let blocking_permits = Arc::new(Semaphore::new(config.blocking_workers));
     let scan_registry = SharedScanRegistry::new(lifecycle_pin, resources.clone());
     let mut tasks = JoinSet::new();
     for request in requests {
+        let prepared_plan = prepared_plans.remove(&request.request_id);
         let config = Arc::clone(&config);
         let event_sender = event_sender.clone();
         let telemetry = telemetry.clone();
@@ -459,7 +473,7 @@ pub(crate) async fn execute_batch(
                         resources,
                         event_reservations,
                     };
-                    run_request(context, request).await
+                    run_request(context, request, prepared_plan).await
                 }
                 Err(error) => {
                     failure_reasons
@@ -520,13 +534,14 @@ impl RequestTerminal {
 async fn run_request(
     context: RequestExecutionContext,
     request: ValidatedBacktestHistoryRequest,
+    prepared_plan: Option<PlannedBacktestHistoryRequest>,
 ) -> RequestTerminal {
     let request_id = request.request_id;
     let symbol = request.symbol.clone();
     let event_sender = context.event_sender.clone();
     let telemetry = context.telemetry.clone();
     let mode = context.mode;
-    let result = execute_request(&context, request).await;
+    let result = execute_request(&context, request, prepared_plan).await;
     match result {
         Ok((report, emitted_rows)) => {
             let _ = event_sender
@@ -549,6 +564,7 @@ async fn run_request(
                     super::report::BacktestHistoryPhase::Read
                 },
                 completed_rows,
+                latest_cursor_ns: None,
                 message: if mode == BacktestHistoryExecutionMode::MaterializeCache {
                     "backtest history cache materialization completed".to_string()
                 } else {
@@ -589,6 +605,7 @@ async fn run_request(
                     super::report::BacktestHistoryPhase::Read
                 },
                 completed_rows: failure.emitted_rows,
+                latest_cursor_ns: None,
                 message: format!("backtest history request failed: {}", failure.error),
             });
             RequestTerminal::Failed(failure)
@@ -656,29 +673,34 @@ struct RequestExecutionContext {
 async fn execute_request(
     context: &RequestExecutionContext,
     request: ValidatedBacktestHistoryRequest,
+    prepared_plan: Option<PlannedBacktestHistoryRequest>,
 ) -> std::result::Result<(super::report::BacktestHistoryRequestReport, usize), ExecutionFailure> {
     let config = &context.config;
     let telemetry = &context.telemetry;
     let cancellation = &context.cancellation;
     let mode = context.mode;
-    let plan = await_or_request_cancelled(
-        cancellation.as_ref(),
-        plan_request_for_execution(config, request),
-    )
-    .await
-    .map_err(|error| ExecutionFailure {
-        error,
-        emitted_rows: 0,
-    })?;
+    let plan = match prepared_plan {
+        Some(plan) => plan,
+        None => await_or_request_cancelled(
+            cancellation.as_ref(),
+            plan_request_for_execution(config, request),
+        )
+        .await
+        .map_err(|error| ExecutionFailure {
+            error,
+            emitted_rows: 0,
+        })?,
+    };
     telemetry.emit(BacktestHistoryTelemetryEvent {
         request_id: Some(plan.request_id),
         symbol: plan.symbol.clone(),
         phase: super::report::BacktestHistoryPhase::Inspect,
         completed_rows: 0,
+        latest_cursor_ns: None,
         message: "planned durable cache sources".to_string(),
     });
 
-    let mut cached_ranges = Vec::new();
+    let mut cached_ranges = plan.proven_empty_ranges.clone();
     let mut remote_filled_ranges = Vec::new();
     let mut remote_used = false;
     let mut rows_written = 0usize;
@@ -717,6 +739,12 @@ async fn execute_request(
                 slice.cache_symbol.clone(),
                 slice.range,
                 plan.minute_snapshot.clone(),
+                provisional_minute_as_of_for_range(&plan, slice.range).map_err(|error| {
+                    ExecutionFailure {
+                        error,
+                        emitted_rows: 0,
+                    }
+                })?,
                 Some(plan.request_id),
                 plan.symbol.clone(),
             ),
@@ -841,7 +869,7 @@ async fn acquire_logical_permit_until_cancelled(
     }
 }
 
-async fn plan_request_for_execution(
+pub(crate) async fn plan_request_for_execution(
     config: &Arc<BacktestHistoryClientConfig>,
     request: ValidatedBacktestHistoryRequest,
 ) -> Result<PlannedBacktestHistoryRequest> {
@@ -867,9 +895,15 @@ async fn plan_request_for_execution(
     } else {
         active_metadata.clone()
     };
-    let metadata_needs_refresh = selected_metadata
-        .as_ref()
-        .is_some_and(|snapshot| !metadata_snapshot_covers_range(snapshot, requested_range));
+    let required_metadata_range = if matches!(base_source, PlannedBaseSource::CanonicalMinute) {
+        minute_metadata_refresh_range(request.symbol.as_str(), request.start_ns, request.end_ns)?
+    } else {
+        requested_range
+    };
+    let metadata_needs_refresh = selected_metadata.as_ref().is_some_and(|snapshot| {
+        !metadata_snapshot_covers_range(snapshot, requested_range)
+            && !metadata_snapshot_covers_range(snapshot, required_metadata_range)
+    });
     if requires_metadata
         && config.policy == BacktestHistoryPolicy::RemoteOnMiss
         && (metadata_needs_refresh || (is_main_continuous && active_metadata.is_none()))
@@ -934,15 +968,22 @@ pub(crate) async fn strict_inspect_request(
     let plan = plan_request_for_execution(&config, request)
         .await
         .map_err(StrictInspectionFailure::Planning)?;
+    strict_inspect_plan(config.as_ref(), &plan)
+}
+
+pub(crate) fn strict_inspect_plan(
+    config: &BacktestHistoryClientConfig,
+    plan: &PlannedBacktestHistoryRequest,
+) -> std::result::Result<super::report::BacktestHistoryRequestReport, StrictInspectionFailure> {
     if let BacktestHistoryFinality::Provisional { as_of_ns } = plan.finality {
         return Err(StrictInspectionFailure::Provisional { as_of_ns });
     }
 
-    let mut cached_ranges = Vec::new();
+    let mut cached_ranges = plan.proven_empty_ranges.clone();
     let mut missing_ranges = Vec::new();
     for slice in &plan.source_slices {
         let inspection =
-            inspect_source(&config, &plan, slice).map_err(StrictInspectionFailure::Source)?;
+            inspect_source(config, plan, slice).map_err(StrictInspectionFailure::Source)?;
         cached_ranges.extend(inspection.cached_ranges);
         missing_ranges.extend(inspection.missing_ranges);
     }
@@ -972,15 +1013,25 @@ fn inspect_source(
             })
         }
         PlannedBaseSource::CanonicalMinute => {
-            let coverage = MinuteKlineCache::open_read_only(config.cache_dir.as_path()).coverage(
+            let cache = MinuteKlineCache::open_read_only(config.cache_dir.as_path());
+            let coverage = cache.coverage(
                 slice.cache_symbol.as_str(),
                 slice.range.0,
                 slice.range.1,
                 &plan.minute_snapshot,
             )?;
+            let mut cached_ranges = coverage.cached_ranges;
+            if let Some(as_of_ns) = provisional_as_of(plan)
+                && let Some(checkpoint) = cache
+                    .provisional_checkpoint(slice.cache_symbol.as_str(), &plan.minute_snapshot)?
+                && checkpoint.as_of_ns >= as_of_ns
+            {
+                cached_ranges.push((checkpoint.range_start_ns, checkpoint.range_end_ns));
+            }
+            let cached_ranges = merge_ranges(cached_ranges);
             Ok(SourceInspection {
-                cached_ranges: coverage.cached_ranges,
-                missing_ranges: coverage.missing_ranges,
+                missing_ranges: uncovered_ranges(slice.range, &cached_ranges),
+                cached_ranges,
             })
         }
         PlannedBaseSource::CanonicalDaily => {
@@ -1517,6 +1568,7 @@ async fn send_tick_chunk_with_reservation(
         return Ok(0);
     }
     let count = rows.len();
+    let latest_cursor_ns = rows.iter().map(|row| row.datetime).max();
     event_sender
         .send(BacktestHistoryEventEnvelope::new(
             BacktestHistoryEvent::Chunk(BacktestHistoryChunk {
@@ -1533,6 +1585,7 @@ async fn send_tick_chunk_with_reservation(
         symbol: plan.symbol.clone(),
         phase: super::report::BacktestHistoryPhase::Read,
         completed_rows: emitted_rows.saturating_add(count),
+        latest_cursor_ns,
         message: "streamed Tick cache rows".to_string(),
     });
     Ok(count)
@@ -1571,6 +1624,7 @@ async fn send_kline_chunk_with_reservation(
         return Ok(0);
     }
     let count = rows.len();
+    let latest_cursor_ns = rows.iter().map(|row| row.datetime).max();
     event_sender
         .send(BacktestHistoryEventEnvelope::new(
             BacktestHistoryEvent::Chunk(BacktestHistoryChunk {
@@ -1587,6 +1641,7 @@ async fn send_kline_chunk_with_reservation(
         symbol: plan.symbol.clone(),
         phase: super::report::BacktestHistoryPhase::Aggregate,
         completed_rows: emitted_rows.saturating_add(count),
+        latest_cursor_ns,
         message: "streamed locally aggregated Kline rows".to_string(),
     });
     Ok(count)
@@ -1620,6 +1675,18 @@ fn provisional_as_of(plan: &PlannedBacktestHistoryRequest) -> Option<i64> {
     provisional_as_of_from_finality(plan.finality)
 }
 
+fn provisional_minute_as_of_for_range(
+    plan: &PlannedBacktestHistoryRequest,
+    range: (i64, i64),
+) -> Result<Option<i64>> {
+    let Some(as_of_ns) = provisional_as_of(plan) else {
+        return Ok(None);
+    };
+    let trading_day = crate::backtest_tick_trading_day_for_timestamp_ns(as_of_ns)?;
+    let day = crate::backtest_tick_trading_day_range(trading_day)?;
+    Ok((range.1 > day.start_ns).then_some(as_of_ns))
+}
+
 fn provisional_as_of_from_finality(finality: BacktestHistoryFinality) -> Option<i64> {
     match finality {
         BacktestHistoryFinality::Final => None,
@@ -1641,6 +1708,27 @@ fn merge_ranges(mut ranges: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
         }
     }
     merged
+}
+
+fn uncovered_ranges(request: (i64, i64), covered: &[(i64, i64)]) -> Vec<(i64, i64)> {
+    let mut missing = Vec::new();
+    let mut cursor = request.0;
+    for &(start_ns, end_ns) in covered {
+        if end_ns <= cursor || start_ns >= request.1 {
+            continue;
+        }
+        if start_ns > cursor {
+            missing.push((cursor, start_ns.min(request.1)));
+        }
+        cursor = cursor.max(end_ns);
+        if cursor >= request.1 {
+            break;
+        }
+    }
+    if cursor < request.1 {
+        missing.push((cursor, request.1));
+    }
+    missing
 }
 
 #[cfg(test)]

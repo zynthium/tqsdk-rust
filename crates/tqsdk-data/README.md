@@ -52,6 +52,9 @@
 - `BacktestHistorySnapshot::open(...)` / `inspect(...)` / `query(...)`（lease-pinned read-only
   generation；manifest metadata hash 是 generation 级 inventory SHA-256，request report hash 仍是
   per-symbol metadata identity；query lease 会保留到 detached blocking scan 完全退出）
+- `BacktestHistoryLiveCache::open(...)` / `prepare(...)`（对 writable cache 的 CacheOnly 只读视图；
+  每个 prepared read 在共享 root gate 下只捕获一次 metadata/source plan，查询只观察已原子提交的
+  coverage，并允许 fill 继续提交后续进度）
 - `BacktestHistorySnapshotRun::next()` / `collect()` / `finish()`（terminal failure 保留
   `BacktestHistoryFailureReason`，不要求调用方解析 legacy error string）
 - publisher-facing manifest seam：`BacktestHistorySnapshotManifestBuilder`、
@@ -129,6 +132,11 @@ canary 成功后前进；发现首行或 terminal empty 才发布新的 acquisit
 同一个 client 是 tick/minute/daily fill scheduling 的唯一 owner：默认 symbol batch size 1、concurrency 2、
 idle timeout 60 秒、无 batch timeout；batch size/concurrency 都只接受 `1..=4`。它统一产生 planning、
 batch、telemetry、terminal progress，facade 与 CLI 不再各自实现调度。
+Tick 与 sub-minute 规划会把 immutable metadata 中明确标记为非交易日的工作日区间作为本地可证明空区间，
+不创建远端 chart，也不等待 idle timeout；周末不会单独剔除，因为周五夜盘可能属于下一个交易日。
+这些区间只随绑定的 metadata snapshot 生效，不会把普通交易日的零行或 provider 无响应误判为完整。
+streaming telemetry 同时携带累计 rows 与最新已接受行的 `latest_cursor_ns`；慢消费者按
+request/phase 单调合并二者，空页、过滤行与重复行不会推进 cursor。
 
 | 请求 | durable source | 是否新建 K 线文件 |
 | --- | --- | --- |
@@ -258,7 +266,13 @@ runtime commit 清理。这样保留 cursor/revision 语义，同时避免默认
   cached range 的 schema/market/symbol/session/交易日/physical mapping 完全相同时兼容。只有完成的远端
   60s range 才可记录 final coverage；当前/未来 trading day 不可 claim final。v3 文件不会自动迁移、覆盖或
   被当作 cache hit；`diagnose()` 会将其列为 `LegacyUnsupported`。它没有 retention、max-byte
-  eviction 或自动清理，`Refresh`、`purge_range` / `purge_symbol` 都是显式 destructive maintenance
+  eviction 或自动清理，`Refresh`、`purge_range` / `purge_symbol` 都是显式 destructive maintenance。
+  当前交易日使用独立 `minute-kline-provisional-v1/*.tqmp` sidecar：只保留固定 as-of 前完整
+  闭合的 60s bars，且只通过显式 provisional checkpoint/reader 可见。它不贡献 `.tqmk` final
+  coverage、不进入 relay history snapshot。非空 metadata session 证明最后一个 window 已结束、
+  checkpoint 已到 close 且 grace 已过时，`finalize_provisional_after_session_close(...)` 按月文件锁→
+  sidecar 锁的既有顺序原子冻结 observed rows，并把 coverage 延伸到 TQBN 日界；不重新请求或应用
+  vendor revision。空 full-day fallback session 不提供提前 final 的证明
 - `DailyKlineCache` 同样以 immutable metadata snapshot fail closed；snapshot hash/identity 不同只有 retained
   sidecar 对每个已有 coverage 的 schema/market/symbol/session/trading-day/physical mapping 全部证明一致时才能复用，
   next-gap write 在 per-symbol lock 内原子 reheader。缺 sidecar、损坏或不一致仍是错误而非 cache miss。只有已
@@ -352,7 +366,8 @@ Python-compatible mmap 缓存；旧 binary/mmap history cache 已从 public surf
 - `BacktestHistoryRequest` / `BacktestHistoryPolicy`
 - `BacktestHistoryEvent` / `BacktestHistoryRun` / `BacktestHistoryBatchReport`
 - `BacktestHistoryRequestFailure`（既有 query 兼容面）/ `BacktestHistoryFailureReason`（strict snapshot seam typed failure）
-- `BacktestHistorySnapshot` / `BacktestHistorySnapshotRun` / `BacktestHistorySnapshotQueryResources`
+- `BacktestHistorySnapshot` / `BacktestHistoryLiveCache` / `BacktestHistoryPreparedRead` /
+  `BacktestHistorySnapshotRun` / `BacktestHistorySnapshotQueryResources`
 - `BacktestHistorySnapshotResourceBudget` / `BacktestHistorySnapshotResourceReservation`（daemon-owned scan budget 与 opaque RAII guard）
 - `BacktestHistoryMetadataCache` / `BacktestHistoryMaintenanceClient`
 - `DailyKlineCache` / `DailyKlineCoverage` / `DailyKlineCacheStatus` /

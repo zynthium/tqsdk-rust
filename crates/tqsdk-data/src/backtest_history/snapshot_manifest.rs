@@ -541,6 +541,13 @@ fn classify_cache_relative_path(
             )));
         }
     }
+    if path
+        .components()
+        .next()
+        .is_some_and(|component| component.as_os_str() == "minute-kline-provisional-v1")
+    {
+        return Ok(BacktestHistorySnapshotFileDisposition::Rebuild);
+    }
     let file_name = path
         .file_name()
         .and_then(|value| value.to_str())
@@ -1510,6 +1517,17 @@ mod tests {
         BacktestHistoryTradingDay,
     };
     use crate::{DailyKlineCache, DailyKlineCacheSnapshot, KlineSessionTemplate};
+
+    #[test]
+    fn provisional_minute_sidecars_are_excluded_from_snapshots() {
+        assert_eq!(
+            classify_backtest_history_snapshot_cache_path(
+                "minute-kline-provisional-v1/SHFE.rb2610.tqmp"
+            )
+            .unwrap(),
+            BacktestHistorySnapshotFileDisposition::Rebuild
+        );
+    }
 
     #[test]
     fn opens_a_valid_current_manifest() {

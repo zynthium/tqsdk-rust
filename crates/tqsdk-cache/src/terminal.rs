@@ -101,6 +101,17 @@ fn write_fill(output: &mut impl Write, value: &Value) -> io::Result<()> {
             output,
             "Accepted partial rows were flushed; coverage was not committed."
         )?;
+        write_requested_days(output, value.get("requested_days"))?;
+        writeln!(
+            output,
+            "Coverage: incomplete | Remote: {} | Rows written: {}",
+            if boolean(value, "remote_used") {
+                "used"
+            } else {
+                "not used"
+            },
+            number(value, "rows_written"),
+        )?;
         if let Some(inventory) = value.get("partial_inventory") {
             if string(value, "cache_kind") == Some("minute") {
                 writeln!(
@@ -155,6 +166,31 @@ fn write_fill(output: &mut impl Write, value: &Value) -> io::Result<()> {
     }
 
     let Some(report) = value.get("report") else {
+        writeln!(
+            output,
+            "Mode: {}",
+            if boolean(value, "dry_run") {
+                "dry run"
+            } else {
+                "fill"
+            }
+        )?;
+        write_requested_days(output, value.get("requested_days"))?;
+        writeln!(
+            output,
+            "Coverage: {} | Remote: {} | Rows written: {}",
+            if boolean(value, "complete") {
+                "complete"
+            } else {
+                "incomplete"
+            },
+            if boolean(value, "remote_used") {
+                "used"
+            } else {
+                "not used"
+            },
+            number(value, "rows_written"),
+        )?;
         return Ok(());
     };
     writeln!(
@@ -831,6 +867,55 @@ mod tests {
             "KQ.i@CFFEX.IC: already cached | final coverage complete | 0 rows downloaded"
         ));
         assert!(!output.contains("day coverage unavailable"));
+    }
+
+    #[test]
+    fn historical_universe_fill_summary_includes_coverage_window() {
+        let value = json!({
+            "command": "fill",
+            "cache_kind": "tick",
+            "cache_dir": "/tmp/cache",
+            "dry_run": false,
+            "requested_days": {
+                "start_day": "2024-01-01",
+                "end_day": "2026-09-03",
+            },
+            "complete": false,
+            "remote_used": true,
+            "rows_written": 123,
+            "symbols": [],
+        });
+        let mut output = Vec::new();
+
+        write_result(&mut output, &value, "incomplete", 1, 12).unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Trading days: 2024-01-01 to 2026-09-03"));
+        assert!(output.contains("Coverage: incomplete | Remote: used | Rows written: 123"));
+    }
+
+    #[test]
+    fn interrupted_fill_summary_keeps_coverage_window() {
+        let value = json!({
+            "command": "fill",
+            "cache_kind": "minute",
+            "cache_dir": "/tmp/cache",
+            "status": "interrupted",
+            "requested_days": {
+                "start_day": "2024-01-01",
+                "end_day": "2026-09-03",
+            },
+            "complete": false,
+            "remote_used": true,
+            "rows_written": 456,
+        });
+        let mut output = Vec::new();
+
+        write_result(&mut output, &value, "interrupted", 130, 12).unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Trading days: 2024-01-01 to 2026-09-03"));
+        assert!(output.contains("Coverage: incomplete | Remote: used | Rows written: 456"));
     }
 
     #[test]

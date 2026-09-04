@@ -209,25 +209,31 @@ cargo run -p tqsdk-relay
 runtime，不改变 SDK 默认直连路径。history listener 默认关闭，只有下面三个环境变量同时存在时才启动：
 
 - `TQSDK_RELAY_HISTORY_LISTEN`：独立 HTTP/1 socket address；
-- `TQSDK_RELAY_HISTORY_ROOT`：已存在、非 symlink 的 absolute published history root；
+- `TQSDK_RELAY_HISTORY_CACHE_DIR`：推荐；已存在、非 symlink 的 absolute writable-cache root，
+  relay 仍以只读方式打开它，并在每个请求开始时读取最新已提交 coverage；
+- `TQSDK_RELAY_HISTORY_ROOT`：兼容模式；已存在、非 symlink 的 absolute published history root；
 - `TQSDK_RELAY_HISTORY_IDENTITY_HEADER`：受控网关注入的 trusted identity header 名。
 
-部分配置、非法 root/header 或 listener/runtime 启动失败都会让进程 fail fast。history 使用 binary-private
+两个 history source 环境变量必须且只能配置一个。部分配置、非法 root/header 或 listener/runtime 启动失败都会让进程 fail fast。history 使用 binary-private
 模块、独立 OS thread 和独立 Tokio worker，不接收 `RelayEngine`、`RelayServer` 或 market mutex。
 listener 提供 `GET /v1/history/schema`、`/v1/history/coverage` 和 `/v1/history/query`。
-coverage/query 只读取 `CURRENT` 指向的 immutable CacheOnly generation；每 5 秒校验并切换
-last-good snapshot，旧请求通过 generation lease 继续固定旧快照。query 在 terminal success
+live-cache 模式下，coverage/query 每次都读取实际缓存的最新原子提交结果；同一请求只规划一次 metadata/source，
+并持有共享 root operation gate 到 detached scan 完全退出，因此可与 fill 并行但不会跨 destructive maintenance
+混读。未提交行、缺失 coverage 和 minute provisional checkpoint 不会被 strict HTTP 接口当作 final 数据。
+兼容 published 模式仍读取 `CURRENT` 指向的 immutable generation，并每 5 秒切换 last-good snapshot。
+query 在 terminal success
 前不会发送 partial body，并执行 8 个 active request、100 ms queue、10 秒 total timeout、
 Tick 50,000/Kline 10,000 rows、32 MiB response 和 512 MiB daemon-global buffer 限制。
 identity JSON 成功响应带 strong ETag，支持 `If-None-Match`/304。所有响应默认发送 wildcard CORS
 header；已知 history path 的 `OPTIONS` 无需 identity，实际 `GET` 仍要求受控网关注入的 identity
 header。identity header 必须为 `X-*`，且不会被列入 CORS allow-headers；网关必须剥离客户端同名
 header 后再注入可信值。CORS 不启用 credential，生产网关仍应限制可达范围。
-缺少或无效 `CURRENT` 只让 history 返回 typed `503 history_unavailable`，不改变 market readiness。
+live cache 缺少 operation lock 或 published 模式缺少/无效 `CURRENT` 时，history 返回 typed
+`503 history_unavailable`，不改变 market readiness。
 
 Linux Docker Compose 部署模板位于
-[`deploy/docker/`](../../deploy/docker/README.md)。模板使用 host networking、只读 published-root
-bind mount 和独立 one-shot publisher profile；它不改变同进程 history failure domain。
+[`deploy/docker/`](../../deploy/docker/README.md)。模板默认把正在填充的 cache root 只读 bind mount 给
+relay；publisher profile 仅作为旧 snapshot 流程的回滚兼容工具。
 
 关闭默认 feature 时不编译 history multi-thread runtime；reader-only 构建可用：
 

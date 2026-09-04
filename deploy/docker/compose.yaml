@@ -12,7 +12,7 @@ services:
     env_file:
       - ${TQSDK_RELAY_ENV_FILE:-./relay.env}
     environment:
-      TQSDK_RELAY_HISTORY_ROOT: /var/lib/tqsdk/history-published
+      TQSDK_RELAY_HISTORY_CACHE_DIR: /var/lib/tqsdk/history-cache
       TZ: ${TQSDK_TIMEZONE:-Asia/Shanghai}
       # Compose inherits these only from its launch environment; credentials
       # are intentionally not kept in relay.env or the repository.
@@ -23,8 +23,8 @@ services:
       - /tmp:size=64m,mode=1777,noexec,nosuid
     volumes:
       - type: bind
-        source: ${TQSDK_HISTORY_ROOT:?set TQSDK_HISTORY_ROOT in deploy/docker/.env}
-        target: /var/lib/tqsdk/history-published
+        source: ${TQSDK_LIVE_CACHE_ROOT:?set TQSDK_LIVE_CACHE_ROOT in deploy/docker/.env}
+        target: /var/lib/tqsdk/history-cache
         read_only: true
         bind:
           create_host_path: false

@@ -22,9 +22,11 @@ use tokio::sync::oneshot;
 use tqsdk_relay::{RelayError, RelayResult};
 
 use self::affinity::{CpuAffinityConfig, HistoryAffinity};
+use self::snapshot::HistorySource;
 
 const ENV_HISTORY_LISTEN: &str = "TQSDK_RELAY_HISTORY_LISTEN";
 const ENV_HISTORY_ROOT: &str = "TQSDK_RELAY_HISTORY_ROOT";
+const ENV_HISTORY_CACHE_DIR: &str = "TQSDK_RELAY_HISTORY_CACHE_DIR";
 const ENV_HISTORY_IDENTITY_HEADER: &str = "TQSDK_RELAY_HISTORY_IDENTITY_HEADER";
 const DEFAULT_RUNTIME_THREADS: usize = 2;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -33,7 +35,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HistoryConfig {
     listen: SocketAddr,
-    root: PathBuf,
+    source: HistorySource,
     identity_header: String,
     runtime_threads: usize,
     affinity: Option<CpuAffinityConfig>,
@@ -48,25 +50,42 @@ impl HistoryConfig {
     fn from_env_values(mut get: impl FnMut(&str) -> Option<String>) -> RelayResult<Option<Self>> {
         let listen = get(ENV_HISTORY_LISTEN);
         let root = get(ENV_HISTORY_ROOT);
+        let cache_dir = get(ENV_HISTORY_CACHE_DIR);
         let identity_header = get(ENV_HISTORY_IDENTITY_HEADER);
         let affinity = CpuAffinityConfig::from_env_values(&mut get)?;
 
-        match (listen, root, identity_header, affinity) {
-            (None, None, None, None) => Ok(None),
-            (Some(listen), Some(root), Some(identity_header), affinity) => Self::new_with_affinity(
-                listen.parse().map_err(|error| {
-                    RelayError::invalid_config(format!(
-                        "{ENV_HISTORY_LISTEN} must be a socket address: {error}"
-                    ))
-                })?,
-                PathBuf::from(root),
-                identity_header,
-                DEFAULT_RUNTIME_THREADS,
-                affinity,
-            )
-            .map(Some),
+        match (listen, root, cache_dir, identity_header, affinity) {
+            (None, None, None, None, None) => Ok(None),
+            (Some(listen), Some(root), None, Some(identity_header), affinity) => {
+                Self::new_with_affinity(
+                    listen.parse().map_err(|error| {
+                        RelayError::invalid_config(format!(
+                            "{ENV_HISTORY_LISTEN} must be a socket address: {error}"
+                        ))
+                    })?,
+                    PathBuf::from(root),
+                    identity_header,
+                    DEFAULT_RUNTIME_THREADS,
+                    affinity,
+                )
+                .map(Some)
+            }
+            (Some(listen), None, Some(cache_dir), Some(identity_header), affinity) => {
+                Self::new_live_with_affinity(
+                    listen.parse().map_err(|error| {
+                        RelayError::invalid_config(format!(
+                            "{ENV_HISTORY_LISTEN} must be a socket address: {error}"
+                        ))
+                    })?,
+                    PathBuf::from(cache_dir),
+                    identity_header,
+                    DEFAULT_RUNTIME_THREADS,
+                    affinity,
+                )
+                .map(Some)
+            }
             _ => Err(RelayError::invalid_config(
-                "history listener requires TQSDK_RELAY_HISTORY_LISTEN, TQSDK_RELAY_HISTORY_ROOT, and TQSDK_RELAY_HISTORY_IDENTITY_HEADER together",
+                "history listener requires TQSDK_RELAY_HISTORY_LISTEN, TQSDK_RELAY_HISTORY_IDENTITY_HEADER, and exactly one of TQSDK_RELAY_HISTORY_ROOT or TQSDK_RELAY_HISTORY_CACHE_DIR",
             )),
         }
     }
@@ -88,9 +107,41 @@ impl HistoryConfig {
         runtime_threads: usize,
         affinity: Option<CpuAffinityConfig>,
     ) -> RelayResult<Self> {
+        Self::from_source_with_affinity(
+            listen,
+            HistorySource::Published(root),
+            identity_header,
+            runtime_threads,
+            affinity,
+        )
+    }
+
+    fn new_live_with_affinity(
+        listen: SocketAddr,
+        cache_dir: PathBuf,
+        identity_header: String,
+        runtime_threads: usize,
+        affinity: Option<CpuAffinityConfig>,
+    ) -> RelayResult<Self> {
+        Self::from_source_with_affinity(
+            listen,
+            HistorySource::Live(cache_dir),
+            identity_header,
+            runtime_threads,
+            affinity,
+        )
+    }
+
+    fn from_source_with_affinity(
+        listen: SocketAddr,
+        source: HistorySource,
+        identity_header: String,
+        runtime_threads: usize,
+        affinity: Option<CpuAffinityConfig>,
+    ) -> RelayResult<Self> {
         let config = Self {
             listen,
-            root,
+            source,
             identity_header,
             runtime_threads,
             affinity,
@@ -100,12 +151,13 @@ impl HistoryConfig {
     }
 
     fn validate(&self) -> RelayResult<()> {
-        if self.root.as_os_str().is_empty() || !self.root.is_absolute() {
+        let source_path = self.source.path();
+        if source_path.as_os_str().is_empty() || !source_path.is_absolute() {
             return Err(RelayError::invalid_config(
-                "TQSDK_RELAY_HISTORY_ROOT must be a non-empty absolute path",
+                "history source must be a non-empty absolute path",
             ));
         }
-        validate_history_root(self.root.as_path())?;
+        validate_history_root(source_path.as_path())?;
         if !is_trusted_identity_header(&self.identity_header) {
             return Err(RelayError::invalid_config(
                 "TQSDK_RELAY_HISTORY_IDENTITY_HEADER must be a non-sensitive ASCII X-* HTTP token",
@@ -349,8 +401,8 @@ fn run_listener_thread(
                 return;
             }
         };
-        let snapshots = Arc::new(snapshot::SnapshotSlot::new_with_affinity(
-            config.root,
+        let snapshots = Arc::new(snapshot::SnapshotSlot::from_source_with_affinity(
+            config.source,
             affinity,
         ));
         snapshots.attach_observability(runtime_observability.clone());
@@ -447,7 +499,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use super::{HistoryConfig, is_trusted_identity_header, spawn};
+    use super::{HistoryConfig, HistorySource, is_trusted_identity_header, spawn};
     use tqsdk_relay::{RelayEngine, RelayError};
 
     fn loopback() -> SocketAddr {
@@ -459,6 +511,31 @@ mod tests {
         assert_eq!(HistoryConfig::from_env_values(|_| None).unwrap(), None);
         let error = HistoryConfig::from_env_values(|key| {
             (key == "TQSDK_RELAY_HISTORY_LISTEN").then(|| "127.0.0.1:0".to_string())
+        })
+        .unwrap_err();
+        assert!(matches!(error, RelayError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn history_config_accepts_live_cache_and_rejects_ambiguous_sources() {
+        let cache_dir = std::env::temp_dir();
+        let config = HistoryConfig::from_env_values(|key| match key {
+            "TQSDK_RELAY_HISTORY_LISTEN" => Some("127.0.0.1:0".to_string()),
+            "TQSDK_RELAY_HISTORY_CACHE_DIR" => Some(cache_dir.to_string_lossy().into_owned()),
+            "TQSDK_RELAY_HISTORY_IDENTITY_HEADER" => Some("X-Trusted-Identity".to_string()),
+            _ => None,
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(config.source, HistorySource::Live(cache_dir));
+
+        let error = HistoryConfig::from_env_values(|key| match key {
+            "TQSDK_RELAY_HISTORY_LISTEN" => Some("127.0.0.1:0".to_string()),
+            "TQSDK_RELAY_HISTORY_ROOT" | "TQSDK_RELAY_HISTORY_CACHE_DIR" => {
+                Some(std::env::temp_dir().to_string_lossy().into_owned())
+            }
+            "TQSDK_RELAY_HISTORY_IDENTITY_HEADER" => Some("X-Trusted-Identity".to_string()),
+            _ => None,
         })
         .unwrap_err();
         assert!(matches!(error, RelayError::InvalidConfig(_)));

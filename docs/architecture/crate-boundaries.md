@@ -454,7 +454,8 @@ projection 仅保留给 V4 验证与迁移，不参与 normal V5 write path。�
 - 新 K 线订阅可用 relay 内存 tick ring 回放已闭合的合成 K 线；这不代表远端 K 线回填
   或跨重启持久化已进入 V1
 - 可选的本地 CacheOnly history HTTP sibling：它使用独立 listener/runtime/thread/CPU/resource
-  路径，只读取 `tqsdk-cache` 已发布并由 `tqsdk-data` 验证的 immutable snapshot；它不进入
+  路径，默认通过 `tqsdk-data` 的 prepared live-cache seam 只读观察 writable cache 的最新已提交
+  coverage，也保留已发布 immutable snapshot 兼容 adapter；它不进入
   `RelayEngine` / `RelayServer`，不获取 market mutex，不改变 market readiness
 
 ### 不应承担的职责

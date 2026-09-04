@@ -390,6 +390,7 @@ pub(crate) struct MinuteScanSpec {
     pub(crate) symbol: String,
     pub(crate) range: (i64, i64),
     pub(crate) snapshot: MinuteKlineCacheSnapshot,
+    pub(crate) provisional_as_of_ns: Option<i64>,
     pub(crate) target_bytes: usize,
     pub(crate) cancellation: Arc<AtomicBool>,
     pub(crate) permits: Arc<Semaphore>,
@@ -557,6 +558,7 @@ fn spawn_minute_scan(spec: MinuteScanSpec) -> mpsc::Receiver<StoreScanMessage> {
         symbol,
         range,
         snapshot,
+        provisional_as_of_ns,
         target_bytes,
         cancellation,
         permits,
@@ -611,7 +613,13 @@ fn spawn_minute_scan(spec: MinuteScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 },
             );
             let cache = MinuteKlineCache::open_read_only(&cache_dir);
-            let mut reader = match cache.open_reader(symbol, range.0, range.1, &snapshot) {
+            let mut reader = match cache.open_history_query_reader(
+                symbol,
+                range.0,
+                range.1,
+                &snapshot,
+                provisional_as_of_ns,
+            ) {
                 Ok(reader) => reader,
                 Err(error) => {
                     let _ = blocking_sender.blocking_send(StoreScanMessage::Failed(

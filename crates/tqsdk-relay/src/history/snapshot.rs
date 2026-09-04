@@ -3,14 +3,17 @@
 //! This type only opens `tqsdk-data`'s public snapshot seam. It neither reads
 //! cache files directly nor reaches the relay market runtime.
 
-use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use tokio::sync::{Mutex, oneshot};
-use tqsdk_data::{BacktestHistorySnapshot, BacktestHistorySnapshotError};
+use tqsdk_data::{
+    BacktestHistoryInspection, BacktestHistoryLiveCache, BacktestHistoryRequest,
+    BacktestHistoryRequestReport, BacktestHistorySnapshot, BacktestHistorySnapshotError,
+    BacktestHistorySnapshotQueryResources, BacktestHistorySnapshotRun,
+};
 use tqsdk_relay::{RelayError, RelayResult};
 
 use super::affinity::HistoryAffinity;
@@ -18,22 +21,51 @@ use super::observability::HistoryObservability;
 
 const RELOAD_INTERVAL: Duration = Duration::from_secs(5);
 
-/// One immutable generation and its generation-local integrity signal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum HistorySource {
+    Published(PathBuf),
+    Live(PathBuf),
+}
+
+impl HistorySource {
+    pub(super) fn path(&self) -> &PathBuf {
+        match self {
+            Self::Published(path) | Self::Live(path) => path,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum HistoryReadView {
+    Published(Arc<BacktestHistorySnapshot>),
+    Live(Arc<BacktestHistoryLiveCache>),
+}
+
+impl HistoryReadView {
+    fn view_id(&self) -> &str {
+        match self {
+            Self::Published(snapshot) => snapshot.snapshot_id(),
+            Self::Live(_) => "live",
+        }
+    }
+}
+
+/// One relay-local history read view and its source-specific health signal.
 ///
 /// Clones retain both the `tqsdk-data` lease pin and the same one-shot health
 /// flag, so an in-flight request cannot report an integrity failure against a
 /// generation loaded later by the slot.
 #[derive(Clone, Debug)]
 pub(super) struct PinnedSnapshot {
-    snapshot: Arc<BacktestHistorySnapshot>,
+    view: HistoryReadView,
     unhealthy: Arc<AtomicBool>,
     observability: Option<Arc<HistoryObservability>>,
 }
 
 impl PinnedSnapshot {
-    fn new(snapshot: Arc<BacktestHistorySnapshot>) -> Self {
+    fn new(view: HistoryReadView) -> Self {
         Self {
-            snapshot,
+            view,
             unhealthy: Arc::new(AtomicBool::new(false)),
             observability: None,
         }
@@ -41,6 +73,9 @@ impl PinnedSnapshot {
 
     /// Marks this exact pinned generation unhealthy exactly once.
     pub(super) fn mark_corrupt(&self) -> bool {
+        if matches!(self.view, HistoryReadView::Live(_)) {
+            return true;
+        }
         let won = self
             .unhealthy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -56,24 +91,66 @@ impl PinnedSnapshot {
     /// Whether this exact pinned generation has an integrity failure.
     #[must_use]
     pub(super) fn is_unhealthy(&self) -> bool {
-        self.unhealthy.load(Ordering::Acquire)
+        matches!(self.view, HistoryReadView::Published(_)) && self.unhealthy.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub(super) fn snapshot_id(&self) -> &str {
+        self.view.view_id()
+    }
+
+    #[must_use]
+    pub(super) const fn source_mode(&self) -> &'static str {
+        match self.view {
+            HistoryReadView::Published(_) => "published",
+            HistoryReadView::Live(_) => "live-cache",
+        }
+    }
+
+    #[must_use]
+    pub(super) fn metadata_snapshot_hash(&self, report: &BacktestHistoryRequestReport) -> String {
+        match &self.view {
+            HistoryReadView::Published(snapshot) => snapshot.metadata_snapshot_hash().to_string(),
+            HistoryReadView::Live(_) => report.snapshot_hash.clone(),
+        }
+    }
+
+    pub(super) async fn inspect(
+        &self,
+        request: BacktestHistoryRequest,
+    ) -> Result<BacktestHistoryInspection, BacktestHistorySnapshotError> {
+        match &self.view {
+            HistoryReadView::Published(snapshot) => snapshot.inspect(request).await,
+            HistoryReadView::Live(cache) => cache
+                .prepare(request)
+                .await
+                .map(|prepared| prepared.inspection().clone()),
+        }
+    }
+
+    pub(super) async fn query_with_resources(
+        &self,
+        request: BacktestHistoryRequest,
+        resources: BacktestHistorySnapshotQueryResources,
+    ) -> Result<BacktestHistorySnapshotRun, BacktestHistorySnapshotError> {
+        match &self.view {
+            HistoryReadView::Published(snapshot) => {
+                snapshot.query_with_resources(request, resources).await
+            }
+            HistoryReadView::Live(cache) => cache
+                .prepare(request)
+                .await?
+                .query_with_resources(resources),
+        }
     }
 }
 
-impl Deref for PinnedSnapshot {
-    type Target = BacktestHistorySnapshot;
-
-    fn deref(&self) -> &Self::Target {
-        self.snapshot.as_ref()
-    }
-}
-
-/// One process-local view of the generation selected by `CURRENT`.
+/// One process-local published or live-cache read view.
 ///
-/// The history root is validated as absolute before the history runtime starts.
-/// A failed reload deliberately leaves the previous immutable [`Arc`] intact.
+/// The source root is validated as absolute before the history runtime starts.
+/// A failed open/reload deliberately leaves the previous [`Arc`] intact.
 pub(super) struct SnapshotSlot {
-    root: PathBuf,
+    source: HistorySource,
     affinity: Option<HistoryAffinity>,
     snapshot: RwLock<Option<PinnedSnapshot>>,
     observability: RwLock<Option<Arc<HistoryObservability>>>,
@@ -89,11 +166,23 @@ impl SnapshotSlot {
         Self::new_with_affinity(root, None)
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(super) fn new_with_affinity(root: PathBuf, affinity: Option<HistoryAffinity>) -> Self {
-        assert!(root.is_absolute(), "history snapshot root must be absolute");
+        Self::from_source_with_affinity(HistorySource::Published(root), affinity)
+    }
+
+    #[must_use]
+    pub(super) fn from_source_with_affinity(
+        source: HistorySource,
+        affinity: Option<HistoryAffinity>,
+    ) -> Self {
+        assert!(
+            source.path().is_absolute(),
+            "history source path must be absolute"
+        );
         Self {
-            root,
+            source,
             affinity,
             snapshot: RwLock::new(None),
             observability: RwLock::new(None),
@@ -142,7 +231,7 @@ impl SnapshotSlot {
             observability.note_reload_attempt();
         }
         let _reload_guard = self.reload_gate.lock().await;
-        let root = self.root.clone();
+        let source = self.source.clone();
         let affinity = self.affinity.clone();
         #[cfg(test)]
         let test_worker_binder = self.test_worker_binder.clone();
@@ -161,7 +250,15 @@ impl SnapshotSlot {
                     .bind_current()
                     .map_err(SnapshotWorkerError::Affinity)?;
             }
-            BacktestHistorySnapshot::open(root).map_err(SnapshotWorkerError::Open)
+            match source {
+                HistorySource::Published(root) => BacktestHistorySnapshot::open(root)
+                    .map(Arc::new)
+                    .map(HistoryReadView::Published),
+                HistorySource::Live(cache_dir) => BacktestHistoryLiveCache::open(cache_dir)
+                    .map(Arc::new)
+                    .map(HistoryReadView::Live),
+            }
+            .map_err(SnapshotWorkerError::Open)
         })
         .await
         .map_err(|error| {
@@ -170,7 +267,6 @@ impl SnapshotSlot {
             }
             RelayError::Internal(format!("history snapshot reload task failed: {error}"))
         })?
-        .map(Arc::new)
         .map_err(|error| match error {
             SnapshotWorkerError::Affinity(error) => {
                 if let Some(observability) = &observability {
@@ -191,7 +287,7 @@ impl SnapshotSlot {
             .write()
             .map_err(|_| RelayError::Internal("history snapshot slot lock poisoned".to_string()))?;
         if let Some(current) = current.as_ref()
-            && current.snapshot_id() == opened.snapshot_id()
+            && current.snapshot_id() == opened.view_id()
         {
             if let Some(observability) = &observability {
                 observability.note_reload_unchanged(current.snapshot_id());
@@ -207,11 +303,16 @@ impl SnapshotSlot {
         Ok(pinned)
     }
 
-    /// Reloads every five seconds until the isolated history runtime shuts down.
+    /// Reloads a published pointer every five seconds until shutdown.
     ///
-    /// Individual failures are intentionally retained as the last-good
-    /// generation continues serving requests. The next interval retries `CURRENT`.
+    /// Individual failures retain the last-good generation while the next
+    /// interval retries `CURRENT`. A live view reads committed files per
+    /// request and therefore only awaits shutdown.
     pub(super) async fn reload_loop(self: Arc<Self>, mut shutdown: oneshot::Receiver<()>) {
+        if matches!(&self.source, HistorySource::Live(_)) {
+            let _ = shutdown.await;
+            return;
+        }
         let mut interval = tokio::time::interval_at(
             tokio::time::Instant::now() + RELOAD_INTERVAL,
             RELOAD_INTERVAL,
@@ -232,7 +333,7 @@ impl std::fmt::Debug for SnapshotSlot {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SnapshotSlot")
-            .field("root", &self.root)
+            .field("source", &self.source)
             .field("affinity", &self.affinity)
             .finish_non_exhaustive()
     }

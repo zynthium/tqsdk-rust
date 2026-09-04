@@ -331,14 +331,13 @@ struct FillArgs {
     /// Explicitly purge only stale canonical-minute month partitions before remote fill retries.
     #[arg(long)]
     repair_stale: bool,
-    /// Allow a current-day tick fill. Unsupported for --kind minute.
+    /// Include the current trading day as an explicit provisional Tick or minute fill.
     #[arg(
         long,
         conflicts_with_all = ["last_trading_days", "require_final"]
     )]
     include_open_day: bool,
-    /// For tick fills, reject the currently open trading day and require final coverage.
-    /// Minute fills are always final-only.
+    /// Reject the currently open trading day and require final coverage.
     #[arg(long)]
     require_final: bool,
     /// Wait this many seconds for an existing fill owner instead of failing immediately.
@@ -585,6 +584,7 @@ struct ProvisionalOpenDayWindow {
 }
 
 const OPEN_DAY_HORIZON_LAG_NS: i64 = 5 * 1_000_000_000;
+const MINUTE_SESSION_CLOSE_GRACE_NS: i64 = 5 * 1_000_000_000;
 
 impl CalendarResolution {
     fn report_calendar(&self) -> FillReportCalendar {
@@ -776,7 +776,7 @@ async fn resolve_fill_window(
         }
     }
     resolved_fill_window(
-        window,
+        window.clone(),
         CalendarResolution {
             mode: args.calendar,
             snapshot,
@@ -1825,7 +1825,8 @@ async fn fill(
                 "legacy --universe-plan cannot be combined with --universe-file".to_string(),
             ));
         }
-        return fill_historical_universe_plan(cache_dir, kind, market, args, plan_path, None).await;
+        return fill_historical_universe_plan(cache_dir, kind, market, args, plan_path, None, None)
+            .await;
     }
     let mut args = args;
     prepare_current_fill_universe(&mut args, market).await?;
@@ -1855,14 +1856,15 @@ async fn fill_provider_history_universe(
             "historical --universe supports only --market futures".to_string(),
         ));
     }
-    if !args.symbols.symbols.is_empty()
-        || args.repair_stale
-        || args.include_open_day
-        || args.require_final
-        || args.daily_slices
-    {
+    if !args.symbols.symbols.is_empty() || args.repair_stale || args.daily_slices {
         return Err(CliError::Usage(
-            "historical --universe cannot be combined with explicit symbols, repair, open-day, require-final, or slicing flags"
+            "historical --universe cannot be combined with explicit symbols, repair, or slicing flags"
+                .to_string(),
+        ));
+    }
+    if args.include_open_day && kind != CacheKind::Minute {
+        return Err(CliError::Usage(
+            "historical --universe --include-open-day is supported only for --kind minute"
                 .to_string(),
         ));
     }
@@ -1873,8 +1875,15 @@ async fn fill_provider_history_universe(
         ));
     }
     let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
-    let resolved =
-        resolve_fill_window(&canonical_cache_dir, &args.days, args.dry_run, false).await?;
+    let allow_open_day =
+        kind == CacheKind::Minute && (args.include_open_day || !args.require_final);
+    let resolved = resolve_fill_window(
+        &canonical_cache_dir,
+        &args.days,
+        args.dry_run,
+        allow_open_day,
+    )
+    .await?;
     let user = std::env::var("TQ_AUTH_USER").map_err(|_| {
         CliError::Usage("historical --universe requires TQ_AUTH_USER and TQ_AUTH_PASS".to_string())
     })?;
@@ -2893,7 +2902,9 @@ async fn bootstrap_provider_history_and_fill(
                 &semantic,
                 &spec,
                 resolved.window.start_ns,
-                resolved.window.end_ns,
+                resolved
+                    .provisional
+                    .map_or(resolved.window.end_ns, |provisional| provisional.as_of_ns),
                 budget,
             )?;
             CompiledProviderHistoricalPlan::Legacy(Box::new(resolution.plan))
@@ -2907,7 +2918,9 @@ async fn bootstrap_provider_history_and_fill(
                 spec,
                 input.expanded_symbols(),
                 resolved.window.start_ns,
-                resolved.window.end_ns,
+                resolved
+                    .provisional
+                    .map_or(resolved.window.end_ns, |provisional| provisional.as_of_ns),
                 budget,
                 None,
             )
@@ -2977,6 +2990,7 @@ async fn bootstrap_provider_history_and_fill(
         args,
         plan_path,
         signal_context,
+        resolved.provisional,
     )
     .await?;
     if let Some(object) = outcome.value.as_object_mut() {
@@ -3154,6 +3168,7 @@ async fn fill_historical_universe_plan(
     args: FillArgs,
     plan_path: PathBuf,
     signal_context: Option<(BacktestHistoryFillCancellation, tokio::task::JoinHandle<()>)>,
+    provisional: Option<ProvisionalOpenDayWindow>,
 ) -> Result<CommandOutcome, CliError> {
     let (_, preflight_cache_dir) = open_read_only_cache(cache_dir)?;
     let preflight_store = tqsdk_data::HistoricalUniverseArtifactStore::new(preflight_cache_dir);
@@ -3162,6 +3177,10 @@ async fn fill_historical_universe_plan(
         &plan_path,
         historical_data_kind(kind),
         args.allow_legacy_universe_plan,
+    )?;
+    let requested_days = TradingDayWindow::from_days(
+        backtest_tick_trading_day_for_timestamp_ns(plan.start_ns)?,
+        backtest_tick_trading_day_for_timestamp_ns(plan.end_ns.saturating_sub(1))?,
     )?;
 
     if !matches!(market, MarketKind::Futures) {
@@ -3175,13 +3194,17 @@ async fn fill_historical_universe_plan(
         || args.days.last_trading_days.is_some()
         || !matches!(args.days.calendar, CalendarMode::Auto)
         || args.days.refresh_calendar
-        || args.include_open_day
-        || args.require_final
         || args.repair_stale
         || args.daily_slices
     {
         return Err(CliError::Usage(
-            "legacy --universe-plan supplies exact source ranges; omit symbol, trading-day, calendar, open-day, repair, and slicing flags"
+            "legacy --universe-plan supplies exact source ranges; omit symbol, trading-day, calendar, repair, and slicing flags"
+                .to_string(),
+        ));
+    }
+    if args.include_open_day && (kind != CacheKind::Minute || provisional.is_none()) {
+        return Err(CliError::Usage(
+            "historical plan open-day fill requires a resolved minute provisional window"
                 .to_string(),
         ));
     }
@@ -3200,6 +3223,19 @@ async fn fill_historical_universe_plan(
         ));
     }
     let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
+    let prefill_session_close_finalized_symbols = if kind == CacheKind::Minute && !args.dry_run {
+        let ranges = targets
+            .iter()
+            .map(|target| (target.symbol.clone(), target.start_ns, target.end_ns))
+            .collect::<Vec<_>>();
+        finalize_pending_closed_minute_ranges(
+            canonical_cache_dir.as_path(),
+            ranges.as_slice(),
+            current_time_ns()?,
+        )?
+    } else {
+        0
+    };
     let mut builder =
         BacktestHistoryClient::builder(canonical_cache_dir.clone()).policy(if args.dry_run {
             BacktestHistoryPolicy::CacheOnly
@@ -3222,13 +3258,21 @@ async fn fill_historical_universe_plan(
                     target.start_ns,
                     target.end_ns,
                 ),
-                CacheKind::Minute => BacktestHistoryRequest::kline(
-                    request_id,
-                    &target.symbol,
-                    Duration::from_secs(60),
-                    target.start_ns,
-                    target.end_ns,
-                ),
+                CacheKind::Minute => {
+                    let request = BacktestHistoryRequest::kline(
+                        request_id,
+                        &target.symbol,
+                        Duration::from_secs(60),
+                        target.start_ns,
+                        target.end_ns,
+                    );
+                    match provisional {
+                        Some(provisional) if target.end_ns > provisional.day_start_ns => {
+                            request.with_provisional_as_of_ns(provisional.as_of_ns)
+                        }
+                        _ => request,
+                    }
+                }
                 CacheKind::Daily => BacktestHistoryRequest::kline(
                     request_id,
                     &target.symbol,
@@ -3281,6 +3325,7 @@ async fn fill_historical_universe_plan(
                     "cache_dir": canonical_cache_dir,
                     "status": "failed",
                     "complete": false,
+                    "requested_days": requested_days.clone(),
                     "legacy_unproven": legacy_unproven,
                     "error": error.to_string(),
                     "universe_plan": {
@@ -3293,6 +3338,22 @@ async fn fill_historical_universe_plan(
             }
             return Err(error.into());
         }
+    };
+    let (session_close_finalized_symbols, session_close_final) = match (kind, provisional) {
+        (CacheKind::Minute, Some(provisional)) if !args.dry_run => {
+            let ranges = targets
+                .iter()
+                .map(|target| (target.symbol.clone(), target.start_ns, target.end_ns))
+                .collect::<Vec<_>>();
+            finalize_closed_minute_target_ranges(
+                canonical_cache_dir.as_path(),
+                ranges.as_slice(),
+                provisional,
+                current_time_ns()?,
+            )?
+        }
+        (_, None) => (0, true),
+        _ => (0, false),
     };
     let (status, terminal, exit_code) = match report.status() {
         BacktestHistoryFillTerminalStatus::Complete => {
@@ -3352,9 +3413,14 @@ async fn fill_historical_universe_plan(
         "dry_run": args.dry_run,
         "status": status,
         "complete": exit_code == 0,
+        "final_complete": exit_code == 0 && session_close_final,
+        "provisional_as_of_ns": provisional.map(|window| window.as_of_ns),
+        "session_close_finalized_symbols": prefill_session_close_finalized_symbols
+            .saturating_add(session_close_finalized_symbols),
         "legacy_unproven": legacy_unproven,
         "remote_used": report.symbols().iter().any(|item| item.remote_used),
         "rows_written": report.rows_written(),
+        "requested_days": requested_days,
         "plan_sha256": plan.plan_sha256,
         "symbols_warmed": requests.len(),
         "universe_timeline": universe_timeline,
@@ -3647,15 +3713,10 @@ async fn fill_minute(
     args: FillArgs,
 ) -> Result<CommandOutcome, CliError> {
     let config = fill_config(&args);
+    let allow_open_day = args.include_open_day || !args.require_final;
     if args.repair_stale && args.dry_run {
         return Err(CliError::Usage(
             "--repair-stale cannot be used with --dry-run because dry-run never removes cache partitions"
-                .to_string(),
-        ));
-    }
-    if args.include_open_day {
-        return Err(CliError::Usage(
-            "--include-open-day is not supported for --kind minute; minute coverage is final-only"
                 .to_string(),
         ));
     }
@@ -3677,16 +3738,28 @@ async fn fill_minute(
     let reporter = progress_session.observer();
     reporter.planning("resolving canonical-minute fill window and universe");
     let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
-    let mut resolved =
-        resolve_fill_window(&canonical_cache_dir, &args.days, args.dry_run, false).await?;
+    let mut resolved = resolve_fill_window(
+        &canonical_cache_dir,
+        &args.days,
+        args.dry_run,
+        allow_open_day,
+    )
+    .await?;
     persist_calendar_if_needed(
         canonical_cache_dir.as_path(),
         &mut resolved.calendar,
         args.dry_run,
     )?;
-    debug_assert!(resolved.provisional.is_none());
     let calendar_report = resolved.calendar.report_calendar();
     let window = resolved.window;
+    let operation_end_ns = resolved
+        .provisional
+        .map_or(window.end_ns, |provisional| provisional.as_of_ns);
+    if args.repair_stale && resolved.provisional.is_some() {
+        return Err(CliError::Usage(
+            "--repair-stale cannot be combined with provisional minute fill".to_string(),
+        ));
+    }
     let selector_symbols = explicit_symbols.clone();
     let symbols = resolve_minute_fill_symbols(explicit_symbols, universe.as_deref()).await?;
     let selector = FillSelectorReport {
@@ -3700,7 +3773,7 @@ async fn fill_minute(
             "coverage uses TQBN partition days; pass --calendar required for exchange-calendar totals",
         );
     }
-    reporter.set_scope(&symbols, (window.start_ns, window.end_ns));
+    reporter.set_scope(&symbols, (window.start_ns, operation_end_ns));
     if args.dry_run {
         if args.report.is_some() {
             return Err(CliError::Usage(
@@ -3716,12 +3789,12 @@ async fn fill_minute(
                     &canonical_cache_dir,
                     symbol.as_str(),
                     window.start_ns,
-                    window.end_ns,
+                    operation_end_ns,
                 )?;
-                cache.inspect(symbol, window.start_ns, window.end_ns, &snapshot)
+                cache.inspect(symbol, window.start_ns, operation_end_ns, &snapshot)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let report = minute_cache_only_report(
+        let mut report = minute_cache_only_report(
             canonical_cache_dir.as_path(),
             window.clone(),
             market,
@@ -3729,14 +3802,25 @@ async fn fill_minute(
             calendar_report,
             statuses,
         );
+        report.requested_range = (window.start_ns, operation_end_ns);
+        if let Some(provisional) = resolved.provisional {
+            let (complete_through_ns, complete) = minute_provisional_state(
+                canonical_cache_dir.as_path(),
+                &symbols,
+                window.start_ns,
+                provisional,
+            )?;
+            report = report.with_provisional(provisional.as_of_ns, complete_through_ns, complete);
+        }
+        let operation_complete = report.complete || report.provisional_complete;
         reporter.final_minute_report(&report);
         progress_session.finish(
-            if report.complete {
+            if operation_complete {
                 ProgressTerminalStatus::Complete
             } else {
                 ProgressTerminalStatus::Failed
             },
-            if report.complete {
+            if operation_complete {
                 "minute dry-run complete; local canonical-minute coverage verified"
             } else {
                 "minute dry-run found missing canonical-minute coverage"
@@ -3753,7 +3837,7 @@ async fn fill_minute(
                 "report_path": Value::Null,
                 "report": report,
             }),
-            exit_code: if report.complete { 0 } else { 1 },
+            exit_code: if operation_complete { 0 } else { 1 },
         });
     }
 
@@ -3761,6 +3845,17 @@ async fn fill_minute(
         reporter.planning(
             "checking explicitly requested stale canonical-minute partitions under remote-fill lock",
         );
+    }
+    if !args.repair_stale {
+        let pending_ranges = symbols
+            .iter()
+            .map(|symbol| (symbol.clone(), window.start_ns, operation_end_ns))
+            .collect::<Vec<_>>();
+        finalize_pending_closed_minute_ranges(
+            canonical_cache_dir.as_path(),
+            pending_ranges.as_slice(),
+            current_time_ns()?,
+        )?;
     }
     let report_path = args
         .report
@@ -3772,13 +3867,17 @@ async fn fill_minute(
     let progress_callback = reporter.clone();
     let telemetry_callback = reporter.clone();
     let mut builder = builder_with_market_environment_auth(market, false)?
-        .backtest(window.start_ns, window.end_ns)
+        .backtest(window.start_ns, operation_end_ns)
         .cache_dir(&canonical_cache_dir)?
         .remote_on_miss()
         .remote_fill_config(config)
         .remote_fill_cancellation(cancellation.clone())
         .on_remote_fill_progress(move |event| progress_callback.observe_progress(event))
         .on_remote_fill_telemetry(move |event| telemetry_callback.observe_telemetry(event));
+    if let Some(provisional) = resolved.provisional {
+        builder =
+            builder.provisional_open_day_fill(provisional.day_start_ns, provisional.as_of_ns)?;
+    }
     if args.repair_stale {
         builder = builder.repair_stale_minute_partitions();
     }
@@ -3820,7 +3919,7 @@ async fn fill_minute(
             exit_code: 130,
         });
     }
-    let warmup = match warmup {
+    let mut warmup = match warmup {
         Ok(warmup) => warmup,
         Err(error) => {
             let failed_report = UnifiedFillReport::from_planned_terminal(
@@ -3840,18 +3939,39 @@ async fn fill_minute(
             return Err(error.into());
         }
     };
+    if resolved.provisional.is_some() {
+        finalize_closed_minute_sessions(
+            canonical_cache_dir.as_path(),
+            &mut warmup,
+            window.start_ns,
+            operation_end_ns,
+            current_time_ns()?,
+        )?;
+    }
     let repaired_stale_partitions = warmup.stale_minute_partitions_repaired;
-    let report = MinuteFillReport::from_warmup(
+    let mut report = MinuteFillReport::from_warmup(
         &warmup,
         canonical_cache_dir.as_path(),
-        window,
+        window.clone(),
         market.as_str(),
         false,
     )
     .with_selector(selector)
     .with_calendar(calendar_report);
+    if let Some(provisional) = resolved.provisional {
+        let (complete_through_ns, complete) = minute_provisional_state(
+            canonical_cache_dir.as_path(),
+            &symbols,
+            window.start_ns,
+            provisional,
+        )?;
+        report = report.with_provisional(provisional.as_of_ns, complete_through_ns, complete);
+    }
+    let operation_complete = report.complete || report.provisional_complete;
     reporter.final_minute_report(&report);
-    let completion_summary = if report.complete {
+    let completion_summary = if report.provisional_complete {
+        "minute fill complete; closed ranges are final and open-day complete bars are provisional"
+    } else if report.complete {
         "minute fill complete; final canonical-minute coverage verified"
     } else {
         "minute fill completed with missing canonical-minute coverage"
@@ -3865,7 +3985,7 @@ async fn fill_minute(
         return Err(error.into());
     }
     progress_session.finish(
-        if report.complete {
+        if operation_complete {
             ProgressTerminalStatus::Complete
         } else {
             ProgressTerminalStatus::Failed
@@ -3884,7 +4004,7 @@ async fn fill_minute(
             "report_path": report_path,
             "report": report,
         }),
-        exit_code: if report.complete { 0 } else { 1 },
+        exit_code: if operation_complete { 0 } else { 1 },
     })
 }
 
@@ -3905,6 +4025,190 @@ fn minute_cache_snapshot_for_symbol(
         })
         .transpose()?
         .map_or_else(|| Ok(MinuteKlineCacheSnapshot::cst_v1()), Ok)
+}
+
+fn finalize_pending_closed_minute_ranges(
+    cache_dir: &Path,
+    ranges: &[(String, i64, i64)],
+    now_ns: i64,
+) -> Result<usize, CliError> {
+    let cache = MinuteKlineCache::open(cache_dir)?;
+    let mut finalized_symbols = BTreeSet::new();
+    let mut visited_symbols = BTreeSet::new();
+    for (symbol, start_ns, end_ns) in ranges {
+        if !visited_symbols.insert(symbol.clone()) {
+            continue;
+        }
+        let Some(metadata) = tqsdk_data::resolve_minute_cache_metadata_snapshot(
+            cache_dir,
+            symbol.as_str(),
+            *start_ns,
+            *end_ns,
+        )?
+        else {
+            continue;
+        };
+        let snapshot = MinuteKlineCacheSnapshot::new(
+            metadata.schema_version,
+            metadata.snapshot_hash.clone(),
+            metadata.session.snapshot_hash(),
+        )?;
+        if cache
+            .finalize_provisional_after_session_close(
+                symbol.as_str(),
+                &snapshot,
+                &metadata.session,
+                now_ns,
+                MINUTE_SESSION_CLOSE_GRACE_NS,
+            )?
+            .is_some()
+        {
+            finalized_symbols.insert(symbol.clone());
+        }
+    }
+    Ok(finalized_symbols.len())
+}
+
+fn finalize_closed_minute_sessions(
+    cache_dir: &Path,
+    warmup: &mut tqsdk::BacktestCacheWarmupReport,
+    range_start_ns: i64,
+    range_end_ns: i64,
+    now_ns: i64,
+) -> Result<usize, CliError> {
+    let cache = MinuteKlineCache::open(cache_dir)?;
+    let mut finalized = 0_usize;
+    for report in &mut warmup.minute_kline_symbols {
+        let Some(metadata) = tqsdk_data::resolve_minute_cache_metadata_snapshot(
+            cache_dir,
+            report.symbol.as_str(),
+            range_start_ns,
+            range_end_ns,
+        )?
+        else {
+            continue;
+        };
+        let snapshot = MinuteKlineCacheSnapshot::new(
+            metadata.schema_version,
+            metadata.snapshot_hash.clone(),
+            metadata.session.snapshot_hash(),
+        )?;
+        if cache
+            .finalize_provisional_after_session_close(
+                report.symbol.as_str(),
+                &snapshot,
+                &metadata.session,
+                now_ns,
+                MINUTE_SESSION_CLOSE_GRACE_NS,
+            )?
+            .is_some()
+        {
+            report.after = cache.inspect(
+                report.symbol.as_str(),
+                range_start_ns,
+                range_end_ns,
+                &snapshot,
+            )?;
+            finalized = finalized.saturating_add(1);
+        }
+    }
+    Ok(finalized)
+}
+
+fn finalize_closed_minute_target_ranges(
+    cache_dir: &Path,
+    ranges: &[(String, i64, i64)],
+    provisional: ProvisionalOpenDayWindow,
+    now_ns: i64,
+) -> Result<(usize, bool), CliError> {
+    let cache = MinuteKlineCache::open(cache_dir)?;
+    let mut finalized_symbols = BTreeSet::new();
+    let mut touched_open_range = false;
+    let mut all_final = true;
+    for (symbol, start_ns, end_ns) in ranges {
+        let open_start_ns = (*start_ns).max(provisional.day_start_ns);
+        let open_end_ns = (*end_ns).min(provisional.as_of_ns);
+        if open_start_ns >= open_end_ns {
+            continue;
+        }
+        touched_open_range = true;
+        let Some(metadata) = tqsdk_data::resolve_minute_cache_metadata_snapshot(
+            cache_dir,
+            symbol.as_str(),
+            open_start_ns,
+            open_end_ns,
+        )?
+        else {
+            all_final = false;
+            continue;
+        };
+        let snapshot = MinuteKlineCacheSnapshot::new(
+            metadata.schema_version,
+            metadata.snapshot_hash.clone(),
+            metadata.session.snapshot_hash(),
+        )?;
+        if cache
+            .finalize_provisional_after_session_close(
+                symbol.as_str(),
+                &snapshot,
+                &metadata.session,
+                now_ns,
+                MINUTE_SESSION_CLOSE_GRACE_NS,
+            )?
+            .is_some()
+        {
+            finalized_symbols.insert(symbol.clone());
+        }
+        if !cache
+            .coverage(symbol.as_str(), open_start_ns, open_end_ns, &snapshot)?
+            .is_complete()
+        {
+            all_final = false;
+        }
+    }
+    Ok((finalized_symbols.len(), !touched_open_range || all_final))
+}
+
+fn minute_provisional_state(
+    cache_dir: &Path,
+    symbols: &[String],
+    range_start_ns: i64,
+    provisional: ProvisionalOpenDayWindow,
+) -> Result<(Option<i64>, bool), CliError> {
+    let cache = MinuteKlineCache::open_read_only(cache_dir);
+    let mut complete_through_ns = None::<i64>;
+    let mut complete = !symbols.is_empty();
+    for symbol in symbols {
+        let snapshot = minute_cache_snapshot_for_symbol(
+            cache_dir,
+            symbol,
+            range_start_ns,
+            provisional.as_of_ns,
+        )?;
+        if range_start_ns < provisional.day_start_ns
+            && !cache
+                .coverage(symbol, range_start_ns, provisional.day_start_ns, &snapshot)?
+                .is_complete()
+        {
+            complete = false;
+        }
+        let checkpoint = cache.provisional_checkpoint(symbol, &snapshot)?;
+        match checkpoint {
+            Some(checkpoint)
+                if checkpoint.range_start_ns <= provisional.day_start_ns
+                    && checkpoint.range_end_ns >= provisional.as_of_ns
+                    && checkpoint.as_of_ns >= provisional.as_of_ns =>
+            {
+                complete_through_ns = Some(
+                    complete_through_ns.map_or(checkpoint.complete_through_ns, |current| {
+                        current.min(checkpoint.complete_through_ns)
+                    }),
+                );
+            }
+            _ => complete = false,
+        }
+    }
+    Ok((complete_through_ns, complete))
 }
 
 fn daily_cache_snapshot_for_symbol(
@@ -4004,6 +4308,9 @@ fn minute_cache_only_report(
         remote_used: false,
         rows_written: 0,
         complete,
+        provisional_as_of_ns: None,
+        provisional_complete_through_ns: None,
+        provisional_complete: false,
         dry_run: true,
     }
 }
@@ -6173,23 +6480,114 @@ mod tests {
     use super::{
         CacheKind, CalendarMode, Cli, Command, FillDaysArgs, MarketKind, MigrateArgs, ProgressMode,
         ProviderMembershipRefreshArgs, current_open_trading_day, fill_historical_universe_plan,
-        fill_was_interrupted, historical_universe_fill_targets,
-        isolated_provider_history_unavailable_after_ns, migrate, persist_calendar_if_needed,
-        provider_history_bootstrap_is_publishable, provider_history_unavailable_limit,
-        provider_membership_canary_fill_config, provider_membership_refresh_fill_config,
-        resolve_fill_window,
+        fill_was_interrupted, finalize_pending_closed_minute_ranges,
+        historical_universe_fill_targets, isolated_provider_history_unavailable_after_ns, migrate,
+        persist_calendar_if_needed, provider_history_bootstrap_is_publishable,
+        provider_history_unavailable_limit, provider_membership_canary_fill_config,
+        provider_membership_refresh_fill_config, resolve_fill_window,
     };
     use chrono::NaiveDate;
     use clap::Parser;
-    use tqsdk::advanced::core::Tick;
+    use tqsdk::advanced::core::{Kline, Tick};
     use tqsdk_cache::{
         TradingCalendarHolidaysSnapshot, TradingCalendarSnapshot,
         read_trading_calendar_holidays_snapshot, write_trading_calendar_holidays_snapshot,
         write_trading_calendar_snapshot,
     };
     use tqsdk_data::{
-        BacktestHistoryFillConfig, BacktestTickCache, TradingCalendarHolidays, TradingCalendarRow,
+        BACKTEST_HISTORY_METADATA_SCHEMA_VERSION, BacktestHistoryFillConfig,
+        BacktestHistoryMarketKind, BacktestHistoryMetadataCache, BacktestHistoryMetadataSnapshot,
+        BacktestHistoryPhysicalSegment, BacktestHistoryTradingDay, BacktestTickCache,
+        KlineSessionTemplate, KlineSessionWindow, MINUTE_KLINE_DURATION_NS, MinuteKlineCache,
+        MinuteKlineCacheSnapshot, TradingCalendarHolidays, TradingCalendarRow,
     };
+
+    #[test]
+    fn pending_observed_minute_sidecar_is_finalized_before_a_later_fill() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let cache_dir =
+            std::env::temp_dir().join(format!("tqsdk-cache-minute-pending-final-{nanos}"));
+        let symbol = "SHFE.rb2610";
+        let trading_day = NaiveDate::from_ymd_opt(2026, 7, 29).unwrap();
+        let day_range = tqsdk_data::backtest_tick_trading_day_range(trading_day).unwrap();
+        let close_ns = day_range.start_ns + 2 * MINUTE_KLINE_DURATION_NS;
+        let session = KlineSessionTemplate::new(
+            "session-v1",
+            vec![KlineSessionWindow::new(0, 2 * MINUTE_KLINE_DURATION_NS).unwrap()],
+        )
+        .unwrap();
+        let metadata = BacktestHistoryMetadataCache::open(&cache_dir)
+            .unwrap()
+            .store_snapshot(BacktestHistoryMetadataSnapshot {
+                schema_version: BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
+                market_kind: BacktestHistoryMarketKind::Futures,
+                logical_symbol: symbol.to_string(),
+                captured_at_ns: close_ns,
+                trading_days: vec![BacktestHistoryTradingDay {
+                    date: trading_day.to_string(),
+                    is_trading_day: true,
+                    start_ns: day_range.start_ns,
+                    end_ns: day_range.end_ns,
+                }],
+                session,
+                physical_segments: vec![BacktestHistoryPhysicalSegment {
+                    physical_symbol: symbol.to_string(),
+                    start_ns: day_range.start_ns,
+                    end_ns: day_range.end_ns,
+                }],
+                snapshot_hash: String::new(),
+            })
+            .unwrap();
+        let snapshot = MinuteKlineCacheSnapshot::new(
+            metadata.schema_version,
+            metadata.snapshot_hash,
+            metadata.session.snapshot_hash(),
+        )
+        .unwrap();
+        let cache = MinuteKlineCache::open(&cache_dir).unwrap();
+        cache
+            .store_provisional_range(
+                symbol,
+                day_range.start_ns,
+                close_ns,
+                close_ns,
+                &snapshot,
+                &[Kline {
+                    id: 1,
+                    datetime: day_range.start_ns,
+                    close: 10.0,
+                    ..Kline::default()
+                }],
+            )
+            .unwrap();
+
+        let ranges = vec![(symbol.to_string(), day_range.start_ns, day_range.end_ns)];
+        assert_eq!(
+            finalize_pending_closed_minute_ranges(
+                &cache_dir,
+                ranges.as_slice(),
+                close_ns + 5_000_000_000,
+            )
+            .unwrap(),
+            1
+        );
+        assert!(
+            cache
+                .coverage(symbol, day_range.start_ns, day_range.end_ns, &snapshot,)
+                .unwrap()
+                .is_complete()
+        );
+        assert_eq!(
+            finalize_pending_closed_minute_ranges(&cache_dir, ranges.as_slice(), day_range.end_ns,)
+                .unwrap(),
+            0
+        );
+
+        let _ = std::fs::remove_dir_all(cache_dir);
+    }
 
     #[test]
     fn successful_warmup_wins_a_late_shutdown_signal_race() {
@@ -6798,6 +7196,7 @@ mod tests {
             args,
             plan_path,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -6908,5 +7307,25 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn minute_fill_accepts_the_open_day_flag() {
+        let cli = Cli::try_parse_from([
+            "tqsdk-cache",
+            "--kind",
+            "minute",
+            "fill",
+            "--symbol",
+            "SHFE.au2608",
+            "--start-day",
+            "2026-07-24",
+            "--include-open-day",
+        ])
+        .unwrap();
+        let Command::Fill(args) = cli.command else {
+            panic!("expected fill command");
+        };
+        assert!(args.include_open_day);
     }
 }

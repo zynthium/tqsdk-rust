@@ -80,7 +80,7 @@ impl BacktestHistoryRequest {
         }
     }
 
-    /// Opts this Tick or sub-minute request into an explicit provisional view.
+    /// Opts this Tick or Kline request up to 60 seconds into an explicit provisional view.
     #[must_use]
     pub fn with_provisional_as_of_ns(mut self, as_of_ns: i64) -> Self {
         self.provisional_as_of_ns = Some(as_of_ns);

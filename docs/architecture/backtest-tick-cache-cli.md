@@ -144,6 +144,16 @@ cache 的唯一持久 K 线是同一官方接口返回的 native `1d` bar，不�
 成功前保留 rows，成功后才提交该 batch 的 final coverage；合法的零行窗口也可提交 final coverage。
 取消、超时、未确认结束或失败 batch 不得把未完成范围标记为 final。
 
+交互式 fill 的逐合约 `本轮接收` 在 streaming 阶段使用最新已接受源行 cursor，仅统计该 cursor
+之前已经完整结束的交易日；cursor 所在交易日不提前计入。`覆盖` 仍只读取成功 terminal 后提交的
+final coverage。tick 与 minute 共用该语义；失败或取消会清除本 batch 的 provisional received
+进度。每个 active batch 只保留一个单调 cursor，不按事件累积状态或日志。
+Tick/sub-minute source planning 将绑定 immutable metadata 中 `is_trading_day=false` 的工作日转换为
+metadata-proven empty ranges，并从物理 source slices 中扣除；周末不单独扣除，以保留归属于下一交易日的
+周五夜盘。该证明随 snapshot hash 参与请求计划，普通交易日的零行仍必须取得 server terminal。
+TTY/plain 的 rows rate 使用最近 60 秒滑动窗口；分子是跨 source slice 单调累计的已接受 rows，
+batch terminal 不得让该计数回退；plain 的输出频率不因此增加。
+
 tick fill 按 TQBN trading day 顺序消费每个 physical symbol 的缺口，并以 8192 rows 为短批写入；这限制
 长窗口的峰值内存和每行 fsync 开销。取消时已接受的短尾先 flush，但不提交本轮 final/provisional
 coverage。fill-only materialization 不再为了生成报告回读刚写入的 cache；`rows_written` 只统计本进程
@@ -213,7 +223,7 @@ block（连续合约会保留必要的 underlying / segment mapping）。这是 
 | `inventory` | 快速枚举日分区 | 快速枚举月文件 | 读取 fixed header 与 embedded logical symbol；不读 rows/checksum |
 | `inspect` | physical symbol coverage | logical symbol final-60s coverage | logical symbol native-1d final coverage |
 | `fill --dry-run` | CacheOnly 预检 | CacheOnly final coverage 预检 | CacheOnly final coverage 预检 |
-| `fill` | missing tick ranges；可显式 current-day provisional | official 60s final ranges | official native 1d final ranges；只请求缺口 |
+| `fill` | missing tick ranges；可显式 current-day provisional | official 60s final ranges；可显式 current-day provisional sidecar | official native 1d final ranges；只请求缺口 |
 | `verify` | report/window 绑定，选配 tick replay | report/window 绑定，选配 minute rows | report/window 绑定，选配 native-1d rows |
 | `doctor` | 完整解码 TQBN | 完整解码 `.tqmk` | 完整解码 `.tqdk` 并校验 checksum/rows |
 | `purge` | 删除相交 TQBN trading-day partitions | 删除相交整月分区 | 删除整个 logical-symbol 文件；拒绝日期参数 |
@@ -232,8 +242,14 @@ TQBN trading day 时写 non-final provisional checkpoint；`--require-final` 会
 `--last-trading-days` 只选择已结束日。checkpoint 不进入 normal coverage/cache-hit，最终 closed-day
 reconcile 才提交 final coverage。
 
-minute 与 daily fill 没有 provisional 语义：当前或未来 trading day 一律不能 claim final，因而被拒绝；
-`--include-open-day` 也不适用于 minute/daily。daily 请求保持为 exact missing range，
+minute 默认（或显式 `--include-open-day`）只把当前交易日完整闭合的 60s bars 写入独立 `.tqmp`
+sidecar；`--require-final` 会退回纯 final 窗口。sidecar 不进入 `.tqmk` final coverage；普通
+reader/verify 仍只认 final。组合查询按区间让 `.tqmk` final 优先。若非空 metadata session
+证明最后一个 window 已收盘，checkpoint 已到 close 且经过 5 秒 grace，fill 会在远端补缺前或
+本轮完成后将 observed sidecar 原子冻结到 `.tqmk`，coverage 延伸至 TQBN 日界，且不应用盘后
+vendor revision。空 full-day fallback、缺 metadata 或不完整 checkpoint 继续保持 provisional。
+daily 没有 provisional
+语义，当前或未来 trading day 一律拒绝。daily 请求保持为 exact missing range，
 `--repair-stale`、`--daily-slices` 与未映射的 remote scheduler 参数都是 usage error。`--calendar auto|required|off` 与
 `--last-trading-days` 只用于选择 closed-day window 和进度分母，不能推断任一 cache 的 coverage。
 
@@ -266,11 +282,16 @@ closed trading day。显式 `--start-day/--end-day` 仍表达调用者的数据�
 `--output-schema v2` 仅保留旧兼容 shape。coverage 不完整或 `repair-locks` 存在 legacy/逐文件失败时退出 `1`，usage
 错误退出 `2`，cache busy 退出 `75`，协作式取消退出 `130`。
 
-- 新生成的 tick、minute、daily fill report 都使用 schema v3，包含 `cache_kind`、统一 terminal status、
+- 新生成的 tick、minute、daily fill report 都使用 schema v4，包含 `cache_kind`、统一 terminal status、
   请求窗口、逐 symbol rows/error/interruption 结果与调度配置。默认目录分别是
   `<cache-root>/reports/tick/`、`<cache-root>/reports/minute/`、`<cache-root>/reports/daily/`。
-- report reader 保持兼容 tick schema v1/v2、minute schema v1、daily schema v1；兼容读取不改变
-  新报告只能写 schema v3 的合同。
+- fill 的所有正常、部分完成和中断终态都在人工摘要输出 `Trading days: START to END`，并在 JSON
+  结果的 `requested_days` 输出同一请求覆盖窗口；timeline 历史 universe fill 不例外。该窗口不是完整性
+  证明，调用方必须同时检查 `Coverage` / `complete`。
+- report reader 保持兼容 unified schema v3、tick schema v1/v2、minute schema v1、daily schema v1；兼容读取不改变
+  新报告只能写 schema v4 的合同；minute provisional 还显式记录 `coverage_state`、`final_complete`、
+  `provisional_as_of_ns` 与 `complete_through_ns`；timeline 历史 fill 另记录
+  `session_close_finalized_symbols`。
 - tick 与 minute fill report 的 `calendar`（存在时）只记录 mode、source、是否已持久化以及 raw
   snapshot 的 source URL、fetch 时间、hash、支持年份和 holiday count；不会嵌入完整 holiday list。
   text output 会显示 `local holidays, years YYYY–YYYY`；dry-run remote candidate 还会显示

@@ -5,6 +5,9 @@
 本文固定 `tqsdk-relay` 私有 history 模块的 HTTP/1 wire contract。服务只读、CacheOnly，并部署在
 受控网关后。ownership 和隔离理由见 [history-relay.md](history-relay.md)。
 
+服务支持 `live-cache`（默认）和 `published` 两种只读 source mode。live-cache 每个请求读取 cache
+最新已提交 coverage；请求内固定一次 metadata/source plan，不承诺跨请求 snapshot isolation。
+
 支持三个 endpoint：
 
 - `GET /v1/history/query`
@@ -89,6 +92,7 @@ JSON cell 编码：
 ```json
 {
   "snapshot_id": "s-20260829-8d19c4af",
+  "source_mode": "published",
   "columns": ["t", "o", "h", "l", "c", "v", "oi"],
   "rows": [
     ["2026-08-01T09:00:00+08:00", 3100.0, 3110.0, 3090.0, 3105.0, "12345", "67890"]
@@ -126,6 +130,7 @@ coverage 必须调用与 query 相同的 strict planner/source inspection。mani
 ```json
 {
   "snapshot_id": "s-20260829-8d19c4af",
+  "source_mode": "published",
   "symbol": "SHFE.au2612",
   "series": "kline",
   "period": "1m",
@@ -151,8 +156,10 @@ relay 增量消费 run chunks，但在 terminal success 前不发送 body。term
 
 - 请求 coverage 完整；
 - 全部 row final；
-- metadata snapshot hash 与 pinned generation 一致；
-- concrete/index/main physical plan 与 pinned authoritative catalog 一致；
+- live-cache 的 metadata snapshot hash 与该请求唯一 prepared plan 一致；published 模式则与 pinned
+  generation 一致；
+- concrete/index/main physical plan 与该请求的 prepared plan 一致；只有 published 模式可用 manifest
+  authoritative catalog 证明 symbol 不存在，live-cache 不提供全局完整 catalog 证明；
 - 响应未超过 row、byte、timeout 和 daemon-global buffer 限制。
 
 失败时丢弃所有 buffered rows 并发送一个完整错误响应。不得把 partial rows 与错误混合。
@@ -200,6 +207,10 @@ active generation 首次检测到运行时损坏并赢得 relay-local atomic `he
 请求返回 500 `snapshot_corrupt`；同 generation 的其他并发和后续请求返回 503
 `snapshot_unhealthy`。health state 不写入 immutable snapshot，这不改变 market readiness。
 
+上述 sticky unhealthy 仅适用于 published generation。live-cache 中一次读取发现的 corruption 返回
+当前请求的 500，但不永久毒化服务；后续 fill/repair 原子替换文件后，新请求可以恢复。exclusive
+maintenance 持锁期间返回 503，而不是跨维护窗口混读。
+
 `message` 供人阅读但不作为机器判断；调用方只依赖 `code` 和 typed `details`。
 
 ## ETag 与 gzip
@@ -214,7 +225,10 @@ active generation 首次检测到运行时损坏并赢得 relay-local atomic `he
 - compression queue 满时使用 identity，不等待另一个隐藏队列；
 - gzip 时间属于同一个 10 秒 total timeout。
 
-`snapshot_id` 仅用于诊断与审计。API 不提供 `generation=` 或其他 pin parameter。
+`source_mode` 明确为 `live-cache` 或 `published`。为兼容旧客户端，`snapshot_id` 保留：live-cache
+固定为 `live`，不表示版本或可 pin 的 identity；published 模式为 generation id。API 不提供
+`generation=` 或其他 pin parameter。ETag 按完整响应 bytes 计算，因此 live coverage/rows 改变后 ETag
+也随之改变。
 
 ## CORS、审计与取消
 

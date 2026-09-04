@@ -15,8 +15,9 @@
 | feature、用户入口或验证 | 根 README、目标 crate README | contract example、`validation.md` |
 | Universe DSL、snapshot/timeline 或入口能力 | [`universe-language.md`](universe-language.md) | 受影响 crate README、contract example、`validation.md` |
 | 历史 universe proof、artifact、retry receipt 或 plan 持久化 | [`historical-universe-catalog.md`](historical-universe-catalog.md)、[`universe-language.md`](universe-language.md) | `tqsdk-data`/`tqsdk-cache` README、`validation.md` |
+| history cache finality、open-day provisional 或 as-traded freeze | [`api-data.md`](api-data.md)、[`backtest-tick-cache-cli.md`](backtest-tick-cache-cli.md) | `tqsdk-data`/`tqsdk-cache` README、`validation.md` |
 | WebSocket DIFF / 状态字段 | [`diff_protocol_spec.md`](../diff_protocol_spec.md) 的目标章节 | 不全文读取协议 |
-| relay history / snapshot | [`history-relay.md`](history-relay.md)、[`history-relay-http.md`](history-relay-http.md)、[`history-snapshot-manifest.md`](history-snapshot-manifest.md) | relay README、`validation.md` |
+| relay history / live cache / snapshot | [`history-relay.md`](history-relay.md)、[`history-relay-http.md`](history-relay-http.md)；仅 published adapter 再读 [`history-snapshot-manifest.md`](history-snapshot-manifest.md) | data/relay README、`validation.md` |
 
 修改前先检查工作树，不覆盖已有改动。可用时先用 CodeGraph 定位代码；修改 Rust 符号前按 `AGENTS.md` 做 impact analysis。HIGH、CRITICAL 或 unresolved UNKNOWN 风险先向用户报告。真实账号、行情、交易、发布和不可逆操作始终需要显式授权及环境变量门控。
 
@@ -25,7 +26,7 @@
 - `tqsdk-core` 拥有 protocol runtime、状态、commit/revision、cursor、adapter 与底层 contract；交易登录命令仅承载可选的穿透式字段，不负责采集客户端信息，也不拥有 facade、direct query、task 或 data 语义。
 - `tqsdk` 仅是默认入口、prelude、轻量 wrapper 和 curated re-export；不拥有第二棵状态树或第二套 runtime。
 - `tqsdk-session` 拥有 shared session、one-shot request/response、direct query、GraphQL、metadata、calendar、ranking、EDB、auth refresh 与 replay control；它在命令提交边界使用官方 `tqsdk-ctpse` 采集、校验并补全 CTP 穿透式客户端信息，`tqsdk-wait` 不复制该逻辑。
-- `tqsdk-wait` 仅做 single-owner continuous consumption；`tqsdk-task` 是执行层，`tqsdk-data` 是 research/offline data 层，并拥有 V2 timeline 的 bootstrap closure、历史 proof/catalog/plan 语义；`tqsdk-cache` 不得自行解释 exclusion 或 derived dependency。
+- `tqsdk-wait` 仅做 single-owner continuous consumption；`tqsdk-task` 是执行层，`tqsdk-data` 是 research/offline data 层，并拥有 V2 timeline 的 bootstrap closure、历史 proof/catalog/plan 语义以及 fill 累计行数、最新已接受源行 cursor、terminal report contract；`tqsdk-cache` 不得自行解释 exclusion 或 derived dependency，只将该 cursor 适配为 provisional received progress。
 - `tqsdk-relay` 是可选 CacheOnly market relay；不进入默认 SDK 依赖路径，不扩展为通用代理或 provider 聚合。
 - 可见状态变化只能走 `RuntimeHandle -> StateStore -> CommitResult -> RuntimeReader/UpdateCursor`；禁止旁路通知、私有 revision 或第二棵状态树。
 - domain 写入经过 `MutationSource`；command/order 遵守 runtime 状态机，禁止 adapter 本地字符串判断绕过转换校验。

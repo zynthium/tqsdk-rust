@@ -140,8 +140,10 @@ root remote-fill lock 并完成认证预检后，删除与覆盖窗口快照冲�
 snapshot 覆盖整个请求窗口，则该 flag 会删除窗口内所有已存在的 minute 月分区，让官方 metadata refresh
 建立唯一的目标 snapshot。锁忙或 repair 所需认证缺失时，命令失败且不删除任何分区。该 flag 不支持 tick
 或 `--dry-run`。
-remote-on-miss metadata 会覆盖涉及的完整 CST trading month；短查询生成的 snapshot 不会替换更宽的 active
-pointer，后续查询会优先复用覆盖其范围的 retained snapshot。
+remote-on-miss metadata 会覆盖涉及的完整 CST trading month；`KQ.*` 逻辑分钟序列还会保留早于月界的原始
+trading-cycle 起点，避免周末或节假日边界被错误收缩。普通物理合约仍按完整 trading month 判断已有 snapshot，
+不会仅因这个无交易前缀重复刷新。短查询生成的 snapshot 不会替换更宽的 active pointer，后续查询会优先复用
+覆盖其范围的 retained snapshot。
 
 `--market futures|stock` 只影响 `fill --kind minute` 的 server-side backtest endpoint：
 futures 是默认值，允许 `--universe`；stock 必须提供一个或多个显式 `--symbol`，不支持 futures
@@ -212,7 +214,7 @@ cargo run -p tqsdk-cache -- \
   --universe 'snapshot(main:all;index:all;!CFFEX.*)' \
   --start-day 2026-06-01 --end-day 2026-06-30 --dry-run
 
-# final-only minute fill：只选择已结束 trading day。
+# minute fill：默认包含当前交易日已闭合分钟；需要纯 final 时加 --require-final。
 TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
 cargo run -p tqsdk-cache -- \
   fill \
@@ -220,6 +222,13 @@ cargo run -p tqsdk-cache -- \
   --symbol KQ.i@SHFE.au \
   --start-day 2026-06-01 --end-day 2026-06-30 \
   --symbol-concurrency 2
+
+# 当前交易日完整 60s bars 写入独立 provisional sidecar；不冒充 final coverage。
+TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
+cargo run -p tqsdk-cache -- \
+  fill \
+  --cache-dir /var/lib/tqsdk/history --kind minute --market futures \
+  --symbol KQ.i@SHFE.au --start-day 2026-06-01 --include-open-day
 
 # final-only native daily fill：远端只请求官方 1d chart，不从 60s/tick 聚合。
 TQ_AUTH_USER='your-account' TQ_AUTH_PASS='your-password' \
@@ -264,6 +273,13 @@ idle timeout 为 60 秒，batch size 与 concurrency 都只接受 `1..=4`。默�
 timeout，`--batch-timeout-secs 0` 也表示禁用；`--lock-wait-secs` 默认不等待且显式值必须大于零。
 daily 的 TTY/plain/JSONL 进度与 tick/minute 相同，包含 planning、batch、symbol telemetry 和唯一
 terminal 事件。无效参数在连接远端前返回 validation error。
+活跃合约的 bar 与“本轮接收”按 `latest_cursor_ns` 只统计 cursor 所在交易日之前已完整流过的
+TQBN partition day；当前日不会因首行到达而提前计满，乱序 telemetry 不会让进度回退。
+“覆盖”仍只统计成功 terminal 后已验证并提交的 final coverage；取消、超时或失败不会推进覆盖。
+每个 active batch 只保存一个单调边界，内存不随 telemetry 事件数或请求天数增长。
+Tick 规划还会跳过 immutable metadata 已证明的工作日休市区间，避免合法零行日期占满并发槽位直至
+idle timeout；TTY/plain 的速率是最近 60 秒窗口，按同一 logical request 跨 source slice 单调累计
+已接受 rows，batch terminal 不会让计数回退，也不再被较早的长时间空等永久拉低。
 
 tick fill 按 trading day 顺序执行，以 8192 rows 缓冲追加；取消会 flush 已接受短尾，但不推进未 terminal
 范围的 final/provisional coverage。fill-only 不回读刚写入 rows；`rows_written` 只统计实际物理落盘，
@@ -486,8 +502,12 @@ cargo run -p tqsdk-cache -- \
 ```
 
 tick `fill` 保留 CST `18:00` TQBN partition、当前交易日 provisional checkpoint 与
-`--require-final` 的既有合同。minute fill 则严格 final-only：当前或未来 trading day 会拒绝，
-`--include-open-day` 也不适用于 minute。`--last-trading-days` 与 `--calendar auto|required|off`
+`--require-final` 的既有合同。minute fill 默认包含当前 open day（也可显式写
+`--include-open-day`），但只保存固定 as-of 前已完整闭合的 60s bars。若 metadata 提供非空
+session windows 且 checkpoint 已到最后一个 session close，fill 会在 close 后 5 秒把当时观测值
+原子冻结为 final `.tqmk`；不会用盘后重新下载的数据覆盖。后续 fill 在发起远端请求前也会优先冻结
+满足条件的遗留 sidecar。缺少 session metadata 或完整收盘 checkpoint 时不会提前 final。
+`--last-trading-days` 与 `--calendar auto|required|off`
 仍可用于选择 closed-day 窗口；日历只做选择和进度，不替代 cache coverage。
 
 ## 并发锁与任务中断
@@ -538,11 +558,14 @@ closed trading day。显式 `--start-day/--end-day` 的数据窗口仍由 TQBN �
 
 进度的 coverage 分母在 universe 解析后固定为用户请求范围；远端 plan 只更新待补缺口，不会让整体或合约总量回退或跳变。未加载交易日历时会明确标注采用 TQBN partition-day 计数。minute 的 remote telemetry 不等于 canonical cache 实际写入行数，因此运行中 rows/rate 显示 `n/a`（JSONL 为 `null`）；只有最终 canonical report 生成后才显示真实 rows。
 
-新生成的 tick、minute、daily fill report 都使用 schema v3：包含 `cache_kind`、统一 terminal status、
-请求窗口、逐 symbol rows/error/interruption 结果与调度配置。默认目录分别是
+新生成的 tick、minute、daily fill report 都使用 schema v4：包含 `cache_kind`、统一 terminal status、
+请求窗口、逐 symbol rows/error/interruption 结果与调度配置。minute provisional 另含
+`coverage_state`、`final_complete`、`provisional_as_of_ns` 与 `complete_through_ns`，原 `complete`
+继续只表示 final coverage；timeline 历史 fill 还记录 `session_close_finalized_symbols`。默认目录分别是
 `<cache-root>/reports/tick/`、`<cache-root>/reports/minute/`、`<cache-root>/reports/daily/`。
 对应的 `verify --report` 以 report 记录的 canonical root、range 和 symbols 为准。reader 保持兼容
-tick schema v1/v2、minute schema v1 和 daily schema v1；新报告不再写这些旧 schema。
+unified schema v3、tick schema v1/v2、minute schema v1 和 daily schema v1；新报告不再写这些旧
+schema。
 
 进度总是写 stderr。默认 `--progress auto` 在交互终端使用动态 TTY bars，在 pipe、CI 或重定向时退化为
 plain；显式 `tty` 只适用于终端。TTY 默认显示全局条及全部活跃 symbol（并发上限为 4），且至多每秒
@@ -553,6 +576,11 @@ interrupted`。`--progress jsonl` 对 tick、minute 与 daily fill 都输出 sch
 不会阻塞 remote-fill 回调，session 结束前会写完终态。不要再按旧 schema-v1 解析。tick 的 progress 以
 physical cache symbol 展示，minute 与 daily 则以 logical symbol 展示；仍在执行的 symbol 和失败 symbol
 都会保留，失败项带 `error`。
+
+fill 结束时，人工摘要始终输出 `Trading days: START to END`；JSON 结果在
+`requested_days.start_day` / `requested_days.end_day` 携带同一请求覆盖窗口。timeline 历史 universe
+fill 的 complete、incomplete 和 interrupted 终态也遵守该合同；窗口表示本次请求范围，实际是否完整以
+`Coverage` / `complete` 为准。
 
 ## 显式破坏性维护
 

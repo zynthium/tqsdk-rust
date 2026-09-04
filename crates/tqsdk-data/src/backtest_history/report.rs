@@ -306,5 +306,7 @@ pub struct BacktestHistoryTelemetryEvent {
     pub symbol: String,
     pub phase: BacktestHistoryPhase,
     pub completed_rows: usize,
+    /// Latest accepted source row timestamp observed by this progress snapshot.
+    pub latest_cursor_ns: Option<i64>,
     pub message: String,
 }

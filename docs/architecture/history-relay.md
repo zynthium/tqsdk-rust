@@ -3,11 +3,26 @@
 ## 状态
 
 - 状态：Accepted
-- 日期：2026-08-29
+- 日期：2026-08-29；2026-09-04 修订为 live-cache 默认
 - 适用范围：`tqsdk-data`、`tqsdk-cache`、`tqsdk-relay`
 
 HTTP wire contract 见 [history-relay-http.md](history-relay-http.md)，snapshot 发布与兼容合同见
 [history-snapshot-manifest.md](history-snapshot-manifest.md)。
+
+## 2026-09-04 决策修订
+
+relay history 默认不再依赖只读 published generation。部署通过
+`TQSDK_RELAY_HISTORY_CACHE_DIR` 以只读 mount 打开正在被 `tqsdk-cache fill` 更新的 cache root；每个
+请求重新读取已原子提交的 coverage，因此不发布、不重启即可看到 fill 进度。它仍是 CacheOnly，
+不会触发远端补数。
+
+请求先取得与 fill 兼容、与 destructive maintenance 互斥的共享 cache-root operation gate，然后只做
+一次 metadata/source planning 和 strict inspection。相同 prepared plan 用于后续 scan，gate 作为 lifecycle
+pin 保留到 detached blocking reader 完全退出。未提交 rows、缺少 durable coverage、minute provisional
+checkpoint 都不会被当作 final 成功。
+
+`TQSDK_RELAY_HISTORY_ROOT` 和 published snapshot reader 保留为显式兼容/回滚 adapter；两个 source
+配置互斥。下文 snapshot 发布设计仅约束该兼容 adapter，不再是默认部署前置条件。
 
 ## 背景
 

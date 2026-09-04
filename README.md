@@ -32,8 +32,8 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
 | [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、task-owned replay source、streaming local backtest execution、Python-compatible local backtest sim、kline default price tick、cash/equity drawdown summary、低延迟 trading desk profile |
 | [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、`BacktestHistoryClient` 异步缓存查询、TQBN daily v3 (`.tqbn`) tick cache、canonical final-60s K cache、native final-1d K cache、tick companion-lock repair API 和共享 universe selector |
-| [`tqsdk-cache`](crates/tqsdk-cache) | 可选 tick / canonical-minute / native-daily cache 运维与区间查询 CLI：统一 fill progress/schema-v3 report、proof-pinned 历史 universe plan、默认文本摘要、按需 versioned JSON、lossless JSONL / token-aware LLM CSV、inventory/inspect/verify/doctor/purge，以及显式 `--history-root` 的 immutable snapshot clone/import、prewarm/query-smoke、publish/recover/rollback/scrub 和 lease-aware GC；不进入默认策略 hot path |
-| [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端，并可在独立 listener/runtime 上启用默认 wildcard CORS 的只读 CacheOnly history sibling；未配置 relay 时 SDK 仍直连天勤 |
+| [`tqsdk-cache`](crates/tqsdk-cache) | 可选 tick / canonical-minute / native-daily cache 运维与区间查询 CLI：统一逐合约 streaming fill progress/schema-v4 report、proof-pinned 历史 universe plan、默认文本摘要、按需 versioned JSON、lossless JSONL / token-aware LLM CSV、inventory/inspect/verify/doctor/purge，以及显式 `--history-root` 的 immutable snapshot clone/import、prewarm/query-smoke、publish/recover/rollback/scrub 和 lease-aware GC；不进入默认策略 hot path |
+| [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端，并可在独立 listener/runtime 上启用默认 wildcard CORS、即时观察已提交 fill 进度的只读 CacheOnly history sibling；未配置 relay 时 SDK 仍直连天勤 |
 
 一般使用建议：
 
@@ -327,11 +327,15 @@ provisional fill 不 compact。Tick 远端行按交易日顺序消费并以 8192
 统计行数回读 cache；完整 cache hit 的 `rows_written` 为 0，同一 shared fill 的物理写入只计入一个报告。
 当前交易日若要盘中增量快照，可固定
 `.backtest(day_start_ns, as_of_ns)` 后调用
-`.provisional_open_day_fill(day_start_ns, as_of_ns)?`；它只写 non-final checkpoint，
-不满足普通 coverage/cache-hit，且 checkpoint 的范围和 as-of 必须位于同一 TQBN 日分区。
+`.provisional_open_day_fill(day_start_ns, as_of_ns)?`；Tick 写 TQBN non-final checkpoint，
+canonical 60s minute 写独立 `.tqmp` sidecar 且过滤未闭合分钟。两者都不满足普通 final
+coverage/cache-hit，且 checkpoint 的范围和 as-of 必须位于同一 TQBN 日分区。
 远端明确成功结束的空增量可以推进 checkpoint；取消、超时或未确认结束不能推进。
-重复运行从 checkpoint 前 5 分钟重叠续填，并延后 compaction，避免每次盘中续填重写全历史；
-TQBN 18:00 分区结束后必须再次运行普通 warmup，完成全日 final 重对账、compaction 并淘汰 checkpoint。
+重复运行从 checkpoint 前 5 分钟重叠续填，并延后 compaction，避免每次盘中续填重写全历史。
+canonical-minute 若有非空 metadata session windows，且 checkpoint 已推进到最后一个 session close，
+则 close 后 5 秒会把当时观测到的 `.tqmp` 原子冻结为 final `.tqmk`，不会再下载并覆盖为盘后修订值；
+后续 fill 会在远端补缺前优先处理遗留 sidecar。缺少可靠 session metadata，或收盘时没有完整 checkpoint，
+就不能从盘后历史接口还原严格的 as-traded 数据；这类情况保持保守语义，精确回放需要 live recorder。
 运维 CLI 对显式 `--end-day` 等于当前 TQBN 交易日的请求自动采用该模式，单次 horizon 固定为
 启动时刻减 5 秒；严格任务可传 `--require-final` 拒绝当前日。`--include-open-day` 仅保留为兼容参数。
 

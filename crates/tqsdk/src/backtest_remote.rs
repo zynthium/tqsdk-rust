@@ -673,6 +673,7 @@ pub(crate) struct BacktestMinuteKlineFillRequest {
     pub(crate) symbol: String,
     pub(crate) start_ns: i64,
     pub(crate) end_ns: i64,
+    pub(crate) commit_mode: RemoteCacheCommitMode,
 }
 
 impl BacktestMinuteKlineFillRequest {
@@ -681,6 +682,25 @@ impl BacktestMinuteKlineFillRequest {
             symbol: symbol.into(),
             start_ns,
             end_ns,
+            commit_mode: RemoteCacheCommitMode::Final,
+        }
+    }
+
+    pub(crate) fn provisional(
+        symbol: impl Into<String>,
+        start_ns: i64,
+        end_ns: i64,
+        provisional_start_ns: i64,
+        as_of_ns: i64,
+    ) -> Self {
+        Self {
+            symbol: symbol.into(),
+            start_ns,
+            end_ns,
+            commit_mode: RemoteCacheCommitMode::Provisional {
+                provisional_start_ns,
+                as_of_ns,
+            },
         }
     }
 }
@@ -763,13 +783,21 @@ impl FacadeHistoryFillKind {
                     }
                 }
             }
-            Self::CanonicalMinute => BacktestHistoryRequest::kline(
-                request_id,
-                symbol,
-                Duration::from_secs(60),
-                start_ns,
-                end_ns,
-            ),
+            Self::CanonicalMinute => {
+                let request = BacktestHistoryRequest::kline(
+                    request_id,
+                    symbol,
+                    Duration::from_secs(60),
+                    start_ns,
+                    end_ns,
+                );
+                match commit_mode {
+                    RemoteCacheCommitMode::Final => request,
+                    RemoteCacheCommitMode::Provisional { as_of_ns, .. } => {
+                        request.with_provisional_as_of_ns(as_of_ns)
+                    }
+                }
+            }
             Self::NativeDaily => BacktestHistoryRequest::kline(
                 request_id,
                 symbol,
@@ -818,8 +846,11 @@ pub(crate) async fn fill_backtest_minute_kline_cache(
 ) -> Result<BacktestMinuteKlineFillReport> {
     let requests = requests
         .into_iter()
-        .map(|request| {
-            RemoteBacktestCacheFillRequest::new(request.symbol, request.start_ns, request.end_ns)
+        .map(|request| RemoteBacktestCacheFillRequest {
+            symbol: request.symbol,
+            start_ns: request.start_ns,
+            end_ns: request.end_ns,
+            commit_mode: request.commit_mode,
         })
         .collect();
     let report = fill_backtest_history_cache(
@@ -1728,7 +1759,7 @@ fn observe_materialized_telemetry(
             physical_symbol: event.symbol,
             requested_range: (batch.start_ns, batch.end_ns),
             accepted_rows,
-            latest_cursor_ns: None,
+            latest_cursor_ns: event.latest_cursor_ns,
             elapsed,
             error: None,
         },
@@ -2213,6 +2244,7 @@ mod tests {
             symbol: "KQ.m@SHFE.au".to_string(),
             phase,
             completed_rows,
+            latest_cursor_ns: None,
             message: "buffering canonical-minute rows".to_string(),
         };
 

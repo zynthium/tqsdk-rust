@@ -686,6 +686,31 @@ impl BacktestTickCache {
     }
 
     /// Try to acquire an exclusive stable-view gate for verification and diagnostics.
+    /// Acquires the existing cache-root gate for a read-only live cache view.
+    ///
+    /// This never creates or opens the lock file for writing, allowing a relay
+    /// to consume a read-only bind mount while coordinating with fills and
+    /// excluding destructive maintenance.
+    pub(crate) fn try_acquire_live_read_shared_lock(
+        &self,
+    ) -> Result<BacktestTickCacheOperationLock> {
+        let cache_dir = self.history.root_dir().to_path_buf();
+        let path = cache_dir.join(".tqsdk-cache-operation.lock");
+        let file = OpenOptions::new().read(true).open(&path)?;
+        match FileExt::try_lock_shared(&file) {
+            Ok(()) => Ok(BacktestTickCacheOperationLock {
+                cache_dir,
+                path,
+                file,
+            }),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Err(DataError::CacheBusy {
+                cache_dir,
+                operation: "live cache read",
+            }),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub fn try_acquire_consistency_read_lock(&self) -> Result<BacktestTickCacheOperationLock> {
         self.try_acquire_operation_lock("consistency read", true)
     }

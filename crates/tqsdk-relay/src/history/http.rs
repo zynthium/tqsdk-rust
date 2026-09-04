@@ -470,6 +470,7 @@ async fn route_request(
                 audit.rows(0);
                 let mut body = Map::new();
                 body.insert("snapshot_id".into(), json!(snapshot.snapshot_id()));
+                body.insert("source_mode".into(), json!(snapshot.source_mode()));
                 body.insert("symbol".into(), json!(data.symbol));
                 body.insert("series".into(), json!(series_name));
                 if let Some(period) = data.period {
@@ -487,7 +488,7 @@ async fn route_request(
                 );
                 body.insert(
                     "metadata_snapshot_hash".into(),
-                    json!(snapshot.metadata_snapshot_hash()),
+                    json!(snapshot.metadata_snapshot_hash(report)),
                 );
                 Response::success_with_permit(Value::Object(body), request_id, admission)
             }
@@ -641,6 +642,7 @@ async fn query_response(
                 }
                 let mut body = Map::new();
                 body.insert("snapshot_id".into(), json!(snapshot.snapshot_id()));
+                body.insert("source_mode".into(), json!(snapshot.source_mode()));
                 body.insert("columns".into(), json!(codec.column_names()));
                 body.insert("rows".into(), Value::Array(rows));
                 if data.include_provenance
