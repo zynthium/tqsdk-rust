@@ -170,8 +170,15 @@ uncompressed 32 MiB、daemon-global buffer 512 MiB。
 若请求起点晚于 relay 捕获的服务器时间超过 5 秒，整个区间尚未发生。listener 必须在进入
 admission queue、读取 live cache 或 pinned snapshot 之前直接返回
 `409 coverage_incomplete`；`details.reason` 固定为 `range_starts_in_future`，并携带
-`requested_start`、`server_time`、`retryable=true` 和时钟偏差容忍值。与当前时间重叠的区间
-仍走既有 coverage/finality 校验，不得因此返回空的 `200`。
+`requested_start`、`server_time`、`retryable=true` 和时钟偏差容忍值。
+
+若 `start < server_time < end`，listener 默认先把 end 裁到本次请求捕获的服务器时间。若严格检查
+只发现一个延伸到该 end 的尾部 coverage 缺口，再把 end 裁到该缺口起点，并对缩短后的区间重新
+执行严格检查。缩短区间完整且 final 时返回 `200`；coverage 响应中的 `end` 是实际结束时间，且
+coverage/query 都额外包含
+`requested_end`、`effective_end`、`truncated=true`、`truncation_reason="future_end"` 和
+`requested_complete=false`。内部缺口、完全没有连续前缀、metadata 不足或 provisional 数据仍返回
+原有 typed 409，不得跨缺口拼接或返回空的 `200`。
 
 ## Stable errors
 

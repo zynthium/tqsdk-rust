@@ -703,4 +703,5 @@ p99 SLO 时必须重新实测并单独验收。
 
 无有效 snapshot 的集成测试还必须证明：请求起点晚于服务器时间超过 5 秒时，coverage/query
 在 admission 与 source lookup 之前返回 `409 coverage_incomplete`，且
-`details.reason=range_starts_in_future`；与当前时间重叠的区间仍执行正常 coverage/finality 校验。
+`details.reason=range_starts_in_future`。另需证明 `start < server_time < end` 默认裁到唯一连续 final
+前缀并返回带 truncation metadata 的 `200`；存在内部缺口或没有非空连续前缀时仍返回 typed 409。

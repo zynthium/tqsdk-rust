@@ -393,7 +393,7 @@ async fn route_request(
     if parsed.path == SCHEMA_PATH {
         return Response::success(schema_response(), request_id);
     }
-    let data = match parse_data_request(parsed.path, parsed.query, data_id) {
+    let mut data = match parse_data_request(parsed.path, parsed.query, data_id) {
         Ok(value) => value,
         Err(message) => {
             return error_response(400, "invalid_request", message, request_id, json!({}));
@@ -426,6 +426,9 @@ async fn route_request(
                     "clock_skew_tolerance_seconds": 5,
                 }),
             );
+        }
+        if let Some(effective_end_ns) = future_end_cap(data.start_ns, data.end_ns, server_time_ns) {
+            data.set_effective_end(effective_end_ns);
         }
     }
     let queue_gauge = state.observability.request_queued();
@@ -468,6 +471,28 @@ async fn route_request(
             admission,
         );
     }
+    let mut preflight_inspection = None;
+    if data.end_was_truncated() {
+        match snapshot.inspect(data.request.clone()).await {
+            Ok(inspection) => preflight_inspection = Some(inspection),
+            Err(error) => {
+                let Some(available_end_ns) = trailing_missing_start(error.reason(), data.end_ns)
+                else {
+                    return snapshot_error(error, &snapshot, request_id, admission);
+                };
+                if available_end_ns <= data.start_ns {
+                    return snapshot_error(error, &snapshot, request_id, admission);
+                }
+                data.set_effective_end(available_end_ns);
+                match snapshot.inspect(data.request.clone()).await {
+                    Ok(inspection) => preflight_inspection = Some(inspection),
+                    Err(error) => {
+                        return snapshot_error(error, &snapshot, request_id, admission);
+                    }
+                }
+            }
+        }
+    }
     audit.query(
         Some(snapshot.snapshot_id()),
         &data.symbol,
@@ -482,11 +507,16 @@ async fn route_request(
     );
     if parsed.path == COVERAGE_PATH {
         let series_name = data.series_name();
-        return match snapshot.inspect(data.request).await {
+        let inspection = match preflight_inspection {
+            Some(inspection) => Ok(inspection),
+            None => snapshot.inspect(data.request.clone()).await,
+        };
+        return match inspection {
             Ok(inspection) => {
                 let report = inspection.report();
                 audit.rows(0);
                 let mut body = Map::new();
+                insert_end_truncation(&mut body, &data);
                 body.insert("snapshot_id".into(), json!(snapshot.snapshot_id()));
                 body.insert("source_mode".into(), json!(snapshot.source_mode()));
                 body.insert("symbol".into(), json!(data.symbol));
@@ -524,7 +554,7 @@ async fn query_response(
     state: &Arc<HistoryState>,
     audit: &mut RequestAudit,
 ) -> Response {
-    let codec = match HistoryRowCodec::new(data.series, data.columns) {
+    let codec = match HistoryRowCodec::new(data.series, data.columns.clone()) {
         Ok(value) => value,
         Err(error) => {
             return error_with_permit(
@@ -539,7 +569,10 @@ async fn query_response(
     };
     let resources =
         BacktestHistorySnapshotQueryResources::new(state.scan_budget.clone(), admission.clone());
-    let mut run = match snapshot.query_with_resources(data.request, resources).await {
+    let mut run = match snapshot
+        .query_with_resources(data.request.clone(), resources)
+        .await
+    {
         Ok(value) => value,
         Err(error) => {
             return snapshot_error(error, &snapshot, request_id, admission);
@@ -663,6 +696,7 @@ async fn query_response(
                 body.insert("source_mode".into(), json!(snapshot.source_mode()));
                 body.insert("columns".into(), json!(codec.column_names()));
                 body.insert("rows".into(), Value::Array(rows));
+                insert_end_truncation(&mut body, &data);
                 if data.include_provenance
                     && data.symbol.starts_with("KQ.m@")
                     && !report.physical_segments.is_empty()
@@ -709,10 +743,14 @@ async fn query_response(
 
 struct ParsedDataRequest {
     request: BacktestHistoryRequest,
+    request_id: u64,
     symbol: String,
     series: BacktestHistorySchemaSeries,
     period: Option<String>,
     start_ns: i64,
+    end_ns: i64,
+    requested_end_ns: i64,
+    requested_end: String,
     start: String,
     end: String,
     columns: Vec<HistoryColumn>,
@@ -725,6 +763,33 @@ impl ParsedDataRequest {
             BacktestHistorySchemaSeries::Tick => "tick",
             BacktestHistorySchemaSeries::Kline => "kline",
         }
+    }
+
+    fn set_effective_end(&mut self, end_ns: i64) {
+        self.request = match self.series {
+            BacktestHistorySchemaSeries::Tick => BacktestHistoryRequest::tick(
+                self.request_id,
+                self.symbol.clone(),
+                self.start_ns,
+                end_ns,
+            ),
+            BacktestHistorySchemaSeries::Kline => BacktestHistoryRequest::kline(
+                self.request_id,
+                self.symbol.clone(),
+                Duration::from_nanos(
+                    parse_legal_period_ns(self.period.as_deref().expect("validated kline period"))
+                        .expect("validated kline period"),
+                ),
+                self.start_ns,
+                end_ns,
+            ),
+        };
+        self.end_ns = end_ns;
+        self.end = format_ns(end_ns);
+    }
+
+    fn end_was_truncated(&self) -> bool {
+        self.end_ns < self.requested_end_ns
     }
 }
 
@@ -803,10 +868,14 @@ fn parse_data_request(
     };
     Ok(ParsedDataRequest {
         request,
+        request_id,
         symbol,
         series,
         period,
         start_ns,
+        end_ns,
+        requested_end_ns: end_ns,
+        requested_end: format_ns(end_ns),
         start: format_ns(start_ns),
         end: format_ns(end_ns),
         columns,
@@ -816,6 +885,34 @@ fn parse_data_request(
 
 fn request_starts_in_future(start_ns: i64, server_time_ns: i64) -> bool {
     start_ns > server_time_ns.saturating_add(FUTURE_START_TOLERANCE_NS)
+}
+
+fn future_end_cap(start_ns: i64, end_ns: i64, server_time_ns: i64) -> Option<i64> {
+    (start_ns < server_time_ns && end_ns > server_time_ns).then_some(server_time_ns)
+}
+
+fn trailing_missing_start(
+    reason: &BacktestHistoryFailureReason,
+    requested_end_ns: i64,
+) -> Option<i64> {
+    match reason {
+        BacktestHistoryFailureReason::CoverageIncomplete { missing_ranges }
+            if missing_ranges.len() == 1 && missing_ranges[0].1 == requested_end_ns =>
+        {
+            Some(missing_ranges[0].0)
+        }
+        _ => None,
+    }
+}
+
+fn insert_end_truncation(body: &mut Map<String, Value>, data: &ParsedDataRequest) {
+    if data.end_was_truncated() {
+        body.insert("requested_end".into(), json!(data.requested_end));
+        body.insert("effective_end".into(), json!(data.end));
+        body.insert("truncated".into(), json!(true));
+        body.insert("truncation_reason".into(), json!("future_end"));
+        body.insert("requested_complete".into(), json!(false));
+    }
 }
 
 fn parse_projection(
@@ -2007,6 +2104,45 @@ mod tests {
             server_time_ns - 1,
             server_time_ns,
         ));
+    }
+
+    #[test]
+    fn overlapping_future_end_is_capped_and_reported() {
+        assert_eq!(future_end_cap(10, 30, 20), Some(20));
+        assert_eq!(future_end_cap(20, 30, 20), None);
+        assert_eq!(future_end_cap(10, 20, 20), None);
+
+        let mut data = parse_data_request(
+            QUERY_PATH,
+            Some(
+                "symbol=SHFE.au2612&series=tick&start=2026-08-01T09:00:00%2B08:00&end=2099-01-01T00:00:00Z",
+            ),
+            1,
+        )
+        .unwrap();
+        data.set_effective_end(parse_rfc3339_ns("2026-08-01T10:00:00+08:00").unwrap());
+        let mut body = Map::new();
+        insert_end_truncation(&mut body, &data);
+
+        assert_eq!(body["truncated"], true);
+        assert_eq!(body["truncation_reason"], "future_end");
+        assert_eq!(body["requested_complete"], false);
+        assert_eq!(body["effective_end"], "2026-08-01T10:00:00+08:00");
+        assert_eq!(body["requested_end"], "2099-01-01T08:00:00+08:00");
+    }
+
+    #[test]
+    fn trailing_missing_range_must_be_the_only_gap() {
+        let end_ns = 30;
+        let tail = BacktestHistoryFailureReason::CoverageIncomplete {
+            missing_ranges: vec![(20, end_ns)],
+        };
+        assert_eq!(trailing_missing_start(&tail, end_ns), Some(20));
+
+        let internal = BacktestHistoryFailureReason::CoverageIncomplete {
+            missing_ranges: vec![(10, 15), (20, end_ns)],
+        };
+        assert_eq!(trailing_missing_start(&internal, end_ns), None);
     }
 
     #[tokio::test]

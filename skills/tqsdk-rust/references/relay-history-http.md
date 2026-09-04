@@ -38,7 +38,7 @@ curl --fail-with-body --silent --show-error \
 
 整数 cell 以 JSON 十进制字符串返回；有限浮点是 JSON number；缺失或非有限值是 `null`。`columns` 与每行 `rows` 的位置一一对应。完整覆盖但没有 row 时是 200 和空 `rows`；coverage 缺口通常是 typed 409，不是 partial 200。
 
-请求起点比 relay 服务器时间晚超过 5 秒时，`coverage` 和 `query` 会在 admission 与 cache/source lookup 前返回 `409 coverage_incomplete`，其中 `details.reason=range_starts_in_future`、`retryable=true`。与当前时间重叠但尾部在未来的区间仍执行正常 coverage/finality 校验；不要把它解释成空数据成功。默认 row 上限是 Kline 10,000、Tick 50,000，未压缩响应上限 32 MiB；调用方应缩小时间区间后重试，不要无界重放同一个超限请求。
+请求起点比 relay 服务器时间晚超过 5 秒时，`coverage` 和 `query` 会在 admission 与 cache/source lookup 前返回 `409 coverage_incomplete`，其中 `details.reason=range_starts_in_future`、`retryable=true`。若起点在过去而 end 超过服务器时间，默认返回已存在的连续 final 前缀：成功响应通过 `requested_end`、`effective_end`、`truncated=true`、`truncation_reason=future_end` 和 `requested_complete=false` 明确裁剪；内部缺口、空前缀、metadata 不足或 provisional 数据仍返回 typed 409。默认 row 上限是 Kline 10,000、Tick 50,000，未压缩响应上限 32 MiB；调用方应缩小时间区间后重试，不要无界重放同一个超限请求。
 
 所有 history 响应默认带 wildcard CORS header；已知 path 的 `OPTIONS` 无需 identity，实际 `GET` 仍要求 trusted identity header。该 header 不进入 CORS allow-headers，浏览器调用应由受控网关注入，不能让前端脚本自行伪造。
 
