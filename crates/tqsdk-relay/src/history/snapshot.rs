@@ -10,9 +10,10 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex, oneshot};
 use tqsdk_data::{
-    BacktestHistoryInspection, BacktestHistoryLiveCache, BacktestHistoryRequest,
-    BacktestHistoryRequestReport, BacktestHistorySnapshot, BacktestHistorySnapshotError,
-    BacktestHistorySnapshotQueryResources, BacktestHistorySnapshotRun,
+    BacktestHistoryContextRequest, BacktestHistoryContextResult, BacktestHistoryInspection,
+    BacktestHistoryLiveCache, BacktestHistoryRequest, BacktestHistoryRequestReport,
+    BacktestHistorySnapshot, BacktestHistorySnapshotError, BacktestHistorySnapshotQueryResources,
+    BacktestHistorySnapshotRun,
 };
 use tqsdk_relay::{RelayError, RelayResult};
 
@@ -141,6 +142,19 @@ impl PinnedSnapshot {
                 .prepare(request)
                 .await?
                 .query_with_resources(resources),
+        }
+    }
+
+    pub(super) async fn query_context(
+        &self,
+        request: BacktestHistoryContextRequest,
+        resources: BacktestHistorySnapshotQueryResources,
+    ) -> Result<BacktestHistoryContextResult, BacktestHistorySnapshotError> {
+        match &self.view {
+            HistoryReadView::Published(snapshot) => {
+                snapshot.query_context(request, resources).await
+            }
+            HistoryReadView::Live(cache) => cache.query_context(request, resources).await,
         }
     }
 }

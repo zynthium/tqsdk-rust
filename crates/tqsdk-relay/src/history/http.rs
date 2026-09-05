@@ -15,7 +15,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio::time::{Instant, timeout, timeout_at};
 use tqsdk_data::{
-    BacktestHistoryFailureReason, BacktestHistoryFinality, BacktestHistoryRequest,
+    BacktestHistoryContextBoundary, BacktestHistoryContextRequest, BacktestHistoryFailureReason,
+    BacktestHistoryFinality, BacktestHistoryKind, BacktestHistoryRequest,
     BacktestHistorySchemaSeries, BacktestHistorySnapshotError, BacktestHistorySnapshotEvent,
     BacktestHistorySnapshotQueryResources, BacktestHistorySnapshotResourceBudget,
     BacktestHistorySnapshotResourceReservation, BacktestHistoryValueKind,
@@ -49,6 +50,7 @@ const GZIP_OUTPUT_OVERHEAD: usize = 64 * 1024;
 const SCHEMA_PATH: &str = "/v1/history/schema";
 const QUERY_PATH: &str = "/v1/history/query";
 const COVERAGE_PATH: &str = "/v1/history/coverage";
+const CONTEXT_PATH: &str = "/v1/history/context";
 const FUTURE_START_TOLERANCE_NS: i64 = 5_000_000_000;
 const SECOND_NS: u64 = 1_000_000_000;
 const MINUTE_NS: u64 = 60 * SECOND_NS;
@@ -193,6 +195,7 @@ async fn serve_stream(
             Some(SCHEMA_PATH) => "schema",
             Some(QUERY_PATH) => "query",
             Some(COVERAGE_PATH) => "coverage",
+            Some(CONTEXT_PATH) => "context",
             _ => "unknown",
         },
     );
@@ -393,6 +396,9 @@ async fn route_request(
     if parsed.path == SCHEMA_PATH {
         return Response::success(schema_response(), request_id);
     }
+    if parsed.path == CONTEXT_PATH {
+        return route_context(parsed.query, state, data_id, request_id, audit).await;
+    }
     let mut data = match parse_data_request(parsed.path, parsed.query, data_id) {
         Ok(value) => value,
         Err(message) => {
@@ -544,6 +550,280 @@ async fn route_request(
         };
     }
     query_response(snapshot, data, request_id, admission, &state, audit).await
+}
+
+async fn route_context(
+    query: Option<&str>,
+    state: Arc<HistoryState>,
+    data_id: u64,
+    request_id: String,
+    audit: &mut RequestAudit,
+) -> Response {
+    let data = match parse_context_request(query, data_id) {
+        Ok(value) => value,
+        Err(message) => {
+            if message == "context row count exceeds limit" {
+                return error_response(413, "row_limit_exceeded", message, request_id, json!({}));
+            }
+            return error_response(400, "invalid_request", message, request_id, json!({}));
+        }
+    };
+    audit.query(
+        None,
+        &data.symbol,
+        data.series_name(),
+        data.period.as_deref(),
+        (&data.anchor, &data.anchor),
+        data.columns
+            .iter()
+            .copied()
+            .map(HistoryColumn::canonical_name)
+            .collect(),
+    );
+    let server_time_ns = match Utc::now().timestamp_nanos_opt() {
+        Some(value) => value,
+        None => {
+            return error_response(
+                500,
+                "history_internal",
+                "server time is outside nanosecond range",
+                request_id,
+                json!({}),
+            );
+        }
+    };
+    if request_starts_in_future(data.context.anchor_ns, server_time_ns) {
+        return error_response(
+            409,
+            "coverage_incomplete",
+            "history context anchor is after server time",
+            request_id,
+            json!({
+                "reason": "anchor_in_future",
+                "requested_anchor": data.anchor,
+                "server_time": format_ns(server_time_ns),
+                "retryable": true,
+                "clock_skew_tolerance_seconds": 5,
+            }),
+        );
+    }
+    let queue_gauge = state.observability.request_queued();
+    let admission = match timeout(QUEUE_TIMEOUT, state.active.clone().acquire_owned()).await {
+        Ok(Ok(permit)) => {
+            drop(queue_gauge);
+            Arc::new(ActiveRequestPin {
+                _permit: permit,
+                _gauge: Some(state.observability.request_active()),
+            })
+        }
+        _ => {
+            drop(queue_gauge);
+            return error_response(
+                429,
+                "history_overloaded",
+                "history request admission queue full",
+                request_id,
+                json!({"retry_after_ms": 100}),
+            );
+        }
+    };
+    let Some(snapshot) = state.snapshots.current() else {
+        return error_with_permit(
+            503,
+            "history_unavailable",
+            "no valid history snapshot is loaded",
+            request_id,
+            json!({}),
+            admission,
+        );
+    };
+    if snapshot.is_unhealthy() {
+        return error_with_permit(
+            503,
+            "snapshot_unhealthy",
+            "loaded history snapshot unhealthy",
+            request_id,
+            json!({"snapshot_id": snapshot.snapshot_id()}),
+            admission,
+        );
+    }
+    audit.query(
+        Some(snapshot.snapshot_id()),
+        &data.symbol,
+        data.series_name(),
+        data.period.as_deref(),
+        (&data.anchor, &data.anchor),
+        data.columns
+            .iter()
+            .copied()
+            .map(HistoryColumn::canonical_name)
+            .collect(),
+    );
+    context_response(
+        snapshot,
+        data,
+        server_time_ns,
+        request_id,
+        admission,
+        &state,
+        audit,
+    )
+    .await
+}
+
+async fn context_response(
+    snapshot: PinnedSnapshot,
+    mut data: ParsedContextRequest,
+    server_time_ns: i64,
+    request_id: String,
+    admission: Arc<ActiveRequestPin>,
+    state: &Arc<HistoryState>,
+    audit: &mut RequestAudit,
+) -> Response {
+    data.context = data.context.with_effective_end_ns(server_time_ns);
+    let codec = match HistoryRowCodec::new(data.series, data.columns.clone()) {
+        Ok(value) => value,
+        Err(error) => {
+            return error_with_permit(
+                400,
+                "invalid_request",
+                &error.to_string(),
+                request_id,
+                json!({}),
+                admission,
+            );
+        }
+    };
+    let resources =
+        BacktestHistorySnapshotQueryResources::new(state.scan_budget.clone(), admission.clone());
+    let result = match snapshot
+        .query_context(data.context.clone(), resources)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return snapshot_error(error, &snapshot, request_id, admission),
+    };
+    let row_limit = match data.series {
+        BacktestHistorySchemaSeries::Tick => MAX_TICK_ROWS,
+        BacktestHistorySchemaSeries::Kline => MAX_KLINE_ROWS,
+    };
+    if result.rows.len() > row_limit {
+        return error_with_permit(
+            413,
+            "row_limit_exceeded",
+            "context result exceeds row limit",
+            request_id,
+            json!({"limit": row_limit}),
+            admission,
+        );
+    }
+    if !matches!(
+        result.report.coverage.finality,
+        BacktestHistoryFinality::Final
+    ) {
+        return error_with_permit(
+            409,
+            "provisional_data",
+            "context result contains provisional rows",
+            request_id,
+            json!({}),
+            admission,
+        );
+    }
+    let encoded = match codec.encode_chunk(&result.rows) {
+        Ok(value) => value,
+        Err(error) => {
+            return error_with_permit(
+                500,
+                "history_internal",
+                &error.to_string(),
+                request_id,
+                json!({}),
+                admission,
+            );
+        }
+    };
+    if encoded.estimated_json_bytes > MAX_RESPONSE_BYTES {
+        return error_with_permit(
+            413,
+            "response_too_large",
+            "context response exceeds byte limit",
+            request_id,
+            json!({"limit_bytes": MAX_RESPONSE_BYTES, "attempted_bytes": encoded.estimated_json_bytes}),
+            admission,
+        );
+    }
+    let permit = match state
+        .buffers
+        .try_reserve(encoded.estimated_json_bytes.max(1))
+    {
+        Some(value) => value,
+        None => {
+            return error_with_permit(
+                429,
+                "history_overloaded",
+                "history response buffers are exhausted",
+                request_id,
+                json!({"limit_bytes": GLOBAL_BUFFER_BYTES}),
+                admission,
+            );
+        }
+    };
+    audit.rows(encoded.row_count);
+    let mut body = Map::new();
+    body.insert("snapshot_id".into(), json!(snapshot.snapshot_id()));
+    body.insert("source_mode".into(), json!(snapshot.source_mode()));
+    body.insert("columns".into(), json!(codec.column_names()));
+    body.insert("rows".into(), Value::Array(encoded.rows));
+    body.insert(
+        "context".into(),
+        json!({
+            "requested_anchor": data.anchor,
+            "matched_anchor": format_ns(result.matched_anchor_ns),
+            "matched_anchor_tns": result.matched_anchor_ns.to_string(),
+            "matched_anchor_id": result.matched_anchor_row_id.map(|value| value.to_string()),
+            "anchor_index": result.anchor_index,
+            "requested_before": result.requested_before,
+            "requested_after": result.requested_after,
+            "actual_before": result.actual_before,
+            "actual_after": result.actual_after,
+            "complete": result.complete,
+            "left_boundary": result.left_boundary.as_ref().map(context_boundary_json),
+            "right_boundary": result.right_boundary.as_ref().map(context_boundary_json),
+        }),
+    );
+    if data.include_provenance
+        && data.symbol.starts_with("KQ.m@")
+        && !result.report.physical_segments.is_empty()
+    {
+        let segments = result
+            .report
+            .physical_segments
+            .iter()
+            .map(|segment| {
+                json!({
+                    "symbol": segment.physical_symbol,
+                    "start": format_ns(segment.start_ns),
+                    "end": format_ns(segment.end_ns),
+                })
+            })
+            .collect::<Vec<_>>();
+        body.insert(
+            "provenance".into(),
+            json!({"logical_symbol": data.symbol, "segments": segments}),
+        );
+    }
+    Response::success_with_resources(Value::Object(body), request_id, admission, vec![permit])
+}
+
+fn context_boundary_json(boundary: &BacktestHistoryContextBoundary) -> Value {
+    match boundary {
+        BacktestHistoryContextBoundary::HistoryStart => json!({"reason": "history_start"}),
+        BacktestHistoryContextBoundary::FutureEnd { effective_end_ns } => json!({
+            "reason": "future_end",
+            "effective_end": format_ns(*effective_end_ns),
+        }),
+    }
 }
 
 async fn query_response(
@@ -793,6 +1073,140 @@ impl ParsedDataRequest {
     }
 }
 
+struct ParsedContextRequest {
+    context: BacktestHistoryContextRequest,
+    symbol: String,
+    series: BacktestHistorySchemaSeries,
+    period: Option<String>,
+    anchor: String,
+    columns: Vec<HistoryColumn>,
+    include_provenance: bool,
+}
+
+impl ParsedContextRequest {
+    const fn series_name(&self) -> &'static str {
+        match self.series {
+            BacktestHistorySchemaSeries::Tick => "tick",
+            BacktestHistorySchemaSeries::Kline => "kline",
+        }
+    }
+}
+
+fn parse_context_request(
+    query: Option<&str>,
+    request_id: u64,
+) -> Result<ParsedContextRequest, &'static str> {
+    let query = query
+        .filter(|value| !value.is_empty())
+        .ok_or("missing query parameters")?;
+    let parameters = parse_query_parameters(query)?;
+    let allowed = [
+        "symbol",
+        "series",
+        "period",
+        "anchor",
+        "anchor_id",
+        "before",
+        "after",
+        "fields",
+        "include",
+    ];
+    if parameters
+        .keys()
+        .any(|key| !allowed.contains(&key.as_str()))
+    {
+        return Err("unknown history context parameter");
+    }
+    let required = |name| {
+        parameters
+            .get(name)
+            .filter(|value| !value.is_empty())
+            .cloned()
+            .ok_or("missing required history context parameter")
+    };
+    let symbol = required("symbol")?;
+    if !is_history_symbol(&symbol) {
+        return Err("invalid history symbol");
+    }
+    let series = match required("series")?.as_str() {
+        "tick" => BacktestHistorySchemaSeries::Tick,
+        "kline" => BacktestHistorySchemaSeries::Kline,
+        _ => return Err("series must be tick or kline"),
+    };
+    let period = parameters.get("period").cloned();
+    let kind = match series {
+        BacktestHistorySchemaSeries::Tick => {
+            if period.is_some() {
+                return Err("tick requests must not include period");
+            }
+            BacktestHistoryKind::Tick
+        }
+        BacktestHistorySchemaSeries::Kline => {
+            let period = period.as_deref().ok_or("kline requests require period")?;
+            BacktestHistoryKind::Kline {
+                duration: Duration::from_nanos(parse_legal_period_ns(period)?),
+            }
+        }
+    };
+    let anchor = required("anchor")?;
+    let anchor_ns = parse_rfc3339_ns(&anchor)?;
+    let before_rows = required("before")?
+        .parse::<usize>()
+        .map_err(|_| "before must be an unsigned integer")?;
+    let after_rows = required("after")?
+        .parse::<usize>()
+        .map_err(|_| "after must be an unsigned integer")?;
+    let row_limit = match series {
+        BacktestHistorySchemaSeries::Tick => MAX_TICK_ROWS,
+        BacktestHistorySchemaSeries::Kline => MAX_KLINE_ROWS,
+    };
+    if before_rows
+        .checked_add(1)
+        .and_then(|value| value.checked_add(after_rows))
+        .ok_or("context row count overflows")?
+        > row_limit
+    {
+        return Err("context row count exceeds limit");
+    }
+    let anchor_row_id = parameters
+        .get("anchor_id")
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .map_err(|_| "anchor_id must be a signed integer")
+        })
+        .transpose()?;
+    if matches!(series, BacktestHistorySchemaSeries::Kline) && anchor_row_id.is_some() {
+        return Err("anchor_id is only valid for tick requests");
+    }
+    let include_provenance = match parameters.get("include").map(String::as_str) {
+        None => false,
+        Some("provenance") => true,
+        Some(_) => return Err("include only accepts provenance"),
+    };
+    let columns = parse_projection(series, parameters.get("fields").map(String::as_str))?;
+    let mut context = BacktestHistoryContextRequest::new(
+        request_id,
+        symbol.clone(),
+        kind,
+        anchor_ns,
+        before_rows,
+        after_rows,
+    );
+    if let Some(anchor_row_id) = anchor_row_id {
+        context = context.with_anchor_row_id(anchor_row_id);
+    }
+    Ok(ParsedContextRequest {
+        context,
+        symbol,
+        series,
+        period,
+        anchor: format_ns(anchor_ns),
+        columns,
+        include_provenance,
+    })
+}
+
 fn parse_data_request(
     path: &str,
     query: Option<&str>,
@@ -970,6 +1384,14 @@ fn schema_response() -> Value {
         "derived_fields": [
             {"canonical_name": "tns", "value_kind": "integer", "description": "raw nanosecond timestamp"}
         ],
+        "capabilities": {
+            "context_query": {
+                "path": CONTEXT_PATH,
+                "anchor_id_for_tick": true,
+                "max_kline_rows": MAX_KLINE_ROWS,
+                "max_tick_rows": MAX_TICK_ROWS,
+            }
+        },
     })
 }
 
@@ -1203,7 +1625,10 @@ fn format_ns(value: i64) -> String {
 }
 
 fn is_known_path(path: &str) -> bool {
-    matches!(path, SCHEMA_PATH | QUERY_PATH | COVERAGE_PATH)
+    matches!(
+        path,
+        SCHEMA_PATH | QUERY_PATH | COVERAGE_PATH | CONTEXT_PATH
+    )
 }
 
 struct Response {
@@ -1305,6 +1730,12 @@ fn snapshot_error(
     let (status, code, details) = match error.reason() {
         BacktestHistoryFailureReason::InvalidRequest => (400, "invalid_request", json!({})),
         BacktestHistoryFailureReason::SymbolNotFound => (404, "symbol_not_found", json!({})),
+        BacktestHistoryFailureReason::AnchorNotFound => (409, "anchor_not_found", json!({})),
+        BacktestHistoryFailureReason::ContextScanLimitExceeded { limit_rows } => (
+            413,
+            "scan_limit_exceeded",
+            json!({"limit_rows": limit_rows}),
+        ),
         BacktestHistoryFailureReason::CoverageIncomplete { missing_ranges } => (
             409,
             "coverage_incomplete",

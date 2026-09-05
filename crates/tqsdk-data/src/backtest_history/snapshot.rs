@@ -4,6 +4,10 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::context::{
+    BacktestHistoryContextRequest, BacktestHistoryContextResult, collect_context,
+    initial_context_range,
+};
 use super::executor::{
     StrictInspectionFailure, plan_request_for_execution, strict_inspect_plan,
     strict_inspect_request,
@@ -38,7 +42,7 @@ pub struct BacktestHistorySnapshotError {
 }
 
 impl BacktestHistorySnapshotError {
-    fn new(
+    pub(crate) fn new(
         reason: BacktestHistoryFailureReason,
         request_id: Option<u64>,
         symbol: Option<String>,
@@ -189,6 +193,128 @@ impl BacktestHistoryLiveCache {
             inspection: BacktestHistoryInspection { report },
             lifecycle_pin: Arc::new(root_gate),
         })
+    }
+
+    /// Prepares one anchor-centred context from one fixed metadata/source basis.
+    pub async fn prepare_context(
+        &self,
+        request: BacktestHistoryContextRequest,
+    ) -> Result<BacktestHistoryPreparedContextRead, BacktestHistorySnapshotError> {
+        request.validate()?;
+        let (start_ns, end_ns) = initial_context_range(&request);
+        let initial = context_range_request(&request, start_ns, end_ns);
+        let prepared = self.prepare(initial).await?;
+        Ok(BacktestHistoryPreparedContextRead {
+            client: prepared.client,
+            basis: prepared.plan.context_basis,
+            lifecycle_pin: prepared.lifecycle_pin,
+            request,
+        })
+    }
+
+    /// Reads one anchor-centred context while retaining one live-cache operation gate.
+    pub async fn query_context(
+        &self,
+        request: BacktestHistoryContextRequest,
+        resources: BacktestHistorySnapshotQueryResources,
+    ) -> Result<BacktestHistoryContextResult, BacktestHistorySnapshotError> {
+        self.prepare_context(request)
+            .await?
+            .query_with_resources(resources)
+            .await
+    }
+}
+
+/// Request-scoped context reader with one immutable planning basis.
+pub struct BacktestHistoryPreparedContextRead {
+    client: BacktestHistoryClient,
+    basis: planner::FrozenBacktestHistoryPlanBasis,
+    lifecycle_pin: BacktestHistoryLifecyclePin,
+    request: BacktestHistoryContextRequest,
+}
+
+impl BacktestHistoryPreparedContextRead {
+    pub async fn query_with_resources(
+        self,
+        resources: BacktestHistorySnapshotQueryResources,
+    ) -> Result<BacktestHistoryContextResult, BacktestHistorySnapshotError> {
+        let client = self.client;
+        let basis = self.basis;
+        let lifecycle_pin = self.lifecycle_pin;
+        collect_context(self.request, move |range_request| {
+            let client = client.clone();
+            let basis = basis.clone();
+            let lifecycle_pin = lifecycle_pin.clone();
+            let resources = resources.clone();
+            async move {
+                let validated = range_request.validate().map_err(|error| {
+                    BacktestHistorySnapshotError::new(
+                        BacktestHistoryFailureReason::InvalidRequest,
+                        None,
+                        None,
+                        error.to_string(),
+                    )
+                })?;
+                let request_id = validated.request_id;
+                let symbol = validated.symbol.clone();
+                let plan = basis
+                    .plan_range(request_id, (validated.start_ns, validated.end_ns))
+                    .map_err(|error| {
+                        let (reason, message) = map_planning_error(error);
+                        BacktestHistorySnapshotError::new(
+                            reason,
+                            Some(request_id),
+                            Some(symbol.clone()),
+                            message,
+                        )
+                    })?;
+                strict_inspect_plan(client.config.as_ref(), &plan).map_err(|failure| {
+                    map_inspection_failure(request_id, symbol.as_str(), failure)
+                })?;
+                let run = client
+                    .start_prepared_run_with_resources(
+                        validated,
+                        plan,
+                        lifecycle_pin,
+                        Some(resources),
+                    )
+                    .map_err(|error| {
+                        let (reason, message) = map_planning_error(error);
+                        BacktestHistorySnapshotError::new(
+                            reason,
+                            Some(request_id),
+                            Some(symbol.clone()),
+                            message,
+                        )
+                    })?;
+                BacktestHistorySnapshotRun::new(run, request_id, symbol)
+                    .collect()
+                    .await
+            }
+        })
+        .await
+    }
+}
+
+fn context_range_request(
+    context: &BacktestHistoryContextRequest,
+    start_ns: i64,
+    end_ns: i64,
+) -> BacktestHistoryRequest {
+    match context.kind {
+        super::BacktestHistoryKind::Tick => BacktestHistoryRequest::tick(
+            context.request_id,
+            context.symbol.clone(),
+            start_ns,
+            end_ns,
+        ),
+        super::BacktestHistoryKind::Kline { duration } => BacktestHistoryRequest::kline(
+            context.request_id,
+            context.symbol.clone(),
+            duration,
+            start_ns,
+            end_ns,
+        ),
     }
 }
 
@@ -538,6 +664,77 @@ impl BacktestHistorySnapshot {
         resources: BacktestHistorySnapshotQueryResources,
     ) -> Result<BacktestHistorySnapshotRun, BacktestHistorySnapshotError> {
         self.query_inner(request, Some(resources)).await
+    }
+
+    /// Prepares one anchor-centred context pinned to this immutable generation.
+    pub async fn prepare_context(
+        &self,
+        request: BacktestHistoryContextRequest,
+    ) -> Result<BacktestHistoryPreparedContextRead, BacktestHistorySnapshotError> {
+        request.validate()?;
+        if !self.manifest.catalog_contains(request.symbol.as_str()) {
+            let reason = if self.manifest.catalog_complete() {
+                BacktestHistoryFailureReason::SymbolNotFound
+            } else {
+                BacktestHistoryFailureReason::MetadataIncomplete
+            };
+            return Err(BacktestHistorySnapshotError::new(
+                reason,
+                Some(request.request_id),
+                Some(request.symbol.clone()),
+                "requested symbol absent snapshot catalog",
+            ));
+        }
+        let (start_ns, end_ns) = initial_context_range(&request);
+        let initial = context_range_request(&request, start_ns, end_ns);
+        let validated = initial.validate().map_err(|error| {
+            BacktestHistorySnapshotError::new(
+                BacktestHistoryFailureReason::InvalidRequest,
+                Some(request.request_id),
+                Some(request.symbol.clone()),
+                error.to_string(),
+            )
+        })?;
+        planner::validate_source_policy(&validated).map_err(|error| {
+            BacktestHistorySnapshotError::new(
+                BacktestHistoryFailureReason::InvalidRequest,
+                Some(request.request_id),
+                Some(request.symbol.clone()),
+                error.to_string(),
+            )
+        })?;
+        let plan = plan_request_for_execution(&self.client.config, validated)
+            .await
+            .map_err(|error| {
+                let (reason, message) = map_planning_error(error);
+                BacktestHistorySnapshotError::new(
+                    reason,
+                    Some(request.request_id),
+                    Some(request.symbol.clone()),
+                    message,
+                )
+            })?;
+        strict_inspect_plan(self.client.config.as_ref(), &plan).map_err(|failure| {
+            map_inspection_failure(request.request_id, request.symbol.as_str(), failure)
+        })?;
+        Ok(BacktestHistoryPreparedContextRead {
+            client: self.client.clone(),
+            basis: plan.context_basis,
+            lifecycle_pin: self.manifest.lifecycle_pin(),
+            request,
+        })
+    }
+
+    /// Reads one anchor-centred context pinned to this immutable generation.
+    pub async fn query_context(
+        &self,
+        request: BacktestHistoryContextRequest,
+        resources: BacktestHistorySnapshotQueryResources,
+    ) -> Result<BacktestHistoryContextResult, BacktestHistorySnapshotError> {
+        self.prepare_context(request)
+            .await?
+            .query_with_resources(resources)
+            .await
     }
 
     async fn query_inner(

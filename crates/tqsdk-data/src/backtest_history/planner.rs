@@ -37,6 +37,25 @@ pub(crate) struct PlannedSourceSlice {
     pub(crate) physical_rank: usize,
 }
 
+/// Metadata and source selection retained for one context request.
+///
+/// This deliberately owns every value needed to derive a wider range without
+/// reopening metadata or changing the physical mapping.
+#[derive(Debug, Clone)]
+pub(crate) struct FrozenBacktestHistoryPlanBasis {
+    pub(crate) symbol: String,
+    pub(crate) kind: BacktestHistoryKind,
+    pub(crate) duration_ns: Option<i64>,
+    pub(crate) base_source: PlannedBaseSource,
+    pub(crate) session: KlineSessionTemplate,
+    pub(crate) trading_days: Option<Vec<BacktestHistoryTradingDay>>,
+    pub(crate) minute_snapshot: MinuteKlineCacheSnapshot,
+    pub(crate) snapshot_hash: String,
+    pub(crate) source_mapping_segments: Vec<BacktestHistoryPhysicalSegment>,
+    pub(crate) finality: BacktestHistoryFinality,
+    pub(crate) direct_native_daily: bool,
+}
+
 /// Fully validated, cache-oriented plan for one public request.
 #[derive(Debug, Clone)]
 pub(crate) struct PlannedBacktestHistoryRequest {
@@ -55,6 +74,7 @@ pub(crate) struct PlannedBacktestHistoryRequest {
     pub(crate) minute_snapshot: MinuteKlineCacheSnapshot,
     pub(crate) snapshot_hash: String,
     pub(crate) finality: BacktestHistoryFinality,
+    pub(crate) context_basis: FrozenBacktestHistoryPlanBasis,
 }
 
 impl PlannedBacktestHistoryRequest {
@@ -81,6 +101,138 @@ impl PlannedBacktestHistoryRequest {
             },
             remote_used,
         }
+    }
+}
+
+impl FrozenBacktestHistoryPlanBasis {
+    /// Derives one range plan without reopening metadata or changing source selection.
+    pub(crate) fn plan_range(
+        &self,
+        request_id: BacktestHistoryRequestId,
+        requested_range: (i64, i64),
+    ) -> Result<PlannedBacktestHistoryRequest> {
+        if requested_range.0 >= requested_range.1 {
+            return Err(DataError::Validation(
+                "context source range must have positive width".to_string(),
+            ));
+        }
+        let effective_end_ns = requested_range.1;
+        let physical_segments = if self.source_mapping_segments.is_empty()
+            || (self.direct_native_daily && !self.symbol.starts_with("KQ.m@"))
+        {
+            vec![BacktestHistoryPhysicalSegment {
+                physical_symbol: self.symbol.clone(),
+                start_ns: requested_range.0,
+                end_ns: effective_end_ns,
+            }]
+        } else {
+            intersect_segments(
+                self.source_mapping_segments.clone(),
+                (requested_range.0, effective_end_ns),
+            )
+        };
+        if self.symbol.starts_with("KQ.m@") && physical_segments.is_empty() {
+            return Err(DataError::InvalidState(
+                "frozen context metadata does not cover requested main-contract range",
+            ));
+        }
+        let source_slices = match self.base_source {
+            PlannedBaseSource::Tick if self.symbol.starts_with("KQ.m@") => physical_segments
+                .iter()
+                .enumerate()
+                .map(|(physical_rank, segment)| {
+                    let range = expand_tick_source_range(
+                        (segment.start_ns, segment.end_ns),
+                        self.duration_ns,
+                        &self.session,
+                        self.trading_days.as_deref(),
+                    )?;
+                    Ok(PlannedSourceSlice {
+                        cache_symbol: segment.physical_symbol.clone(),
+                        range: (range.0.max(segment.start_ns), range.1.min(segment.end_ns)),
+                        physical_rank,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+            PlannedBaseSource::Tick => vec![PlannedSourceSlice {
+                cache_symbol: self.symbol.clone(),
+                range: expand_tick_source_range(
+                    requested_range,
+                    self.duration_ns,
+                    &self.session,
+                    self.trading_days.as_deref(),
+                )?,
+                physical_rank: 0,
+            }],
+            PlannedBaseSource::CanonicalMinute if self.symbol.starts_with("KQ.") => {
+                physical_segments
+                    .iter()
+                    .enumerate()
+                    .map(|(physical_rank, segment)| {
+                        let range = expand_minute_source_range(
+                            (segment.start_ns, segment.end_ns),
+                            self.duration_ns.expect("minute source has duration"),
+                            &self.session,
+                        )?;
+                        Ok(PlannedSourceSlice {
+                            cache_symbol: segment.physical_symbol.clone(),
+                            range: (range.0.max(segment.start_ns), range.1.min(segment.end_ns)),
+                            physical_rank,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            }
+            PlannedBaseSource::CanonicalMinute => vec![PlannedSourceSlice {
+                cache_symbol: self.symbol.clone(),
+                range: expand_minute_source_range(
+                    requested_range,
+                    self.duration_ns.expect("minute source has duration"),
+                    &self.session,
+                )?,
+                physical_rank: 0,
+            }],
+            PlannedBaseSource::CanonicalDaily => vec![PlannedSourceSlice {
+                cache_symbol: self.symbol.clone(),
+                range: requested_range,
+                physical_rank: 0,
+            }],
+        };
+        let expanded_source_range = source_slices
+            .iter()
+            .map(|slice| slice.range)
+            .reduce(|left, right| (left.0.min(right.0), left.1.max(right.1)))
+            .ok_or(DataError::InvalidState("context plan has no source slices"))?;
+        let proven_empty_ranges = if self.base_source == PlannedBaseSource::Tick {
+            known_non_trading_tick_ranges(
+                self.trading_days.as_deref().unwrap_or_default(),
+                expanded_source_range,
+            )?
+        } else {
+            Vec::new()
+        };
+        let source_slices = if proven_empty_ranges.is_empty() {
+            source_slices
+        } else {
+            exclude_proven_empty_tick_ranges(source_slices, proven_empty_ranges.as_slice())
+        };
+        Ok(PlannedBacktestHistoryRequest {
+            request_id,
+            symbol: self.symbol.clone(),
+            kind: self.kind,
+            duration_ns: self.duration_ns,
+            base_source: self.base_source,
+            requested_range,
+            effective_end_ns,
+            expanded_source_range,
+            source_slices,
+            proven_empty_ranges,
+            physical_segments,
+            session: self.session.clone(),
+            minute_snapshot: self.minute_snapshot.clone(),
+            snapshot_hash: self.snapshot_hash.clone(),
+            finality: self.finality,
+            context_basis: self.clone(),
+        })
     }
 }
 
@@ -333,7 +485,7 @@ pub(crate) fn plan_request(
 
     Ok(PlannedBacktestHistoryRequest {
         request_id: request.request_id,
-        symbol: request.symbol,
+        symbol: request.symbol.clone(),
         kind: request.kind,
         duration_ns: request.duration_ns,
         base_source,
@@ -343,14 +495,31 @@ pub(crate) fn plan_request(
         source_slices: source_segments,
         proven_empty_ranges,
         physical_segments,
-        session,
-        minute_snapshot,
-        snapshot_hash,
+        session: session.clone(),
+        minute_snapshot: minute_snapshot.clone(),
+        snapshot_hash: snapshot_hash.clone(),
         finality: request
             .provisional_as_of_ns
             .map_or(BacktestHistoryFinality::Final, |as_of_ns| {
                 BacktestHistoryFinality::Provisional { as_of_ns }
             }),
+        context_basis: FrozenBacktestHistoryPlanBasis {
+            symbol: request.symbol,
+            kind: request.kind,
+            duration_ns: request.duration_ns,
+            base_source,
+            session,
+            trading_days,
+            minute_snapshot,
+            snapshot_hash,
+            source_mapping_segments,
+            finality: request
+                .provisional_as_of_ns
+                .map_or(BacktestHistoryFinality::Final, |as_of_ns| {
+                    BacktestHistoryFinality::Provisional { as_of_ns }
+                }),
+            direct_native_daily: is_direct_native_daily,
+        },
     })
 }
 

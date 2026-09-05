@@ -85,6 +85,13 @@ relay 只执行：
 
 relay 永不写 snapshot、永不 GC、永不 RemoteOnMiss、永不读取历史远端凭证。
 
+### Context query
+
+Context reads retain one request-scoped data planning basis and lifecycle pin.
+Adaptive probes derive ranges only from this basis; response and provenance come
+from one final enclosing strict scan. Relay does not infer trading sessions or own
+a context cursor.
+
 ### 零读中断 snapshot
 
 history root 使用不可变 generation：

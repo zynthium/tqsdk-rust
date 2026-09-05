@@ -243,6 +243,27 @@ maintenance 持锁期间返回 503，而不是跨维护窗口混读。
 `generation=` 或其他 pin parameter。ETag 按完整响应 bytes 计算，因此 live coverage/rows 改变后 ETag
 也随之改变。
 
+## Context query
+
+`GET /v1/history/context` complements range query. It accepts `symbol`, `series`,
+`anchor`, `before`, and `after`; Kline also requires `period`, while Tick may add
+`anchor_id`. Rows remain ascending. Kline selects final bar start at or before
+anchor; Tick selects final `(timestamp_ns, id)` key at or before anchor key.
+
+Response adds `context` with matched anchor, exact Tick nanoseconds/id, anchor
+index, requested/actual side counts, completion, and optional authoritative
+`future_end`. Internal coverage gaps, metadata changes, and provisional rows remain
+409. Requested rows above 10,000 Kline or 50,000 Tick fail before admission with
+`413 row_limit_exceeded`; `anchor_not_found` is 409. Each request freezes one
+metadata/source basis and lifecycle pin, then uses one final enclosing strict scan.
+No public cursor, pagination, batch POST, or streaming body is introduced.
+
+Context probing is deliberately bounded: it uses at most 16 exponentially expanded
+delta scans, a 90-day total time window, and the existing CacheOnly collect budget;
+the listener's 10-second request deadline covers the complete operation. A sparse
+request exceeding this resource window fails rather than causing a blind 250-day
+sequential scan. A backward TQBN index is not part of this first version.
+
 ## CORS、审计与取消
 
 - 所有响应默认发送 `Access-Control-Allow-Origin: *`、`Access-Control-Allow-Methods: GET, OPTIONS`、

@@ -216,7 +216,9 @@ runtime，不改变 SDK 默认直连路径。history listener 默认关闭，只
 
 两个 history source 环境变量必须且只能配置一个。部分配置、非法 root/header 或 listener/runtime 启动失败都会让进程 fail fast。history 使用 binary-private
 模块、独立 OS thread 和独立 Tokio worker，不接收 `RelayEngine`、`RelayServer` 或 market mutex。
-listener 提供 `GET /v1/history/schema`、`/v1/history/coverage` 和 `/v1/history/query`。
+listener 提供 `GET /v1/history/schema`、`/v1/history/coverage`、`/v1/history/query`
+和 `/v1/history/context`。context 以 `anchor + before + after` 返回按实际输出行
+计数的 Tick/Kline 窗口；它不是分页或公开 cursor API。
 live-cache 模式下，coverage/query 每次都读取实际缓存的最新原子提交结果；同一请求只规划一次 metadata/source，
 并持有共享 root operation gate 到 detached scan 完全退出，因此可与 fill 并行但不会跨 destructive maintenance
 混读。未提交行、缺失 coverage 和 minute provisional checkpoint 不会被 strict HTTP 接口当作 final 数据。

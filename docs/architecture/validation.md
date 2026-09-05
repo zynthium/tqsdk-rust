@@ -672,6 +672,16 @@ macOS 和 Windows 的加载验证必须在对应原生 CI runner 上运行 helpe
 | 重连专项 | 验证 session error、重连与 resync 仍走统一提交模型；覆盖有限重试耗尽和默认无限重试直到成功 |
 | adapter 验证 | 验证 wait / fan-out / callback 只消费 contract，不回改 contract |
 
+## History context
+
+Context coverage validates Tick `(timestamp_ns, id)` anchors, Kline floor anchors,
+actual counts across non-trading gaps, complete main-contract provenance, fixed
+metadata/source basis, and 409 coverage/provisional/metadata failures. HTTP tests
+cover row-limit rejection before admission, anchor response encoding, and audit
+parity. Performance fixtures must record probe/final-scan ranges and rows for a
+representative 1,800-row window; context probing is capped at 16 scans and the
+90-day total window, under the listener's 10-second deadline.
+
 ## Workspace 测试放置原则
 为保持多个 crate 的测试结构一致，新增或移动测试时遵守以下规则：
 

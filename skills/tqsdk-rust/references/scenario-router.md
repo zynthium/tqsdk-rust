@@ -35,6 +35,13 @@
 
 ## 各场景调用模式
 
+### Relay 事件窗口历史
+
+用户要“事件前后 N 条 Tick/Kline”、“anchor + before + after”或 HTTP 图表窗口时，路由到
+`tqsdk-relay` 的 `/v1/history/context`，并读取
+[`relay-history-http.md`](relay-history-http.md)。先检查 `/v1/history/schema` 的
+`capabilities.context_query`；按时间区间时仍用 `/query`，不要把 context 当分页接口。
+
 ### 1. 在策略循环中监控一个合约
 
 普通策略使用 `tqsdk`；只有用户明确要 Python-style wait API 时使用 `tqsdk-wait`。

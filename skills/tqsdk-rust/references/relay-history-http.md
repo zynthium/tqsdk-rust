@@ -18,8 +18,11 @@ history listener 只提供：
 - `GET /v1/history/schema`
 - `GET /v1/history/coverage`
 - `GET /v1/history/query`
+- `GET /v1/history/context`
 
 `query` 和 `coverage` 的通用参数为 `symbol`、`series=tick|kline`、`start`、`end`；Kline 必须带 `period`，Tick 禁止带 `period`。时间是 RFC3339，区间固定为 `[start, end)`。`query` 另可带按请求顺序投影的 `fields`；主连映射需要 `include=provenance`。调用方按 HTTP status 和 `error.code` 判断失败，不解析 `message`。
+
+`context` 用于围绕事件加载固定数量的实际输出行，不是分页：必填 `symbol`、`series`、`anchor`、`before`、`after`；Kline 必须带 `period`，Tick 禁止带 `period`，且可用 `anchor_id` 以完整 `(timestamp_ns, tick_id)` 定位。Kline 选择 `bar_start <= anchor` 的最后一行；未给 `anchor_id` 的 Tick 选择 `timestamp_ns <= anchor` 的最后一行。`before`、`after` 都不含锚点，`rows` 始终时间升序；响应的 `context.anchor_index` 等于 `actual_before`。先从 `/schema` 的 `capabilities.context_query` 判断服务是否支持，不能猜版本。
 
 最小调用示例：
 
@@ -34,6 +37,10 @@ curl --fail-with-body --silent --show-error \
 curl --fail-with-body --silent --show-error \
   -H "${IDENTITY_HEADER}: local-client" \
   "http://${RELAY_HOST}:7790/v1/history/query?symbol=SHFE.au2612&series=kline&period=1m&start=2026-08-01T00%3A00%3A00%2B08%3A00&end=2026-08-01T01%3A00%3A00%2B08%3A00&fields=t%2Co%2Ch%2Cl%2Cc%2Cv%2Coi"
+
+curl --fail-with-body --silent --show-error \
+  -H "${IDENTITY_HEADER}: local-client" \
+  "http://${RELAY_HOST}:7790/v1/history/context?symbol=KQ.m%40SHFE.au&series=kline&period=1s&anchor=2026-08-24T13%3A30%3A20%2B08%3A00&before=899&after=900&fields=t%2Co%2Ch%2Cl%2Cc%2Cv%2Coi"
 ```
 
 整数 cell 以 JSON 十进制字符串返回；有限浮点是 JSON number；缺失或非有限值是 `null`。`columns` 与每行 `rows` 的位置一一对应。完整覆盖但没有 row 时是 200 和空 `rows`；coverage 缺口通常是 typed 409，不是 partial 200。
@@ -41,6 +48,8 @@ curl --fail-with-body --silent --show-error \
 请求起点比 relay 服务器时间晚超过 5 秒时，`coverage` 和 `query` 会在 admission 与 cache/source lookup 前返回 `409 coverage_incomplete`，其中 `details.reason=range_starts_in_future`、`retryable=true`。若起点在过去而 end 超过服务器时间，默认返回已存在的连续 final 前缀：成功响应通过 `requested_end`、`effective_end`、`truncated=true`、`truncation_reason=future_end` 和 `requested_complete=false` 明确裁剪；内部缺口、空前缀、metadata 不足或 provisional 数据仍返回 typed 409。默认 row 上限是 Kline 10,000、Tick 50,000，未压缩响应上限 32 MiB；调用方应缩小时间区间后重试，不要无界重放同一个超限请求。
 
 所有 history 响应默认带 wildcard CORS header；已知 path 的 `OPTIONS` 无需 identity，实际 `GET` 仍要求 trusted identity header。该 header 不进入 CORS allow-headers，浏览器调用应由受控网关注入，不能让前端脚本自行伪造。
+
+context 使用相同 row/response 限制；超行数是 `413 row_limit_exceeded`，内部 coverage 缺口、provisional 或 metadata 不完整仍是 typed 409，不能把缓存缺失伪装成部分成功。只有服务器时间形成的权威右边界可返回 `complete=false` 和 `context.right_boundary.reason=future_end`。服务端为保护 cache I/O，context probe 最多 16 次、总时间窗最多 90 天；稀疏请求超出该资源窗会失败，调用方应缩小行数或使用更窄的业务窗口。
 
 ## Docker 配置与挂载
 

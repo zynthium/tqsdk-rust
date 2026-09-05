@@ -63,6 +63,11 @@
   retained validation 仍只在 data 实现，`tqsdk-cache` 不复制 manifest parser
 - `BacktestHistoryMetadataCache` / `BacktestHistoryMaintenanceClient`
 
+`BacktestHistoryContextRequest` with `BacktestHistoryLiveCache::prepare_context(...)`
+or `BacktestHistorySnapshot::query_context(...)` reads an anchor-centred window from
+one fixed metadata/source basis. It is CacheOnly and does not enable RemoteOnMiss
+or cache writes.
+
 ## Universe Language V2 与历史 artifact
 
 `tqsdk-data` 是 Universe 语言和历史 plan 的唯一 owner：

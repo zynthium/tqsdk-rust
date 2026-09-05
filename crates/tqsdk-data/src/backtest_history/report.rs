@@ -213,6 +213,10 @@ pub enum BacktestHistoryFailureReason {
     InvalidRequest,
     /// A complete authoritative catalog proved that the symbol does not exist.
     SymbolNotFound,
+    /// No output row exists at or before an otherwise valid context anchor.
+    AnchorNotFound,
+    /// Context candidate rows exceeded its bounded in-memory scan allowance.
+    ContextScanLimitExceeded { limit_rows: usize },
     /// Durable cache coverage did not span the complete requested range.
     CoverageIncomplete { missing_ranges: Vec<(i64, i64)> },
     /// The available rows were provisional rather than final.

@@ -1,5 +1,6 @@
 //! Async, cache-backed historical market-data queries for local backtests.
 
+mod context;
 mod executor;
 mod fill;
 mod metadata;
@@ -27,6 +28,9 @@ use tokio::task::JoinHandle;
 use crate::backtest_tick_cache::{BacktestTickCache, BacktestTickCacheOperationLock};
 use crate::error::{DataError, Result};
 
+pub use context::{
+    BacktestHistoryContextBoundary, BacktestHistoryContextRequest, BacktestHistoryContextResult,
+};
 pub(crate) use metadata::minute_cache_snapshots_are_compatible;
 pub use metadata::{
     BACKTEST_HISTORY_METADATA_FORMAT_ID, BACKTEST_HISTORY_METADATA_SCHEMA_VERSION,
@@ -61,9 +65,9 @@ pub use schema::{
     backtest_history_schema_fields,
 };
 pub use snapshot::{
-    BacktestHistoryInspection, BacktestHistoryLiveCache, BacktestHistoryPreparedRead,
-    BacktestHistorySnapshot, BacktestHistorySnapshotError, BacktestHistorySnapshotEvent,
-    BacktestHistorySnapshotRun,
+    BacktestHistoryInspection, BacktestHistoryLiveCache, BacktestHistoryPreparedContextRead,
+    BacktestHistoryPreparedRead, BacktestHistorySnapshot, BacktestHistorySnapshotError,
+    BacktestHistorySnapshotEvent, BacktestHistorySnapshotRun,
 };
 pub use snapshot_manifest::{
     BacktestHistorySnapshotFileDisposition, BacktestHistorySnapshotFileRole,
