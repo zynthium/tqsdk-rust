@@ -22,8 +22,9 @@ use super::request::{
     BacktestHistoryPolicy, BacktestHistoryRequest, ValidatedBacktestHistoryRequest,
 };
 use super::snapshot_manifest::{
-    BacktestHistorySnapshotFileRole, BacktestHistorySnapshotManifestBuilder, SnapshotManifestError,
-    SnapshotManifestErrorKind, ValidatedSnapshotManifest, open_current_manifest,
+    BacktestHistorySnapshotFileRole, BacktestHistorySnapshotGenerationInfo,
+    BacktestHistorySnapshotManifestBuilder, SnapshotManifestError, SnapshotManifestErrorKind,
+    ValidatedSnapshotManifest, inspect_generation_manifest_metadata, open_current_manifest,
     open_generation_manifest,
 };
 use super::{
@@ -528,6 +529,17 @@ impl BacktestHistorySnapshot {
         let manifest = open_generation_manifest(history_root.as_ref(), generation_dir.as_ref())
             .map_err(map_manifest_error)?;
         Self::from_validated_manifest(manifest)
+    }
+
+    /// Inspects one generation's durable layout and manifest identity without
+    /// scanning every cache file. Maintenance planning must still call
+    /// [`Self::open_generation`] before serving or publishing a generation.
+    pub fn inspect_generation_metadata(
+        history_root: impl AsRef<Path>,
+        generation_dir: impl AsRef<Path>,
+    ) -> Result<BacktestHistorySnapshotGenerationInfo, BacktestHistorySnapshotError> {
+        inspect_generation_manifest_metadata(history_root.as_ref(), generation_dir.as_ref())
+            .map_err(map_manifest_error)
     }
 
     pub(crate) fn from_validated_manifest(

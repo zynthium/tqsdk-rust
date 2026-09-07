@@ -115,12 +115,13 @@ pub use backtest_history::{
     BacktestHistoryRows, BacktestHistoryRun, BacktestHistorySchemaSeries, BacktestHistorySnapshot,
     BacktestHistorySnapshotError, BacktestHistorySnapshotEvent,
     BacktestHistorySnapshotFileDisposition, BacktestHistorySnapshotFileRole,
-    BacktestHistorySnapshotManifestArtifact, BacktestHistorySnapshotManifestBuilder,
-    BacktestHistorySnapshotQueryResources, BacktestHistorySnapshotResourceBudget,
-    BacktestHistorySnapshotResourceReservation, BacktestHistorySnapshotRun,
-    BacktestHistoryTelemetryEvent, BacktestHistoryTelemetryStream, BacktestHistoryTradingDay,
-    BacktestHistoryValueKind, backtest_history_default_fields, backtest_history_resolve_fields,
-    backtest_history_schema_fields, classify_backtest_history_snapshot_cache_path,
+    BacktestHistorySnapshotGenerationInfo, BacktestHistorySnapshotManifestArtifact,
+    BacktestHistorySnapshotManifestBuilder, BacktestHistorySnapshotQueryResources,
+    BacktestHistorySnapshotResourceBudget, BacktestHistorySnapshotResourceReservation,
+    BacktestHistorySnapshotRun, BacktestHistoryTelemetryEvent, BacktestHistoryTelemetryStream,
+    BacktestHistoryTradingDay, BacktestHistoryValueKind, backtest_history_default_fields,
+    backtest_history_resolve_fields, backtest_history_schema_fields,
+    classify_backtest_history_snapshot_cache_path,
 };
 #[doc(hidden)]
 pub use backtest_history::{

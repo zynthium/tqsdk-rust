@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
+use std::io::{BufReader, Read};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -15,7 +16,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::snapshot::{BacktestHistorySnapshotError, map_manifest_error};
-use crate::history_series_cache::tqbn_snapshot_requires_zstd;
+use crate::history_series_cache::tqbn_snapshot_file_sha256_and_requires_zstd;
 
 const MANIFEST_VERSION: u32 = 1;
 const SNAPSHOTS_DIR: &str = "snapshots";
@@ -81,6 +82,33 @@ pub struct BacktestHistorySnapshotManifestArtifact {
     identity_sha256: String,
     metadata_snapshot_hash: String,
     manifest_bytes: Vec<u8>,
+}
+
+/// Manifest-only generation identity for maintenance planning. This checks
+/// layout and manifest fields without reading every cache payload; full
+/// validation remains required before serving or publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestHistorySnapshotGenerationInfo {
+    snapshot_id: String,
+    created_at: String,
+    identity_sha256: String,
+}
+
+impl BacktestHistorySnapshotGenerationInfo {
+    #[must_use]
+    pub fn snapshot_id(&self) -> &str {
+        self.snapshot_id.as_str()
+    }
+
+    #[must_use]
+    pub fn created_at(&self) -> &str {
+        self.created_at.as_str()
+    }
+
+    #[must_use]
+    pub fn identity_sha256(&self) -> &str {
+        self.identity_sha256.as_str()
+    }
 }
 
 impl BacktestHistorySnapshotManifestArtifact {
@@ -495,22 +523,26 @@ fn collect_manifest_input_files(
         let BacktestHistorySnapshotFileDisposition::Include(role) = disposition else {
             continue;
         };
-        let bytes = fs::read(path.as_path()).map_err(|error| {
-            SnapshotManifestError::unavailable(format!(
-                "snapshot cache entry {} cannot be read: {error}",
-                path.display()
-            ))
-        })?;
-        if role == BacktestHistorySnapshotFileRole::TqbnMutableLayout
-            && tqbn_snapshot_requires_zstd(bytes.as_slice()).map_err(|error| {
-                SnapshotManifestError::corrupt(format!(
-                    "snapshot TQBN entry {} cannot be inspected: {error}",
+        let sha256 = if role == BacktestHistorySnapshotFileRole::TqbnMutableLayout {
+            let (sha256, requires_zstd) = tqbn_snapshot_file_sha256_and_requires_zstd(&path)
+                .map_err(|error| {
+                    SnapshotManifestError::corrupt(format!(
+                        "snapshot TQBN entry {} cannot be inspected: {error}",
+                        path.display()
+                    ))
+                })?;
+            if requires_zstd {
+                required_features.insert("tqbn-zstd".to_string());
+            }
+            sha256
+        } else {
+            sha256_file(path.as_path()).map_err(|error| {
+                SnapshotManifestError::unavailable(format!(
+                    "snapshot cache entry {} cannot be read: {error}",
                     path.display()
                 ))
             })?
-        {
-            required_features.insert("tqbn-zstd".to_string());
-        }
+        };
         let relative = relative
             .to_string_lossy()
             .replace(std::path::MAIN_SEPARATOR, "/");
@@ -518,7 +550,7 @@ fn collect_manifest_input_files(
             path: format!("cache/{relative}"),
             role: role.as_str().to_string(),
             size: metadata.len(),
-            sha256: sha256_prefixed(bytes.as_slice()),
+            sha256,
         });
     }
     Ok(())
@@ -626,6 +658,80 @@ pub(crate) fn open_generation_manifest(
     )?;
     let lease = acquire_generation_lease(generation_dir)?;
     load_generation_manifest(history_root, generation_dir, snapshot_id, lease)
+}
+
+pub(crate) fn inspect_generation_manifest_metadata(
+    history_root: &Path,
+    generation_dir: &Path,
+) -> Result<BacktestHistorySnapshotGenerationInfo, SnapshotManifestError> {
+    reject_symlink_ancestors(history_root)?;
+    require_regular_directory(
+        history_root,
+        "history root",
+        SnapshotManifestErrorKind::Unavailable,
+    )?;
+    let namespace = generation_dir.parent().ok_or_else(|| {
+        SnapshotManifestError::corrupt("generation must have a namespace directory")
+    })?;
+    if namespace.parent() != Some(history_root)
+        || !matches!(
+            namespace.file_name().and_then(|value| value.to_str()),
+            Some(SNAPSHOTS_DIR | "staging")
+        )
+    {
+        return Err(SnapshotManifestError::corrupt(
+            "generation must be a direct child of history-root snapshots/ or staging/",
+        ));
+    }
+    let snapshot_id = generation_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| SnapshotManifestError::corrupt("generation name must be UTF-8"))?;
+    if !is_safe_snapshot_id(snapshot_id) {
+        return Err(SnapshotManifestError::corrupt(
+            "generation name is not a safe snapshot id",
+        ));
+    }
+    require_regular_directory(
+        generation_dir,
+        "generation",
+        SnapshotManifestErrorKind::Unavailable,
+    )?;
+    let lease = acquire_generation_lease(generation_dir)?;
+    validate_generation_layout(generation_dir)?;
+    let manifest_path = generation_dir.join(MANIFEST_FILE);
+    let manifest_bytes = read_regular_file(
+        manifest_path.as_path(),
+        "manifest",
+        SnapshotManifestErrorKind::Corrupt,
+    )?;
+    let manifest_value: Value =
+        serde_json::from_slice(manifest_bytes.as_slice()).map_err(|error| {
+            SnapshotManifestError::corrupt(format!(
+                "manifest {} is not valid JSON: {error}",
+                manifest_path.display()
+            ))
+        })?;
+    let manifest: SnapshotManifest =
+        serde_json::from_value(manifest_value.clone()).map_err(|error| {
+            SnapshotManifestError::corrupt(format!(
+                "manifest {} has invalid fields: {error}",
+                manifest_path.display()
+            ))
+        })?;
+    validate_manifest_metadata(
+        history_root,
+        generation_dir,
+        snapshot_id,
+        &manifest,
+        &manifest_value,
+        lease,
+    )?;
+    Ok(BacktestHistorySnapshotGenerationInfo {
+        snapshot_id: manifest.snapshot_id,
+        created_at: manifest.created_at,
+        identity_sha256: manifest.identity_sha256,
+    })
 }
 
 fn load_generation_manifest(
@@ -906,6 +1012,86 @@ fn parse_current(bytes: &[u8]) -> Result<String, SnapshotManifestError> {
     Ok(snapshot_id.to_string())
 }
 
+fn validate_manifest_metadata(
+    history_root: &Path,
+    generation_dir: &Path,
+    current_snapshot_id: &str,
+    manifest: &SnapshotManifest,
+    manifest_value: &Value,
+    _lease: Arc<GenerationLease>,
+) -> Result<(), SnapshotManifestError> {
+    if manifest.manifest_version != MANIFEST_VERSION {
+        return Err(SnapshotManifestError::incompatible(format!(
+            "manifest version {} unsupported; expected {MANIFEST_VERSION}",
+            manifest.manifest_version
+        )));
+    }
+    validate_required_features(manifest.required_features.as_slice())?;
+    if manifest.snapshot_id != current_snapshot_id
+        || generation_dir
+            .file_name()
+            .is_none_or(|name| name != std::ffi::OsStr::new(manifest.snapshot_id.as_str()))
+    {
+        return Err(SnapshotManifestError::corrupt(
+            "CURRENT, generation directory, and manifest snapshot_id must agree",
+        ));
+    }
+    validate_snapshot_id(manifest)?;
+    if !reader_version_is_compatible(manifest.minimum_reader.as_str()) {
+        return Err(SnapshotManifestError::incompatible(format!(
+            "manifest minimum_reader {} exceeds reader {}",
+            manifest.minimum_reader,
+            env!("CARGO_PKG_VERSION")
+        )));
+    }
+    validate_formats(manifest.cache_formats.as_slice())?;
+    validate_sorted_unique(
+        manifest.catalog.symbols.as_slice(),
+        "catalog symbols",
+        SnapshotManifestErrorKind::Corrupt,
+    )?;
+    validate_manifest_file_declarations(manifest.files.as_slice())?;
+    validate_identity(manifest, manifest_value)?;
+    let cache_dir = generation_dir.join("cache");
+    let cache_metadata = fs::symlink_metadata(cache_dir.as_path()).map_err(|error| {
+        SnapshotManifestError::corrupt(format!(
+            "cache directory {} unavailable: {error}",
+            cache_dir.display()
+        ))
+    })?;
+    if cache_metadata.file_type().is_symlink() || !cache_metadata.is_dir() {
+        return Err(SnapshotManifestError::corrupt(format!(
+            "cache directory {} is not a regular directory",
+            cache_dir.display()
+        )));
+    }
+    if generation_dir.parent().and_then(Path::parent) != Some(history_root) {
+        return Err(SnapshotManifestError::corrupt(
+            "generation parent does not belong to history root",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_manifest_file_declarations(
+    files: &[ManifestFile],
+) -> Result<(), SnapshotManifestError> {
+    let paths = files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+    validate_sorted_unique(
+        paths.as_slice(),
+        "manifest file paths",
+        SnapshotManifestErrorKind::Corrupt,
+    )?;
+    for file in files {
+        let relative = normalize_cache_relative_path(file.path.as_str())?;
+        validate_role(file, relative.as_path())?;
+    }
+    Ok(())
+}
+
 fn validate_manifest(
     history_root: &Path,
     generation_dir: &Path,
@@ -1117,13 +1303,13 @@ fn validate_files(
                 file.path
             )));
         }
-        let bytes = fs::read(path.as_path()).map_err(|error| {
+        let sha256 = sha256_file(path.as_path()).map_err(|error| {
             SnapshotManifestError::corrupt(format!(
                 "cannot hash manifest file {}: {error}",
                 file.path
             ))
         })?;
-        if sha256_prefixed(bytes.as_slice()) != file.sha256 {
+        if sha256 != file.sha256 {
             return Err(SnapshotManifestError::corrupt(format!(
                 "manifest file {} SHA-256 differs from manifest",
                 file.path
@@ -1501,6 +1687,21 @@ fn parse_sha256<'a>(value: &'a str, label: &str) -> Result<&'a str, SnapshotMani
 
 fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+fn sha256_file(path: &Path) -> std::io::Result<String> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::with_capacity(64 * 1024, file);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 #[cfg(test)]

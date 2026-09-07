@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -43,7 +44,7 @@ pub(crate) struct ProgressCalendar {
 #[derive(Clone)]
 pub(crate) struct FillProgress {
     shared: Option<Arc<Mutex<ProgressState>>>,
-    jsonl_tx: Option<mpsc::SyncSender<JsonlEvent>>,
+    jsonl_tx: Option<JsonlSender>,
 }
 
 pub(crate) struct FillProgressSession {
@@ -53,13 +54,21 @@ pub(crate) struct FillProgressSession {
 }
 
 enum JsonlEvent {
+    Render,
     Record(Value),
     Finish,
 }
 
+#[derive(Clone)]
+struct JsonlSender {
+    tx: mpsc::SyncSender<JsonlEvent>,
+    render_queued: Arc<AtomicBool>,
+}
+
 struct JsonlWriter {
     tx: mpsc::SyncSender<JsonlEvent>,
-    worker: thread::JoinHandle<()>,
+    render_queued: Arc<AtomicBool>,
+    worker: thread::JoinHandle<io::Result<()>>,
 }
 
 impl FillProgressSession {
@@ -88,13 +97,23 @@ impl FillProgressSession {
         };
         let jsonl_writer = matches!(mode, ResolvedProgressMode::Jsonl).then(|| {
             let (tx, rx) = mpsc::sync_channel(JSONL_QUEUE_CAPACITY);
-            let worker = thread::spawn(move || render_jsonl(rx));
-            JsonlWriter { tx, worker }
+            let render_queued = Arc::new(AtomicBool::new(false));
+            let worker_state = Arc::clone(&shared);
+            let worker_queued = Arc::clone(&render_queued);
+            let worker = thread::spawn(move || render_jsonl(rx, worker_state, worker_queued));
+            JsonlWriter {
+                tx,
+                render_queued,
+                worker,
+            }
         });
         Self {
             progress: FillProgress {
                 shared: Some(shared),
-                jsonl_tx: jsonl_writer.as_ref().map(|writer| writer.tx.clone()),
+                jsonl_tx: jsonl_writer.as_ref().map(|writer| JsonlSender {
+                    tx: writer.tx.clone(),
+                    render_queued: Arc::clone(&writer.render_queued),
+                }),
             },
             renderer,
             jsonl_writer,
@@ -105,21 +124,30 @@ impl FillProgressSession {
         self.progress.clone()
     }
 
-    pub(crate) fn finish(mut self, status: ProgressTerminalStatus, summary: impl Into<String>) {
-        self.progress.finish(status, summary);
+    pub(crate) fn finish(self, status: ProgressTerminalStatus, summary: impl Into<String>) {
+        let _ = self.finish_checked(status, summary);
+    }
+
+    pub(crate) fn finish_checked(
+        mut self,
+        status: ProgressTerminalStatus,
+        summary: impl Into<String>,
+    ) -> io::Result<()> {
+        self.progress.finish(status, summary)?;
         if let Some(renderer) = self.renderer.take() {
             let _ = renderer.join();
         }
         if let Some(writer) = self.jsonl_writer.take() {
-            writer.finish();
+            writer.finish()?;
         }
+        Ok(())
     }
 }
 
 impl Drop for FillProgressSession {
     fn drop(&mut self) {
         if !self.progress.is_finished() {
-            self.progress.finish(
+            let _ = self.progress.finish(
                 ProgressTerminalStatus::Failed,
                 "fill failed before operation completed",
             );
@@ -128,15 +156,19 @@ impl Drop for FillProgressSession {
             let _ = renderer.join();
         }
         if let Some(writer) = self.jsonl_writer.take() {
-            writer.finish();
+            let _ = writer.finish();
         }
     }
 }
 
 impl JsonlWriter {
-    fn finish(self) {
-        let _ = self.tx.send(JsonlEvent::Finish);
-        let _ = self.worker.join();
+    fn finish(self) -> io::Result<()> {
+        self.tx.send(JsonlEvent::Finish).map_err(|_| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "JSONL progress writer stopped")
+        })?;
+        self.worker
+            .join()
+            .map_err(|_| io::Error::other("JSONL progress writer panicked"))?
     }
 }
 
@@ -180,11 +212,26 @@ impl FillProgress {
         self.with_state(|state| state.apply_final_minute_report(report));
     }
 
-    fn finish(&self, status: ProgressTerminalStatus, summary: impl Into<String>) {
+    fn finish(&self, status: ProgressTerminalStatus, summary: impl Into<String>) -> io::Result<()> {
         let summary = summary.into();
-        self.with_state(|state| {
-            state.finished = Some(ProgressCompletion { status, summary });
-        });
+        let Some(shared) = &self.shared else {
+            return Ok(());
+        };
+        let mut state = shared
+            .lock()
+            .map_err(|_| io::Error::other("progress state lock poisoned"))?;
+        if state.finished.is_some() {
+            return Ok(());
+        }
+        state.finished = Some(ProgressCompletion { status, summary });
+        state.revision = state.revision.saturating_add(1);
+        if let Some(sender) = &self.jsonl_tx {
+            let record = state.jsonl_record();
+            sender.tx.send(JsonlEvent::Record(record)).map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "JSONL progress writer stopped")
+            })?;
+        }
+        Ok(())
     }
 
     fn is_finished(&self) -> bool {
@@ -206,20 +253,20 @@ impl FillProgress {
         }
         update(&mut state);
         state.revision = state.revision.saturating_add(1);
-        if matches!(state.mode, ResolvedProgressMode::Jsonl) {
-            if let Some(tx) = &self.jsonl_tx {
-                send_jsonl_record(tx, state.jsonl_record(), state.finished.is_some());
-            }
+        if matches!(state.mode, ResolvedProgressMode::Jsonl)
+            && let Some(sender) = &self.jsonl_tx
+        {
+            send_jsonl_render(sender);
         }
     }
 }
 
-fn send_jsonl_record(tx: &mpsc::SyncSender<JsonlEvent>, record: Value, terminal: bool) {
-    let event = JsonlEvent::Record(record);
-    if terminal {
-        let _ = tx.send(event);
-    } else {
-        let _ = tx.try_send(event);
+fn send_jsonl_render(sender: &JsonlSender) {
+    if sender.render_queued.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if sender.tx.try_send(JsonlEvent::Render).is_err() {
+        sender.render_queued.store(false, Ordering::Release);
     }
 }
 
@@ -1000,22 +1047,34 @@ impl ProgressState {
     }
 }
 
-fn render_jsonl(rx: mpsc::Receiver<JsonlEvent>) {
+fn render_jsonl(
+    rx: mpsc::Receiver<JsonlEvent>,
+    shared: Arc<Mutex<ProgressState>>,
+    render_queued: Arc<AtomicBool>,
+) -> io::Result<()> {
     while let Ok(event) = rx.recv() {
         match event {
-            JsonlEvent::Record(record) => write_jsonl_progress(&record),
-            JsonlEvent::Finish => return,
+            JsonlEvent::Render => {
+                render_queued.store(false, Ordering::Release);
+                let snapshot = shared
+                    .lock()
+                    .map_err(|_| io::Error::other("progress state lock poisoned"))?
+                    .clone();
+                write_jsonl_progress(&snapshot.jsonl_record())?;
+            }
+            JsonlEvent::Record(record) => write_jsonl_progress(&record)?,
+            JsonlEvent::Finish => return Ok(()),
         }
     }
+    Ok(())
 }
 
-fn write_jsonl_progress(record: &Value) {
+fn write_jsonl_progress(record: &Value) -> io::Result<()> {
     let stderr = io::stderr();
     let mut stderr = stderr.lock();
-    if serde_json::to_writer(&mut stderr, record).is_ok() {
-        let _ = stderr.write_all(b"\n");
-        let _ = stderr.flush();
-    }
+    serde_json::to_writer(&mut stderr, record).map_err(io::Error::other)?;
+    stderr.write_all(b"\n")?;
+    stderr.flush()
 }
 
 fn elapsed_millis(started_at: Instant) -> u64 {
@@ -1203,17 +1262,23 @@ fn render_plain(shared: Arc<Mutex<ProgressState>>) {
     loop {
         thread::sleep(RENDER_INTERVAL);
         let snapshot = match shared.lock() {
-            Ok(state) => state.clone(),
+            Ok(state)
+                if state.revision != rendered_revision
+                    || state.finished.is_some()
+                    || last_rendered_at.is_none_or(|rendered_at: Instant| {
+                        rendered_at.elapsed() >= PLAIN_RENDER_INTERVAL
+                    }) =>
+            {
+                state.clone()
+            }
+            Ok(_) => continue,
             Err(_) => return,
         };
-        if snapshot.revision != rendered_revision {
-            if snapshot.finished.is_none()
-                && last_rendered_at.is_some_and(|rendered_at: Instant| {
-                    rendered_at.elapsed() < PLAIN_RENDER_INTERVAL
-                })
-            {
-                continue;
-            }
+        if snapshot.revision != rendered_revision
+            || snapshot.finished.is_some()
+            || last_rendered_at
+                .is_none_or(|rendered_at: Instant| rendered_at.elapsed() >= PLAIN_RENDER_INTERVAL)
+        {
             rendered_revision = snapshot.revision;
             last_rendered_at = Some(Instant::now());
             let (covered, planned, received, missing, rows) = snapshot.coverage_counts();
@@ -1325,10 +1390,18 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
     loop {
         thread::sleep(RENDER_INTERVAL);
         let snapshot = match shared.lock() {
-            Ok(state) => state.clone(),
+            Ok(state)
+                if state.revision != rendered_revision
+                    || state.finished.is_some()
+                    || last_rate_refresh.elapsed() >= Duration::from_secs(1) =>
+            {
+                state.clone()
+            }
+            Ok(_) => continue,
             Err(_) => return,
         };
         if snapshot.revision != rendered_revision
+            || snapshot.finished.is_some()
             || last_rate_refresh.elapsed() >= Duration::from_secs(1)
         {
             rendered_revision = snapshot.revision;
@@ -2193,35 +2266,40 @@ mod tests {
     }
 
     #[test]
-    fn jsonl_queue_drops_intermediate_records_but_preserves_terminal_record() {
+    fn jsonl_queue_coalesces_intermediate_renders_but_preserves_terminal_record() {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        super::send_jsonl_record(&tx, serde_json::json!({"revision": 1}), false);
-        super::send_jsonl_record(&tx, serde_json::json!({"revision": 2}), false);
-
-        let super::JsonlEvent::Record(first) = rx.recv().expect("first record") else {
-            panic!("expected a record");
+        let sender = super::JsonlSender {
+            tx: tx.clone(),
+            render_queued: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
-        assert_eq!(first["revision"], 1);
+        super::send_jsonl_render(&sender);
+        super::send_jsonl_render(&sender);
+        assert!(matches!(
+            rx.recv().expect("first event"),
+            super::JsonlEvent::Render
+        ));
         assert!(matches!(
             rx.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)
         ));
 
-        super::send_jsonl_record(&tx, serde_json::json!({"revision": 3}), false);
+        sender
+            .render_queued
+            .store(false, std::sync::atomic::Ordering::Release);
+        super::send_jsonl_render(&sender);
         let terminal_tx = tx.clone();
         let terminal_sender = std::thread::spawn(move || {
-            super::send_jsonl_record(
-                &terminal_tx,
-                serde_json::json!({"revision": 4, "event": "complete"}),
-                true,
-            );
+            terminal_tx
+                .send(super::JsonlEvent::Record(serde_json::json!({
+                    "revision": 4,
+                    "event": "complete"
+                })))
+                .expect("terminal record queues");
         });
-
-        let super::JsonlEvent::Record(intermediate) = rx.recv().expect("intermediate record")
-        else {
-            panic!("expected a record");
-        };
-        assert_eq!(intermediate["revision"], 3);
+        assert!(matches!(
+            rx.recv().expect("intermediate event"),
+            super::JsonlEvent::Render
+        ));
         let super::JsonlEvent::Record(terminal) = rx.recv().expect("terminal record") else {
             panic!("expected a record");
         };

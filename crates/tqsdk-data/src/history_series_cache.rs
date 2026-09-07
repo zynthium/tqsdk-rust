@@ -13,8 +13,8 @@ mod ranges;
 mod store;
 mod tqbn;
 
-pub(crate) fn tqbn_snapshot_requires_zstd(bytes: &[u8]) -> Result<bool> {
-    tqbn::snapshot_requires_zstd(bytes)
+pub(crate) fn tqbn_snapshot_file_sha256_and_requires_zstd(path: &Path) -> Result<(String, bool)> {
+    tqbn::snapshot_file_sha256_and_requires_zstd(path)
 }
 
 pub(crate) use ranges::{rangeset_difference, rangeset_intersection};

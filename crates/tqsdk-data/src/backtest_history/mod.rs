@@ -71,8 +71,8 @@ pub use snapshot::{
 };
 pub use snapshot_manifest::{
     BacktestHistorySnapshotFileDisposition, BacktestHistorySnapshotFileRole,
-    BacktestHistorySnapshotManifestArtifact, BacktestHistorySnapshotManifestBuilder,
-    classify_backtest_history_snapshot_cache_path,
+    BacktestHistorySnapshotGenerationInfo, BacktestHistorySnapshotManifestArtifact,
+    BacktestHistorySnapshotManifestBuilder, classify_backtest_history_snapshot_cache_path,
 };
 use snapshot_resources::BacktestHistoryRunReservations;
 pub use snapshot_resources::{

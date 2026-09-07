@@ -26,6 +26,7 @@ use chrono::{
     Utc, Weekday,
 };
 use fs2::FileExt;
+use sha2::{Digest, Sha256};
 use tqsdk_core::{Kline, Tick};
 
 use codec::{
@@ -76,53 +77,76 @@ const TQBN_RECORDS_INDEX_MAGIC: [u8; 4] = *b"TQRI";
 const TQBN_RECORDS_INDEX_VERSION: u8 = 1;
 const TQBN_RECORDS_INDEX_PAYLOAD_LEN: usize = 32;
 
-pub(crate) fn snapshot_requires_zstd(bytes: &[u8]) -> Result<bool> {
-    let (_, mut offset) = decode_file_prefix(bytes)?;
+/// Stream a TQBN snapshot file while deriving its manifest checksum and
+/// feature requirements.  Snapshot publication must not materialize an
+/// entire partition merely to inspect its block flags.
+pub(crate) fn snapshot_file_sha256_and_requires_zstd(path: &Path) -> Result<(String, bool)> {
+    let mut file = File::open(path)?;
+    let mut prefix_header = [0_u8; TQBN_PREFIX_HEADER_LEN];
+    file.read_exact(&mut prefix_header)?;
+    let metadata_len = u32::from_le_bytes([
+        prefix_header[9],
+        prefix_header[10],
+        prefix_header[11],
+        prefix_header[12],
+    ]);
+    let metadata_len = usize::try_from(metadata_len).map_err(|_| {
+        DataError::InvalidResponse("TQBN file metadata length does not fit usize".to_string())
+    })?;
+    if metadata_len > MAX_TQBN_PREFIX_METADATA_LEN {
+        return Err(DataError::InvalidResponse(format!(
+            "TQBN file metadata length {metadata_len} exceeds max {MAX_TQBN_PREFIX_METADATA_LEN}"
+        )));
+    }
+
+    let mut prefix = Vec::with_capacity(TQBN_PREFIX_HEADER_LEN + metadata_len);
+    prefix.extend_from_slice(&prefix_header);
+    prefix.resize(TQBN_PREFIX_HEADER_LEN + metadata_len, 0);
+    file.read_exact(&mut prefix[TQBN_PREFIX_HEADER_LEN..])?;
+    decode_file_prefix(prefix.as_slice())?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(prefix.as_slice());
     let mut requires_zstd = false;
-
-    while offset < bytes.len() {
-        let header_end = offset.checked_add(TQBN_BLOCK_HEADER_LEN).ok_or_else(|| {
-            DataError::InvalidResponse("TQBN block header offset overflow".to_string())
-        })?;
-        let header = bytes.get(offset..header_end).ok_or_else(|| {
-            DataError::InvalidResponse(format!("TQBN block header truncated at offset {offset}"))
-        })?;
-        if &header[0..4] != b"TQBB" {
-            return Err(DataError::InvalidResponse(format!(
-                "TQBN block magic mismatch at offset {offset}"
-            )));
+    let mut payload = [0_u8; 64 * 1024];
+    loop {
+        let mut header = [0_u8; TQBN_BLOCK_HEADER_LEN];
+        match file.read(&mut header[..1])? {
+            0 => break,
+            1 => file.read_exact(&mut header[1..])?,
+            _ => unreachable!("single-byte TQBN header probe cannot read more than one byte"),
         }
-
+        if &header[..4] != b"TQBB" {
+            return Err(DataError::InvalidResponse(
+                "TQBN block magic mismatch".to_string(),
+            ));
+        }
         let block_type = header[4];
         let flags = header[5];
         validate_block_flags(block_type, flags)?;
         requires_zstd |= flags & TQBN_BLOCK_FLAG_ZSTD != 0;
-
-        let payload_len_u64 = u64::from_le_bytes([
+        let payload_len = u64::from_le_bytes([
             header[8], header[9], header[10], header[11], header[12], header[13], header[14],
             header[15],
         ]);
-        let payload_len = usize::try_from(payload_len_u64).map_err(|_| {
-            DataError::InvalidResponse(format!(
-                "TQBN block payload length {payload_len_u64} does not fit in usize"
-            ))
+        let payload_len = usize::try_from(payload_len).map_err(|_| {
+            DataError::InvalidResponse("TQBN block payload length does not fit usize".to_string())
         })?;
         if payload_len > MAX_TQBN_BLOCK_PAYLOAD_BYTES {
             return Err(DataError::InvalidResponse(format!(
                 "TQBN block payload length {payload_len} exceeds max {MAX_TQBN_BLOCK_PAYLOAD_BYTES}"
             )));
         }
-        offset = header_end.checked_add(payload_len).ok_or_else(|| {
-            DataError::InvalidResponse("TQBN block payload offset overflow".to_string())
-        })?;
-        if offset > bytes.len() {
-            return Err(DataError::InvalidResponse(format!(
-                "TQBN block payload truncated: requires {payload_len} bytes"
-            )));
+        hasher.update(header);
+        let mut remaining = payload_len;
+        while remaining > 0 {
+            let chunk_len = remaining.min(payload.len());
+            file.read_exact(&mut payload[..chunk_len])?;
+            hasher.update(&payload[..chunk_len]);
+            remaining -= chunk_len;
         }
     }
-
-    Ok(requires_zstd)
+    Ok((format!("sha256:{:x}", hasher.finalize()), requires_zstd))
 }
 const TQBN_TICK_LEGACY_TIMESTAMP_SKEW_NS: i64 = 1_000;
 const TQBN_TICK_LEGACY_SAME_ID_TIMESTAMP_SKEW_NS: i64 = 20_000_000;

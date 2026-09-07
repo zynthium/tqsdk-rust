@@ -447,17 +447,44 @@ impl BacktestTickCache {
         let mut total_bytes = 0u64;
         let mut problem_files = 0usize;
 
-        for entry in fast_tick_partition_files(self.history.root_dir())? {
-            total_files = total_files.saturating_add(1);
-            total_bytes = total_bytes.saturating_add(entry.size_bytes);
-            if entry.is_problem {
-                problem_files = problem_files.saturating_add(1);
+        let series_root = self.history.root_dir().join("series");
+        if series_root.is_dir() {
+            for day_entry in fs::read_dir(series_root)? {
+                let day_entry = day_entry?;
+                if !day_entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let trading_day = day_entry.file_name().to_string_lossy().into_owned();
+                if NaiveDate::parse_from_str(&trading_day, "%Y%m%d").is_err() {
+                    continue;
+                }
+                let tick_dir = day_entry.path().join("tick");
+                if !tick_dir.is_dir() {
+                    continue;
+                }
+                for file_entry in fs::read_dir(tick_dir)? {
+                    let file_entry = file_entry?;
+                    if !file_entry.file_type()?.is_file() {
+                        continue;
+                    }
+                    let path = file_entry.path();
+                    let Some(symbol) = fast_tick_symbol_from_path(&path) else {
+                        continue;
+                    };
+                    let size_bytes = file_entry.metadata()?.len();
+                    let is_problem = fast_tqbn_magic_is_problem(&path, size_bytes)?;
+                    total_files = total_files.saturating_add(1);
+                    total_bytes = total_bytes.saturating_add(size_bytes);
+                    if is_problem {
+                        problem_files = problem_files.saturating_add(1);
+                    }
+                    days.insert(trading_day.clone());
+                    symbols
+                        .entry(symbol.clone())
+                        .or_insert_with(|| FastInventorySymbolAccumulator::new(symbol))
+                        .push(size_bytes, &trading_day, is_problem);
+                }
             }
-            days.insert(entry.trading_day.clone());
-            symbols
-                .entry(entry.symbol.clone())
-                .or_insert_with(|| FastInventorySymbolAccumulator::new(entry.symbol.clone()))
-                .push(entry.size_bytes, &entry.trading_day, entry.is_problem);
         }
 
         Ok(BacktestTickCacheFastInventory {
@@ -713,6 +740,33 @@ impl BacktestTickCache {
 
     pub fn try_acquire_consistency_read_lock(&self) -> Result<BacktestTickCacheOperationLock> {
         self.try_acquire_operation_lock("consistency read", true)
+    }
+
+    /// Try acquire the existing exclusive cache-root gate without creating
+    /// directories or a lock file. Read-only maintenance commands use this
+    /// path so inspection cannot mutate a mounted cache.
+    pub fn try_acquire_existing_consistency_read_lock(
+        &self,
+    ) -> Result<Option<BacktestTickCacheOperationLock>> {
+        let cache_dir = self.history.root_dir().to_path_buf();
+        let path = cache_dir.join(".tqsdk-cache-operation.lock");
+        let file = match OpenOptions::new().read(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        match FileExt::try_lock_exclusive(&file) {
+            Ok(()) => Ok(Some(BacktestTickCacheOperationLock {
+                cache_dir,
+                path,
+                file,
+            })),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Err(DataError::CacheBusy {
+                cache_dir,
+                operation: "consistency read",
+            }),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn try_acquire_operation_lock(
@@ -1290,61 +1344,6 @@ impl FastInventorySymbolAccumulator {
             problem_files: self.problem_files,
         }
     }
-}
-
-#[derive(Debug)]
-struct FastTickPartitionFile {
-    symbol: String,
-    trading_day: String,
-    size_bytes: u64,
-    is_problem: bool,
-}
-
-fn fast_tick_partition_files(root_dir: &Path) -> Result<Vec<FastTickPartitionFile>> {
-    let series_root = root_dir.join("series");
-    if !series_root.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut files = Vec::new();
-    for day_entry in fs::read_dir(&series_root)? {
-        let day_entry = day_entry?;
-        if !day_entry.file_type()?.is_dir() {
-            continue;
-        }
-        let trading_day = day_entry.file_name().to_string_lossy().into_owned();
-        if NaiveDate::parse_from_str(&trading_day, "%Y%m%d").is_err() {
-            continue;
-        }
-        let tick_dir = day_entry.path().join("tick");
-        if !tick_dir.is_dir() {
-            continue;
-        }
-        for file_entry in fs::read_dir(tick_dir)? {
-            let file_entry = file_entry?;
-            if !file_entry.file_type()?.is_file() {
-                continue;
-            }
-            let path = file_entry.path();
-            let Some(symbol) = fast_tick_symbol_from_path(&path) else {
-                continue;
-            };
-            let size_bytes = file_entry.metadata()?.len();
-            let is_problem = fast_tqbn_magic_is_problem(&path, size_bytes)?;
-            files.push(FastTickPartitionFile {
-                symbol,
-                trading_day: trading_day.clone(),
-                size_bytes,
-                is_problem,
-            });
-        }
-    }
-    files.sort_by(|left, right| {
-        left.trading_day
-            .cmp(&right.trading_day)
-            .then_with(|| left.symbol.cmp(&right.symbol))
-    });
-    Ok(files)
 }
 
 fn fast_tick_symbol_from_path(path: &Path) -> Option<String> {

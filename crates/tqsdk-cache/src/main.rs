@@ -1276,19 +1276,29 @@ fn write_terminal_error_output(command: &str, error: &CliError) -> Result<(), Cl
 }
 
 fn write_query_raw_output(raw: QueryRawOutput) -> Result<(), CliError> {
-    if let Some(path) = raw.output_path {
-        write_atomically(path.as_path(), raw.payload.as_slice())?;
+    if let Some(path) = raw.output_path.as_ref() {
+        write_atomically_with(path.as_path(), |file| query::write_raw_output(&raw, file))?;
         eprintln!("tqsdk-cache query: wrote {}", path.display());
         return Ok(());
     }
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
-    stdout.write_all(raw.payload.as_slice())?;
+    query::write_raw_output(&raw, &mut stdout)?;
     stdout.flush()?;
     Ok(())
 }
 
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+    write_atomically_with(path, |file| {
+        file.write_all(bytes)?;
+        Ok(())
+    })
+}
+
+fn write_atomically_with(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> Result<(), CliError>,
+) -> Result<(), CliError> {
     if path.as_os_str().is_empty() || path.file_name().is_none() {
         return Err(CliError::Usage(
             "--output must name a file, not a directory".to_string(),
@@ -1313,12 +1323,12 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
         .map_err(|_| CliError::Usage("system clock is before UNIX epoch".to_string()))?
         .as_nanos();
     let temporary = parent.join(format!(".{file_name}.{}.{}", std::process::id(), nonce));
-    let write_result = (|| -> Result<(), io::Error> {
+    let write_result = (|| -> Result<(), CliError> {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temporary)?;
-        file.write_all(bytes)?;
+        write(&mut file)?;
         file.sync_all()?;
         drop(file);
         fs::rename(&temporary, path)?;
@@ -1326,7 +1336,7 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     })();
     if let Err(error) = write_result {
         let _ = fs::remove_file(&temporary);
-        return Err(error.into());
+        return Err(error);
     }
     Ok(())
 }
@@ -2277,10 +2287,10 @@ async fn refresh_provider_membership(
             probe_provider_membership_canary(&store, &acquisition, &args, cancellation.clone())
                 .await?;
         if cancellation.is_cancelled() {
-            progress_session.finish(
+            progress_session.finish_checked(
                 ProgressTerminalStatus::Interrupted,
                 "provider membership refresh was cancelled before retries",
-            );
+            )?;
             return Ok(provider_membership_refresh_cancelled_outcome(
                 &canonical_cache_dir,
                 market,
@@ -2292,10 +2302,10 @@ async fn refresh_provider_membership(
             ));
         }
         if !canary.healthy {
-            progress_session.finish(
+            progress_session.finish_checked(
                 ProgressTerminalStatus::Failed,
                 "provider-health canary did not complete remotely; retry schedule unchanged",
-            );
+            )?;
             return Ok(CommandOutcome {
                 value: json!({
                     "schema_version": REPORT_SCHEMA_VERSION,
@@ -2352,10 +2362,10 @@ async fn refresh_provider_membership(
         if report.status() == BacktestHistoryFillTerminalStatus::Interrupted
             || cancellation.is_cancelled()
         {
-            progress_session.finish(
+            progress_session.finish_checked(
                 ProgressTerminalStatus::Interrupted,
                 "provider membership refresh was cancelled",
-            );
+            )?;
             return Ok(provider_membership_refresh_cancelled_outcome(
                 &canonical_cache_dir,
                 market,
@@ -2400,10 +2410,10 @@ async fn refresh_provider_membership(
                         config,
                     ) else {
                         let sample = item.error.as_deref().unwrap_or("unknown provider failure");
-                        progress_session.finish(
+                        progress_session.finish_checked(
                             ProgressTerminalStatus::Failed,
                             "provider membership refresh encountered non-timeout failure",
-                        );
+                        )?;
                         return Err(DataError::InvalidResponse(format!(
                             "provider membership refresh has blocking failure for {}: {sample}",
                             item.symbol
@@ -2417,10 +2427,10 @@ async fn refresh_provider_membership(
                     )?
                 }
                 BacktestHistoryFillSymbolStatus::Interrupted => {
-                    progress_session.finish(
+                    progress_session.finish_checked(
                         ProgressTerminalStatus::Interrupted,
                         "provider membership refresh was interrupted",
-                    );
+                    )?;
                     return Ok(provider_membership_refresh_cancelled_outcome(
                         &canonical_cache_dir,
                         market,
@@ -2472,10 +2482,10 @@ async fn refresh_provider_membership(
         let current_after = acquisition.project_provider_current_refresh(&discovered_after)?;
         acquisition.validate_provider_daily_refresh_current(&current_after)?;
         if cancellation.is_cancelled() {
-            progress_session.finish(
+            progress_session.finish_checked(
                 ProgressTerminalStatus::Interrupted,
                 "provider membership refresh was cancelled before publication",
-            );
+            )?;
             return Ok(provider_membership_refresh_cancelled_outcome(
                 &canonical_cache_dir,
                 market,
@@ -2537,10 +2547,10 @@ async fn refresh_provider_membership(
             store.publish_provider_daily_retry_state(&receipt)?;
             (acquisition.clone(), None, None)
         };
-        progress_session.finish(
+        progress_session.finish_checked(
             ProgressTerminalStatus::Complete,
             "bounded provider membership retry completed",
-        );
+        )?;
         Ok(CommandOutcome {
             value: json!({
                 "schema_version": REPORT_SCHEMA_VERSION,
@@ -2936,13 +2946,13 @@ async fn bootstrap_provider_history_and_fill(
         ))
         .into());
         }
-        progress_session.finish(
+        progress_session.finish_checked(
         ProgressTerminalStatus::Complete,
         format!(
             "native daily bootstrap complete; deriving data membership ({} bounded provider-unavailable candidates)",
             provider_unavailable.len()
         ),
-    );
+    )?;
 
         if cancellation.is_cancelled() {
             return Err(DataError::InvalidState("provider history preparation cancelled").into());
@@ -3700,7 +3710,7 @@ async fn fill_daily(
         let complete = before
             .iter()
             .all(tqsdk_data::DailyKlineCacheStatus::is_complete);
-        progress_session.finish(
+        progress_session.finish_checked(
             if complete {
                 ProgressTerminalStatus::Complete
             } else {
@@ -3711,7 +3721,7 @@ async fn fill_daily(
             } else {
                 "daily dry-run found missing native daily coverage"
             },
-        );
+        )?;
         return Ok(CommandOutcome {
             value: json!({
                 "schema_version": REPORT_SCHEMA_VERSION,
@@ -3805,13 +3815,13 @@ async fn fill_daily(
         &report,
     );
     if let Err(error) = write_unified_fill_report(&report_path, &daily_report) {
-        progress_session.finish(
+        progress_session.finish_checked(
             ProgressTerminalStatus::Failed,
             "daily fill failed; report could not be persisted",
-        );
+        )?;
         return Err(error.into());
     }
-    progress_session.finish(
+    progress_session.finish_checked(
         match report.status() {
             BacktestHistoryFillTerminalStatus::Complete if complete => {
                 ProgressTerminalStatus::Complete
@@ -3827,7 +3837,7 @@ async fn fill_daily(
         } else {
             "daily fill completed with missing native daily coverage"
         },
-    );
+    )?;
 
     Ok(CommandOutcome {
         value: json!({
@@ -3978,7 +3988,7 @@ async fn fill_minute(
         }
         let operation_complete = report.complete || report.provisional_complete;
         reporter.final_minute_report(&report);
-        progress_session.finish(
+        progress_session.finish_checked(
             if operation_complete {
                 ProgressTerminalStatus::Complete
             } else {
@@ -3989,7 +3999,7 @@ async fn fill_minute(
             } else {
                 "minute dry-run found missing canonical-minute coverage"
             },
-        );
+        )?;
         return Ok(CommandOutcome {
             value: json!({
                 "schema_version": REPORT_SCHEMA_VERSION,
@@ -4065,10 +4075,10 @@ async fn fill_minute(
             Some("cancelled".to_string()),
         );
         write_unified_fill_report(&report_path, &interrupted_report)?;
-        progress_session.finish(
+        progress_session.finish_checked(
             ProgressTerminalStatus::Interrupted,
             "interrupted; no incomplete minute range was marked final",
-        );
+        )?;
         let inventory = MinuteKlineCache::open_read_only(&canonical_cache_dir).fast_inventory()?;
         return Ok(CommandOutcome {
             value: json!({
@@ -4142,20 +4152,20 @@ async fn fill_minute(
     };
     let persisted_report = UnifiedFillReport::from_minute_fill(&report);
     if let Err(error) = write_unified_fill_report(&report_path, &persisted_report) {
-        progress_session.finish(
+        progress_session.finish_checked(
             ProgressTerminalStatus::Failed,
             "minute fill failed; report could not be persisted",
-        );
+        )?;
         return Err(error.into());
     }
-    progress_session.finish(
+    progress_session.finish_checked(
         if operation_complete {
             ProgressTerminalStatus::Complete
         } else {
             ProgressTerminalStatus::Failed
         },
         completion_summary,
-    );
+    )?;
     Ok(CommandOutcome {
         value: json!({
             "schema_version": REPORT_SCHEMA_VERSION,
@@ -4556,7 +4566,7 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
             },
         )?;
         let complete = fill_operation_complete(&report, resolved.provisional);
-        progress_session.finish(
+        progress_session.finish_checked(
             if complete {
                 ProgressTerminalStatus::Complete
             } else {
@@ -4567,7 +4577,7 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
             } else {
                 "tick dry-run found incomplete strict local coverage"
             },
-        );
+        )?;
         return Ok(CommandOutcome {
             value: json!({
                 "schema_version": REPORT_SCHEMA_VERSION,
@@ -4637,7 +4647,7 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
             Some("cancelled".to_string()),
         );
         write_unified_fill_report(&report_path, &interrupted_report)?;
-        progress_session.finish(ProgressTerminalStatus::Interrupted, summary);
+        progress_session.finish_checked(ProgressTerminalStatus::Interrupted, summary)?;
         let inventory = cache.fast_inventory()?;
         return Ok(CommandOutcome {
             value: json!({
@@ -4736,13 +4746,13 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
     let persisted_report = UnifiedFillReport::from_tick_fill(&report);
     let complete = fill_operation_complete(&report, resolved.provisional);
     if let Err(error) = write_unified_fill_report(&report_path, &persisted_report) {
-        progress_session.finish(
+        progress_session.finish_checked(
             ProgressTerminalStatus::Failed,
             "fill failed; report could not be persisted",
-        );
+        )?;
         return Err(error.into());
     }
-    progress_session.finish(
+    progress_session.finish_checked(
         if complete {
             ProgressTerminalStatus::Complete
         } else {
@@ -4753,7 +4763,7 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
         } else {
             "fill completed with incomplete strict local coverage"
         },
-    );
+    )?;
     Ok(CommandOutcome {
         value: json!({
             "schema_version": REPORT_SCHEMA_VERSION,
@@ -4969,7 +4979,7 @@ async fn verify_tick(
         ))
         .into());
     }
-    let _lock = cache.try_acquire_consistency_read_lock()?;
+    let _lock = cache.try_acquire_existing_consistency_read_lock()?;
     let warmup = cache_only_warmup(&canonical_cache_dir, &window, &symbols).await?;
     let coverage_complete = warmup.symbols_missing == 0
         && warmup
@@ -5080,8 +5090,8 @@ async fn verify_minute(
             )
         }
     };
-    let root_gate = BacktestTickCache::open(&canonical_cache_dir)?;
-    let _lock = root_gate.try_acquire_consistency_read_lock()?;
+    let root_gate = BacktestTickCache::open_read_only(&canonical_cache_dir);
+    let _lock = root_gate.try_acquire_existing_consistency_read_lock()?;
     let cache = MinuteKlineCache::open_read_only(&canonical_cache_dir);
     let snapshots = symbols
         .iter()
@@ -5214,8 +5224,8 @@ async fn verify_daily(
         }
     };
 
-    let root_gate = BacktestTickCache::open(&canonical_cache_dir)?;
-    let _lock = root_gate.try_acquire_consistency_read_lock()?;
+    let root_gate = BacktestTickCache::open_read_only(&canonical_cache_dir);
+    let _lock = root_gate.try_acquire_existing_consistency_read_lock()?;
     let cache = DailyKlineCache::open_read_only(&canonical_cache_dir);
     let snapshots = symbols
         .iter()
@@ -5519,7 +5529,7 @@ fn purge_daily(cache_dir: Option<&Path>, args: PurgeArgs) -> Result<CommandOutco
 
 fn doctor(cache_dir: Option<&Path>, kind: CacheKind) -> Result<CommandOutcome, CliError> {
     let (read_only_tick_cache, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
-    let _lock = read_only_tick_cache.try_acquire_consistency_read_lock()?;
+    let _lock = read_only_tick_cache.try_acquire_existing_consistency_read_lock()?;
     let minute_value = || -> Result<Value, CliError> {
         let report = MinuteKlineCache::open_read_only(&canonical_cache_dir).diagnose()?;
         Ok(json!({
@@ -5627,7 +5637,11 @@ fn repair_locks(
     } else {
         open_read_only_cache(cache_dir)?
     };
-    let _lock = cache.try_acquire_consistency_read_lock()?;
+    let _lock = if args.apply {
+        Some(cache.try_acquire_consistency_read_lock()?)
+    } else {
+        cache.try_acquire_existing_consistency_read_lock()?
+    };
     let mode = if args.apply {
         BacktestTickCacheLockRepairMode::Apply
     } else {

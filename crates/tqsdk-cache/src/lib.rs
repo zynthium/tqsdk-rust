@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, Write};
+use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1642,7 +1642,7 @@ fn write_json_immutably<T: Serialize>(path: &Path, value: &T) -> Result<(), Data
     let parent = path.parent().ok_or_else(|| {
         DataError::Validation("JSON output path must have a parent directory".to_string())
     })?;
-    fs::create_dir_all(parent)?;
+    create_directory_all_durable(parent)?;
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|error| DataError::InvalidResponse(error.to_string()))?;
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
@@ -1661,14 +1661,14 @@ fn write_json_immutably<T: Serialize>(path: &Path, value: &T) -> Result<(), Data
         let _ = fs::remove_file(path);
     }
     write_result?;
-    sync_directory(parent)
+    sync_directory(parent).map_err(|error| calendar_durability_uncertain(path, error))
 }
 
 fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> Result<(), DataError> {
     let parent = path.parent().ok_or_else(|| {
         DataError::Validation("JSON output path must have a parent directory".to_string())
     })?;
-    fs::create_dir_all(parent)?;
+    create_directory_all_durable(parent)?;
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -1688,13 +1688,77 @@ fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> Result<(), Dat
         file.write_all(b"\n")?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
-        sync_directory(parent)?;
+        sync_directory(parent).map_err(|error| calendar_durability_uncertain(path, error))?;
         Ok(())
     })();
     if write_result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     write_result
+}
+
+/// Rename committed a calendar artifact, but a following directory sync failed.
+/// Reload the active pointer before retrying because the visible generation may
+/// already be the requested one.
+#[derive(Debug)]
+pub struct TradingCalendarHolidaysDurabilityUncertain {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+impl std::fmt::Display for TradingCalendarHolidaysDurabilityUncertain {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "calendar artifact {} may be visible but is not durably confirmed: {}",
+            self.path.display(),
+            self.message
+        )
+    }
+}
+
+impl std::error::Error for TradingCalendarHolidaysDurabilityUncertain {}
+
+fn calendar_durability_uncertain(path: &Path, error: DataError) -> DataError {
+    DataError::Io(io::Error::other(
+        TradingCalendarHolidaysDurabilityUncertain {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        },
+    ))
+}
+
+fn create_directory_all_durable(path: &Path) -> Result<(), DataError> {
+    let mut missing = Vec::new();
+    let mut ancestor = path;
+    while !ancestor.exists() {
+        missing.push(ancestor.to_path_buf());
+        ancestor = ancestor.parent().ok_or_else(|| {
+            DataError::Validation(format!(
+                "directory {} has no existing ancestor",
+                path.display()
+            ))
+        })?;
+    }
+    if !fs::symlink_metadata(ancestor)?.is_dir() {
+        return Err(DataError::Validation(format!(
+            "directory ancestor {} is not a directory",
+            ancestor.display()
+        )));
+    }
+    for directory in missing.iter().rev() {
+        match fs::create_dir(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        let parent = directory.parent().ok_or_else(|| {
+            DataError::Validation(format!("directory {} has no parent", directory.display()))
+        })?;
+        sync_directory(parent)?;
+        sync_directory(directory)?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

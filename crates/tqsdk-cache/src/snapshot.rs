@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::io::{self, ErrorKind, Write};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,7 +15,7 @@ use serde_json::{Value, json};
 use tqsdk_data::{
     BacktestHistoryClient, BacktestHistoryPolicy, BacktestHistoryRequest, BacktestHistorySnapshot,
     BacktestHistorySnapshotFileDisposition, BacktestHistorySnapshotFileRole,
-    BacktestHistorySnapshotManifestBuilder, BacktestTickCache,
+    BacktestHistorySnapshotManifestBuilder, BacktestTickCache, DataError,
     classify_backtest_history_snapshot_cache_path,
 };
 
@@ -226,6 +228,10 @@ enum CloneMode {
 }
 
 impl CloneMode {
+    const fn allows_reflink(self) -> bool {
+        matches!(self, Self::Clone)
+    }
+
     const fn allows_hardlink(self) -> bool {
         matches!(self, Self::Clone)
     }
@@ -250,6 +256,7 @@ impl GenerationNamespace {
 struct CloneStats {
     roles: BTreeMap<&'static str, RoleStats>,
     copied_bytes: u64,
+    reflinked_bytes: u64,
     hardlinked_bytes: u64,
 }
 
@@ -258,20 +265,41 @@ struct RoleStats {
     files: u64,
     bytes: u64,
     copied_files: u64,
+    reflinked_files: u64,
     hardlinked_files: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloneMethod {
+    Copy,
+    Reflink,
+    Hardlink,
+}
+
 impl CloneStats {
-    fn record(&mut self, role: BacktestHistorySnapshotFileRole, bytes: u64, hardlinked: bool) {
+    fn total_bytes(&self) -> u64 {
+        self.roles
+            .values()
+            .fold(0_u64, |total, stats| total.saturating_add(stats.bytes))
+    }
+
+    fn record(&mut self, role: BacktestHistorySnapshotFileRole, bytes: u64, method: CloneMethod) {
         let stats = self.roles.entry(role.as_str()).or_default();
         stats.files += 1;
         stats.bytes = stats.bytes.saturating_add(bytes);
-        if hardlinked {
-            stats.hardlinked_files += 1;
-            self.hardlinked_bytes = self.hardlinked_bytes.saturating_add(bytes);
-        } else {
-            stats.copied_files += 1;
-            self.copied_bytes = self.copied_bytes.saturating_add(bytes);
+        match method {
+            CloneMethod::Copy => {
+                stats.copied_files += 1;
+                self.copied_bytes = self.copied_bytes.saturating_add(bytes);
+            }
+            CloneMethod::Reflink => {
+                stats.reflinked_files += 1;
+                self.reflinked_bytes = self.reflinked_bytes.saturating_add(bytes);
+            }
+            CloneMethod::Hardlink => {
+                stats.hardlinked_files += 1;
+                self.hardlinked_bytes = self.hardlinked_bytes.saturating_add(bytes);
+            }
         }
     }
 
@@ -284,9 +312,10 @@ impl CloneStats {
                     (*role).to_string(),
                     json!({
                         "files": stats.files,
-                        "bytes": stats.bytes,
-                        "copied_files": stats.copied_files,
-                        "hardlinked_files": stats.hardlinked_files,
+                    "bytes": stats.bytes,
+                    "copied_files": stats.copied_files,
+                    "reflinked_files": stats.reflinked_files,
+                    "hardlinked_files": stats.hardlinked_files,
                     }),
                 )
             })
@@ -295,8 +324,8 @@ impl CloneStats {
             "roles": roles,
             "copied_bytes": self.copied_bytes,
             "hardlinked_bytes": self.hardlinked_bytes,
-            "reflink_supported": false,
-            "reflink_bytes": 0,
+            "reflink_supported": self.reflinked_bytes > 0,
+            "reflink_bytes": self.reflinked_bytes,
         })
     }
 }
@@ -304,6 +333,25 @@ impl CloneStats {
 struct PublisherLock {
     _file: File,
 }
+
+#[derive(Debug)]
+struct SnapshotDurabilityUncertain {
+    path: PathBuf,
+    message: String,
+}
+
+impl std::fmt::Display for SnapshotDurabilityUncertain {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "snapshot pointer {} may be visible but is not durably confirmed: {}",
+            self.path.display(),
+            self.message
+        )
+    }
+}
+
+impl std::error::Error for SnapshotDurabilityUncertain {}
 
 fn inspect(history_root: &Path, command: &str) -> Result<Value, CliError> {
     let snapshot = BacktestHistorySnapshot::open(history_root)
@@ -315,6 +363,13 @@ fn plan_clone(history_root: &Path, args: &CloneArgs, command: &str) -> Result<Va
     require_source_root(args.source_cache_dir.as_path())?;
     validate_disjoint_roots(args.source_cache_dir.as_path(), history_root)?;
     let stats = inspect_source(args.source_cache_dir.as_path(), CloneMode::Clone)?;
+    let reflink_supported = probe_reflink_support(history_root, args.source_cache_dir.as_path())?;
+    let available_space_bytes = history_root
+        .is_dir()
+        .then(|| fs2::available_space(history_root))
+        .transpose()?;
+    let estimated_copy_bytes = stats.total_bytes();
+
     let mut value = stats.as_value();
     let object = value.as_object_mut().expect("clone stats object");
     object.insert("command".into(), Value::String(command.into()));
@@ -322,6 +377,13 @@ fn plan_clone(history_root: &Path, args: &CloneArgs, command: &str) -> Result<Va
     object.insert(
         "history_root_exists".into(),
         Value::Bool(history_root.exists()),
+    );
+    object.insert("reflink_supported".into(), json!(reflink_supported));
+    object.insert("available_space_bytes".into(), json!(available_space_bytes));
+    object.insert("estimated_copy_bytes".into(), json!(estimated_copy_bytes));
+    object.insert(
+        "capacity_sufficient".into(),
+        json!(available_space_bytes.map(|available| available >= estimated_copy_bytes)),
     );
     object.insert("source_cache_dir".into(), json!(args.source_cache_dir));
     Ok(value)
@@ -338,7 +400,7 @@ fn stage_clone(
     prepare_history_root(history_root)?;
     let _publisher = acquire_publisher_lock(history_root)?;
     let source_cache = BacktestTickCache::open(args.source_cache_dir.as_path())?;
-    let _stable_view = source_cache.try_acquire_consistency_read_lock()?;
+    let stable_view = source_cache.try_acquire_consistency_read_lock()?;
     let created_at = args.created_at.unwrap_or_else(Utc::now);
     let source_before = manifest_builder(created_at, args)
         .build(args.source_cache_dir.as_path())
@@ -377,6 +439,7 @@ fn stage_clone(
                 "staged cache identity differs from stable source".into(),
             ));
         }
+        drop(stable_view);
         write_new_synced(work.join("lease.lock").as_path(), b"")?;
         write_new_synced(
             work.join("manifest.json").as_path(),
@@ -486,8 +549,12 @@ fn inspect_source_directory(
             classify_backtest_history_snapshot_cache_path(relative)
                 .map_err(|error| CliError::Migration(error.to_string()))?
         {
-            let hardlinked = mode.allows_hardlink() && role.allows_hardlink();
-            stats.record(role, metadata.len(), hardlinked);
+            let method = if mode.allows_hardlink() && role.allows_hardlink() {
+                CloneMethod::Hardlink
+            } else {
+                CloneMethod::Copy
+            };
+            stats.record(role, metadata.len(), method);
         }
     }
     Ok(())
@@ -536,16 +603,51 @@ fn clone_directory(
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
-        let hardlinked = mode.allows_hardlink()
-            && role.allows_hardlink()
-            && fs::hard_link(source.as_path(), destination.as_path()).is_ok();
-        if !hardlinked {
-            fs::copy(source.as_path(), destination.as_path())?;
-        }
+        let method =
+            if mode.allows_reflink() && try_reflink(source.as_path(), destination.as_path())? {
+                CloneMethod::Reflink
+            } else if mode.allows_hardlink()
+                && role.allows_hardlink()
+                && fs::hard_link(source.as_path(), destination.as_path()).is_ok()
+            {
+                CloneMethod::Hardlink
+            } else {
+                fs::copy(source.as_path(), destination.as_path())?;
+                CloneMethod::Copy
+            };
         File::open(destination.as_path())?.sync_all()?;
-        stats.record(role, metadata.len(), hardlinked);
+        stats.record(role, metadata.len(), method);
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn try_reflink(source: &Path, destination: &Path) -> Result<bool, CliError> {
+    const FICLONE: libc::c_ulong = 0x4004_9409;
+    let source = File::open(source)?;
+    let destination_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    // SAFETY: both raw descriptors are live regular files owned by this
+    // function. FICLONE neither aliases Rust references nor retains either fd.
+    let result = unsafe { libc::ioctl(destination_file.as_raw_fd(), FICLONE, source.as_raw_fd()) };
+    if result == 0 {
+        destination_file.sync_all()?;
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    drop(destination_file);
+    let _ = fs::remove_file(destination);
+    match error.raw_os_error() {
+        Some(libc::EOPNOTSUPP | libc::ENOTTY | libc::EXDEV | libc::EINVAL) => Ok(false),
+        _ => Err(error.into()),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn try_reflink(_source: &Path, _destination: &Path) -> Result<bool, CliError> {
+    Ok(false)
 }
 
 async fn prewarm(
@@ -772,7 +874,7 @@ async fn verify_snapshot_requests(
             .query(request.request.clone())
             .await
             .map_err(|error| CliError::Migration(error.to_string()))?
-            .collect()
+            .finish()
             .await
             .map_err(|error| CliError::Migration(error.to_string()))?;
     }
@@ -1006,7 +1108,6 @@ fn rollback(
 }
 
 async fn scrub(history_root: &Path, args: &ScrubArgs, command: &str) -> Result<Value, CliError> {
-    let _publisher = acquire_publisher_lock(history_root)?;
     let namespace = if args.snapshot_id.is_some() {
         SNAPSHOTS_DIR
     } else {
@@ -1098,6 +1199,7 @@ fn gc(history_root: &Path, args: &GcArgs, command: &str) -> Result<Value, CliErr
     let current_snapshot = BacktestHistorySnapshot::open(history_root)
         .map_err(|error| CliError::Migration(error.to_string()))?;
     let current = current_snapshot.snapshot_id().to_string();
+    let current_created_at = current_snapshot.created_at().to_string();
     drop(current_snapshot);
     let snapshots_dir = history_root.join(SNAPSHOTS_DIR);
     let mut compatible = Vec::new();
@@ -1114,10 +1216,15 @@ fn gc(history_root: &Path, args: &GcArgs, command: &str) -> Result<Value, CliErr
             .into_string()
             .map_err(|_| CliError::Migration("snapshot id must be UTF-8".into()))?;
         validate_snapshot_id(id.as_str())?;
-        let snapshot = BacktestHistorySnapshot::open_generation(history_root, &path)
-            .map_err(|error| CliError::Migration(error.to_string()))?;
-        compatible.push((id, snapshot.created_at().to_string()));
-        drop(snapshot);
+        let created_at = if id == current {
+            current_created_at.clone()
+        } else {
+            BacktestHistorySnapshot::inspect_generation_metadata(history_root, &path)
+                .map_err(|error| CliError::Migration(error.to_string()))?
+                .created_at()
+                .to_string()
+        };
+        compatible.push((id, created_at));
     }
     compatible.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| right.0.cmp(&left.0)));
     let mut retained = BTreeSet::from([current.clone()]);
@@ -1126,6 +1233,13 @@ fn gc(history_root: &Path, args: &GcArgs, command: &str) -> Result<Value, CliErr
             break;
         }
         retained.insert(snapshot_id.clone());
+    }
+    for snapshot_id in retained
+        .iter()
+        .filter(|snapshot_id| *snapshot_id != &current)
+    {
+        BacktestHistorySnapshot::open_generation(history_root, snapshots_dir.join(snapshot_id))
+            .map_err(|error| CliError::Migration(error.to_string()))?;
     }
     let mut removed = Vec::new();
     let mut leased = Vec::new();
@@ -1202,7 +1316,7 @@ fn snapshot_value(command: &str, snapshot: &BacktestHistorySnapshot, namespace: 
 
 fn prepare_history_root(history_root: &Path) -> Result<(), CliError> {
     reject_symlink_ancestors_that_exist(history_root)?;
-    fs::create_dir_all(history_root)?;
+    create_directory_all_durable(history_root)?;
     let metadata = fs::symlink_metadata(history_root)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(CliError::Migration(format!(
@@ -1210,10 +1324,43 @@ fn prepare_history_root(history_root: &Path) -> Result<(), CliError> {
             history_root.display()
         )));
     }
-    fs::create_dir_all(history_root.join(SNAPSHOTS_DIR))?;
-    fs::create_dir_all(history_root.join(STAGING_DIR))?;
+    create_directory_all_durable(history_root.join(SNAPSHOTS_DIR).as_path())?;
+    create_directory_all_durable(history_root.join(STAGING_DIR).as_path())?;
     require_regular_directory(history_root.join(SNAPSHOTS_DIR).as_path(), "snapshots")?;
     require_regular_directory(history_root.join(STAGING_DIR).as_path(), "staging")?;
+    Ok(())
+}
+
+fn create_directory_all_durable(path: &Path) -> Result<(), CliError> {
+    let mut missing = Vec::new();
+    let mut ancestor = path;
+    while !ancestor.exists() {
+        missing.push(ancestor.to_path_buf());
+        ancestor = ancestor.parent().ok_or_else(|| {
+            CliError::Migration(format!(
+                "directory {} has no existing ancestor",
+                path.display()
+            ))
+        })?;
+    }
+    if !fs::symlink_metadata(ancestor)?.is_dir() {
+        return Err(CliError::Migration(format!(
+            "directory ancestor {} is not a directory",
+            ancestor.display()
+        )));
+    }
+    for directory in missing.iter().rev() {
+        match fs::create_dir(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        let parent = directory.parent().ok_or_else(|| {
+            CliError::Migration(format!("directory {} has no parent", directory.display()))
+        })?;
+        sync_directory(parent)?;
+        sync_directory(directory)?;
+    }
     Ok(())
 }
 
@@ -1306,10 +1453,10 @@ fn acquire_publisher_lock(history_root: &Path) -> Result<PublisherLock, CliError
         .open(&path)?;
     FileExt::try_lock_exclusive(&file).map_err(|error| {
         if error.kind() == ErrorKind::WouldBlock {
-            CliError::Migration(format!(
-                "snapshot publisher operation lock {} is busy",
-                path.display()
-            ))
+            CliError::Data(DataError::CacheBusy {
+                cache_dir: history_root.to_path_buf(),
+                operation: "snapshot publisher",
+            })
         } else {
             error.into()
         }
@@ -1322,9 +1469,15 @@ fn atomic_write_current(history_root: &Path, snapshot_id: &str) -> Result<(), Cl
     let temporary = history_root.join(format!(".CURRENT.tmp-{}-{}", std::process::id(), nonce()?));
     write_new_synced(temporary.as_path(), format!("{snapshot_id}\n").as_bytes())?;
     test_failpoint("current_temp_sync")?;
-    fs::rename(temporary.as_path(), history_root.join(CURRENT_FILE))?;
+    let current = history_root.join(CURRENT_FILE);
+    fs::rename(temporary.as_path(), &current)?;
     test_failpoint("current_rename")?;
-    sync_directory(history_root)?;
+    sync_directory(history_root).map_err(|error| {
+        CliError::Io(io::Error::other(SnapshotDurabilityUncertain {
+            path: current,
+            message: error.to_string(),
+        }))
+    })?;
     test_failpoint("history_root_sync")?;
     Ok(())
 }
@@ -1495,4 +1648,63 @@ fn nonce() -> Result<u128, CliError> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .map_err(|_| CliError::Migration("system clock is before UNIX epoch".into()))
+}
+fn probe_reflink_support(
+    history_root: &Path,
+    source_root: &Path,
+) -> Result<Option<bool>, CliError> {
+    if !history_root.is_dir() {
+        return Ok(None);
+    }
+    let Some(source) = first_included_file(source_root, source_root)? else {
+        return Ok(None);
+    };
+    let probe = history_root.join(format!(
+        ".tqsdk-cache-reflink-probe-{}-{}",
+        std::process::id(),
+        nonce()?
+    ));
+    let result = try_reflink(source.as_path(), probe.as_path());
+    if let Err(error) = fs::remove_file(probe.as_path()) {
+        if error.kind() != ErrorKind::NotFound {
+            return Err(error.into());
+        }
+    }
+    result.map(Some)
+}
+
+fn first_included_file(source_root: &Path, directory: &Path) -> Result<Option<PathBuf>, CliError> {
+    for entry in sorted_entries(directory)? {
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(path.as_path())?;
+        if metadata.file_type().is_symlink() {
+            return Err(CliError::Migration(format!(
+                "source cache entry {} is symlink",
+                path.display()
+            )));
+        }
+        if metadata.is_dir() {
+            if let Some(file) = first_included_file(source_root, path.as_path())? {
+                return Ok(Some(file));
+            }
+            continue;
+        }
+        if !metadata.is_file() {
+            return Err(CliError::Migration(format!(
+                "source cache entry {} is not regular file",
+                path.display()
+            )));
+        }
+        let relative = path
+            .strip_prefix(source_root)
+            .map_err(|_| CliError::Migration("source path escapes cache root".into()))?;
+        if matches!(
+            classify_backtest_history_snapshot_cache_path(relative)
+                .map_err(|error| CliError::Migration(error.to_string()))?,
+            BacktestHistorySnapshotFileDisposition::Include(_)
+        ) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }

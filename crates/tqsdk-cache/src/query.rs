@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -254,9 +255,22 @@ pub(crate) enum QueryExecution {
 }
 
 pub(crate) struct QueryRawOutput {
-    pub(crate) payload: Vec<u8>,
+    artifact: QueryArtifact,
+    format: QueryRawFormat,
     pub(crate) output_path: Option<PathBuf>,
     pub(crate) exit_code: i32,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum QueryRawFormat {
+    Jsonl,
+    LlmCsv,
+}
+
+struct LlmRenderPlan {
+    blocks: Vec<LlmBlock>,
+    selections: Vec<Vec<usize>>,
+    compression: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -498,8 +512,10 @@ struct LlmBlock {
 }
 
 impl LlmBlock {
-    fn render(&self, selected: &[usize], compression: &str) -> String {
-        let mut lines = self.prefix_lines.clone();
+    fn visit_lines(&self, selected: &[usize], compression: &str, visit: &mut impl FnMut(&str)) {
+        for line in &self.prefix_lines {
+            visit(line);
+        }
         let mut data_line = vec![
             "data".to_string(),
             "compression".to_string(),
@@ -515,15 +531,18 @@ impl LlmBlock {
                 selected.len().to_string(),
             ]);
         }
-        lines.push(csv_line(data_line));
-        lines.push(self.header.clone());
-        lines.extend(selected.iter().map(|index| self.row_lines[*index].clone()));
-        lines.push(csv_line(vec![
+        let data_line = csv_line(data_line);
+        visit(&data_line);
+        visit(&self.header);
+        for index in selected {
+            visit(&self.row_lines[*index]);
+        }
+        let block_end = csv_line(vec![
             "block_end".to_string(),
             "rows".to_string(),
             selected.len().to_string(),
-        ]));
-        lines.join("\n")
+        ]);
+        visit(&block_end);
     }
 }
 
@@ -584,15 +603,18 @@ pub(crate) async fn execute(
     }
 
     let exit_code = if artifact.failures.is_empty() { 0 } else { 1 };
+    let output_path = artifact.settings.output_path.clone();
     match output_format {
         OutputFormat::Jsonl => Ok(QueryExecution::Raw(QueryRawOutput {
-            payload: render_jsonl(&artifact)?.into_bytes(),
-            output_path: artifact.settings.output_path.clone(),
+            artifact,
+            format: QueryRawFormat::Jsonl,
+            output_path,
             exit_code,
         })),
         OutputFormat::LlmCsv => Ok(QueryExecution::Raw(QueryRawOutput {
-            payload: render_llm_csv(&artifact)?.into_bytes(),
-            output_path: artifact.settings.output_path.clone(),
+            artifact,
+            format: QueryRawFormat::LlmCsv,
+            output_path,
             exit_code,
         })),
         OutputFormat::Json | OutputFormat::Text => Ok(QueryExecution::Summary(CommandOutcome {
@@ -1066,71 +1088,112 @@ fn block_summary_value(artifact: &QueryArtifact, block: &QueryBlock) -> Result<V
     }))
 }
 
-fn render_jsonl(artifact: &QueryArtifact) -> Result<String, CliError> {
-    let mut lines = Vec::new();
-    lines.push(serde_json::to_string(&json!({
-        "record": "manifest",
-        "protocol": JSONL_PROTOCOL,
-        "query_id": artifact.query_id,
-        "query_hash": artifact.query_hash,
-        "policy": artifact.settings.policy.as_str(),
-        "timestamp": artifact.settings.timestamp.as_str(),
-        "number_format": artifact.settings.number_format.as_str(),
-        "partial": !artifact.failures.is_empty(),
-        "blocks": artifact.blocks.len(),
-    }))?);
-    for block in &artifact.blocks {
-        lines.push(serde_json::to_string(&json!({
-            "record": "block",
-            "block_id": block.block_id,
-            "request_id": block.spec.request_id,
-            "symbol": block.spec.symbol,
-            "series": block.spec.series.as_str(),
-            "period_ns": block.spec.duration_ns,
-            "requested": range_value(block.spec.start_ns, block.spec.end_ns),
-            "fields": block.spec.fields.iter().map(|field| field.canonical_name()).collect::<Vec<_>>(),
-            "source": if block.request.remote_used { "remote-on-miss" } else { "cache" },
-            "finality": finality_value(block.request.coverage.finality),
-            "coverage": coverage_value(&block.request),
-            "physical_segments": segments_value(block.request.physical_segments.as_slice()),
-            "metadata": metadata_value(&block.metadata)?,
-            "data_hash": block.data_hash,
-            "drill_down_id": drill_down_id(artifact, block),
-        }))?);
-        for row in rows_as_json(block, &artifact.settings)? {
-            lines.push(serde_json::to_string(&json!({
-                "record": "row",
-                "block_id": block.block_id,
-                "data": row,
-            }))?);
+pub(crate) fn write_raw_output(
+    raw: &QueryRawOutput,
+    writer: &mut dyn Write,
+) -> Result<(), CliError> {
+    match raw.format {
+        QueryRawFormat::Jsonl => render_jsonl_to(&raw.artifact, writer),
+        QueryRawFormat::LlmCsv => {
+            let plan = prepare_llm_render(&raw.artifact)?;
+            write_llm_document(
+                &raw.artifact,
+                plan.blocks.as_slice(),
+                plan.selections.as_slice(),
+                plan.compression,
+                writer,
+            )
         }
-        lines.push(serde_json::to_string(&json!({
-            "record": "complete",
-            "block_id": block.block_id,
-            "rows": block.rows.len(),
-            "data_hash": block.data_hash,
-        }))?);
     }
-    for failure in &artifact.failures {
-        lines.push(serde_json::to_string(&json!({
-            "record": "gap",
-            "request_id": failure.request_id,
-            "symbol": failure.symbol,
-            "code": failure.code,
-            "message": failure.message,
-        }))?);
-    }
-    lines.push(serde_json::to_string(&json!({
-        "record": "end",
-        "protocol": JSONL_PROTOCOL,
-        "query_id": artifact.query_id,
-        "query_hash": artifact.query_hash,
-        "status": if artifact.failures.is_empty() { "success" } else { "partial" },
-    }))?);
-    Ok(format!("{}\n", lines.join("\n")))
 }
 
-fn render_llm_csv(artifact: &QueryArtifact) -> Result<String, CliError> {
+fn write_jsonl_line(writer: &mut dyn Write, value: &Value) -> Result<(), CliError> {
+    serde_json::to_writer(&mut *writer, value)?;
+    writer.write_all(b"\n")?;
+    Ok(())
+}
+
+fn render_jsonl_to(artifact: &QueryArtifact, writer: &mut dyn Write) -> Result<(), CliError> {
+    write_jsonl_line(
+        writer,
+        &json!({
+            "record": "manifest",
+            "protocol": JSONL_PROTOCOL,
+            "query_id": artifact.query_id,
+            "query_hash": artifact.query_hash,
+            "policy": artifact.settings.policy.as_str(),
+            "timestamp": artifact.settings.timestamp.as_str(),
+            "number_format": artifact.settings.number_format.as_str(),
+            "partial": !artifact.failures.is_empty(),
+            "blocks": artifact.blocks.len(),
+        }),
+    )?;
+    for block in &artifact.blocks {
+        write_jsonl_line(
+            writer,
+            &json!({
+                "record": "block",
+                "block_id": block.block_id,
+                "request_id": block.spec.request_id,
+                "symbol": block.spec.symbol,
+                "series": block.spec.series.as_str(),
+                "period_ns": block.spec.duration_ns,
+                "requested": range_value(block.spec.start_ns, block.spec.end_ns),
+                "fields": block.spec.fields.iter().map(|field| field.canonical_name()).collect::<Vec<_>>(),
+                "source": if block.request.remote_used { "remote-on-miss" } else { "cache" },
+                "finality": finality_value(block.request.coverage.finality),
+                "coverage": coverage_value(&block.request),
+                "physical_segments": segments_value(block.request.physical_segments.as_slice()),
+                "metadata": metadata_value(&block.metadata)?,
+                "data_hash": block.data_hash,
+                "drill_down_id": drill_down_id(artifact, block),
+            }),
+        )?;
+        for row in rows_as_json(block, &artifact.settings)? {
+            write_jsonl_line(
+                writer,
+                &json!({
+                    "record": "row",
+                    "block_id": block.block_id,
+                    "data": row,
+                }),
+            )?;
+        }
+        write_jsonl_line(
+            writer,
+            &json!({
+                "record": "complete",
+                "block_id": block.block_id,
+                "rows": block.rows.len(),
+                "data_hash": block.data_hash,
+            }),
+        )?;
+    }
+    for failure in &artifact.failures {
+        write_jsonl_line(
+            writer,
+            &json!({
+                "record": "gap",
+                "request_id": failure.request_id,
+                "symbol": failure.symbol,
+                "code": failure.code,
+                "message": failure.message,
+            }),
+        )?;
+    }
+    write_jsonl_line(
+        writer,
+        &json!({
+            "record": "end",
+            "protocol": JSONL_PROTOCOL,
+            "query_id": artifact.query_id,
+            "query_hash": artifact.query_hash,
+            "status": if artifact.failures.is_empty() { "success" } else { "partial" },
+        }),
+    )
+}
+
+fn prepare_llm_render(artifact: &QueryArtifact) -> Result<LlmRenderPlan, CliError> {
     let blocks = artifact
         .blocks
         .iter()
@@ -1140,33 +1203,44 @@ fn render_llm_csv(artifact: &QueryArtifact) -> Result<String, CliError> {
         .iter()
         .map(|block| (0..block.row_lines.len()).collect::<Vec<_>>())
         .collect::<Vec<_>>();
-    let (full, full_tokens) = render_llm_document(
+    let full_tokens = estimate_llm_document(
         artifact,
         blocks.as_slice(),
         selections.as_slice(),
         "lossless",
     );
     let Some(budget) = artifact.settings.data_token_budget else {
-        return Ok(full);
+        return Ok(LlmRenderPlan {
+            blocks,
+            selections,
+            compression: "lossless",
+        });
     };
     if full_tokens <= budget {
-        return Ok(full);
+        return Ok(LlmRenderPlan {
+            blocks,
+            selections,
+            compression: "lossless",
+        });
     }
     if matches!(artifact.settings.compression, CompressionMode::Off) {
         return Err(CliError::Usage(format!(
-            "LLM payload estimates {full_tokens} tokens, exceeding --data-token-budget {budget}; enable compression or raise the budget"
+            "LLM payload estimates {full_tokens} tokens, exceeding --data-token-budget {budget}; enable compression or raise budget"
         )));
     }
-
     selections = allocate_compressed_rows(artifact, blocks.as_slice(), budget)?;
-    let (payload, estimated_tokens) =
-        render_llm_document(artifact, blocks.as_slice(), selections.as_slice(), "lossy");
+    let estimated_tokens =
+        estimate_llm_document(artifact, blocks.as_slice(), selections.as_slice(), "lossy");
     if estimated_tokens > budget {
         return Err(CliError::Usage(format!(
-            "--data-token-budget {budget} is too small for required tqllm-csv metadata ({estimated_tokens} estimated tokens)"
+            "--data-token-budget {budget} too small for required tqllm-csv metadata ({estimated_tokens} estimated tokens)"
         )));
     }
-    Ok(payload)
+    Ok(LlmRenderPlan {
+        blocks,
+        selections,
+        compression: "lossy",
+    })
 }
 
 fn allocate_compressed_rows(
@@ -1175,50 +1249,60 @@ fn allocate_compressed_rows(
     budget: usize,
 ) -> Result<Vec<Vec<usize>>, CliError> {
     let empty = vec![Vec::new(); blocks.len()];
-    let (_, base_tokens) = render_llm_document(artifact, blocks, empty.as_slice(), "lossy");
+    let base_tokens = estimate_llm_document(artifact, blocks, empty.as_slice(), "lossy");
     if base_tokens > budget {
         return Err(CliError::Usage(format!(
-            "--data-token-budget {budget} is too small for required tqllm-csv metadata ({base_tokens} estimated tokens)"
+            "--data-token-budget {budget} too small for required tqllm-csv metadata ({base_tokens} estimated tokens)"
         )));
     }
-    let residual = budget - base_tokens;
+    let residual = budget.saturating_sub(base_tokens);
     let total_weight = blocks
         .iter()
         .map(|block| usize::try_from(block.weight).unwrap_or(usize::MAX))
-        .try_fold(0_usize, usize::checked_add)
-        .ok_or_else(|| CliError::Usage("query block weights overflow".to_string()))?;
-    let mut counts = blocks
+        .sum::<usize>();
+    if total_weight == 0 {
+        return Err(CliError::Usage(
+            "query weights must be non-zero".to_string(),
+        ));
+    }
+    let counts = blocks
         .iter()
         .map(|block| {
             if block.row_lines.is_empty() {
-                return Ok(0_usize);
+                return Ok(0);
             }
             let allowance = residual
                 .saturating_mul(usize::try_from(block.weight).unwrap_or(usize::MAX))
                 / total_weight.max(1);
-            let raw_tokens = estimate_tokens(block.row_lines.join("\n").as_str()).max(1);
-            let estimated = block.row_lines.len().saturating_mul(allowance) / raw_tokens;
-            Ok(estimated.min(block.row_lines.len()))
+            let estimated = estimate_lines(block.row_lines.iter().map(String::as_str)).max(1);
+            Ok(block
+                .row_lines
+                .len()
+                .saturating_mul(allowance)
+                .div_ceil(estimated)
+                .min(block.row_lines.len()))
         })
         .collect::<Result<Vec<_>, CliError>>()?;
-    let mut selections = selected_rows(blocks, counts.as_slice());
-    let (_, mut estimated_tokens) =
-        render_llm_document(artifact, blocks, selections.as_slice(), "lossy");
-    while estimated_tokens > budget {
-        let Some((index, _)) = counts
+
+    const SCALE: usize = 1_000_000;
+    let mut low = 0;
+    let mut high = SCALE;
+    let mut best = empty;
+    while low < high {
+        let midpoint = low + (high - low).div_ceil(2);
+        let scaled_counts = counts
             .iter()
-            .enumerate()
-            .filter(|(_, count)| **count > 0)
-            .max_by_key(|(index, count)| (**count, blocks[*index].weight))
-        else {
-            break;
-        };
-        counts[index] -= 1;
-        selections = selected_rows(blocks, counts.as_slice());
-        (_, estimated_tokens) =
-            render_llm_document(artifact, blocks, selections.as_slice(), "lossy");
+            .map(|count| count.saturating_mul(midpoint) / SCALE)
+            .collect::<Vec<_>>();
+        let selections = selected_rows(blocks, scaled_counts.as_slice());
+        if estimate_llm_document(artifact, blocks, selections.as_slice(), "lossy") <= budget {
+            low = midpoint;
+            best = selections;
+        } else {
+            high = midpoint - 1;
+        }
     }
-    Ok(selections)
+    Ok(best)
 }
 
 fn selected_rows(blocks: &[LlmBlock], counts: &[usize]) -> Vec<Vec<usize>> {
@@ -1266,16 +1350,15 @@ fn select_row_indices(block: &LlmBlock, count: usize) -> Vec<usize> {
     selected.into_iter().take(count).collect()
 }
 
-fn render_llm_document(
+fn visit_llm_document(
     artifact: &QueryArtifact,
     blocks: &[LlmBlock],
     selections: &[Vec<usize>],
     compression: &str,
-) -> (String, usize) {
-    let mut lines = vec![csv_line(vec![
-        "protocol".to_string(),
-        LLM_CSV_PROTOCOL.to_string(),
-    ])];
+    visit: &mut impl FnMut(&str),
+) {
+    let protocol = csv_line(vec!["protocol".to_string(), LLM_CSV_PROTOCOL.to_string()]);
+    visit(&protocol);
     let mut metadata = vec![
         "meta".to_string(),
         "model".to_string(),
@@ -1293,20 +1376,22 @@ fn render_llm_document(
             artifact.settings.focus.as_str().to_string(),
         ]);
     }
-    lines.push(csv_line(metadata));
+    let metadata = csv_line(metadata);
+    visit(&metadata);
     for (block, selected) in blocks.iter().zip(selections) {
-        lines.push(block.render(selected.as_slice(), compression));
+        block.visit_lines(selected.as_slice(), compression, visit);
     }
     for failure in &artifact.failures {
-        lines.push(csv_line(vec![
+        let gap = csv_line(vec![
             "gap".to_string(),
             failure.request_id.to_string(),
             failure.symbol.clone(),
             failure.code.to_string(),
             protocol_text(failure.message.as_str()),
-        ]));
+        ]);
+        visit(&gap);
     }
-    lines.push(csv_line(vec![
+    let end = csv_line(vec![
         "document_end".to_string(),
         "status".to_string(),
         if artifact.failures.is_empty() {
@@ -1314,10 +1399,69 @@ fn render_llm_document(
         } else {
             "partial".to_string()
         },
-    ]));
-    let payload = format!("{}\n", lines.join("\n"));
-    let estimated_tokens = estimate_tokens(payload.as_str());
-    (payload, estimated_tokens)
+    ]);
+    visit(&end);
+}
+
+fn estimate_llm_document(
+    artifact: &QueryArtifact,
+    blocks: &[LlmBlock],
+    selections: &[Vec<usize>],
+    compression: &str,
+) -> usize {
+    let mut bytes = 0_usize;
+    let mut lines = 0_usize;
+    visit_llm_document(artifact, blocks, selections, compression, &mut |line| {
+        bytes = bytes.saturating_add(line.len());
+        if lines > 0 {
+            bytes = bytes.saturating_add(1);
+        }
+        lines = lines.saturating_add(1);
+    });
+    if lines > 0 {
+        bytes = bytes.saturating_add(1);
+    }
+    bytes.div_ceil(3).saturating_add(lines)
+}
+
+fn estimate_lines<'a>(lines: impl Iterator<Item = &'a str>) -> usize {
+    let mut bytes = 0_usize;
+    let mut count = 0_usize;
+    for line in lines {
+        bytes = bytes.saturating_add(line.len());
+        if count > 0 {
+            bytes = bytes.saturating_add(1);
+        }
+        count = count.saturating_add(1);
+    }
+    bytes.div_ceil(3).saturating_add(count)
+}
+
+fn write_llm_document(
+    artifact: &QueryArtifact,
+    blocks: &[LlmBlock],
+    selections: &[Vec<usize>],
+    compression: &str,
+    writer: &mut dyn Write,
+) -> Result<(), CliError> {
+    let mut first = true;
+    let mut result = Ok(());
+    visit_llm_document(artifact, blocks, selections, compression, &mut |line| {
+        if result.is_ok() {
+            if !first {
+                result = writer.write_all(b"\n");
+            }
+            if result.is_ok() {
+                result = writer.write_all(line.as_bytes());
+            }
+            first = false;
+        }
+    });
+    result?;
+    if !first {
+        writer.write_all(b"\n")?;
+    }
+    Ok(())
 }
 
 impl LlmBlock {
@@ -2412,6 +2556,7 @@ fn expand_scientific_decimal(value: &str) -> Option<String> {
     (rendered.len() <= 32).then_some(rendered)
 }
 
+#[cfg(test)]
 fn estimate_tokens(value: &str) -> usize {
     value
         .len()
