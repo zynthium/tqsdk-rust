@@ -57,7 +57,8 @@ acquisition SHA-256。完成探测后再次进行全量 discovery，再投影为
 影响该 scoped provider-history proof。
 
 CLI 强制 daily bootstrap 的 symbol batch size 为 1，使每个 scheduler 终态精确归属于一个候选。
-调用方未显式设置 `--batch-timeout-secs` 时，单候选观察默认使用 15 秒 wall-clock 上限。精确 timeout
+调用方未显式设置 `--batch-timeout-secs` 时，单候选观察默认使用 15 秒 wall-clock 上限；若显式设置
+`--idle-timeout-secs`，该值同时作为单候选 wall-clock 上限，避免更短的隐式上限覆盖调用方选择。精确 timeout
 直接记录为 `provider_unavailable`：它只表达“本次有界 provider 观察不可用”，不表达终态空、从未
 挂牌或永远没有行情；后续 acquisition 可以重新观察并升级。认证、transport、取消和非 timeout 失败
 都拒绝发布。若没有任何完成请求，或者 unavailable 数超过 `max(8, ceil(roster/20))`，熔断并拒绝

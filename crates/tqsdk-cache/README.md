@@ -49,7 +49,8 @@ V4/V3 chain 验证后可迁移为 V5，source 与 rollback artifact 保留。
 服务端显式 rows 形成 membership，终态空窗口形成空观测。provider roster 中不创建历史 chart 的
 候选会在 symbol batch size 1 的精确 timeout 后记录为 `provider_unavailable`，保留在 acquisition
 审计中但不进入 universe；后续 acquisition 可以重新观察并升级，当前状态不作为缺少行情的证明。
-每个 scheduler batch 只含一个候选；默认有界观察上限为 15 秒。精确 timeout 记录为
+每个 scheduler batch 只含一个候选；默认有界观察上限为 15 秒。显式 `--idle-timeout-secs` 会在未设置
+`--batch-timeout-secs` 时同时设置该观察上限。精确 timeout 记录为
 `provider_unavailable`，只表示本次 provider chart 不可用，不表示终态空、从未挂牌或永远无行情。
 非 timeout、取消、零完成请求或超过 5%（至少 8 个）的 unavailable 会触发熔断并拒绝发布，避免
 全局故障被误判成空市场。

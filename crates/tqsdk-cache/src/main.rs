@@ -2852,11 +2852,7 @@ async fn bootstrap_provider_history_and_fill(
         let progress_callback = reporter.clone();
         // Keep every terminal outcome attributable to one symbol. Exact timeouts
         // remain bounded provider-unavailable audit facts for this acquisition.
-        let mut bootstrap_config = history_fill_config(&args)?.with_symbol_batch_size(1)?;
-        if args.batch_timeout_secs.is_none() {
-            bootstrap_config =
-                bootstrap_config.with_batch_timeout(Some(Duration::from_secs(15)))?;
-        }
+        let bootstrap_config = provider_history_bootstrap_fill_config(&args)?;
         let bootstrap = client
             .orchestrate_fill(
                 requests,
@@ -6279,6 +6275,19 @@ fn history_fill_config(args: &FillArgs) -> Result<BacktestHistoryFillConfig, Dat
     Ok(config)
 }
 
+fn provider_history_bootstrap_fill_config(
+    args: &FillArgs,
+) -> Result<BacktestHistoryFillConfig, DataError> {
+    let mut config = history_fill_config(args)?.with_symbol_batch_size(1)?;
+    if args.batch_timeout_secs.is_none() {
+        let timeout = args
+            .idle_timeout_secs
+            .map_or(Duration::from_secs(15), Duration::from_secs);
+        config = config.with_batch_timeout(Some(timeout))?;
+    }
+    Ok(config)
+}
+
 fn apply_fill_targets(
     mut builder: tqsdk::BacktestBuilder,
     symbols: &[String],
@@ -6667,9 +6676,10 @@ mod tests {
         ProviderMembershipRefreshArgs, current_open_trading_day, fill_historical_universe_plan,
         fill_was_interrupted, finalize_pending_closed_minute_ranges,
         historical_universe_fill_targets, isolated_provider_history_unavailable_after_ns, migrate,
-        persist_calendar_if_needed, provider_history_bootstrap_is_publishable,
-        provider_history_unavailable_limit, provider_membership_canary_fill_config,
-        provider_membership_refresh_fill_config, resolve_fill_window,
+        persist_calendar_if_needed, provider_history_bootstrap_fill_config,
+        provider_history_bootstrap_is_publishable, provider_history_unavailable_limit,
+        provider_membership_canary_fill_config, provider_membership_refresh_fill_config,
+        resolve_fill_window,
     };
     use chrono::NaiveDate;
     use clap::Parser;
@@ -6891,6 +6901,31 @@ mod tests {
             limit + 1,
             roster_len,
         ));
+    }
+
+    #[test]
+    fn provider_history_bootstrap_batch_timeout_respects_idle_override() {
+        let cli = Cli::try_parse_from([
+            "tqsdk-cache",
+            "fill",
+            "--kind",
+            "minute",
+            "--universe",
+            "timeline(contract:all)",
+            "--start-day",
+            "2024-01-01",
+            "--idle-timeout-secs",
+            "180",
+        ])
+        .unwrap();
+        let Command::Fill(args) = cli.command else {
+            panic!("expected fill command");
+        };
+
+        let config = provider_history_bootstrap_fill_config(&args).unwrap();
+        assert_eq!(config.symbol_batch_size(), 1);
+        assert_eq!(config.idle_timeout(), Duration::from_secs(180));
+        assert_eq!(config.batch_timeout(), Some(Duration::from_secs(180)));
     }
 
     #[tokio::test(flavor = "current_thread")]
