@@ -348,6 +348,8 @@ canary 仅请求成熟 complete observation 的已知单日窗口，默认上限
 allowlist clone/import 到 staging：`.tqbn` 与 pointer 只独立复制，`.tqmk` / `.tqdk` / immutable
 metadata 可 hardlink（失败时普通 copy），lock/sidecar 只重建、不进入 manifest。
 
+`--source-cache-dir` 与 `--history-root` 必须完全分离；相同路径或任一方向的嵌套都会在创建 history root 之前失败，`dry-run` 也执行同一检查。
+
 ```bash
 # 完全只读；不会创建 history root、staging 或 operation lock。
 cargo run -p tqsdk-cache -- snapshot \
@@ -379,12 +381,21 @@ manifest 中每种实际数据 role；metadata-only generation 不需要伪造 q
 {"requests":[{"series":"tick","request_id":1,"symbol":"SHFE.au2612","start_ns":1787932800000000000,"end_ns":1788019200000000000}]}
 ```
 
+`prewarm` 仅在请求遇到远端缺口时惰性读取 `TQ_AUTH_USER` / `TQ_AUTH_PASS`。已发布 generation 的 `scrub` 也会执行 strict inspect + CacheOnly query smoke；含数据 role 时必须提供覆盖所有 role 的 request file：
+
+```bash
+cargo run -p tqsdk-cache -- snapshot \
+  --history-root /var/lib/tqsdk/history-published scrub \
+  --request-file verify.json
+```
+
 `prewarm` 只写隔离 staging 副本，并可能返回新的 `snapshot_id`。`publish` 固定执行 data/manifest
 sync、generation rename、`snapshots/` sync、CURRENT temp sync、CURRENT rename、history-root sync；
 CURRENT rename 后 root sync 失败属于 indeterminate，必须运行 `snapshot recover`。`rollback`、
 `recover`、`scrub`、`gc` 默认只读，只有 rollback/recover/gc 的 `--apply` 执行 mutation。GC 默认
-保留 CURRENT 加两个 previous compatible generation；它只在取得 exclusive generation lease 后把
-目标原子移到 staging tombstone，再删除并 fsync，shared lease 忙时跳过。relay/reader 永不执行 GC。
+保留 CURRENT 加两个 previous compatible generation；运行前会严格打开 CURRENT，缺失、悬空或损坏时
+fail closed 并要求先 `recover`。它只在取得 exclusive generation lease 后把目标原子移到 staging
+tombstone，再删除并 fsync，shared lease 忙时跳过。relay/reader 永不执行 GC。
 
 ## 历史查询与 LLM 上下文
 
@@ -597,7 +608,8 @@ plain；显式 `tty` 只适用于终端。TTY 默认显示全局条及全部活�
 一次，但终态必定立即输出 `status=complete | failed |
 interrupted`。`--progress jsonl` 对 tick、minute 与 daily fill 都输出 schema-v2
 `tqsdk-cache.progress` JSONL，并带 `cache_kind: "tick" | "minute" | "daily"`；JSONL 写入在独立线程，
-不会阻塞 remote-fill 回调，session 结束前会写完终态。不要再按旧 schema-v1 解析。tick 的 progress 以
+使用有界队列且普通中间快照允许合并/跳过，因此不会因慢 stderr 消费者无限增长内存或阻塞
+remote-fill 回调；terminal record 会在 session 结束前完整写出。不要再按旧 schema-v1 解析。tick 的 progress 以
 physical cache symbol 展示，minute 与 daily 则以 logical symbol 展示；仍在执行的 symbol 和失败 symbol
 都会保留，失败项带 `error`。
 

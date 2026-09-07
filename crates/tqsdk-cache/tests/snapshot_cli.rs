@@ -61,6 +61,24 @@ fn result(output: &Output) -> Value {
     value["result"].clone()
 }
 
+fn find_file_with_extension(root: &Path, extension: &str) -> Option<PathBuf> {
+    for entry in fs::read_dir(root).ok()? {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        let file_type = entry.file_type().ok()?;
+        if file_type.is_dir() {
+            if let Some(found) = find_file_with_extension(&path, extension) {
+                return Some(found);
+            }
+        } else if file_type.is_file()
+            && path.extension().and_then(|value| value.to_str()) == Some(extension)
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
 fn tqbn_fixture(payload: &[u8]) -> Vec<u8> {
     fn fnv1a(bytes: &[u8]) -> u64 {
         bytes.iter().fold(0xcbf29ce484222325, |hash, byte| {
@@ -151,6 +169,50 @@ fn clone_args(source: &Path, history: &Path, created_at: &str, command: &str) ->
         "--created-at".into(),
         created_at.into(),
     ]
+}
+
+#[test]
+fn clone_and_dry_run_reject_overlapping_source_and_history_roots_before_writes() {
+    let source = temp_dir("overlap-source");
+    seed_source(&source, b"one");
+    let nested_history = source.join("history");
+
+    for command in ["dry-run", "clone"] {
+        let output = run_json(&clone_args(
+            &source,
+            &nested_history,
+            "2026-08-29T00:00:00Z",
+            command,
+        ));
+        assert!(!output.status.success());
+        assert!(!nested_history.exists());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("must be disjoint"));
+    }
+
+    for command in ["dry-run", "clone"] {
+        let output = run_json(&clone_args(
+            &source,
+            &source,
+            "2026-08-29T00:00:00Z",
+            command,
+        ));
+        assert!(!output.status.success());
+        assert!(!source.join("snapshots").exists());
+        assert!(!source.join("staging").exists());
+    }
+
+    let parent_history = temp_dir("overlap-parent");
+    let nested_source = parent_history.join("source");
+    seed_source(&nested_source, b"two");
+    let output = run_json(&clone_args(
+        &nested_source,
+        &parent_history,
+        "2026-08-29T00:00:00Z",
+        "clone",
+    ));
+    assert!(!output.status.success());
+    assert!(!parent_history.join("snapshots").exists());
+    assert!(!parent_history.join("staging").exists());
 }
 
 #[test]
@@ -395,6 +457,140 @@ fn data_generation_requires_cache_only_inspect_and_real_query_smoke_before_publi
 }
 
 #[test]
+fn prewarm_uses_auth_env_when_remote_materialization_is_needed() {
+    let source = temp_dir("prewarm-auth-source");
+    let history = temp_dir("prewarm-auth-history");
+    let symbol = "SHFE.au2608";
+    seed_queryable_tick_source(&source, symbol);
+    let staged = result(&run_json(&clone_args(
+        &source,
+        &history,
+        "2026-08-29T00:00:00Z",
+        "clone",
+    )));
+    let snapshot_id = staged["snapshot_id"].as_str().unwrap();
+    let requests = temp_dir("prewarm-auth-requests").with_extension("json");
+    fs::write(
+        &requests,
+        serde_json::to_vec(&serde_json::json!({
+            "requests": [{
+                "series": "tick",
+                "request_id": 1,
+                "symbol": symbol,
+                "start_ns": DAY_END_NS,
+                "end_ns": DAY_END_NS + 86_400_000_000_000_i64
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = run_json(&[
+        "snapshot".into(),
+        "--history-root".into(),
+        history.display().to_string(),
+        "prewarm".into(),
+        "--snapshot-id".into(),
+        snapshot_id.into(),
+        "--request-file".into(),
+        requests.display().to_string(),
+    ]);
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("TQ_AUTH_USER"), "{stdout}");
+    assert!(
+        !stdout.contains("auth_env() or auth_provider()"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn scrub_requires_and_executes_query_smoke_for_data_generations() {
+    let source = temp_dir("scrub-source");
+    let history = temp_dir("scrub-history");
+    let symbol = "SHFE.au2608";
+    seed_queryable_tick_source(&source, symbol);
+    let mut clone = clone_args(&source, &history, "2026-08-29T00:00:00Z", "clone");
+    clone.extend([
+        "--catalog-complete".into(),
+        "--catalog-symbol".into(),
+        symbol.into(),
+    ]);
+    let staged = result(&run_json(&clone));
+    let snapshot_id = staged["snapshot_id"].as_str().unwrap().to_string();
+    let requests = temp_dir("scrub-requests").with_extension("json");
+    fs::write(
+        &requests,
+        serde_json::to_vec(&serde_json::json!({
+            "requests": [{
+                "series": "tick",
+                "request_id": 1,
+                "symbol": symbol,
+                "start_ns": DAY_START_NS,
+                "end_ns": DAY_END_NS
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    result(&run_json(&[
+        "snapshot".into(),
+        "--history-root".into(),
+        history.display().to_string(),
+        "verify".into(),
+        "--snapshot-id".into(),
+        snapshot_id.clone(),
+        "--request-file".into(),
+        requests.display().to_string(),
+    ]));
+    result(&run_json(&[
+        "snapshot".into(),
+        "--history-root".into(),
+        history.display().to_string(),
+        "publish".into(),
+        "--snapshot-id".into(),
+        snapshot_id.clone(),
+    ]));
+
+    let without_requests = run_json(&[
+        "snapshot".into(),
+        "--history-root".into(),
+        history.display().to_string(),
+        "scrub".into(),
+    ]);
+    assert!(!without_requests.status.success());
+
+    let scrubbed = result(&run_json(&[
+        "snapshot".into(),
+        "--history-root".into(),
+        history.display().to_string(),
+        "scrub".into(),
+        "--request-file".into(),
+        requests.display().to_string(),
+    ]));
+    assert_eq!(scrubbed["query_smoke_verified"], true);
+    assert_eq!(scrubbed["requests"], 1);
+    assert_eq!(scrubbed["namespace"], "current");
+
+    let generation = history.join("snapshots").join(&snapshot_id);
+    let tick_file = find_file_with_extension(&generation, "tqbn").expect("snapshot tick file");
+    let mut corrupted = fs::read(&tick_file).unwrap();
+    corrupted.push(0xff);
+    fs::write(&tick_file, corrupted).unwrap();
+    let corrupted_scrub = run_json(&[
+        "snapshot".into(),
+        "--history-root".into(),
+        history.display().to_string(),
+        "scrub".into(),
+        "--request-file".into(),
+        requests.display().to_string(),
+    ]);
+    assert!(!corrupted_scrub.status.success());
+}
+
+#[test]
 fn import_is_retry_idempotent_and_gc_skips_a_leased_old_generation() {
     let source = temp_dir("gc-source");
     let history = temp_dir("gc-history");
@@ -470,6 +666,54 @@ fn import_is_retry_idempotent_and_gc_skips_a_leased_old_generation() {
         &[Value::String(ids[0].clone())]
     );
     assert!(!history.join("snapshots").join(&ids[0]).exists());
+}
+
+#[test]
+fn gc_fails_closed_when_current_is_invalid_without_removing_generations() {
+    let source = temp_dir("gc-invalid-current-source");
+    let history = temp_dir("gc-invalid-current-history");
+    seed_metadata_source(&source, b"one");
+    let mut ids = Vec::new();
+
+    for (day, marker) in [(28, b'a'), (29, b'b')] {
+        fs::write(
+            source.join("backtest-history-metadata-v1/snapshots/content.json"),
+            [marker],
+        )
+        .unwrap();
+        let imported = result(&run_json(&clone_args(
+            &source,
+            &history,
+            format!("2026-08-{day:02}T00:00:00Z").as_str(),
+            "import",
+        )));
+        let snapshot_id = imported["snapshot_id"].as_str().unwrap().to_string();
+        result(&run_json(&[
+            "snapshot".into(),
+            "--history-root".into(),
+            history.display().to_string(),
+            "publish".into(),
+            "--snapshot-id".into(),
+            snapshot_id.clone(),
+        ]));
+        ids.push(snapshot_id);
+    }
+
+    fs::write(history.join("CURRENT"), "missing-generation\n").unwrap();
+    let output = run_json(&[
+        "snapshot".into(),
+        "--history-root".into(),
+        history.display().to_string(),
+        "gc".into(),
+        "--retain".into(),
+        "1".into(),
+        "--apply".into(),
+    ]);
+
+    assert!(!output.status.success());
+    for snapshot_id in ids {
+        assert!(history.join("snapshots").join(snapshot_id).is_dir());
+    }
 }
 
 #[test]

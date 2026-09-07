@@ -479,14 +479,12 @@ impl CliError {
 
     fn retryable(&self) -> bool {
         self.is_cache_busy()
-            || matches!(
-                self,
-                Self::Io(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::Interrupted | io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                    )
-            )
+            || match self {
+                Self::Data(error) => data_error_retryable(error),
+                Self::Sdk(error) => sdk_error_retryable(error),
+                Self::Io(error) => transient_io_kind(error.kind()),
+                Self::Usage(_) | Self::Migration(_) | Self::Json(_) => false,
+            }
     }
 
     fn is_cache_busy(&self) -> bool {
@@ -497,6 +495,31 @@ impl CliError {
             }
             _ => false,
         }
+    }
+}
+
+fn transient_io_kind(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::Interrupted | io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    )
+}
+
+fn data_error_retryable(error: &DataError) -> bool {
+    match error {
+        DataError::CacheBusy { .. } | DataError::Timeout(_) => true,
+        DataError::Session(error) => error.is_retryable(),
+        DataError::Http(error) => error.is_timeout() || error.is_connect(),
+        DataError::Io(error) => transient_io_kind(error.kind()),
+        _ => false,
+    }
+}
+
+fn sdk_error_retryable(error: &tqsdk::Error) -> bool {
+    match error {
+        tqsdk::Error::Session(error) => error.is_retryable(),
+        tqsdk::Error::Data(error) => data_error_retryable(error),
+        _ => false,
     }
 }
 
@@ -589,6 +612,12 @@ struct ProvisionalOpenDayWindow {
     as_of_ns: i64,
 }
 
+struct HistoricalUniversePlanExecution {
+    signal_context: Option<(BacktestHistoryFillCancellation, tokio::task::JoinHandle<()>)>,
+    provisional: Option<ProvisionalOpenDayWindow>,
+    progress_calendar: Option<CalendarResolution>,
+}
+
 const OPEN_DAY_HORIZON_LAG_NS: i64 = 5 * 1_000_000_000;
 const MINUTE_SESSION_CLOSE_GRACE_NS: i64 = 5 * 1_000_000_000;
 
@@ -617,6 +646,58 @@ impl CalendarResolution {
             days,
         })
     }
+}
+
+fn historical_plan_progress_calendar(
+    cache_dir: Option<&Path>,
+    mode: CalendarMode,
+    window: &TradingDayWindow,
+) -> Result<CalendarResolution, CliError> {
+    let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
+    let mut snapshot = if matches!(mode, CalendarMode::Off) {
+        None
+    } else {
+        match read_trading_calendar_holidays_snapshot(canonical_cache_dir.as_path()) {
+            Ok(snapshot) => snapshot,
+            Err(_) if matches!(mode, CalendarMode::Auto) => None,
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let start_day = parse_window_day(&window.start_day)?;
+    let end_day = parse_window_day(&window.end_day)?;
+    if let Some(local) = snapshot.as_ref() {
+        match local.covers(start_day, end_day) {
+            Ok(true) => {}
+            Ok(false) if matches!(mode, CalendarMode::Auto) => snapshot = None,
+            Err(_) if matches!(mode, CalendarMode::Auto) => snapshot = None,
+            Ok(false) => {
+                return Err(DataError::Validation(format!(
+                    "local trading calendar does not cover {start_day} through {end_day}"
+                ))
+                .into());
+            }
+            Err(error) => return Err(error.into()),
+        }
+    } else if matches!(mode, CalendarMode::Required) {
+        return Err(DataError::Validation(
+            "--calendar required needs a local trading calendar snapshot".to_string(),
+        )
+        .into());
+    }
+    let source = if snapshot.is_some() {
+        "local"
+    } else if matches!(mode, CalendarMode::Off) {
+        "off"
+    } else {
+        "partition_fallback"
+    };
+    Ok(CalendarResolution {
+        mode,
+        persisted: snapshot.is_some(),
+        snapshot,
+        source: source.to_string(),
+        persist_after_plan: false,
+    })
 }
 
 async fn resolve_fill_window(
@@ -1467,11 +1548,9 @@ fn parse_metadata_refresh_timestamp(value: &str, flag: &str) -> Result<i64, CliE
 
 fn inventory(cache_dir: Option<&Path>, kind: CacheKind) -> Result<CommandOutcome, CliError> {
     let (cache, cache_dir) = open_read_only_cache(cache_dir)?;
-    let tick_inventory = cache.fast_inventory()?;
-    let minute_inventory = MinuteKlineCache::open_read_only(&cache_dir).fast_inventory()?;
-    let daily_inventory = DailyKlineCache::open_read_only(&cache_dir).fast_inventory()?;
-    let tick_json = || {
-        json!({
+    let tick_json = || -> Result<Value, CliError> {
+        let tick_inventory = cache.fast_inventory()?;
+        Ok(json!({
             "backend_format": tick_inventory.backend_format,
             "total_files": tick_inventory.total_files,
             "total_bytes": tick_inventory.total_bytes,
@@ -1484,10 +1563,11 @@ fn inventory(cache_dir: Option<&Path>, kind: CacheKind) -> Result<CommandOutcome
                 "days": symbol.days,
                 "problem_files": symbol.problem_files,
             })).collect::<Vec<_>>(),
-        })
+        }))
     };
-    let minute_json = || {
-        json!({
+    let minute_json = || -> Result<Value, CliError> {
+        let minute_inventory = MinuteKlineCache::open_read_only(&cache_dir).fast_inventory()?;
+        Ok(json!({
             "backend_format": minute_inventory.format_id,
             "total_files": minute_inventory.total_files,
             "total_bytes": minute_inventory.total_bytes,
@@ -1499,10 +1579,11 @@ fn inventory(cache_dir: Option<&Path>, kind: CacheKind) -> Result<CommandOutcome
                 "bytes": symbol.bytes,
                 "months": symbol.months,
             })).collect::<Vec<_>>(),
-        })
+        }))
     };
-    let daily_json = || {
-        json!({
+    let daily_json = || -> Result<Value, CliError> {
+        let daily_inventory = DailyKlineCache::open_read_only(&cache_dir).fast_inventory()?;
+        Ok(json!({
             "backend_format": daily_inventory.format_id,
             "total_files": daily_inventory.total_files,
             "total_bytes": daily_inventory.total_bytes,
@@ -1514,17 +1595,17 @@ fn inventory(cache_dir: Option<&Path>, kind: CacheKind) -> Result<CommandOutcome
                 "bytes": symbol.bytes,
                 "problem_files": symbol.problem_files,
             })).collect::<Vec<_>>(),
-        })
+        }))
     };
     let result = match kind {
-        CacheKind::Tick => tick_json(),
-        CacheKind::Minute => minute_json(),
-        CacheKind::Daily => daily_json(),
+        CacheKind::Tick => tick_json()?,
+        CacheKind::Minute => minute_json()?,
+        CacheKind::Daily => daily_json()?,
         CacheKind::All => json!({
             "cache_kind": kind.as_str(),
-            "tick": tick_json(),
-            "minute": minute_json(),
-            "daily": daily_json(),
+            "tick": tick_json()?,
+            "minute": minute_json()?,
+            "daily": daily_json()?,
         }),
     };
     let mut result = result;
@@ -1875,8 +1956,19 @@ async fn fill_inner(
                 "legacy --universe-plan cannot be combined with --universe-file".to_string(),
             ));
         }
-        return fill_historical_universe_plan(cache_dir, kind, market, args, plan_path, None, None)
-            .await;
+        return fill_historical_universe_plan(
+            cache_dir,
+            kind,
+            market,
+            args,
+            plan_path,
+            HistoricalUniversePlanExecution {
+                signal_context: None,
+                provisional: None,
+                progress_calendar: None,
+            },
+        )
+        .await;
     }
     let mut args = args;
     prepare_current_fill_universe(&mut args, market).await?;
@@ -3033,14 +3125,18 @@ async fn bootstrap_provider_history_and_fill(
     args.days.calendar = CalendarMode::Auto;
     args.days.refresh_calendar = false;
     let report_path = args.report.clone();
+    let progress_calendar = resolved.calendar.clone();
     let mut outcome = fill_historical_universe_plan(
         Some(&canonical_cache_dir),
         kind,
         market,
         args,
         plan_path,
-        signal_context,
-        resolved.provisional,
+        HistoricalUniversePlanExecution {
+            signal_context,
+            provisional: resolved.provisional,
+            progress_calendar: Some(progress_calendar),
+        },
     )
     .await?;
     if let Some(object) = outcome.value.as_object_mut() {
@@ -3217,11 +3313,15 @@ async fn fill_historical_universe_plan(
     market: MarketKind,
     args: FillArgs,
     plan_path: PathBuf,
-    signal_context: Option<(BacktestHistoryFillCancellation, tokio::task::JoinHandle<()>)>,
-    provisional: Option<ProvisionalOpenDayWindow>,
+    execution: HistoricalUniversePlanExecution,
 ) -> Result<CommandOutcome, CliError> {
+    let HistoricalUniversePlanExecution {
+        signal_context,
+        provisional,
+        progress_calendar,
+    } = execution;
     let (_, preflight_cache_dir) = open_read_only_cache(cache_dir)?;
-    let preflight_store = tqsdk_data::HistoricalUniverseArtifactStore::new(preflight_cache_dir);
+    let preflight_store = tqsdk_data::HistoricalUniverseArtifactStore::new(&preflight_cache_dir);
     let plan = load_historical_universe_fill_plan(
         &preflight_store,
         &plan_path,
@@ -3232,7 +3332,6 @@ async fn fill_historical_universe_plan(
         backtest_tick_trading_day_for_timestamp_ns(plan.start_ns)?,
         backtest_tick_trading_day_for_timestamp_ns(plan.end_ns.saturating_sub(1))?,
     )?;
-
     if !matches!(market, MarketKind::Futures) {
         return Err(CliError::Usage(
             "legacy --universe-plan supports only --market futures".to_string(),
@@ -3272,6 +3371,14 @@ async fn fill_historical_universe_plan(
             "historical universe plan resolves no physical fill targets".to_string(),
         ));
     }
+    let progress_calendar = match progress_calendar {
+        Some(calendar) => calendar,
+        None => historical_plan_progress_calendar(
+            Some(preflight_cache_dir.as_path()),
+            args.days.calendar,
+            &requested_days,
+        )?,
+    };
     let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
     let prefill_session_close_finalized_symbols = if kind == CacheKind::Minute && !args.dry_run {
         let ranges = targets
@@ -3339,6 +3446,13 @@ async fn fill_historical_universe_plan(
         FillProgressSession::new(args.progress, args.progress_max_bars, kind.as_str());
     let reporter = progress_session.observer();
     reporter.planning("validating pinned historical plan and materializing exact source ranges");
+    if progress_calendar.snapshot.is_some() {
+        reporter.calendar_ready(progress_calendar.progress_calendar(&requested_days)?);
+    } else {
+        reporter.calendar_unavailable(
+            "coverage uses TQBN partition days; cached exchange calendar is unavailable",
+        );
+    }
     let (cancellation, signal_task) = match signal_context {
         Some(context) => context,
         None => {
@@ -4822,9 +4936,9 @@ async fn verify_tick(
                     ));
                 }
             };
-            let (cache, canonical_cache_dir) = open_cache(Some(&report_root))?;
+            let (cache, canonical_cache_dir) = open_read_only_cache(Some(&report_root))?;
             if let Some(requested_cache_dir) = cache_dir {
-                let (_, requested_canonical_dir) = open_cache(Some(requested_cache_dir))?;
+                let (_, requested_canonical_dir) = open_read_only_cache(Some(requested_cache_dir))?;
                 if requested_canonical_dir != canonical_cache_dir {
                     return Err(CliError::Usage(format!(
                         "--cache-dir {} does not match report cache root {}",
@@ -4844,10 +4958,17 @@ async fn verify_tick(
                 CliError::Usage("verify requires --end-day without --report".to_string())
             })?;
             let window = TradingDayWindow::closed_from_days(start_day, end_day)?;
-            let (cache, canonical_cache_dir) = open_cache(cache_dir)?;
+            let (cache, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
             (cache, canonical_cache_dir, window, symbols, None)
         }
     };
+    if !canonical_cache_dir.is_dir() {
+        return Err(DataError::Validation(format!(
+            "cache root {} does not exist",
+            canonical_cache_dir.display()
+        ))
+        .into());
+    }
     let _lock = cache.try_acquire_consistency_read_lock()?;
     let warmup = cache_only_warmup(&canonical_cache_dir, &window, &symbols).await?;
     let coverage_complete = warmup.symbols_missing == 0
@@ -6191,7 +6312,7 @@ async fn cache_only_warmup(
 ) -> Result<tqsdk::BacktestCacheWarmupReport, CliError> {
     let mut builder = Tq::futures()
         .backtest(window.start_ns, window.end_ns)
-        .cache_dir(cache_dir)?
+        .cache_store(BacktestTickCache::open_read_only(cache_dir))
         .cache_only();
     for symbol in symbols {
         builder = builder.symbol(symbol);
@@ -6206,7 +6327,7 @@ async fn cache_only_replay(
 ) -> Result<u64, CliError> {
     let mut builder = Tq::futures()
         .backtest(window.start_ns, window.end_ns)
-        .cache_dir(cache_dir)?
+        .cache_store(BacktestTickCache::open_read_only(cache_dir))
         .cache_only();
     for symbol in symbols {
         builder = builder.symbol(symbol);
@@ -7023,6 +7144,94 @@ mod tests {
         assert!(!calendar.persisted);
     }
 
+    #[test]
+    fn historical_plan_progress_calendar_falls_back_when_local_snapshot_is_out_of_range() {
+        let root = std::env::temp_dir().join(format!(
+            "tqsdk-cache-historical-progress-calendar-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_trading_calendar_holidays_snapshot(&root, &raw_snapshot(2020, 2020)).unwrap();
+        let window = super::TradingDayWindow::from_days(
+            NaiveDate::from_ymd_opt(2021, 1, 4).unwrap(),
+            NaiveDate::from_ymd_opt(2021, 1, 5).unwrap(),
+        )
+        .unwrap();
+
+        let resolved =
+            super::historical_plan_progress_calendar(Some(&root), CalendarMode::Auto, &window)
+                .unwrap();
+
+        assert!(resolved.snapshot.is_none());
+        assert_eq!(resolved.source, "partition_fallback");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn historical_plan_progress_calendar_falls_back_without_local_snapshot() {
+        let root = std::env::temp_dir().join(format!(
+            "tqsdk-cache-historical-progress-no-calendar-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let window = super::TradingDayWindow::from_days(
+            NaiveDate::from_ymd_opt(2021, 1, 4).unwrap(),
+            NaiveDate::from_ymd_opt(2021, 1, 5).unwrap(),
+        )
+        .unwrap();
+
+        let resolved =
+            super::historical_plan_progress_calendar(Some(&root), CalendarMode::Auto, &window)
+                .unwrap();
+
+        assert!(resolved.snapshot.is_none());
+        assert_eq!(resolved.source, "partition_fallback");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn historical_plan_required_progress_calendar_fails_closed() {
+        let root = std::env::temp_dir().join(format!(
+            "tqsdk-cache-historical-progress-required-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let window = super::TradingDayWindow::from_days(
+            NaiveDate::from_ymd_opt(2021, 1, 4).unwrap(),
+            NaiveDate::from_ymd_opt(2021, 1, 5).unwrap(),
+        )
+        .unwrap();
+
+        let missing =
+            super::historical_plan_progress_calendar(Some(&root), CalendarMode::Required, &window)
+                .err()
+                .expect("required calendar must reject a missing snapshot");
+        assert!(
+            missing
+                .to_string()
+                .contains("needs a local trading calendar")
+        );
+
+        write_trading_calendar_holidays_snapshot(&root, &raw_snapshot(2020, 2020)).unwrap();
+        let out_of_range =
+            super::historical_plan_progress_calendar(Some(&root), CalendarMode::Required, &window)
+                .err()
+                .expect("required calendar must reject an out-of-range snapshot");
+        assert!(out_of_range.to_string().contains("does not cover"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn raw_snapshot(start_year: i32, end_year: i32) -> TradingCalendarHolidaysSnapshot {
         let holidays = (start_year..=end_year)
             .map(|year| NaiveDate::from_ymd_opt(year, 1, 1).unwrap())
@@ -7245,8 +7454,11 @@ mod tests {
             MarketKind::Futures,
             args,
             plan_path,
-            None,
-            None,
+            super::HistoricalUniversePlanExecution {
+                signal_context: None,
+                provisional: None,
+                progress_calendar: None,
+            },
         )
         .await
         .unwrap();
@@ -7377,5 +7589,27 @@ mod tests {
             panic!("expected fill command");
         };
         assert!(args.include_open_day);
+    }
+
+    #[test]
+    fn retryable_classifies_nested_data_and_sdk_failures() {
+        let timeout = super::CliError::Data(tqsdk_data::DataError::Timeout(Duration::from_secs(1)));
+        assert!(timeout.retryable());
+
+        let data_io = super::CliError::Data(tqsdk_data::DataError::Io(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "retry later",
+        )));
+        assert!(data_io.retryable());
+
+        let sdk_timeout = super::CliError::Sdk(tqsdk::Error::from(tqsdk_data::DataError::Timeout(
+            Duration::from_secs(1),
+        )));
+        assert!(sdk_timeout.retryable());
+
+        let permanent = super::CliError::Data(tqsdk_data::DataError::Validation(
+            "invalid request".to_string(),
+        ));
+        assert!(!permanent.retryable());
     }
 }

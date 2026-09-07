@@ -26,6 +26,10 @@ pub(crate) fn write_result(
         "metadata-refresh" => write_metadata_refresh(&mut output, value)?,
         "purge" => write_purge(&mut output, value)?,
         "query" => write_query(&mut output, value)?,
+        "timeline" => write_timeline(&mut output, value)?,
+        "migrate-universe" => write_migrate_universe(&mut output, value)?,
+        "refresh-provider-membership" => write_provider_membership_refresh(&mut output, value)?,
+        command if command.starts_with("snapshot ") => write_snapshot(&mut output, value)?,
         _ => writeln!(output, "No terminal summary is available for this command.")?,
     }
 
@@ -644,6 +648,136 @@ fn write_query(output: &mut impl Write, value: &Value) -> io::Result<()> {
     )
 }
 
+fn write_timeline(output: &mut impl Write, value: &Value) -> io::Result<()> {
+    writeln!(
+        output,
+        "Mode: {} | Products: {}",
+        if boolean(value, "activated") {
+            "activated"
+        } else {
+            "dry run"
+        },
+        array(value, "products").len()
+    )?;
+    writeln!(
+        output,
+        "Catalog: {}",
+        string(value, "catalog_hash").unwrap_or("-")
+    )?;
+    for product in array(value, "products") {
+        writeln!(
+            output,
+            "  {}.{}: {} intervals | {}",
+            string(product, "exchange").unwrap_or("-"),
+            string(product, "product").unwrap_or("-"),
+            number(product, "open_intervals"),
+            string(product, "timeline_hash").unwrap_or("-")
+        )?;
+    }
+    Ok(())
+}
+
+fn write_migrate_universe(output: &mut impl Write, value: &Value) -> io::Result<()> {
+    write_cache_header(output, value)?;
+    writeln!(
+        output,
+        "Mode: {}",
+        if boolean(value, "dry_run") {
+            "dry run"
+        } else {
+            "applied"
+        }
+    )?;
+    if let Some(migration) = value.get("migration") {
+        if let Some(source) = string(migration, "source_plan_sha256") {
+            writeln!(output, "Source plan: {source}")?;
+        }
+        if let Some(target) =
+            string(migration, "plan_sha256").or_else(|| string(migration, "target_plan_sha256"))
+        {
+            writeln!(output, "Target plan: {target}")?;
+        }
+    }
+    Ok(())
+}
+
+fn write_provider_membership_refresh(output: &mut impl Write, value: &Value) -> io::Result<()> {
+    write_cache_header(output, value)?;
+    writeln!(
+        output,
+        "Mode: {} | Status: {}",
+        if boolean(value, "dry_run") {
+            "dry run"
+        } else {
+            "refresh"
+        },
+        string(value, "status").unwrap_or("complete")
+    )?;
+    writeln!(
+        output,
+        "Candidates: {} | Due: {} | Selected: {}",
+        number(value, "candidate_count"),
+        number(value, "due_count"),
+        number(value, "selected_count")
+    )?;
+    if let Some(hash) =
+        string(value, "next_acquisition_sha256").or_else(|| string(value, "acquisition_sha256"))
+    {
+        writeln!(output, "Acquisition: {hash}")?;
+    }
+    Ok(())
+}
+
+fn write_snapshot(output: &mut impl Write, value: &Value) -> io::Result<()> {
+    if let Some(snapshot_id) = string(value, "snapshot_id") {
+        writeln!(output, "Snapshot: {snapshot_id}")?;
+    }
+    if let Some(current) = string(value, "current_snapshot_id") {
+        writeln!(output, "Current: {current}")?;
+    }
+    if let Some(namespace) = string(value, "namespace") {
+        writeln!(output, "Namespace: {namespace}")?;
+    }
+    if value.get("applied").is_some() || value.get("read_only").is_some() {
+        writeln!(
+            output,
+            "Mode: {}",
+            if boolean(value, "applied") {
+                "applied"
+            } else {
+                "read only"
+            }
+        )?;
+    }
+    if value.get("requests").is_some() {
+        writeln!(
+            output,
+            "Query smoke: {} | Requests: {} | Families: {}",
+            if boolean(value, "query_smoke_verified") {
+                "verified"
+            } else {
+                "not verified"
+            },
+            number(value, "requests"),
+            array(value, "families")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )?;
+    }
+    if value.get("eligible").is_some() {
+        writeln!(
+            output,
+            "GC: {} eligible | {} removed | {} leased",
+            array(value, "eligible").len(),
+            array(value, "removed").len(),
+            array(value, "leased").len()
+        )?;
+    }
+    Ok(())
+}
+
 fn write_cache_header(output: &mut impl Write, value: &Value) -> io::Result<()> {
     if let Some(cache_dir) = string(value, "cache_dir") {
         writeln!(output, "Cache: {cache_dir}")?;
@@ -1141,5 +1275,47 @@ mod tests {
         assert!(output.contains("Mode: applied"));
         assert!(output.contains("Backup: /tmp/backup"));
         assert!(!output.contains("No terminal summary is available"));
+    }
+
+    #[test]
+    fn extended_commands_have_human_readable_summaries() {
+        let values = [
+            json!({
+                "command": "timeline",
+                "activated": false,
+                "catalog_hash": "sha256:catalog",
+                "products": [],
+            }),
+            json!({
+                "command": "migrate-universe",
+                "cache_dir": "/tmp/cache",
+                "dry_run": true,
+                "migration": { "source_plan_sha256": "sha256:v4" },
+            }),
+            json!({
+                "command": "refresh-provider-membership",
+                "cache_dir": "/tmp/cache",
+                "dry_run": true,
+                "candidate_count": 3,
+                "due_count": 2,
+                "selected_count": 1,
+                "acquisition_sha256": "sha256:acquisition",
+            }),
+            json!({
+                "command": "snapshot scrub",
+                "snapshot_id": "snapshot-1",
+                "namespace": "current",
+                "requests": 1,
+                "families": ["tqbn_mutable_layout"],
+                "query_smoke_verified": true,
+            }),
+        ];
+
+        for value in values {
+            let mut output = Vec::new();
+            write_result(&mut output, &value, "success", 0, 12).unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(!output.contains("No terminal summary"), "{output}");
+        }
     }
 }

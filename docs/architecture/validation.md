@@ -182,7 +182,7 @@ gate/例外日 fail-closed，以及唯一规则日与歧义日的编译边界。
 | 验证面 | 主要验证文件 |
 | --- | --- |
 | data schema、typed failure、strict inspect、prepared live plan、shared root gate lifecycle、manifest、lease/pinning | `crates/tqsdk-data/tests/backtest_history_snapshot.rs`、`crates/tqsdk-data/src/backtest_history/snapshot.rs` 单元测试 |
-| publisher role-aware clone/import、prewarm、strict inspect + real query smoke、publish crash/recover、rollback/scrub、tombstone/lease-aware GC | `crates/tqsdk-cache/tests/snapshot_cli.rs` |
+| publisher role-aware clone/import 与 source/history 隔离、prewarm auth-on-miss、strict inspect + real query smoke、publish crash/recover、rollback/scrub、invalid-CURRENT fail-closed 与 tombstone/lease-aware GC | `crates/tqsdk-cache/tests/snapshot_cli.rs` |
 | HTTP grammar、JSON、error、ETag、gzip、limits/cancel，以及 live cache commit 无发布/重启即时可见、maintenance 互斥恢复 | `crates/tqsdk-relay/tests/history_http.rs` |
 | dedicated runtime、market-lock isolation、reload、generation health、默认 wildcard CORS 与无 identity `OPTIONS` preflight | `crates/tqsdk-relay/tests/history_runtime.rs` |
 | readiness/reload/query/buffer/compression metrics、单条结构化 audit | `crates/tqsdk-relay/src/history/observability.rs`、`crates/tqsdk-relay/src/metrics_http_impl.rs` 单元测试 |

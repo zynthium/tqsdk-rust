@@ -23,6 +23,7 @@ const PLAIN_RENDER_INTERVAL: Duration = Duration::from_secs(1);
 const TTY_RENDER_HZ: u8 = 1;
 const TTY_SPINNER_INTERVAL: Duration = Duration::from_secs(1);
 const RECENT_RATE_WINDOW: Duration = Duration::from_secs(60);
+const JSONL_QUEUE_CAPACITY: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ProgressMode {
@@ -42,7 +43,7 @@ pub(crate) struct ProgressCalendar {
 #[derive(Clone)]
 pub(crate) struct FillProgress {
     shared: Option<Arc<Mutex<ProgressState>>>,
-    jsonl_tx: Option<mpsc::Sender<JsonlEvent>>,
+    jsonl_tx: Option<mpsc::SyncSender<JsonlEvent>>,
 }
 
 pub(crate) struct FillProgressSession {
@@ -57,7 +58,7 @@ enum JsonlEvent {
 }
 
 struct JsonlWriter {
-    tx: mpsc::Sender<JsonlEvent>,
+    tx: mpsc::SyncSender<JsonlEvent>,
     worker: thread::JoinHandle<()>,
 }
 
@@ -86,7 +87,7 @@ impl FillProgressSession {
             ResolvedProgressMode::Jsonl | ResolvedProgressMode::Off => None,
         };
         let jsonl_writer = matches!(mode, ResolvedProgressMode::Jsonl).then(|| {
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = mpsc::sync_channel(JSONL_QUEUE_CAPACITY);
             let worker = thread::spawn(move || render_jsonl(rx));
             JsonlWriter { tx, worker }
         });
@@ -207,9 +208,18 @@ impl FillProgress {
         state.revision = state.revision.saturating_add(1);
         if matches!(state.mode, ResolvedProgressMode::Jsonl) {
             if let Some(tx) = &self.jsonl_tx {
-                let _ = tx.send(JsonlEvent::Record(state.jsonl_record()));
+                send_jsonl_record(tx, state.jsonl_record(), state.finished.is_some());
             }
         }
+    }
+}
+
+fn send_jsonl_record(tx: &mpsc::SyncSender<JsonlEvent>, record: Value, terminal: bool) {
+    let event = JsonlEvent::Record(record);
+    if terminal {
+        let _ = tx.send(event);
+    } else {
+        let _ = tx.try_send(event);
     }
 }
 
@@ -395,17 +405,22 @@ impl ProgressState {
         self.recalculate_days();
     }
 
-    fn apply_plan_symbol_ranges(
+    fn replace_scope_with_plan<'a>(
         &mut self,
-        physical_symbol: &str,
-        requested_ranges: &[(i64, i64)],
-        missing_ranges: &[(i64, i64)],
+        physical_symbols: impl IntoIterator<Item = (&'a str, &'a [(i64, i64)], &'a [(i64, i64)])>,
     ) {
-        let entry = self.symbols.entry(physical_symbol.to_string()).or_default();
-        if entry.requested_ranges.is_empty() {
-            entry.requested_ranges = requested_ranges.to_vec();
+        self.symbols.clear();
+        for (physical_symbol, requested_ranges, missing_ranges) in physical_symbols {
+            self.symbols.insert(
+                physical_symbol.to_string(),
+                SymbolProgress {
+                    requested_ranges: requested_ranges.to_vec(),
+                    missing_ranges: missing_ranges.to_vec(),
+                    ..SymbolProgress::default()
+                },
+            );
         }
-        entry.missing_ranges = missing_ranges.to_vec();
+        self.recalculate_days();
     }
 
     fn apply_progress(&mut self, event: &BacktestRemoteFillProgress) {
@@ -652,14 +667,13 @@ impl ProgressState {
             self.inspection = None;
             self.plan = Some(plan.clone());
             self.total_batches = plan.logical_batches();
-            for plan_symbol in plan.physical_symbols() {
-                self.apply_plan_symbol_ranges(
+            self.replace_scope_with_plan(plan.physical_symbols().iter().map(|plan_symbol| {
+                (
                     plan_symbol.physical_symbol(),
                     plan_symbol.requested_ranges(),
                     plan_symbol.missing_ranges(),
-                );
-            }
-            self.recalculate_days();
+                )
+            }));
             return;
         }
 
@@ -1734,6 +1748,33 @@ mod tests {
     }
 
     #[test]
+    fn history_progress_uses_the_exchange_calendar_for_totals() {
+        let friday = NaiveDate::from_ymd_opt(2026, 7, 17).expect("valid Friday");
+        let monday = NaiveDate::from_ymd_opt(2026, 7, 20).expect("valid Monday");
+        let first_range = backtest_tick_trading_day_range(friday).expect("valid Friday range");
+        let last_range = backtest_tick_trading_day_range(monday).expect("valid Monday range");
+        let requested_range = (first_range.start_ns, last_range.end_ns);
+        let symbol = "SHFE.au2608".to_string();
+        let mut state = ProgressState::new(ResolvedProgressMode::Plain, 8);
+        state.calendar = Some(ProgressCalendar {
+            source: "test".to_string(),
+            days: vec![friday, monday],
+        });
+
+        state.apply_history_progress(&BacktestHistoryFillProgress::BatchStarted {
+            family: BacktestHistoryFillFamily::Daily,
+            batch_number: 1,
+            total_batches: 1,
+            requested_range,
+            pending_batches: 0,
+            active_batches: 1,
+            symbols: vec![symbol],
+        });
+
+        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 0));
+    }
+
+    #[test]
     fn history_progress_keeps_long_day_ranges_compact() {
         let first_day = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
         let last_day = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
@@ -1932,7 +1973,7 @@ mod tests {
     }
 
     #[test]
-    fn minute_remote_plan_keeps_the_user_requested_denominator() {
+    fn minute_remote_plan_replaces_the_coarse_logical_scope() {
         let mut state =
             ProgressState::new_with_cache_kind(ResolvedProgressMode::Plain, 8, "minute");
         let first_day = NaiveDate::from_ymd_opt(2026, 7, 20).expect("valid first test day");
@@ -1947,14 +1988,33 @@ mod tests {
             std::slice::from_ref(&symbol),
             (first_range.start_ns, second_range.end_ns),
         );
-        state.apply_plan_symbol_ranges(
-            &symbol,
-            &[(first_range.start_ns, first_range.end_ns)],
-            &[(first_range.start_ns, first_range.end_ns)],
-        );
-        state.recalculate_days();
+        let requested_ranges = [(first_range.start_ns, second_range.end_ns)];
+        let missing_ranges = [(first_range.start_ns, first_range.end_ns)];
+        state.replace_scope_with_plan([(
+            symbol.as_str(),
+            requested_ranges.as_slice(),
+            missing_ranges.as_slice(),
+        )]);
 
         assert_eq!(state.coverage_counts(), (1, 2, 0, 1, 0));
+    }
+
+    #[test]
+    fn minute_remote_plan_replaces_a_logical_scope_with_physical_scope() {
+        let mut state =
+            ProgressState::new_with_cache_kind(ResolvedProgressMode::Plain, 8, "minute");
+        let day = NaiveDate::from_ymd_opt(2026, 7, 20).expect("valid test day");
+        let range = backtest_tick_trading_day_range(day).expect("valid test range");
+        let logical = "KQ.m@SHFE.au".to_string();
+        let physical = "SHFE.au2608".to_string();
+        let ranges = [(range.start_ns, range.end_ns)];
+
+        state.set_scope(std::slice::from_ref(&logical), ranges[0]);
+        state.replace_scope_with_plan([(physical.as_str(), ranges.as_slice(), ranges.as_slice())]);
+
+        assert_eq!(state.coverage_counts(), (0, 1, 0, 1, 0));
+        assert!(!state.symbols.contains_key(&logical));
+        assert!(state.symbols.contains_key(&physical));
     }
 
     #[test]
@@ -2130,5 +2190,42 @@ mod tests {
             state.visible_symbols(),
             vec!["KQ.m@GFEX.pd".to_string(), "KQ.m@GFEX.pt".to_string()]
         );
+    }
+
+    #[test]
+    fn jsonl_queue_drops_intermediate_records_but_preserves_terminal_record() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        super::send_jsonl_record(&tx, serde_json::json!({"revision": 1}), false);
+        super::send_jsonl_record(&tx, serde_json::json!({"revision": 2}), false);
+
+        let super::JsonlEvent::Record(first) = rx.recv().expect("first record") else {
+            panic!("expected a record");
+        };
+        assert_eq!(first["revision"], 1);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+
+        super::send_jsonl_record(&tx, serde_json::json!({"revision": 3}), false);
+        let terminal_tx = tx.clone();
+        let terminal_sender = std::thread::spawn(move || {
+            super::send_jsonl_record(
+                &terminal_tx,
+                serde_json::json!({"revision": 4, "event": "complete"}),
+                true,
+            );
+        });
+
+        let super::JsonlEvent::Record(intermediate) = rx.recv().expect("intermediate record")
+        else {
+            panic!("expected a record");
+        };
+        assert_eq!(intermediate["revision"], 3);
+        let super::JsonlEvent::Record(terminal) = rx.recv().expect("terminal record") else {
+            panic!("expected a record");
+        };
+        assert_eq!(terminal["event"], "complete");
+        terminal_sender.join().expect("terminal sender joins");
     }
 }

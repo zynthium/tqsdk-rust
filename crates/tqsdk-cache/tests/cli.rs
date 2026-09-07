@@ -63,6 +63,37 @@ fn minute_inventory_is_read_only_for_a_missing_cache_root() {
 }
 
 #[test]
+fn tick_inventory_does_not_scan_malformed_minute_files() {
+    let cache_dir = temp_dir("tick-inventory-isolated");
+    fs::create_dir_all(cache_dir.join("minute-kline-v3")).unwrap();
+    fs::write(
+        cache_dir.join("minute-kline-v3/broken.tqmk"),
+        b"not a minute cache",
+    )
+    .unwrap();
+
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "tick",
+        "inventory",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "inventory", "success", 0);
+    assert_eq!(result["cache_kind"], "tick");
+    assert_eq!(result["total_files"], 0);
+    fs::remove_dir_all(cache_dir).unwrap();
+}
+
+#[test]
 fn daily_and_all_inventory_include_prefix_scanned_daily_files() {
     let cache_dir = temp_dir("daily-inventory");
     let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
@@ -2133,6 +2164,47 @@ fn fill_reuses_complete_cache_without_auth_and_report_binds_its_root() {
 }
 
 #[test]
+fn tick_verify_report_does_not_create_a_missing_cache_root() {
+    let source_root = temp_dir("verify-missing-source");
+    let missing_root = temp_dir("verify-missing-report-root");
+    let report_path = temp_dir("verify-missing-report").with_extension("json");
+    let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    let cache = BacktestTickCache::open(&source_root).unwrap();
+    cache
+        .mark_complete("SHFE.rb2601", range.start_ns, range.end_ns, 0, None)
+        .unwrap();
+    drop(cache);
+
+    let filled = run_without_auth_json([
+        "fill",
+        "--cache-dir",
+        source_root.to_str().unwrap(),
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--report",
+        report_path.to_str().unwrap(),
+        "--progress",
+        "off",
+    ]);
+    assert!(filled.status.success());
+
+    let mut report: Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    report["cache_dir"] = json!(missing_root);
+    fs::write(&report_path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+
+    let verified = run_without_auth_json(["verify", "--report", report_path.to_str().unwrap()]);
+    assert!(!verified.status.success());
+    assert!(!missing_root.exists());
+
+    fs::remove_dir_all(source_root).unwrap();
+    fs::remove_file(report_path).unwrap();
+}
+
+#[test]
 fn fill_rejects_last_trading_days_when_calendar_is_off() {
     let output = run_json([
         "fill",
@@ -2158,17 +2230,22 @@ fn fill_rejects_last_trading_days_when_calendar_is_off() {
 
 #[test]
 fn fill_start_day_defaults_to_latest_closed_trading_day() {
-    let output = run_json([
+    let cache_dir = temp_dir("start-day-default-end");
+    let output = run_without_auth_json([
         "fill",
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
         "--symbol",
         "SHFE.rb2601",
         "--start-day",
         "2020-01-02",
+        "--dry-run",
     ]);
 
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(1));
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let _ = v3_result(&json, "fill", "success", 0);
+    let _ = v3_result(&json, "fill", "incomplete", 1);
+    assert!(!cache_dir.exists());
 }
 
 #[test]

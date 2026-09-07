@@ -55,7 +55,7 @@ enum SnapshotCommand {
     /// Atomically switch CURRENT to a retained verified generation.
     Rollback(MutationGenerationArgs),
     /// Recompute manifest/file/metadata validity for one generation.
-    Scrub(OptionalGenerationArgs),
+    Scrub(ScrubArgs),
     /// Retain CURRENT plus previous compatible generations and remove only unleased excess.
     Gc(GcArgs),
 }
@@ -133,9 +133,12 @@ enum VerificationRequest {
 }
 
 #[derive(Debug, Args)]
-struct OptionalGenerationArgs {
+struct ScrubArgs {
     #[arg(long)]
     snapshot_id: Option<String>,
+    /// JSON request list used for strict inspect and query smoke checks.
+    #[arg(long, value_name = "FILE")]
+    request_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -206,7 +209,7 @@ pub(super) async fn execute(args: SnapshotArgs) -> Result<CommandOutcome, CliErr
             rollback(args.history_root.as_path(), &rollback_args, command)?
         }
         SnapshotCommand::Scrub(scrub_args) => {
-            scrub(args.history_root.as_path(), &scrub_args, command)?
+            scrub(args.history_root.as_path(), &scrub_args, command).await?
         }
         SnapshotCommand::Gc(gc_args) => gc(args.history_root.as_path(), &gc_args, command)?,
     };
@@ -310,6 +313,7 @@ fn inspect(history_root: &Path, command: &str) -> Result<Value, CliError> {
 
 fn plan_clone(history_root: &Path, args: &CloneArgs, command: &str) -> Result<Value, CliError> {
     require_source_root(args.source_cache_dir.as_path())?;
+    validate_disjoint_roots(args.source_cache_dir.as_path(), history_root)?;
     let stats = inspect_source(args.source_cache_dir.as_path(), CloneMode::Clone)?;
     let mut value = stats.as_value();
     let object = value.as_object_mut().expect("clone stats object");
@@ -330,6 +334,7 @@ fn stage_clone(
     command: &str,
 ) -> Result<Value, CliError> {
     require_source_root(args.source_cache_dir.as_path())?;
+    validate_disjoint_roots(args.source_cache_dir.as_path(), history_root)?;
     prepare_history_root(history_root)?;
     let _publisher = acquire_publisher_lock(history_root)?;
     let source_cache = BacktestTickCache::open(args.source_cache_dir.as_path())?;
@@ -590,6 +595,7 @@ async fn prewarm(
             .collect::<Vec<_>>();
         let client = BacktestHistoryClient::builder(work_cache.as_path())
             .policy(BacktestHistoryPolicy::RemoteOnMiss)
+            .auth_env()
             .build()?;
         client.materialize_cache(materialize_requests).await?;
         test_failpoint("prewarm")?;
@@ -999,21 +1005,31 @@ fn rollback(
     }))
 }
 
-fn scrub(
-    history_root: &Path,
-    args: &OptionalGenerationArgs,
-    command: &str,
-) -> Result<Value, CliError> {
+async fn scrub(history_root: &Path, args: &ScrubArgs, command: &str) -> Result<Value, CliError> {
     let _publisher = acquire_publisher_lock(history_root)?;
-    match args.snapshot_id.as_deref() {
-        Some(snapshot_id) => validate_generation(
-            history_root,
-            snapshot_id,
-            GenerationNamespace::Snapshots,
-            command,
-        ),
-        None => inspect(history_root, command),
-    }
+    let namespace = if args.snapshot_id.is_some() {
+        SNAPSHOTS_DIR
+    } else {
+        "current"
+    };
+    let snapshot = match args.snapshot_id.as_deref() {
+        Some(snapshot_id) => {
+            validate_snapshot_id(snapshot_id)?;
+            let generation = history_root.join(SNAPSHOTS_DIR).join(snapshot_id);
+            BacktestHistorySnapshot::open_generation(history_root, &generation)
+                .map_err(|error| CliError::Migration(error.to_string()))?
+        }
+        None => BacktestHistorySnapshot::open(history_root)
+            .map_err(|error| CliError::Migration(error.to_string()))?,
+    };
+    let requests = read_verification_requests(args.request_file.as_deref())?;
+    let families = verify_snapshot_requests(&snapshot, requests.as_slice()).await?;
+    let mut value = snapshot_value(command, &snapshot, namespace);
+    let object = value.as_object_mut().expect("snapshot value object");
+    object.insert("requests".into(), json!(requests.len()));
+    object.insert("families".into(), json!(families));
+    object.insert("query_smoke_verified".into(), Value::Bool(true));
+    Ok(value)
 }
 
 fn recover(history_root: &Path, args: &RecoverArgs, command: &str) -> Result<Value, CliError> {
@@ -1079,7 +1095,10 @@ fn gc(history_root: &Path, args: &GcArgs, command: &str) -> Result<Value, CliErr
     } else {
         None
     };
-    let current = read_current(history_root)?;
+    let current_snapshot = BacktestHistorySnapshot::open(history_root)
+        .map_err(|error| CliError::Migration(error.to_string()))?;
+    let current = current_snapshot.snapshot_id().to_string();
+    drop(current_snapshot);
     let snapshots_dir = history_root.join(SNAPSHOTS_DIR);
     let mut compatible = Vec::new();
     for entry in sorted_entries(snapshots_dir.as_path())? {
@@ -1223,6 +1242,58 @@ fn require_source_root(source: &Path) -> Result<(), CliError> {
         )));
     }
     Ok(())
+}
+
+fn validate_disjoint_roots(source: &Path, history_root: &Path) -> Result<(), CliError> {
+    let source = fs::canonicalize(source)?;
+    let history_root = canonical_or_intended_path(history_root)?;
+    if source == history_root
+        || source.starts_with(&history_root)
+        || history_root.starts_with(&source)
+    {
+        return Err(CliError::Usage(format!(
+            "--source-cache-dir {} and --history-root {} must be disjoint",
+            source.display(),
+            history_root.display()
+        )));
+    }
+    Ok(())
+}
+
+fn canonical_or_intended_path(path: &Path) -> Result<PathBuf, CliError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut ancestor = absolute.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match fs::canonicalize(ancestor) {
+            Ok(mut canonical) => {
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                let component = ancestor.file_name().ok_or_else(|| {
+                    CliError::Usage(format!(
+                        "cannot resolve intended history root {}",
+                        path.display()
+                    ))
+                })?;
+                missing.push(component.to_os_string());
+                ancestor = ancestor.parent().ok_or_else(|| {
+                    CliError::Usage(format!(
+                        "cannot resolve intended history root {}",
+                        path.display()
+                    ))
+                })?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 fn acquire_publisher_lock(history_root: &Path) -> Result<PublisherLock, CliError> {

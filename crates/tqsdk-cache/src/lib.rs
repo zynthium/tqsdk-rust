@@ -1660,7 +1660,8 @@ fn write_json_immutably<T: Serialize>(path: &Path, value: &T) -> Result<(), Data
         drop(file);
         let _ = fs::remove_file(path);
     }
-    write_result
+    write_result?;
+    sync_directory(parent)
 }
 
 fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> Result<(), DataError> {
@@ -1687,12 +1688,24 @@ fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> Result<(), Dat
         file.write_all(b"\n")?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
+        sync_directory(parent)?;
         Ok(())
     })();
     if write_result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     write_result
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), DataError> {
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), DataError> {
+    Ok(())
 }
 
 fn current_open_trading_day() -> Result<NaiveDate, DataError> {

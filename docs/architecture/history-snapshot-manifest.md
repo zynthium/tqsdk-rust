@@ -210,7 +210,8 @@ runtime unhealthy 是 relay-owned、generation-local 的内存状态，不写回
 - recover 清理或隔离未完成 staging/CURRENT temp，但不猜测或发布缺 manifest/未 sync 的 generation；
 - CURRENT 缺失或损坏时，只能从完整、兼容、重新验证成功的 retained generation 显式恢复；
 - rollback 是 publisher command：验证目标、取得必要 lease、原子切 CURRENT；不修改目标 generation；
-- scrub 重算 manifest identity 与全部 file hashes，并执行 data strict inspect/query smoke；
+- scrub 重算 manifest identity 与全部 file hashes，并执行 data strict inspect/query smoke；含数据 role 的
+  generation 必须提供覆盖每种 role 的 request file，metadata-only generation 可使用空请求集；
 - 已发布 generation 的任何 file mismatch 都标记该 generation corrupt，不原地 repair；
 - active generation 首次运行时 corruption 由 relay 返回一次 500 并标记 unhealthy，之后返回 503。
 
@@ -221,7 +222,8 @@ recover/rollback/scrub 都必须可 dry-run，并输出计划动作而不写入�
 - relay/reader 持 generation `lease.lock` shared lease；
 - publisher GC 只有取得同一文件 exclusive lease 后才能删除 generation；
 - relay 永不 GC；
-- retention 默认保留 CURRENT 加前两个兼容 generation；
+- retention 默认保留 CURRENT 加前两个兼容 generation；GC 枚举或删除前必须严格打开 CURRENT，缺失、
+  悬空或损坏时 fail closed，由显式 recover 先恢复；
 - 被 shared lease pin 的 generation 不计为可立即删除；GC 跳过并在下次重试；
 - 删除前再次确认目标不是 CURRENT，并在取得 exclusive lease 后重读 CURRENT；
 - 删除完整 generation directory 后 sync `snapshots/`。
