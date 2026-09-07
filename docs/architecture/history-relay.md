@@ -85,12 +85,11 @@ relay 只执行：
 
 relay 永不写 snapshot、永不 GC、永不 RemoteOnMiss、永不读取历史远端凭证。
 
-### Context query
+### Trading-time windows
 
-Context reads retain one request-scoped data planning basis and lifecycle pin.
-Adaptive probes derive ranges only from this basis; response and provenance come
-from one final enclosing strict scan. Relay does not infer trading sessions or own
-a context cursor.
+Relay 只接受显式 range query，并在一个 request-scoped metadata/source lifecycle pin 下完成
+strict scan。交易时间长度窗口由本地 `tqsdk-data::TradingTimeline` 在调用 relay 前换算为
+`[start,end)`；relay 不推导交易时段、不做自适应 anchor probing，也不拥有 context cursor。
 
 ### 零读中断 snapshot
 

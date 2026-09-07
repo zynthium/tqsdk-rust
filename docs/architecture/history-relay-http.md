@@ -243,26 +243,15 @@ maintenance 持锁期间返回 503，而不是跨维护窗口混读。
 `generation=` 或其他 pin parameter。ETag 按完整响应 bytes 计算，因此 live coverage/rows 改变后 ETag
 也随之改变。
 
-## Context query
+## Trading-time windows
 
-`GET /v1/history/context` complements range query. It accepts `symbol`, `series`,
-`anchor`, `before`, and `after`; Kline also requires `period`, while Tick may add
-`anchor_id`. Rows remain ascending. Kline selects final bar start at or before
-anchor; Tick selects final `(timestamp_ns, id)` key at or before anchor key.
+历史读取只保留显式 `[start,end)` 的 `GET /v1/history/query`。按交易时间长度构造窗口的
+调用方使用本地 `tqsdk-data::TradingTimeline` 先换算两个端点；relay 只解析范围、固定
+metadata/source 读取、编码并映射错误，不推导交易时段。
 
-Response adds `context` with matched anchor, exact Tick nanoseconds/id, anchor
-index, requested/actual side counts, completion, and optional authoritative
-`future_end`. Internal coverage gaps, metadata changes, and provisional rows remain
-409. Requested rows above 10,000 Kline or 50,000 Tick fail before admission with
-`413 row_limit_exceeded`; `anchor_not_found` is 409. Each request freezes one
-metadata/source basis and lifecycle pin, then uses one final enclosing strict scan.
-No public cursor, pagination, batch POST, or streaming body is introduced.
-
-Context probing is deliberately bounded: it uses at most 16 exponentially expanded
-delta scans, a 90-day total time window, and the existing CacheOnly collect budget;
-the listener's 10-second request deadline covers the complete operation. A sparse
-request exceeding this resource window fails rather than causing a blind 250-day
-sequential scan. A backward TQBN index is not part of this first version.
+每个 range request 固定一个 metadata/source basis 和 lifecycle pin，并使用一个 final
+enclosing strict scan。不会引入公开 cursor、分页、batch POST 或 streaming body；relay 不做
+anchor probing，也不需要反向 TQBN index。
 
 ## CORS、审计与取消
 

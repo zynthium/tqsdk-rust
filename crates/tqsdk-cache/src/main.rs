@@ -1,12 +1,11 @@
+use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
+use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
-use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
-use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tqsdk::{BacktestRemoteFillCancellation, BacktestRemoteFillConfig, RemoteFillPlan, Tq};
 use tqsdk_cache::{
@@ -36,6 +35,7 @@ mod progress;
 mod query;
 mod snapshot;
 mod terminal;
+mod timeline;
 
 use progress::{
     FillProgress, FillProgressSession, ProgressCalendar, ProgressMode, ProgressTerminalStatus,
@@ -122,6 +122,8 @@ impl MarketKind {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Audit or rebuild trading sessions from local final-minute index data.
+    Timeline(timeline::TimelineArgs),
     /// Fast filesystem-only inventory; safe to run while a fill is active.
     Inventory,
     /// Inspect coverage for explicit cache symbols.
@@ -153,6 +155,7 @@ enum Command {
 impl Command {
     fn name(&self) -> &'static str {
         match self {
+            Self::Timeline(_) => "timeline",
             Self::Inventory => "inventory",
             Self::Inspect(_) => "inspect",
             Self::Fill(_) => "fill",
@@ -287,6 +290,9 @@ struct InspectArgs {
 
 #[derive(Debug, Args)]
 struct FillArgs {
+    /// After successful final minute fill, rebuild catalog products under a stable root gate.
+    #[arg(long, value_name = "PATH")]
+    trading_timeline_catalog: Option<PathBuf>,
     #[command(flatten)]
     symbols: SymbolsArgs,
     /// Futures universe expression resolved by the SDK; may be combined with --symbol.
@@ -1310,6 +1316,7 @@ async fn run(cli: Cli) -> Result<CommandOutcome, CliError> {
         ));
     }
     match cli.command {
+        Command::Timeline(args) => timeline::run(cli.cache_dir.as_deref(), args),
         Command::Inventory => inventory(cli.cache_dir.as_deref(), cli.kind),
         Command::Inspect(args) => inspect(cli.cache_dir.as_deref(), cli.kind, args),
         Command::Fill(args) => fill(cli.cache_dir.as_deref(), cli.kind, cli.market, args).await,
@@ -1801,6 +1808,49 @@ async fn prepare_current_fill_universe(
 }
 
 async fn fill(
+    cache_dir: Option<&Path>,
+    kind: CacheKind,
+    market: MarketKind,
+    args: FillArgs,
+) -> Result<CommandOutcome, CliError> {
+    let timeline_catalog = args.trading_timeline_catalog.clone();
+    let dry_run = args.dry_run;
+    if timeline_catalog.is_some()
+        && (!matches!(kind, CacheKind::Minute)
+            || !matches!(market, MarketKind::Futures)
+            || args.include_open_day
+            || !args.require_final)
+    {
+        return Err(CliError::Usage(
+            "--trading-timeline-catalog requires final-only futures minute fill".into(),
+        ));
+    }
+    let timeline_catalog = timeline_catalog
+        .as_ref()
+        .map(tqsdk_data::TradingTimelineRuleCatalog::from_json_path)
+        .transpose()?;
+    if let Some(catalog) = &timeline_catalog {
+        if !catalog.exception_review_complete
+            || catalog.rules.is_empty()
+            || catalog
+                .rules
+                .iter()
+                .any(|rule| rule.validation.status != "confirmed")
+        {
+            return Err(CliError::Usage("fill timeline catalog must contain only reviewed rules; use timeline without --apply to audit drafts".into()));
+        }
+    }
+    let mut outcome = fill_inner(cache_dir, kind, market, args).await?;
+    if let Some(catalog) = timeline_catalog
+        && !dry_run
+        && outcome.exit_code == 0
+    {
+        timeline::after_fill(&catalog, &mut outcome)?;
+    }
+    Ok(outcome)
+}
+
+async fn fill_inner(
     cache_dir: Option<&Path>,
     kind: CacheKind,
     market: MarketKind,

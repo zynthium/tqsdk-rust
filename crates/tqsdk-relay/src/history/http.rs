@@ -50,7 +50,6 @@ const GZIP_OUTPUT_OVERHEAD: usize = 64 * 1024;
 const SCHEMA_PATH: &str = "/v1/history/schema";
 const QUERY_PATH: &str = "/v1/history/query";
 const COVERAGE_PATH: &str = "/v1/history/coverage";
-const CONTEXT_PATH: &str = "/v1/history/context";
 const FUTURE_START_TOLERANCE_NS: i64 = 5_000_000_000;
 const SECOND_NS: u64 = 1_000_000_000;
 const MINUTE_NS: u64 = 60 * SECOND_NS;
@@ -195,7 +194,6 @@ async fn serve_stream(
             Some(SCHEMA_PATH) => "schema",
             Some(QUERY_PATH) => "query",
             Some(COVERAGE_PATH) => "coverage",
-            Some(CONTEXT_PATH) => "context",
             _ => "unknown",
         },
     );
@@ -396,9 +394,6 @@ async fn route_request(
     if parsed.path == SCHEMA_PATH {
         return Response::success(schema_response(), request_id);
     }
-    if parsed.path == CONTEXT_PATH {
-        return route_context(parsed.query, state, data_id, request_id, audit).await;
-    }
     let mut data = match parse_data_request(parsed.path, parsed.query, data_id) {
         Ok(value) => value,
         Err(message) => {
@@ -552,6 +547,7 @@ async fn route_request(
     query_response(snapshot, data, request_id, admission, &state, audit).await
 }
 
+#[allow(dead_code)]
 async fn route_context(
     query: Option<&str>,
     state: Arc<HistoryState>,
@@ -671,6 +667,7 @@ async fn route_context(
     .await
 }
 
+#[allow(dead_code)]
 async fn context_response(
     snapshot: PinnedSnapshot,
     mut data: ParsedContextRequest,
@@ -816,6 +813,7 @@ async fn context_response(
     Response::success_with_resources(Value::Object(body), request_id, admission, vec![permit])
 }
 
+#[allow(dead_code)]
 fn context_boundary_json(boundary: &BacktestHistoryContextBoundary) -> Value {
     match boundary {
         BacktestHistoryContextBoundary::HistoryStart => json!({"reason": "history_start"}),
@@ -1073,6 +1071,7 @@ impl ParsedDataRequest {
     }
 }
 
+#[allow(dead_code)]
 struct ParsedContextRequest {
     context: BacktestHistoryContextRequest,
     symbol: String,
@@ -1083,6 +1082,7 @@ struct ParsedContextRequest {
     include_provenance: bool,
 }
 
+#[allow(dead_code)]
 impl ParsedContextRequest {
     const fn series_name(&self) -> &'static str {
         match self.series {
@@ -1092,6 +1092,7 @@ impl ParsedContextRequest {
     }
 }
 
+#[allow(dead_code)]
 fn parse_context_request(
     query: Option<&str>,
     request_id: u64,
@@ -1384,14 +1385,6 @@ fn schema_response() -> Value {
         "derived_fields": [
             {"canonical_name": "tns", "value_kind": "integer", "description": "raw nanosecond timestamp"}
         ],
-        "capabilities": {
-            "context_query": {
-                "path": CONTEXT_PATH,
-                "anchor_id_for_tick": true,
-                "max_kline_rows": MAX_KLINE_ROWS,
-                "max_tick_rows": MAX_TICK_ROWS,
-            }
-        },
     })
 }
 
@@ -1625,10 +1618,7 @@ fn format_ns(value: i64) -> String {
 }
 
 fn is_known_path(path: &str) -> bool {
-    matches!(
-        path,
-        SCHEMA_PATH | QUERY_PATH | COVERAGE_PATH | CONTEXT_PATH
-    )
+    matches!(path, SCHEMA_PATH | QUERY_PATH | COVERAGE_PATH)
 }
 
 struct Response {

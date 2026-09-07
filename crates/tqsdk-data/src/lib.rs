@@ -66,6 +66,7 @@ mod integrity;
 mod live_quote;
 mod live_tick_cache_writer;
 mod minute_kline_cache;
+mod trading_timeline;
 mod universe;
 mod universe_expression;
 mod universe_spec;
@@ -228,6 +229,16 @@ pub use minute_kline_cache::{
     MinuteKlineCoverage, MinuteKlineProvisionalCheckpoint, MinuteKlineProvisionalReader,
     MinuteKlineReader, trading_month_for_timestamp_ns,
 };
+pub use trading_timeline::{
+    TradingTimeDirection, TradingTimeline, TradingTimelineBuildRequest,
+    TradingTimelineCatalogAuthority, TradingTimelineCatalogException, TradingTimelineCatalogRule,
+    TradingTimelineCatalogValidation, TradingTimelineDecisionRecord,
+    TradingTimelineDurabilityUncertain, TradingTimelineIdentity, TradingTimelineInterval,
+    TradingTimelineKnownRange, TradingTimelineRule, TradingTimelineRuleCatalog,
+    TradingTimelineRuleDecision, TradingTimelineRuleWindow, TradingTimelineSnapshot,
+    TradingTimelineStore, infer_trading_timeline_rule,
+};
+pub use trading_timeline::{build_trading_timeline_from_minute_cache, compile_trading_timeline};
 pub use universe::{
     DEFAULT_FUTURES_METADATA_BATCH_SIZE, FuturesContract, FuturesProductCode,
     FuturesUniverseResolver, SessionFuturesUniverseResolver, StaticFuturesUniverseResolver,

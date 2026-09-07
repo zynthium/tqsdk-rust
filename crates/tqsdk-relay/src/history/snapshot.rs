@@ -145,6 +145,7 @@ impl PinnedSnapshot {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) async fn query_context(
         &self,
         request: BacktestHistoryContextRequest,

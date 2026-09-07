@@ -1,5 +1,14 @@
 # `tqsdk-data`
 
+TradingTimeline rebuild 使用 root 共享生命周期锁和目标指数分钟月分区共享 pin，
+从 metadata/coverage 检查前保持到发布完成；不再与无关 Tick fill 互斥。
+产品锁覆盖 active 读取、增量合并及提交。单次最多 256 个不同月分区，缺失锁文件
+或 coverage 仍失败；热路径时间计算不新增锁或 I/O。见 [锁契约](../../docs/architecture/trading-timeline.md)。
+
+TradingTimeline 的 2024 IM/CF 有受限的操作者批准 `cache_inference` 目录。
+完整 final 缓存的无成交可确认例外，但不等于交易所认证，也不放宽缺失 coverage 门禁。
+参见 [确认口径与范围](../../docs/architecture/trading-timeline.md)。
+
 `tqsdk-data` 是 `tqsdk-rust` workspace 里预留给研究、离线数据和批量拉取能力的 crate。
 
 当前阶段它只开放几层很窄的能力：
@@ -63,10 +72,18 @@
   retained validation 仍只在 data 实现，`tqsdk-cache` 不复制 manifest parser
 - `BacktestHistoryMetadataCache` / `BacktestHistoryMaintenanceClient`
 
-`BacktestHistoryContextRequest` with `BacktestHistoryLiveCache::prepare_context(...)`
-or `BacktestHistorySnapshot::query_context(...)` reads an anchor-centred window from
-one fixed metadata/source basis. It is CacheOnly and does not enable RemoteOnMiss
-or cache writes.
+`TradingTimeline`：不可变交易时间前缀索引，热路径只做内存二分。
+激活仅经 `rebuild_from_cache`；须有 `exception_review_complete` 权威审计声明。
+模板内有成交不能证明没有延迟开盘/提前收盘，未完成例外审计的 catalog 只可用于 audit。
+`TradingTimelineStore::rebuild_from_cache(...)` 在一个独占 root gate 内解析 metadata、
+按月读取 final 正成交指数证据并验证全部产品；`activate=false` 只审计，未知日期禁止激活。
+fill 必须先释放 shared gate；不可在已有 fill gate 内嵌套调用重建。
+增量维护保留其他已知日期；规则改变须覆盖旧代重建。快照按产品独立发布，
+并非跨产品事务。当前持久化为每产品一个紧凑、原子替换的
+`trading-timeline-v1/.../timeline.json`；热路径仍只读取已加载的内存索引。
+只读加载使用 `TradingTimelineStore::open_read_only(...).load_active(...)`。旧
+`active.json`/`snapshots` 只可经一次性维护转换为该布局，运行时不会兼容读取。
+规则权威覆盖、限制与验证见 [TradingTimeline](../../docs/architecture/trading-timeline.md)。
 
 ## Universe Language V2 与历史 artifact
 
@@ -182,10 +199,10 @@ storage orchestration 是 async，但 TQBN 解压/解码仍由有界 `spawn_bloc
 实际缺口再以 `cache family × cache symbol` 的跨进程 lease 串行化，等待者重查 coverage 后复用 owner
 结果。Tick fill 按 trading day 顺序消费并以 8192 rows 缓冲；取消会 flush 已接受短尾但不提交未 terminal
 coverage。fill-only materialization 不回读刚写入的 cache，物理写入计数在 shared fill 中只累计一次。
-一个 client 最多保留 `logical_concurrency` 个 clean server-backtest source lanes；clean terminal 与
-chart cleanup 成功后，同一 session 可顺序服务后续 trading-day/minute slices。pool 饱和时 overflow
-不等待且不回池；取消、source error 或 cleanup error 也会丢弃 lane。coverage 仍按 slice 独立提交，
-因此连接复用不改变中断恢复粒度。
+一个 client 最多保留 `logical_concurrency` 个 clean source lanes。仅未裁剪本地 DIFF 状态且
+chart cleanup 成功的 session 可复用；本地裁剪后的 lane 必须丢弃，防止后续 slice 缺失重叠 DIFF。
+同一 chart 内分页不重建连接。pool 饱和时 overflow 不等待且不回池；取消或错误也丢弃 lane。
+coverage 仍按 slice 独立提交。消费后保留末行及预取数据，仅裁剪更早的 ID。
 每条专用 lane 把 runtime commit retention 收窄到 8；消费后的 Tick/Kline page data 也立即经正常
 runtime commit 清理。这样保留 cursor/revision 语义，同时避免默认 8192-entry commit history 持有
 大页 `ChangeSet`。canonical-minute 和 native-daily 仍只在服务端明确 terminal 后发布 final coverage；

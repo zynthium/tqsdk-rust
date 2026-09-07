@@ -604,6 +604,19 @@ impl ServerBacktestHistoryStream {
         let Some(data) = data.and_then(Value::as_object) else {
             return Ok(None);
         };
+        // A ready canonical window must retain both edges. Interior IDs may be sparse.
+        // Missing overlap after local pruning must never become final coverage.
+        if matches!(
+            state.chart.kind,
+            ServerBacktestHistoryKind::CanonicalMinute | ServerBacktestHistoryKind::CanonicalDaily
+        ) && chart.left_id <= effective_right_id
+            && (!data.contains_key(&chart.left_id.to_string())
+                || !data.contains_key(&effective_right_id.to_string()))
+        {
+            return Err(validation_error(
+                "server-backtest canonical chart was ready without its page boundary rows",
+            ));
+        }
         match state.chart.kind {
             ServerBacktestHistoryKind::Tick => {
                 let rows = decode_page_rows::<Tick>(data, chart.left_id, effective_right_id)?;

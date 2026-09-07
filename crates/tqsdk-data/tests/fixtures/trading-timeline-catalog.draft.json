@@ -1,0 +1,872 @@
+{
+  "catalog_version": 1,
+  "generated_at": "2026-09-05",
+  "timezone": "Asia/Shanghai",
+  "interval_semantics": "sessions_cst are half-open [start,end); all endpoints are exact minutes",
+  "night_session_semantics": "A night session starts on civil day D and belongs to following exchange trading day D+1, whether or not it crosses midnight.",
+  "scope_note": "Candidate end 2026-09-05 is research cutoff, not asserted rule expiry. Holiday closure appears only in exceptions.",
+  "rules": [
+    {
+      "exchange": "SHFE",
+      "product": "au",
+      "evidence_symbol": "KQ.i@SHFE.au",
+      "rule_id": "shfe-au-v1-2100-0230-day",
+      "candidate_trading_day_start": "2013-07-05",
+      "candidate_trading_day_end": "2026-09-05",
+      "sessions_cst": [
+        [
+          "21:00",
+          "02:30"
+        ],
+        [
+          "09:00",
+          "10:15"
+        ],
+        [
+          "10:30",
+          "11:30"
+        ],
+        [
+          "13:30",
+          "15:00"
+        ]
+      ],
+      "session_ids": [
+        "night",
+        "morning_1",
+        "morning_2",
+        "afternoon"
+      ],
+      "night_session": {
+        "cross_midnight": true,
+        "belongs_to": "following_trading_day"
+      },
+      "authority": {
+        "source_type": "exchange_page_reproducing_notice",
+        "title": "上期所黄金和白银交易夜盘7月5日开闸",
+        "published_at": "2013-06-08",
+        "url": "https://www.shfe.com.cn/docview/docview_35218417.htm",
+        "confidence": "confirmed"
+      },
+      "validation": {
+        "status": "unverified",
+        "required_symbol": "KQ.i@SHFE.au",
+        "required_check": "final 60-second quote evidence at each expected session end"
+      }
+    },
+    {
+      "exchange": "SHFE",
+      "product": "ag",
+      "evidence_symbol": "KQ.i@SHFE.ag",
+      "rule_id": "shfe-ag-v1-2100-0230-day",
+      "candidate_trading_day_start": "2013-07-05",
+      "candidate_trading_day_end": "2026-09-05",
+      "sessions_cst": [
+        [
+          "21:00",
+          "02:30"
+        ],
+        [
+          "09:00",
+          "10:15"
+        ],
+        [
+          "10:30",
+          "11:30"
+        ],
+        [
+          "13:30",
+          "15:00"
+        ]
+      ],
+      "night_session": {
+        "cross_midnight": true,
+        "belongs_to": "following_trading_day"
+      },
+      "authority": {
+        "source_type": "exchange_page_reproducing_notice",
+        "title": "上期所黄金和白银交易夜盘7月5日开闸",
+        "published_at": "2013-06-08",
+        "url": "https://www.shfe.com.cn/docview/docview_35218417.htm",
+        "confidence": "confirmed"
+      },
+      "validation": {
+        "status": "unverified",
+        "required_symbol": "KQ.i@SHFE.ag",
+        "required_check": "final 60-second quote evidence at each expected session end"
+      }
+    },
+    {
+      "exchange": "SHFE",
+      "product": "cu",
+      "evidence_symbol": "KQ.i@SHFE.cu",
+      "rule_id": "shfe-cu-v1-2100-0100-day",
+      "candidate_trading_day_start": "2013-12-20",
+      "candidate_trading_day_end": "2026-09-05",
+      "sessions_cst": [
+        [
+          "21:00",
+          "01:00"
+        ],
+        [
+          "09:00",
+          "10:15"
+        ],
+        [
+          "10:30",
+          "11:30"
+        ],
+        [
+          "13:30",
+          "15:00"
+        ]
+      ],
+      "night_session": {
+        "cross_midnight": true,
+        "belongs_to": "following_trading_day"
+      },
+      "authority": {
+        "source_type": "exchange_schedule",
+        "title": "连续交易业务专题",
+        "published_at": null,
+        "published_at_status": "unverified",
+        "url": "https://www.shfe.com.cn/content/lxjy/main.html",
+        "confidence": "confirmed"
+      },
+      "historical_basis": {
+        "effective_date": "2013-12-20",
+        "url": "https://www.shfe.com.cn/content/lxjy/main.html"
+      },
+      "validation": {
+        "status": "unverified",
+        "required_symbol": "KQ.i@SHFE.cu",
+        "required_check": "final 60-second quote evidence at each expected session end"
+      }
+    },
+    {
+      "exchange": "SHFE",
+      "product": "rb",
+      "evidence_symbol": "KQ.i@SHFE.rb",
+      "rule_id": "shfe-rb-v1-2100-0100-day",
+      "candidate_trading_day_start": "2014-12-26",
+      "candidate_trading_day_end": null,
+      "candidate_range_status": "unverified_end_transition",
+      "sessions_cst": [
+        [
+          "21:00",
+          "01:00"
+        ],
+        [
+          "09:00",
+          "10:15"
+        ],
+        [
+          "10:30",
+          "11:30"
+        ],
+        [
+          "13:30",
+          "15:00"
+        ]
+      ],
+      "night_session": {
+        "cross_midnight": true,
+        "belongs_to": "following_trading_day"
+      },
+      "authority": {
+        "source_type": "exchange_history",
+        "title": "连续交易业务专题",
+        "published_at": null,
+        "published_at_status": "unverified",
+        "url": "https://www.shfe.com.cn/content/lxjy/mtbd5.html",
+        "confidence": "confirmed"
+      },
+      "validation": {
+        "status": "unverified",
+        "required_symbol": "KQ.i@SHFE.rb",
+        "required_check": "final 60-second quote evidence at each expected session end"
+      }
+    },
+    {
+      "exchange": "SHFE",
+      "product": "rb",
+      "evidence_symbol": "KQ.i@SHFE.rb",
+      "rule_id": "shfe-rb-v2-current-2100-2300-day",
+      "candidate_trading_day_start": null,
+      "candidate_trading_day_end": "2026-09-05",
+      "candidate_range_status": "unverified_start",
+      "sessions_cst": [
+        [
+          "21:00",
+          "23:00"
+        ],
+        [
+          "09:00",
+          "10:15"
+        ],
+        [
+          "10:30",
+          "11:30"
+        ],
+        [
+          "13:30",
+          "15:00"
+        ]
+      ],
+      "session_ids": [
+        "night",
+        "morning_1",
+        "morning_2",
+        "afternoon"
+      ],
+      "night_session": {
+        "cross_midnight": false,
+        "belongs_to": "following_trading_day"
+      },
+      "authority": {
+        "source_type": "exchange_schedule",
+        "title": "SHFE连续交易时间表（官方PDF）",
+        "published_at": null,
+        "published_at_status": "unverified",
+        "url": "https://www.shfe.com.cn/upload/20211110/1636525208614.pdf",
+        "confidence": "confirmed"
+      },
+      "validation": {
+        "status": "unverified",
+        "required_symbol": "KQ.i@SHFE.rb",
+        "required_check": "final 60-second quote evidence at each expected session end"
+      }
+    },
+    {
+      "exchange": "SHFE",
+      "product": "ru",
+      "evidence_symbol": "KQ.i@SHFE.ru",
+      "rule_id": "shfe-ru-v1-2100-2300-day",
+      "candidate_trading_day_start": "2014-12-26",
+      "candidate_trading_day_end": "2026-09-05",
+      "sessions_cst": [
+        [
+          "21:00",
+          "23:00"
+        ],
+        [
+          "09:00",
+          "10:15"
+        ],
+        [
+          "10:30",
+          "11:30"
+        ],
+        [
+          "13:30",
+          "15:00"
+        ]
+      ],
+      "night_session": {
+        "cross_midnight": false,
+        "belongs_to": "following_trading_day"
+      },
+      "authority": {
+        "source_type": "exchange_history",
+        "title": "连续交易业务专题",
+        "published_at": null,
+        "published_at_status": "unverified",
+        "url": "https://www.shfe.com.cn/content/lxjy/mtbd5.html",
+        "confidence": "confirmed"
+      },
+      "validation": {
+        "status": "unverified",
+        "required_symbol": "KQ.i@SHFE.ru",
+        "required_check": "final 60-second quote evidence at each expected session end"
+      }
+    },
+    {
+      "exchange": "INE",
+      "product": "sc",
+      "evidence_symbol": "KQ.i@INE.sc",
+      "rule_id": "ine-sc-v1-2100-0230-day",
+      "candidate_trading_day_start": "2018-03-26",
+      "candidate_trading_day_end": "2026-09-05",
+      "sessions_cst": [
+        [
+          "21:00",
+          "02:30"
+        ],
+        [
+          "09:00",
+          "10:15"
+        ],
+        [
+          "10:30",
+          "11:30"
+        ],
+        [
+          "13:30",
+          "15:00"
+        ]
+      ],
+      "session_ids": [
+        "night",
+        "morning_1",
+        "morning_2",
+        "afternoon"
+      ],
+      "night_session": {
+        "cross_midnight": true,
+        "belongs_to": "following_trading_day"
+      },
+      "authority": {
+        "source_type": "exchange_trading_hours",
+        "title": "交易时间",
+        "published_at": null,
+        "published_at_status": "unverified",
+        "url": "https://www.ine.cn/services/calenderandholidays/tradinghours/",
+        "confidence": "confirmed"
+      },
+      "historical_basis": {
+        "effective_date": "2018-03-26",
+        "title": "期货日报：融入全球市场 上海原油期货成为区域定价‘风向标’",
+        "published_at": "2025-04-03",
+        "url": "https://www.ine.cn/publicnotice/media/202504/t20250403_824958.html"
+      },
+      "validation": {
+        "status": "unverified",
+        "required_symbol": "KQ.i@INE.sc",
+        "required_check": "final 60-second quote evidence at each expected session end"
+      }
+    },
+    {
+      "exchange": "INE",
+      "product": "nr",
+      "evidence_symbol": "KQ.i@INE.nr",
+      "rule_id": "ine-nr-v1-2100-2300-day",
+      "candidate_trading_day_start": "2019-08-12",
+      "candidate_trading_day_end": "2026-09-05",
+      "sessions_cst": [
+        [
+          "21:00",
+          "23:00"
+        ],
+        [
+          "09:00",
+          "10:15"
+        ],
+        [
+          "10:30",
+          "11:30"
+        ],
+        [
+          "13:30",
+          "15:00"
+        ]
+      ],
+      "session_ids": [
+        "night",
+        "morning_1",
+        "morning_2",
+        "afternoon"
+      ],
+      "night_session": {
+        "cross_midnight": false,
+        "belongs_to": "following_trading_day"
+      },
+      "authority": {
+        "source_type": "exchange_trading_hours",
+        "title": "交易时间",
+        "published_at": null,
+        "published_at_status": "unverified",
+        "url": "https://www.ine.cn/services/calenderandholidays/tradinghours/",
+        "confidence": "confirmed"
+      },
+      "historical_basis": {
+        "effective_date": "2019-08-12",
+        "title": "20号胶期货上市五周年",
+        "published_at": "2024-08-16",
+        "url": "https://www.ine.cn/publicnotice/news/202408/t20240816_815025.html"
+      },
+      "validation": {
+        "status": "unverified",
+        "required_symbol": "KQ.i@INE.nr",
+        "required_check": "final 60-second quote evidence at each expected session end"
+      }
+    },
+    {
+      "exchange": "CZCE",
+      "product": "CF",
+      "evidence_symbol": "KQ.i@CZCE.CF",
+      "rule_id": "czce-cf-v1-2100-2300-day",
+      "candidate_trading_day_start": "2024-02-06",
+      "candidate_trading_day_end": "2026-09-05",
+      "sessions_cst": [
+        [
+          "21:00",
+          "23:00"
+        ],
+        [
+          "09:00",
+          "10:15"
+        ],
+        [
+          "10:30",
+          "11:30"
+        ],
+        [
+          "13:30",
+          "15:00"
+        ]
+      ],
+      "night_session": {
+        "cross_midnight": false,
+        "belongs_to": "following_trading_day"
+      },
+      "authority": {
+        "source_type": "exchange_rule",
+        "title": "郑州商品交易所棉花期货业务细则",
+        "published_at": "2024-02-07",
+        "url": "https://www.czce.com.cn/cn/flfg/zcjywgz/pzxz/webinfo/2024/02/1708568084281851.htm",
+        "confidence": "confirmed",
+        "effective_date": "2024-02-06"
+      },
+      "validation": {
+        "status": "unverified",
+        "required_symbol": "KQ.i@CZCE.CF",
+        "required_check": "final 60-second quote evidence at each expected session end"
+      }
+    },
+    {
+      "exchange": "DCE",
+      "product": "l",
+      "evidence_symbol": "KQ.i@DCE.l",
+      "rule_id": "dce-l-v1-2100-2300-day",
+      "candidate_trading_day_start": "2019-03-29",
+      "candidate_trading_day_end": "2026-09-05",
+      "sessions_cst": [
+        [
+          "21:00",
+          "23:00"
+        ],
+        [
+          "09:00",
+          "10:15"
+        ],
+        [
+          "10:30",
+          "11:30"
+        ],
+        [
+          "13:30",
+          "15:00"
+        ]
+      ],
+      "night_session": {
+        "cross_midnight": false,
+        "belongs_to": "following_trading_day"
+      },
+      "authority": {
+        "source_type": "exchange_trading_guide",
+        "title": "DCE Trading Hours (China Standard Time)",
+        "published_at": "2025-05-29",
+        "url": "https://www.dce.com.cn/dceg/file/2025-05-29/1748480876704ff80808197162e7128701971994e0a01313.pdf",
+        "confidence": "confirmed"
+      },
+      "historical_basis": {
+        "effective_date": "2019-03-29",
+        "title": "大连期货市场月报 2019年第3期",
+        "published_at": null,
+        "published_at_status": "unverified",
+        "url": "https://www.dce.com.cn/dalianshangpin/resource/cms/2019/04/2019042612023697006.pdf"
+      },
+      "validation": {
+        "status": "unverified",
+        "required_symbol": "KQ.i@DCE.l",
+        "required_check": "final 60-second quote evidence at each expected session end"
+      }
+    },
+    {
+      "exchange": "DCE",
+      "product": "c",
+      "evidence_symbol": "KQ.i@DCE.c",
+      "rule_id": "dce-c-v1-2100-2300-day",
+      "candidate_trading_day_start": "2019-03-29",
+      "candidate_trading_day_end": "2026-09-05",
+      "sessions_cst": [
+        [
+          "21:00",
+          "23:00"
+        ],
+        [
+          "09:00",
+          "10:15"
+        ],
+        [
+          "10:30",
+          "11:30"
+        ],
+        [
+          "13:30",
+          "15:00"
+        ]
+      ],
+      "night_session": {
+        "cross_midnight": false,
+        "belongs_to": "following_trading_day"
+      },
+      "authority": {
+        "source_type": "exchange_trading_guide",
+        "title": "DCE Trading Hours (China Standard Time)",
+        "published_at": "2025-05-29",
+        "url": "https://www.dce.com.cn/dceg/file/2025-05-29/1748480876704ff80808197162e7128701971994e0a01313.pdf",
+        "confidence": "confirmed"
+      },
+      "historical_basis": {
+        "effective_date": "2019-03-29",
+        "title": "大连期货市场月报 2019年第3期",
+        "published_at": null,
+        "published_at_status": "unverified",
+        "url": "https://www.dce.com.cn/dalianshangpin/resource/cms/2019/04/2019042612023697006.pdf"
+      },
+      "validation": {
+        "status": "unverified",
+        "required_symbol": "KQ.i@DCE.c",
+        "required_check": "final 60-second quote evidence at each expected session end"
+      }
+    },
+    {
+      "exchange": "CFFEX",
+      "product": "IF",
+      "evidence_symbol": "KQ.i@CFFEX.IF",
+      "rule_id": "cffex-if-v1-day-0930-1500",
+      "candidate_trading_day_start": "2016-01-01",
+      "candidate_trading_day_end": "2026-09-05",
+      "sessions_cst": [
+        [
+          "09:30",
+          "11:30"
+        ],
+        [
+          "13:00",
+          "15:00"
+        ]
+      ],
+      "night_session": {
+        "cross_midnight": false,
+        "belongs_to": "not_applicable"
+      },
+      "authority": {
+        "source_type": "exchange_product_page",
+        "title": "沪深300股指期货",
+        "published_at": null,
+        "published_at_status": "unverified",
+        "url": "https://www.cffex.com.cn/hs300/",
+        "confidence": "confirmed"
+      },
+      "historical_basis": {
+        "effective_date": "2016-01-01",
+        "title": "三所指数熔断联合公告及业务问答：股指期货交易时间调整",
+        "published_at": "2015-12-04",
+        "url": "https://www.szse.cn/aboutus/trends/news/t20151204_518654.html",
+        "notice_url": "https://www.sse.com.cn/aboutus/mediacenter/hotandd/c/c_20151204_4019218.shtml"
+      },
+      "validation": {
+        "status": "unverified",
+        "required_symbol": "KQ.i@CFFEX.IF",
+        "required_check": "final 60-second quote evidence at each expected session end"
+      }
+    },
+    {
+      "exchange": "CFFEX",
+      "product": "IH",
+      "evidence_symbol": "KQ.i@CFFEX.IH",
+      "rule_id": "cffex-ih-v1-day-0930-1500",
+      "candidate_trading_day_start": "2016-01-01",
+      "candidate_trading_day_end": "2026-09-05",
+      "sessions_cst": [
+        [
+          "09:30",
+          "11:30"
+        ],
+        [
+          "13:00",
+          "15:00"
+        ]
+      ],
+      "night_session": {
+        "cross_midnight": false,
+        "belongs_to": "not_applicable"
+      },
+      "authority": {
+        "source_type": "exchange_product_page",
+        "title": "上证50股指期货",
+        "published_at": null,
+        "published_at_status": "unverified",
+        "url": "https://www.cffex.com.cn/cn/sz50gzqh.html",
+        "confidence": "confirmed"
+      },
+      "historical_basis": {
+        "effective_date": "2016-01-01",
+        "title": "三所指数熔断联合公告及业务问答：股指期货交易时间调整",
+        "published_at": "2015-12-04",
+        "url": "https://www.szse.cn/aboutus/trends/news/t20151204_518654.html",
+        "notice_url": "https://www.sse.com.cn/aboutus/mediacenter/hotandd/c/c_20151204_4019218.shtml"
+      },
+      "validation": {
+        "status": "unverified",
+        "required_symbol": "KQ.i@CFFEX.IH",
+        "required_check": "final 60-second quote evidence at each expected session end"
+      }
+    },
+    {
+      "exchange": "CFFEX",
+      "product": "IC",
+      "evidence_symbol": "KQ.i@CFFEX.IC",
+      "rule_id": "cffex-ic-v1-day-0930-1500",
+      "candidate_trading_day_start": "2016-01-01",
+      "candidate_trading_day_end": "2026-09-05",
+      "sessions_cst": [
+        [
+          "09:30",
+          "11:30"
+        ],
+        [
+          "13:00",
+          "15:00"
+        ]
+      ],
+      "night_session": {
+        "cross_midnight": false,
+        "belongs_to": "not_applicable"
+      },
+      "authority": {
+        "source_type": "exchange_product_page",
+        "title": "中证500股指期货",
+        "published_at": null,
+        "published_at_status": "unverified",
+        "url": "https://www.cffex.com.cn/cn/zz500.html",
+        "confidence": "confirmed"
+      },
+      "historical_basis": {
+        "effective_date": "2016-01-01",
+        "title": "三所指数熔断联合公告及业务问答：股指期货交易时间调整",
+        "published_at": "2015-12-04",
+        "url": "https://www.szse.cn/aboutus/trends/news/t20151204_518654.html",
+        "notice_url": "https://www.sse.com.cn/aboutus/mediacenter/hotandd/c/c_20151204_4019218.shtml"
+      },
+      "validation": {
+        "status": "unverified",
+        "required_symbol": "KQ.i@CFFEX.IC",
+        "required_check": "final 60-second quote evidence at each expected session end"
+      }
+    },
+    {
+      "exchange": "CFFEX",
+      "product": "IM",
+      "evidence_symbol": "KQ.i@CFFEX.IM",
+      "rule_id": "cffex-im-v1-day-0930-1500",
+      "candidate_trading_day_start": "2022-07-22",
+      "candidate_trading_day_end": "2026-09-05",
+      "sessions_cst": [
+        [
+          "09:30",
+          "11:30"
+        ],
+        [
+          "13:00",
+          "15:00"
+        ]
+      ],
+      "night_session": {
+        "cross_midnight": false,
+        "belongs_to": "not_applicable"
+      },
+      "authority": {
+        "source_type": "exchange_rule",
+        "title": "中国金融期货交易所中证1000股指期货合约交易细则",
+        "published_at": "2022-07-18",
+        "url": "https://www.cffex.com.cn/cn/ssxz/20220718/43093.html",
+        "confidence": "confirmed",
+        "effective_date": "2022-07-22"
+      },
+      "validation": {
+        "status": "unverified",
+        "required_symbol": "KQ.i@CFFEX.IM",
+        "required_check": "final 60-second quote evidence at each expected session end"
+      }
+    }
+  ],
+  "exceptions": [
+    {
+      "exchange": "INE",
+      "products": [
+        "ALL_INE_FUTURES_OPTIONS"
+      ],
+      "trading_day": "2024-10-08",
+      "kind": "night_session_cancelled",
+      "replacement_rule_id": null,
+      "closed": false,
+      "session_ids": [
+        "night"
+      ],
+      "authority": {
+        "source_type": "exchange_notice",
+        "title": "上海国际能源交易中心发布关于2024年国庆节期间有关工作安排的通知",
+        "published_at": "2024-09-24",
+        "url": "https://www.shfe.com.cn/publicnotice/notice/202409/t20240924_815106.html",
+        "confidence": "confirmed"
+      },
+      "validation": {
+        "status": "confirmed",
+        "required_symbol": "KQ.i@INE.{product}",
+        "required_check": "INE official 2024-09-24 National Day notice: day session resumes 2024-10-08; night resumes civil 2024-10-08 for trading day 2024-10-09"
+      }
+    },
+    {
+      "exchange": "INE",
+      "products": [
+        "ALL_INE_FUTURES_OPTIONS"
+      ],
+      "trading_day": "2024-10-01",
+      "kind": "closed",
+      "replacement_rule_id": null,
+      "closed": true,
+      "authority": {
+        "title": "上海国际能源交易中心发布关于2024年国庆节期间有关工作安排的通知",
+        "published_at": "2024-09-24",
+        "url": "https://www.shfe.com.cn/publicnotice/notice/202409/t20240924_815106.html",
+        "confidence": "confirmed"
+      }
+    },
+    {
+      "exchange": "INE",
+      "products": [
+        "ALL_INE_FUTURES_OPTIONS"
+      ],
+      "trading_day": "2024-10-02",
+      "kind": "closed",
+      "replacement_rule_id": null,
+      "closed": true,
+      "authority": {
+        "title": "上海国际能源交易中心发布关于2024年国庆节期间有关工作安排的通知",
+        "published_at": "2024-09-24",
+        "url": "https://www.shfe.com.cn/publicnotice/notice/202409/t20240924_815106.html",
+        "confidence": "confirmed"
+      }
+    },
+    {
+      "exchange": "INE",
+      "products": [
+        "ALL_INE_FUTURES_OPTIONS"
+      ],
+      "trading_day": "2024-10-03",
+      "kind": "closed",
+      "replacement_rule_id": null,
+      "closed": true,
+      "authority": {
+        "title": "上海国际能源交易中心发布关于2024年国庆节期间有关工作安排的通知",
+        "published_at": "2024-09-24",
+        "url": "https://www.shfe.com.cn/publicnotice/notice/202409/t20240924_815106.html",
+        "confidence": "confirmed"
+      }
+    },
+    {
+      "exchange": "INE",
+      "products": [
+        "ALL_INE_FUTURES_OPTIONS"
+      ],
+      "trading_day": "2024-10-04",
+      "kind": "closed",
+      "replacement_rule_id": null,
+      "closed": true,
+      "authority": {
+        "title": "上海国际能源交易中心发布关于2024年国庆节期间有关工作安排的通知",
+        "published_at": "2024-09-24",
+        "url": "https://www.shfe.com.cn/publicnotice/notice/202409/t20240924_815106.html",
+        "confidence": "confirmed"
+      }
+    },
+    {
+      "exchange": "INE",
+      "products": [
+        "ALL_INE_FUTURES_OPTIONS"
+      ],
+      "trading_day": "2024-10-05",
+      "kind": "closed",
+      "replacement_rule_id": null,
+      "closed": true,
+      "authority": {
+        "title": "上海国际能源交易中心发布关于2024年国庆节期间有关工作安排的通知",
+        "published_at": "2024-09-24",
+        "url": "https://www.shfe.com.cn/publicnotice/notice/202409/t20240924_815106.html",
+        "confidence": "confirmed"
+      }
+    },
+    {
+      "exchange": "INE",
+      "products": [
+        "ALL_INE_FUTURES_OPTIONS"
+      ],
+      "trading_day": "2024-10-06",
+      "kind": "closed",
+      "replacement_rule_id": null,
+      "closed": true,
+      "authority": {
+        "title": "上海国际能源交易中心发布关于2024年国庆节期间有关工作安排的通知",
+        "published_at": "2024-09-24",
+        "url": "https://www.shfe.com.cn/publicnotice/notice/202409/t20240924_815106.html",
+        "confidence": "confirmed"
+      }
+    },
+    {
+      "exchange": "INE",
+      "products": [
+        "ALL_INE_FUTURES_OPTIONS"
+      ],
+      "trading_day": "2024-10-07",
+      "kind": "closed",
+      "replacement_rule_id": null,
+      "closed": true,
+      "authority": {
+        "title": "上海国际能源交易中心发布关于2024年国庆节期间有关工作安排的通知",
+        "published_at": "2024-09-24",
+        "url": "https://www.shfe.com.cn/publicnotice/notice/202409/t20240924_815106.html",
+        "confidence": "confirmed"
+      }
+    }
+  ],
+  "gaps": [
+    {
+      "scope": "all_rules",
+      "status": "unverified",
+      "need": "Fetch KQ.i@exchange.product final-60-second bars for every candidate trading day; this draft contains no positive quote evidence."
+    },
+    {
+      "scope": "SHFE",
+      "status": "unverified",
+      "need": "Resolve rb/hc/bu transition from 21:00-01:00 to 21:00-23:00; add au/ag/cu/al/zn/pb/ni/sn/ru and other product-specific historical versions; verify fu, ss, ao and remaining products."
+    },
+    {
+      "scope": "INE",
+      "status": "unverified",
+      "need": "Add bc, lu, ec historical start dates and all historical rule changes; current trading-hours page alone is not a complete historical catalog."
+    },
+    {
+      "scope": "CZCE",
+      "status": "unverified",
+      "need": "Add all products beyond cf from dated official rule versions and effective dates; do not infer a product's night session from another product."
+    },
+    {
+      "scope": "DCE",
+      "status": "unverified",
+      "need": "Add all products, pre-2019 versions, later additions, non-night products, and dated holiday/temporary notices."
+    },
+    {
+      "scope": "CFFEX",
+      "status": "unverified",
+      "need": "Add TS/TF/T/TL and options; verify historical 09:15 versus 09:30 session changes before extending current templates backward."
+    },
+    {
+      "scope": "exceptions",
+      "status": "unverified",
+      "need": "Collect dated official notices for delayed opening, early close, temporary exchange adjustments, and pre-holiday night arrangements for every exchange."
+    }
+  ]
+}

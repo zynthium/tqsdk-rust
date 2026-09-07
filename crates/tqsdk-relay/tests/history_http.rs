@@ -49,6 +49,13 @@ fn current_snapshot_serves_strict_coverage_query_and_etag_contracts() {
     assert_eq!(coverage_body["complete"], true);
     assert_eq!(coverage_body["final"], true);
 
+    let schema = request(history, &mut child, "/v1/history/schema", None);
+    assert_status(&schema, "200 OK");
+    assert!(json_body(&schema)["capabilities"]["context_query"].is_null());
+
+    let removed_context = request(history, &mut child, "/v1/history/context", None);
+    assert_status(&removed_context, "404 Not Found");
+
     let query_path = format!(
         "/v1/history/query?symbol=KQ.m%40SHFE.au&series=tick&start={START}&end={END}&fields=time,id,last_price,tns"
     );

@@ -14,6 +14,9 @@
 
 ## 当前状态
 
+离线交易时长换算使用 `tqsdk-data::TradingTimeline`；缓存审计和 fill 收尾维护见
+[TradingTimeline](docs/architecture/trading-timeline.md)。它不按物理 Kline 行数扩窗。
+
 项目正在积极开发中，当前 crate 版本为 `0.1.0`。建议先通过本仓库 workspace 或 Git
 dependency 使用；正式 crates.io 发布前，public API 仍可能继续收敛。
 

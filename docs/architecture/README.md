@@ -1,6 +1,13 @@
 # tqsdk-rs 分层内核架构
 
+TradingTimeline rebuild 的稳定视图由 root 共享生命周期锁、目标指数分钟月分区 pin
+及产品发布锁提供；普通 Tick fill 不再阻塞。每产品持久化为 V1 紧凑、原子替换的
+`timeline.json`；旧 pre-compact layout 不参与运行时读取。实现归属仍为 `tqsdk-data`，
+不改变热路径公共 API；详见 [TradingTimeline](trading-timeline.md)。
+
 ## 文档定位
+
+离线交易时间换算、分钟缓存证据与 fill 收尾维护见 [TradingTimeline](trading-timeline.md)。
 本文档目录描述的是“从头重写一个 Rust 版天勤 TqSdk”的基础架构主线。
 
 这里的第一原则不是先做某种用户 API，而是先做一个足以承载所有远端协议与对象的统一 runtime contract。
@@ -121,9 +128,9 @@ helper 不是 facade、runtime 或 public API；它隔离 SDK 地址空间中的
   tick cache、独立 canonical final-60s monthly cache 与 native final-1d single-file cache，缺失时由 `tqsdk-data`
     `BacktestHistoryClient` 通过官方 server-side backtest stream 填充对应输入并驱动本地 `TqSim`。
     一个 client 最多保留 logical concurrency 个 clean source lanes；Tick 每日 coverage checkpoint 与
-    minute bounded window 保持不变，但 clean terminal 后复用 lane/session，避免每段重复鉴权和建连。
-    pool 饱和时 overflow 不在 series lease 内等待且不会回池；取消、协议/传输错误或 chart cleanup
-    失败也会丢弃 lane。
+    minute bounded window 保持不变。同一 chart 的分页保持 session；本地裁剪过 DIFF 状态的 lane
+    不得回池，即使 terminal/cleanup 成功也销毁，避免后续 slice 丢失重叠数据。
+    pool 饱和时 overflow 不等待且不回池；取消、协议/传输或 cleanup 失败也丢弃 lane。
 minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 final coverage；`KQ.m@...`
     使用 data 持久化的 calendar/session/physical-segment metadata sidecar 解析为 dated
     concrete-contract tick ranges，因而与具体合约共用物理 cache、coverage 和远端补缺请求。

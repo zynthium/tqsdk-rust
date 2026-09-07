@@ -1,5 +1,21 @@
 # 验收标准与测试矩阵
 
+TradingTimeline 热路径性能：使用独立只读 release 基准
+[TradingTimeline 性能结论](../research/2026-09-07-trading-timeline-performance.md)。
+覆盖生产 75 品种、顺序/随机查询、跨休市位移、历史规模增长、零分配及独立系统调用跟踪。
+加载成本必须单列；批平均分位数不得称为单次调用尾延迟，不将微基准等同于策略吞吐。
+
+TradingTimeline 锁粒度回归：`cargo test -p tqsdk-data trading_timeline --lib`、
+`cargo test -p tqsdk-cache timeline --bin tqsdk-cache`。覆盖跨进程根共享共存、
+所有目标月分区在 metadata/coverage 前固定、部分获取失败释放、缺 sidecar 不创建、
+不同月份并发、256 分区预算，以及同产品并发增量合并无丢更新。
+根独占维护仍互斥；CLI fill 后维护不再因无关 root-shared fill 返回 busy。
+
+TradingTimeline 缓存确认专项：见
+[2026-09-07 受限 IM/CF 验证记录](../research/2026-09-07-trading-timeline-cache-confirmed.md)。
+确认目录须逐项匹配 evidence hash，完整/增量重建保持 identity，加载 active 后验证
+跨午休、周末、长假正反向运算；无 coverage 仍应报错。该记录不是全市场或性能验收。
+
 ## 文档定位
 本文档定义的是 runtime contract 的验收标准，以及未来 facade/adapters 的派生验收基线。
 
@@ -125,6 +141,39 @@ fail-closed 与 root operation lock。CLI 至少运行 `refresh-provider-members
 acquisition 的 `--dry-run`，后者不得认证、请求 provider 或写 cache/artifact。真实远端验证应限制
 `--max-symbols`，并确认 canary/认证/传输/取消失败不会发布 receipt/proof；正常成功只允许发布 receipt
 或新的 acquisition/catalog，绝不发布 plan。
+
+### Trading timeline
+
+2024 全年 IM 与 02-06 起 CF 的冻结缓存审计及逐日资料缺口，见
+[2024 闭环审计](../research/2026-09-06-trading-timeline-2024-closeout.md)。
+该审计不是生产放行：缺失官方例外完整性材料时仍禁止激活。
+
+reviewed-2024 当前 `exception_review_complete: false`：只支持审计匹配，禁止激活。
+新增门禁回归覆盖：无例外完整性声明拒绝激活、重复增量与全量 hash 一致、
+紧凑 V1 单文件的 round-trip/hash 校验、旧 layout 的独占转换，以及单文件 rename
+后 fsync 失败报告 `indeterminate`（重新 load 后决定可见 generation）。
+
+2026-09-06 修复验证：周一双日期锚点、按月扫描和 opt-in fill 收尾维护已落地。
+具体回归与冻结缓存抽样结果见 [TradingTimeline](trading-timeline.md#verification)。
+规则资料仍非全量：reviewed-2024 仅覆盖有官方模板证据的 CF 与四种股指；
+缺失节假日、其他品种或历史时期仍 fail-closed，不能声明全市场全年度验收通过。
+
+```bash
+cargo test -p tqsdk-data trading_timeline --lib
+cargo test -p tqsdk-cache --bin tqsdk-cache timeline
+cargo run -p tqsdk-data --example api_contract_s40_trading_timeline
+```
+
+维护验收要求每月校验扫描次数与月份数相关；普通 fill 和 historical-universe fill 的
+收尾路径均须验证。填充锁冲突、coverage 缺口、未知规则不得替换 active；数据阶段成功
+但 timeline 维护失败时，保留数据并明确返回非零命令状态。不要把前端 npm 缺失警告
+忽略成 Dashboard 构建通过，也不要把暖缓存逻辑 read 次数写成物理磁盘 IOPS。
+
+`cargo test -p tqsdk-data trading_timeline --lib` 覆盖交易时长/跨休盘移动、未知覆盖 fail-closed、
+稀疏指数的正证据规则推断、final minute cache 的 timeline 重建、draft catalog 的 confirmed
+gate/例外日 fail-closed，以及唯一规则日与歧义日的编译边界。relay 仅保留 range query：
+`cargo test -p tqsdk-relay --test history_http` 必须确认 `/v1/history/context` 为 404，且 schema
+不再声明 `context_query`。
 
 ### Relay CacheOnly history
 
@@ -715,3 +764,11 @@ p99 SLO 时必须重新实测并单独验收。
 在 admission 与 source lookup 之前返回 `409 coverage_incomplete`，且
 `details.reason=range_starts_in_future`。另需证明 `start < server_time < end` 默认裁到唯一连续 final
 前缀并返回带 truncation metadata 的 `200`；存在内部缺口或没有非空连续前缀时仍返回 typed 409。
+# History source 分页一致性回归
+
+- `cargo test -p tqsdk-data --lib backtest_history::fill::tests`：保留重叠/预取行、裁剪连接不回池、
+  单 chart 门控，以及 32 页消费后仅保留边界和预取数据的内存上界。
+- `cargo test -p tqsdk-session --test server_backtest_history`：canonical minute/daily 缺失窗口边界
+  必须失败，允许内部 ID 稀疏；保留 Tick 与空终态的既有行为。
+- 真实历史验证必须使用隔离缓存；不要用既有 final coverage 跳过读取后宣称修复通过。
+  生产旧分区须单独重建，Timeline 的算术测试不能证明底层行情完整。

@@ -170,10 +170,13 @@ mapping 以 versioned snapshot sidecar 持久化，terminal report 携带 snapsh
 且覆盖请求窗口的 sidecar，不会向公开 metadata service 查询。当前 cache-backed fill 只支持 futures；
 股票回测必须使用 facade 的 `.disabled_cache()` 官方路径。
 
-一个 client 最多保留 `logical_concurrency` 个 clean server-backtest source lanes。Tick trading-day
-slice 与 canonical-minute bounded window 仍分别提交 coverage，但 clean terminal 后 lane 保留底层
-session 供下一 slice 顺序复用；服务端 10,000-row page 不重建 session。pool 饱和时 overflow session
-不等待且不回池；取消、source error 或显式 chart cleanup 失败时 lane 也直接销毁。
+一个 client 最多保留 `logical_concurrency` 个与服务端 DIFF 状态一致的 clean source lanes。
+Tick trading-day slice 与 canonical-minute bounded window 分别提交 coverage；同一 chart 内的
+10,000-row page 继续使用原 session。消费后只删除已消费末行之前的 ID，保留边界行与预取数据。
+一旦本地裁剪过状态，即使 terminal 和 cleanup 成功也销毁 session，不向后续 slice 回收；
+否则服务端可能省略重叠 DIFF，导致缺行被错误标记为完整。未裁剪且 cleanup 成功的 lane 才能复用。
+pool 饱和时 overflow 不等待且不回池；取消、source error 或 cleanup 失败也销毁 lane。
+fill source 每次只接受一个 chart；常规固定窗口协议下，裁剪后的内存保留重叠行和预取窗口。
 
 每个 `RemoteOnMiss` run 在 planner、fill 和 row scan 生命周期内持有 shared cache-root gate；facade
 已经取得 shared/exclusive gate 时把同一个实际锁守卫传给 data run，不重复加锁。不同 symbol 可以并行，

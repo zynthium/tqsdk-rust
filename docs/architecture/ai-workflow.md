@@ -1,5 +1,13 @@
 # AI 工作流与架构守则
 
+TradingTimeline 锁契约：root shared → 全部目标分钟月分区 shared pin → 短时 metadata
+解析 → 产品发布 exclusive。月 pin 必须先于 coverage 并贯穿发布；产品锁必须覆盖
+load/merge/write。不要只将 root exclusive 改 shared，或复用 remote-fill lease
+替代底层分区写入保护。维护、GC、repair 的 root-exclusive 边界不变。
+
+TradingTimeline 只使用 V1 每产品单文件原子替换。涉及旧 pre-compact layout 转换时必须在
+停机维护窗口执行；完成全量校验后才可整体清理 `active.json` 与 `snapshots/`，运行时不 fallback。
+
 本文是 Codex、Claude Code 和其他代码代理的新 session 入口。它只给出不可违反的边界、最小阅读路由和变更同步规则；不得复制完整架构说明或验证矩阵。
 
 ## 权威与最小阅读
@@ -40,6 +48,9 @@
 
 ## Codex 多代理路由
 
+涉及 TradingTimeline/fill 维护时，定向读取 [交易时间轴合同](trading-timeline.md)，
+区别候选规则、已确认模板与实际 final-minute 日证据，不得为了激活而放宽 unknown gate。
+
 `.codex/config.toml` 与 `.codex/agents/*.toml` 定义模型、推理深度、并发与 sandbox；本文定义委派门槛。
 
 - 默认不委派。主代理负责全部探索、实现、验证、失败归因、风险升级与结果整合。
@@ -69,3 +80,8 @@ git diff --check
 ```
 
 Rust、feature、public API、relay 与 release 检查按 [`validation.md`](validation.md) 的任务分类执行。public API、crate 拆分、feature 或 facade/runtime 消费方式变化时，相关 `crates/*/examples/api_contract_sXX_*.rs` 必须继续清晰且可编译。
+# History source DIFF 一致性
+
+本地裁剪 server-backtest runtime 数据后，不得将该 session 回池供后续 slice 使用；服务端可能省略
+它认为客户端仍持有的重叠数据。分页裁剪须保留消费边界与预取行。修复代码不能自动修复已写入的
+错误 final coverage，运维必须定向失效并重建受影响分区，再审计和发布 Timeline。

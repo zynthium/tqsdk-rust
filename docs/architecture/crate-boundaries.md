@@ -12,6 +12,10 @@
 
 ## 当前结论
 
+TradingTimeline 的规则匹配、交易时间运算与产品快照属于 `tqsdk-data`；离线命令与
+fill 收尾编排属于 `tqsdk-cache`。不下沉到 core/session/facade，也不进入 relay 行情 runtime。
+锁、发布和现阶段权威覆盖边界见 [TradingTimeline](trading-timeline.md)。
+
 当前边界整体判断为：
 
 - 方向正确

@@ -521,6 +521,13 @@ impl ServerHistorySourceFactory for SessionServerHistorySourceFactory {
         request: ServerBacktestHistoryRequest,
     ) -> OpenServerHistorySourceFuture<'a> {
         Box::pin(async move {
+            // Local pruning uses a single monotonic consumer per series. Do not
+            // silently allow a second chart to lose rows needed by its reader.
+            if request.charts.len() != 1 {
+                return Err(DataError::Validation(
+                    "cache fill sources require exactly one history chart".to_string(),
+                ));
+            }
             let lease = self.pool.acquire(credentials)?;
             let chart_kinds = request
                 .charts
@@ -534,6 +541,7 @@ impl ServerHistorySourceFactory for SessionServerHistorySourceFactory {
                 stream: Some(stream),
                 lease: Some(lease),
                 chart_kinds,
+                state_pruned: false,
             }) as Box<dyn ServerHistorySource>)
         })
     }
@@ -544,6 +552,7 @@ struct SessionServerHistorySource {
     stream: Option<tqsdk_session::ServerBacktestHistoryStream>,
     lease: Option<ServerHistorySessionLease>,
     chart_kinds: BTreeMap<String, ServerBacktestHistoryKind>,
+    state_pruned: bool,
 }
 
 #[cfg(all(feature = "live", feature = "services"))]
@@ -555,7 +564,8 @@ impl ServerHistorySource for SessionServerHistorySource {
             ))?;
             let event = stream.next_event(None).await.map_err(DataError::from)?;
             if let (Some(event), Some(lease)) = (&event, &self.lease) {
-                prune_consumed_server_history_page(lease.session(), &self.chart_kinds, event)?;
+                self.state_pruned |=
+                    prune_consumed_server_history_page(lease.session(), &self.chart_kinds, event)?;
             }
             Ok(event)
         })
@@ -567,7 +577,9 @@ impl ServerHistorySource for SessionServerHistorySource {
                 Some(stream) => stream.close().await.map_err(Into::into),
                 None => Ok(()),
             };
-            if reusable && cleanup_result.is_ok() {
+            // The peer still remembers locally pruned DIFF rows. A later request
+            // may revisit them, so only unmodified connections can be recycled.
+            if reusable && !self.state_pruned && cleanup_result.is_ok() {
                 if let Some(lease) = self.lease.take() {
                     lease.recycle();
                 }
@@ -584,16 +596,33 @@ fn prune_consumed_server_history_page(
     session: &tqsdk_session::SessionClient,
     chart_kinds: &BTreeMap<String, ServerBacktestHistoryKind>,
     event: &ServerBacktestHistoryEvent,
-) -> Result<()> {
-    let (symbol, kind) = match event {
-        ServerBacktestHistoryEvent::Ticks { symbol, .. } => {
-            (symbol, ServerBacktestHistoryKind::Tick)
+) -> Result<bool> {
+    let (symbol, kind, last_consumed_id) = match event {
+        ServerBacktestHistoryEvent::Ticks { symbol, rows, .. } => {
+            let Some(last) = rows.last() else {
+                return Ok(false);
+            };
+            (symbol, ServerBacktestHistoryKind::Tick, Some(last.id))
         }
-        ServerBacktestHistoryEvent::CanonicalMinutes { symbol, .. } => {
-            (symbol, ServerBacktestHistoryKind::CanonicalMinute)
+        ServerBacktestHistoryEvent::CanonicalMinutes { symbol, rows, .. } => {
+            let Some(last) = rows.last() else {
+                return Ok(false);
+            };
+            (
+                symbol,
+                ServerBacktestHistoryKind::CanonicalMinute,
+                Some(last.id),
+            )
         }
-        ServerBacktestHistoryEvent::CanonicalDaily { symbol, .. } => {
-            (symbol, ServerBacktestHistoryKind::CanonicalDaily)
+        ServerBacktestHistoryEvent::CanonicalDaily { symbol, rows, .. } => {
+            let Some(last) = rows.last() else {
+                return Ok(false);
+            };
+            (
+                symbol,
+                ServerBacktestHistoryKind::CanonicalDaily,
+                Some(last.id),
+            )
         }
         ServerBacktestHistoryEvent::ChartCompleted {
             chart_id, symbol, ..
@@ -604,9 +633,9 @@ fn prune_consumed_server_history_page(
                 .ok_or(DataError::InvalidState(
                     "completed server-history chart kind was not retained",
                 ))?;
-            (symbol, kind)
+            (symbol, kind, None)
         }
-        ServerBacktestHistoryEvent::StreamCompleted => return Ok(()),
+        ServerBacktestHistoryEvent::StreamCompleted => return Ok(false),
     };
     let path = match kind {
         ServerBacktestHistoryKind::Tick => StatePath::new(["ticks".to_string(), symbol.clone()]),
@@ -621,23 +650,52 @@ fn prune_consumed_server_history_page(
             tqsdk_session::SERVER_BACKTEST_CANONICAL_DAILY_NS.to_string(),
         ]),
     };
+    let (path, fields) = if let Some(last_consumed_id) = last_consumed_id {
+        // Continuations overlap the previous right edge. The server can also
+        // prefetch beyond the requested end; neither may be deleted before use.
+        let mut row_path = path.segments().to_vec();
+        row_path.push("data".to_string());
+        let reader = session.reader();
+        let market = reader.read_market_state();
+        let borrowed_path: Vec<_> = row_path.iter().map(String::as_str).collect();
+        let fields: Vec<_> = market
+            .get_path(&borrowed_path)
+            .and_then(serde_json::Value::as_object)
+            .into_iter()
+            .flat_map(|rows| rows.keys())
+            .filter(|id| id.parse::<i64>().is_ok_and(|id| id < last_consumed_id))
+            .map(|id| FieldMutation {
+                field: id.clone(),
+                value: serde_json::Value::Null,
+            })
+            .collect();
+        if fields.is_empty() {
+            return Ok(false);
+        }
+        (StatePath::new(row_path), fields)
+    } else {
+        (
+            path,
+            vec![FieldMutation {
+                field: "data".to_string(),
+                value: serde_json::Value::Null,
+            }],
+        )
+    };
     session
         .handle()
         .ingest_presorted_market_mutations(
             [NormalizedMutation {
                 path,
                 object: None,
-                fields: vec![FieldMutation {
-                    field: "data".to_string(),
-                    value: serde_json::Value::Null,
-                }],
+                fields,
                 source: MutationSource::MarketDiff,
             }],
             vec![],
             CommitScope::RealtimeUpdate,
         )
         .map_err(|error| DataError::Session(error.into()))?;
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(not(all(feature = "live", feature = "services")))]
@@ -1745,6 +1803,157 @@ mod tests {
     use crate::backtest_history::request::BacktestHistoryAuthProvider;
     use crate::backtest_history::telemetry::TelemetryHub;
 
+    #[cfg(all(feature = "live", feature = "services"))]
+    #[test]
+    fn consumed_page_pruning_preserves_overlap_and_prefetched_minutes() {
+        use serde_json::json;
+        use tqsdk_core::{
+            AdapterRegistry, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle, RuntimeInput,
+        };
+        use tqsdk_session::testing::ManualSession;
+        let mut adapters = AdapterRegistry::new();
+        adapters.register_default_adapters();
+        let manual = ManualSession::from_runtime(RuntimeHandle::with_adapters(adapters));
+        let session = manual.client_clone();
+        session
+            .handle()
+            .ingest(
+                RuntimeInput::Io(IoEvent {
+                    route: "market".to_string(),
+                    domains: vec![ProtocolDomain::Market],
+                    payload: InputPayload::Json(json!({"aid":"rtn_data", "data":[{
+                        "klines":{"KQ.i@CZCE.PL":{"60000000000":{"last_id":4,"data":{
+                            "1":{"id":1,"datetime":1100},
+                            "2":{"id":2,"datetime":1200},
+                            "3":{"id":3,"datetime":2100},
+                            "4":{"id":4,"datetime":2200}
+                        }}}}
+                    }]})),
+                }),
+                vec![],
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap();
+        prune_consumed_server_history_page(
+            &session,
+            &BTreeMap::new(),
+            &ServerBacktestHistoryEvent::CanonicalMinutes {
+                chart_id: "minute-pl".to_string(),
+                symbol: "KQ.i@CZCE.PL".to_string(),
+                rows: vec![
+                    Kline {
+                        id: 1,
+                        datetime: 1100,
+                        ..Kline::default()
+                    },
+                    Kline {
+                        id: 2,
+                        datetime: 1200,
+                        ..Kline::default()
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        let reader = session.reader();
+        let market = reader.read_market_state();
+        assert!(
+            market
+                .get_path(&["klines", "KQ.i@CZCE.PL", "60000000000", "data", "1"])
+                .is_none()
+        );
+        for id in ["2", "3", "4"] {
+            assert!(
+                market
+                    .get_path(&["klines", "KQ.i@CZCE.PL", "60000000000", "data", id])
+                    .is_some(),
+                "DIFF overlap/prefetch row {id} must survive local page pruning"
+            );
+        }
+    }
+
+    #[cfg(all(feature = "live", feature = "services"))]
+    #[tokio::test]
+    async fn session_source_rejects_multiple_charts_before_acquiring_a_connection() {
+        let factory = SessionServerHistorySourceFactory::new(1);
+        let mut request = BacktestHistoryFillRequest::tick(
+            "SHFE.au2608",
+            (1000, 2000),
+            None,
+            Some(1),
+            "SHFE.au2608",
+        )
+        .server_request();
+        let mut other = request.charts[0].clone();
+        other.chart_id.push_str("-other");
+        request.charts.push(other);
+        let result = factory
+            .open(
+                BacktestHistoryCredentials::new("test-user", "test-pass"),
+                request,
+            )
+            .await;
+        assert!(matches!(result, Err(DataError::Validation(_))));
+        assert_eq!(factory.created_session_count(), 0);
+    }
+
+    #[cfg(all(feature = "live", feature = "services"))]
+    #[test]
+    fn pruning_keeps_only_overlap_and_prefetch_over_many_pages() {
+        use serde_json::json;
+        use tqsdk_core::{AdapterRegistry, RuntimeHandle};
+        use tqsdk_session::testing::ManualSession;
+        let mut adapters = AdapterRegistry::new();
+        adapters.register_default_adapters();
+        let manual = ManualSession::from_runtime(RuntimeHandle::with_adapters(adapters));
+        let session = manual.client_clone();
+        let symbol = "KQ.i@CZCE.PL";
+        for page in 0..32_i64 {
+            let start = page * 512;
+            let fields = (start..start + 512 + 17)
+                .map(|id| FieldMutation {
+                    field: id.to_string(),
+                    value: json!({"id":id,"datetime":1000+id}),
+                })
+                .collect();
+            session
+                .handle()
+                .ingest_presorted_market_mutations(
+                    [NormalizedMutation {
+                        path: StatePath::new(["klines", symbol, "60000000000", "data"]),
+                        object: None,
+                        fields,
+                        source: MutationSource::MarketDiff,
+                    }],
+                    vec![],
+                    CommitScope::RealtimeUpdate,
+                )
+                .unwrap();
+            let event = ServerBacktestHistoryEvent::CanonicalMinutes {
+                chart_id: "minute-pl".to_string(),
+                symbol: symbol.to_string(),
+                rows: (start..start + 512)
+                    .map(|id| kline(id, 1000 + id))
+                    .collect(),
+            };
+            assert!(
+                prune_consumed_server_history_page(&session, &BTreeMap::new(), &event).unwrap()
+            );
+            let reader = session.reader();
+            let market = reader.read_market_state();
+            let rows = market
+                .get_path(&["klines", symbol, "60000000000", "data"])
+                .unwrap()
+                .as_object()
+                .unwrap();
+            assert_eq!(
+                rows.len(),
+                18,
+                "only one overlap plus seventeen prefetched rows survive page {page}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn complete_coverage_does_not_open_a_source_or_load_authentication() {
         let root = temporary_root("fill-complete-coverage");
@@ -2260,7 +2469,7 @@ mod tests {
             .unwrap();
         let pool = Arc::new(ServerHistorySessionPool::new(1));
         let lease = ServerHistorySessionLease {
-            pool,
+            pool: Arc::clone(&pool),
             entry: Some(IdleServerHistorySession {
                 credentials: ServerHistorySessionCredentials {
                     user: "test-user".to_string(),
@@ -2268,11 +2477,12 @@ mod tests {
                 },
                 session: session.clone(),
             }),
-            permit: None,
+            permit: Some(Arc::clone(&pool.permits).try_acquire_owned().unwrap()),
         };
         let mut source = SessionServerHistorySource {
             stream: Some(stream),
             lease: Some(lease),
+            state_pruned: false,
             chart_kinds: BTreeMap::from([(
                 "ticks-au".to_string(),
                 ServerBacktestHistoryKind::Tick,
@@ -2330,11 +2540,23 @@ mod tests {
             session
                 .reader()
                 .read_market_state()
-                .get_path(&["ticks", "SHFE.au2608", "data"])
+                .get_path(&["ticks", "SHFE.au2608", "data", "1"])
                 .is_none(),
-            "consumed tick page must not remain in the pooled session state tree"
+            "consumed prefix must not remain in session state"
         );
-        source.close(false).await.unwrap();
+        assert!(
+            session
+                .reader()
+                .read_market_state()
+                .get_path(&["ticks", "SHFE.au2608", "data", "2"])
+                .is_some(),
+            "the continuation overlap must remain available"
+        );
+        source.close(true).await.unwrap();
+        assert!(
+            pool.idle.lock().unwrap().is_empty(),
+            "a peer with locally pruned DIFF state must not be recycled"
+        );
     }
 
     #[cfg(all(feature = "live", feature = "services"))]
@@ -2379,6 +2601,7 @@ mod tests {
         let mut source = SessionServerHistorySource {
             stream: Some(stream),
             lease: Some(lease),
+            state_pruned: false,
             chart_kinds: BTreeMap::from([(
                 "ticks-au".to_string(),
                 ServerBacktestHistoryKind::Tick,
@@ -2464,7 +2687,7 @@ mod tests {
                 ServerBacktestHistoryEvent::CanonicalMinutes {
                     chart_id: "minute-au".to_string(),
                     symbol: symbol.to_string(),
-                    rows: vec![kline(1, 1_000)],
+                    rows: vec![kline(1, 1_000), kline(2, 1_001)],
                 },
             ),
             (
@@ -2473,7 +2696,7 @@ mod tests {
                 ServerBacktestHistoryEvent::CanonicalDaily {
                     chart_id: "daily-au".to_string(),
                     symbol: symbol.to_string(),
-                    rows: vec![kline(1, 1_000)],
+                    rows: vec![kline(1, 1_000), kline(2, 1_001)],
                 },
             ),
         ];
@@ -2492,7 +2715,7 @@ mod tests {
                         object: None,
                         fields: vec![FieldMutation {
                             field: "data".to_string(),
-                            value: json!({"1": {"id": 1, "datetime": 1_000}}),
+                            value: json!({"1": {"id": 1, "datetime": 1_000}, "2": {"id": 2, "datetime": 1_001}}),
                         }],
                         source: MutationSource::MarketDiff,
                     }],
@@ -2508,9 +2731,16 @@ mod tests {
                 session
                     .reader()
                     .read_market_state()
-                    .get_path(&["klines", symbol, duration.as_str(), "data"])
+                    .get_path(&["klines", symbol, duration.as_str(), "data", "1"])
                     .is_none(),
                 "consumed {kind:?} page must not remain in the pooled session state tree"
+            );
+            assert!(
+                session
+                    .reader()
+                    .read_market_state()
+                    .get_path(&["klines", symbol, duration.as_str(), "data", "2"])
+                    .is_some()
             );
         }
     }

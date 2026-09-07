@@ -4,7 +4,7 @@
 //! 60-second Kline is the durable canonical Kline input for the local backtest
 //! path; higher periods are derived by `tqsdk-task` at replay time.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -53,7 +53,7 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 #[cfg(test)]
 std::thread_local! {
-    static TEST_MONTH_SCAN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static TEST_MONTH_SCAN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Compatibility identity for a cache file's calendar and session definition.
@@ -1773,6 +1773,53 @@ impl MonthRowReader {
         let row = decode_kline(bytes.as_slice());
         validate_one_stored_row(self.path.as_path(), self.trading_month.as_str(), &row)?;
         Ok(Some(row))
+    }
+}
+
+/// Request-scoped shared locks on existing final minute partitions.
+/// Closing these descriptors releases the locks, including partial acquisition failures.
+pub(crate) struct MinuteKlineReadPin {
+    _files: Vec<File>,
+}
+
+impl MinuteKlineCache {
+    pub(crate) fn pin_final_ranges(
+        &self,
+        ranges: &[(String, i64, i64)],
+    ) -> Result<MinuteKlineReadPin> {
+        // Bound descriptor use before opening anything. Larger offline jobs must
+        // explicitly split requests rather than silently lose snapshot isolation.
+        const MAX_PINNED_PARTITIONS: usize = 256;
+        let mut paths = BTreeSet::new();
+        for (symbol, start, end) in ranges {
+            validate_range(symbol, *start, *end)?;
+            for slice in split_trading_month_range(*start, *end)? {
+                paths.insert(self.month_file_path_unchecked(symbol, &slice.trading_month));
+                if paths.len() > MAX_PINNED_PARTITIONS {
+                    return Err(DataError::InvalidState(
+                        "minute read pin partition limit exceeded",
+                    ));
+                }
+            }
+        }
+        let mut files = Vec::with_capacity(paths.len());
+        for path in paths {
+            let file = OpenOptions::new()
+                .read(true)
+                .open(path.with_extension(format!("{FILE_EXTENSION}.lock")))?;
+            FileExt::try_lock_shared(&file).map_err(|error| {
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    DataError::CacheBusy {
+                        cache_dir: path.clone(),
+                        operation: "timeline minute partition read",
+                    }
+                } else {
+                    error.into()
+                }
+            })?;
+            files.push(file);
+        }
+        Ok(MinuteKlineReadPin { _files: files })
     }
 }
 

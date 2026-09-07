@@ -345,6 +345,58 @@ async fn canonical_minute_reads_only_the_60_second_kline_path() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn canonical_pages_require_window_edges_but_allow_interior_id_gaps() {
+    for (kind, duration) in [
+        (ServerBacktestHistoryKind::CanonicalMinute, MINUTE_NS),
+        (
+            ServerBacktestHistoryKind::CanonicalDaily,
+            SERVER_BACKTEST_CANONICAL_DAILY_NS,
+        ),
+    ] {
+        for missing in [Some("left"), Some("right"), None] {
+            let session = manual_session();
+            let symbol = "KQ.i@CZCE.PL";
+            let mut stream = ServerBacktestHistoryStream::open(
+                session.client_clone(),
+                request(vec![chart("canonical-edges", symbol, kind)]),
+            )
+            .await
+            .unwrap();
+            let _ = transport_bodies(&session);
+            let rows = match missing {
+                Some("left") => json!({"2":{"id":2,"datetime":2100},"3":{"id":3,"datetime":2200}}),
+                Some("right") => json!({"1":{"id":1,"datetime":1100},"2":{"id":2,"datetime":1200}}),
+                _ => json!({"1":{"id":1,"datetime":1100},"3":{"id":3,"datetime":2200}}),
+            };
+            let mut payload = tick_page("canonical-edges", symbol, 1, 3, rows, PAGE_COMPLETE);
+            payload["data"][0]["charts"]["canonical-edges"]["state"]["duration"] = json!(duration);
+            let series = payload["data"][0]["ticks"][symbol].take();
+            payload["data"][0].as_object_mut().unwrap().remove("ticks");
+            payload["data"][0]["klines"] = json!({symbol:{duration.to_string():series}});
+            ingest(&session, payload);
+            let event = stream
+                .next_event(Some(Instant::now() + Duration::from_millis(20)))
+                .await;
+            if let Some(edge) = missing {
+                assert!(
+                    event.is_err(),
+                    "{kind:?} must reject missing {edge} edge rather than emitting/finishing: {event:?}"
+                );
+            } else {
+                let rows = match event.unwrap().unwrap() {
+                    ServerBacktestHistoryEvent::CanonicalMinutes { rows, .. }
+                    | ServerBacktestHistoryEvent::CanonicalDaily { rows, .. } => rows,
+                    event => panic!("expected sparse canonical rows, got {event:?}"),
+                };
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].id, 1);
+            }
+            stream.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn canonical_daily_uses_native_one_day_chart_path_and_event() {
     let session = manual_session();
     let mut stream = ServerBacktestHistoryStream::open(

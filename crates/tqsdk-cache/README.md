@@ -1,5 +1,15 @@
 # `tqsdk-cache`
 
+`timeline` audit/`--apply` 及 fill 后 Timeline 重建可与普通 Tick fill 共存：
+root shared + 目标指数分钟月分区 shared pin + 产品发布 exclusive。
+相同分钟分区写入或 root-exclusive 维护仍互斥，busy 返回可重试错误。
+每次重建最多固定 256 个不同月分区；超限须显式拆分请求，不会静默丢弃 pin。
+
+TradingTimeline 的 2024 IM/CF 缓存确认目录可通过现有 `timeline --apply`
+及 `fill --trading-timeline-catalog ... --require-final` 使用；只能用于目录标注范围，
+不适用于其他品种或日期。该目录接受缓存推断，不声称公告认证；每次重建仍验证当前证据。
+参见 [隔离验证与命令](../../docs/research/2026-09-07-trading-timeline-cache-confirmed.md)。
+
 `tqsdk-cache` 是 `tqsdk-rust` 的可选 cache operator CLI。它管理同一 history root 中的
 daily TQBN tick cache、canonical final-60s Kline cache 和 native final-1d Kline cache，也可通过
 同一份回测历史查询合同导出时间区间；它是 workspace member，但不属于 Cargo default-members，也不会
@@ -88,6 +98,20 @@ tqsdk-cache migrate-universe --cache-dir /var/lib/tqsdk/history --plan-sha256 <V
 `preparation_required`/exit 1 报告需要 native-daily cache mutation。
 
 ## Cache family
+
+### TradingTimeline maintenance
+
+激活还要求 catalog 显式声明 `exception_review_complete: true`，代表已审计所有规则日期范围的完整例外史。
+仓库的 reviewed-2024 子集尚不具备该证明，只允许 audit，不可用于 `--apply` 或 fill 自动激活。
+fill 在远端操作前解析并固定 catalog；遇到发布后 fsync 失败会报告激活状态不确定，必须 reload
+`timeline.json`，不能假定旧 generation 未改变。Timeline 使用唯一的 V1 单文件布局；旧
+`active.json`/`snapshots` 必须在停机维护中转换并在验证后整体清理，运行时不读取旧布局。
+
+`timeline --catalog PATH --start-day YYYY-MM-DD --end-day YYYY-MM-DD [--symbol KQ.i@EX.product]`
+只审计本地 final 分钟缓存；`--apply` 才激活。普通及 historical-universe 分钟 fill 可用
+`--require-final --trading-timeline-catalog PATH` 自动执行收尾维护。没有该选项时原行为不变。
+未知日期或证据缺口禁止激活；忙锁退出可重试，不触发远端补数。详见
+[交易时间轴合同](../../docs/architecture/trading-timeline.md)。
 
 全局 `--kind` 选择目标 cache family，默认是 `tick`：
 
