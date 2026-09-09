@@ -101,6 +101,23 @@ fn tqbn_fixture(payload: &[u8]) -> Vec<u8> {
     bytes
 }
 
+fn tqbn_checkpoint(bytes: &[u8]) -> [u8; 32] {
+    fn fnv1a(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf29ce484222325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        })
+    }
+
+    let mut checkpoint = [0_u8; 32];
+    checkpoint[..4].copy_from_slice(b"TQTC");
+    checkpoint[4] = 2;
+    checkpoint[8..16].copy_from_slice(&(bytes.len() as u64).to_le_bytes());
+    checkpoint[16..24]
+        .copy_from_slice(&fnv1a(&bytes[bytes.len().saturating_sub(64)..]).to_le_bytes());
+    checkpoint[24..32].copy_from_slice(&u64::MAX.to_le_bytes());
+    checkpoint
+}
+
 fn seed_source(root: &Path, marker: &[u8]) {
     fs::create_dir_all(root.join(".backtest-history-staging/minute-v1")).unwrap();
     fs::write(
@@ -112,9 +129,10 @@ fn seed_source(root: &Path, marker: &[u8]) {
     fs::create_dir_all(root.join("minute-kline-v3")).unwrap();
     fs::create_dir_all(root.join("daily-kline-v1")).unwrap();
     fs::create_dir_all(root.join("backtest-history-metadata-v1/snapshots")).unwrap();
+    let tick_bytes = tqbn_fixture(marker);
     fs::write(
         root.join("series/20260829/tick/SHFE.au2612.tqbn"),
-        tqbn_fixture(marker),
+        &tick_bytes,
     )
     .unwrap();
     let snapshot = tqsdk_data::MinuteKlineCacheSnapshot::cst_v1();
@@ -145,7 +163,11 @@ fn seed_source(root: &Path, marker: &[u8]) {
     .unwrap();
     fs::write(root.join("backtest-history-metadata-v1/active.json"), b"{}").unwrap();
     fs::write(root.join(".tqsdk-cache-operation.lock"), b"").unwrap();
-    fs::write(root.join("series/20260829/tick/SHFE.au2612.tqbn.lock"), b"").unwrap();
+    fs::write(
+        root.join("series/20260829/tick/SHFE.au2612.tqbn.lock"),
+        tqbn_checkpoint(&tick_bytes),
+    )
+    .unwrap();
 }
 
 fn seed_metadata_source(root: &Path, marker: &[u8]) {
@@ -258,6 +280,34 @@ fn dry_run_is_read_only_and_reports_role_copy_policy() {
     assert_eq!(result["roles"]["tqbn_mutable_layout"]["files"], 1);
     assert!(!history.exists());
     assert!(!source.join(".tqsdk-cache-snapshot.lock").exists());
+}
+
+#[test]
+fn clone_omits_crash_cow_orphans_without_placeholder() {
+    let source = temp_dir("cow-orphan-source");
+    let history = temp_dir("cow-orphan-history");
+    seed_source(&source, b"one");
+    let orphan = "series/20260829/tick/SHFE.au2612.tqbn.cow-12-345-0";
+    fs::write(source.join(orphan), b"unpublished partial copy").unwrap();
+    let cloned = result(&run_json(&clone_args(
+        &source,
+        &history,
+        "2026-08-29T00:00:00Z",
+        "clone",
+    )));
+    let generation = history
+        .join("staging")
+        .join(cloned["snapshot_id"].as_str().unwrap());
+    assert!(!generation.join("cache").join(orphan).exists());
+    assert!(
+        generation
+            .join("cache/series/20260829/tick/SHFE.au2612.tqbn")
+            .is_file()
+    );
+    assert_eq!(
+        fs::read(source.join(orphan)).unwrap(),
+        b"unpublished partial copy"
+    );
 }
 
 #[test]

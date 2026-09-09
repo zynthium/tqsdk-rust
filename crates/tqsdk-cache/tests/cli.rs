@@ -491,7 +491,7 @@ fn minute_doctor_reports_the_v5_month_file_without_touching_tick_cache() {
     assert_eq!(result["cache_kind"], "minute");
     assert_eq!(result["problem_files"], 0);
     assert_eq!(result["files"][0]["status"], "readable");
-    assert_eq!(result["files"][0]["schema_version"], 5);
+    assert_eq!(result["files"][0]["schema_version"], 6);
 
     let _ = std::fs::remove_dir_all(cache_dir);
 }
@@ -557,18 +557,32 @@ fn minute_migrate_rewrites_v4_with_a_rollback_backup() {
         )
         .unwrap();
     let path = cache.month_file_path("KQ.i@SHFE.au", "202001");
-    let mut bytes = std::fs::read(&path).unwrap();
-    if bytes.starts_with(b"TQKLOG01") {
-        let offset = u64::from_le_bytes(bytes[64..72].try_into().unwrap()) as usize;
-        let len = u64::from_le_bytes(bytes[72..80].try_into().unwrap()) as usize;
-        let index: serde_json::Value =
-            serde_json::from_slice(&bytes[offset..offset + len]).unwrap();
-        let segment = &index["segments"][0];
-        let offset = segment["offset"].as_u64().unwrap() as usize;
-        let len = segment["len"].as_u64().unwrap() as usize;
-        bytes = bytes[offset..offset + len].to_vec();
+    // Independent v4 fixture, not extracted from the current writer.
+    let mut metadata = 1_u32.to_le_bytes().to_vec();
+    for value in [
+        "KQ.i@SHFE.au",
+        "202001",
+        "cst-trading-day-v1",
+        "cst-trading-day-v1",
+    ] {
+        metadata.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        metadata.extend_from_slice(value.as_bytes());
     }
-    bytes[4..6].copy_from_slice(&4_u16.to_le_bytes());
+    let metadata_len = metadata.len();
+    let mut payload = metadata;
+    payload.extend_from_slice(&range.start_ns.to_le_bytes());
+    payload.extend_from_slice(&range.end_ns.to_le_bytes());
+    let checksum = payload.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    let mut bytes = b"TQMK".to_vec();
+    bytes.extend_from_slice(&4_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&(metadata_len as u32).to_le_bytes());
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    bytes.extend_from_slice(&0_u64.to_le_bytes());
+    bytes.extend_from_slice(&checksum.to_le_bytes());
+    bytes.extend_from_slice(&payload);
     std::fs::write(&path, bytes).unwrap();
     let backup_dir = cache_dir.with_file_name(format!(
         "{}-backup",
@@ -596,7 +610,7 @@ fn minute_migrate_rewrites_v4_with_a_rollback_backup() {
         std::fs::read(backup_dir.join(path.strip_prefix(&cache_dir).unwrap())).unwrap()[4..6],
         4_u16.to_le_bytes()
     );
-    assert_eq!(&std::fs::read(&path).unwrap()[..8], b"TQKLOG01");
+    assert_eq!(&std::fs::read(&path).unwrap()[..8], b"TQHIST01");
 
     let _ = std::fs::remove_dir_all(cache_dir);
     let _ = std::fs::remove_dir_all(backup_dir);
@@ -3684,6 +3698,120 @@ fn metadata_refresh_requires_auth_before_advancing_active_sidecar() {
             .exists()
     );
     let _ = fs::remove_dir_all(cache_dir);
+}
+
+#[test]
+fn tick_migration_dry_run_and_apply_convert_a_frozen_schema3_fixture() {
+    let parent = temp_dir("tick-migrate-schema3");
+    let cache_dir = parent.join("cache");
+    let backup_dir = parent.join("backup");
+    let source = write_legacy_empty_tick_partition(&cache_dir, "SHFE.test2601", "20260105");
+    let old_bytes = fs::read(&source).unwrap();
+
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "tick",
+        "migrate",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "migrate", "success", 0);
+    assert_eq!(result["legacy_files"], 1);
+    assert_eq!(result["target_schema_version"], 4);
+    assert_eq!(result["capacity_estimate_ok"], true);
+    assert!(
+        result["estimated_required_available_bytes"]
+            .as_u64()
+            .unwrap()
+            > old_bytes.len() as u64
+    );
+
+    let output = run_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--kind",
+        "tick",
+        "migrate",
+        "--apply",
+        "--backup-dir",
+        backup_dir.to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = v3_result(&json, "migrate", "success", 0);
+    assert_eq!(result["completed"], true);
+    assert_eq!(result["legacy_files"], 1);
+    assert_eq!(&fs::read(&source).unwrap()[..8], b"TQHIST01");
+    assert_eq!(
+        fs::read(backup_dir.join(source.strip_prefix(&cache_dir).unwrap())).unwrap(),
+        old_bytes
+    );
+    let _ = fs::remove_dir_all(parent);
+}
+
+fn write_legacy_empty_tick_partition(
+    cache_dir: &std::path::Path,
+    symbol: &str,
+    day: &str,
+) -> std::path::PathBuf {
+    fn fnv1a(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf29ce484222325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        })
+    }
+    fn push_string(bytes: &mut Vec<u8>, value: &str) {
+        bytes.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(value.as_bytes());
+    }
+
+    let mut metadata = Vec::new();
+    push_string(&mut metadata, "tqsdk-history");
+    metadata.push(2);
+    push_string(&mut metadata, symbol);
+    metadata.extend_from_slice(&0_i64.to_le_bytes());
+    metadata.extend_from_slice(&1_000_000_000_i64.to_le_bytes());
+    metadata.extend_from_slice(&1_000_000_i64.to_le_bytes());
+    metadata.push(5);
+    metadata.extend_from_slice(&1_u32.to_le_bytes());
+    metadata.extend_from_slice(&1_u32.to_le_bytes());
+    push_string(&mut metadata, symbol);
+    metadata.extend_from_slice(&i64::MIN.to_le_bytes());
+    metadata.extend_from_slice(&i64::MAX.to_le_bytes());
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"TQBN");
+    bytes.push(1);
+    bytes.extend_from_slice(&3_u32.to_le_bytes());
+    bytes.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&fnv1a(&metadata).to_le_bytes());
+    bytes.extend_from_slice(&metadata);
+
+    let path = cache_dir
+        .join("series")
+        .join(day)
+        .join("tick")
+        .join(format!("{symbol}.tqbn"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    let mut checkpoint = [0_u8; 32];
+    checkpoint[..4].copy_from_slice(b"TQTC");
+    checkpoint[4] = 2;
+    checkpoint[8..16].copy_from_slice(&(bytes.len() as u64).to_le_bytes());
+    checkpoint[16..24]
+        .copy_from_slice(&fnv1a(&bytes[bytes.len().saturating_sub(64)..]).to_le_bytes());
+    checkpoint[24..32].copy_from_slice(&u64::MAX.to_le_bytes());
+    fs::write(path.with_extension("tqbn.lock"), checkpoint).unwrap();
+    path
 }
 
 fn run_json<const N: usize>(args: [&str; N]) -> std::process::Output {
