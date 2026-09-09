@@ -1,0 +1,17 @@
+[package]
+name = "tqsdk-hard-risk"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Opt-in durable, fail-closed hard-risk authority for tqsdk-rust"
+documentation = "https://docs.rs/tqsdk-hard-risk"
+readme = "README.md"
+license.workspace = true
+repository = "https://github.com/zynthium/tqsdk-rust"
+
+[dependencies]
+rusqlite.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

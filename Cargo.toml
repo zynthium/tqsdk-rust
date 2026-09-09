@@ -5,6 +5,7 @@ members = [
     "crates/tqsdk-data",
     "crates/tqsdk-cache",
     "crates/tqsdk-ctpse-helper",
+    "crates/tqsdk-hard-risk",
     "crates/tqsdk-relay",
     "crates/tqsdk-session",
     "crates/tqsdk-wait",
