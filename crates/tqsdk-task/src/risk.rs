@@ -322,7 +322,9 @@ const ORDER_RATE_WINDOW: Duration = Duration::from_secs(1);
 /// Snapshot checks are revision-bound. Daily open counters are process-local
 /// usage limits recorded by [`TaskHost`](crate::TaskHost) after a submitted
 /// order request, matching the core SDK rule shape without adding durable
-/// audit or cross-process risk management.
+/// audit or cross-process risk management. Recreating the process or engine
+/// resets those counters, so this type cannot be the sole hard-risk control
+/// across a crash or restart.
 #[derive(Debug, Clone, Default)]
 pub struct RiskEngine {
     max_order_volume: Option<i64>,

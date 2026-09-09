@@ -67,11 +67,12 @@ impl TargetPosSchedulerInner {
                 return;
             }
 
-            if matches!(phase, ActiveStepPhase::Running) && step.price_mode.is_some() {
-                if let Err(error) = self.ensure_quote_ref(api).await {
-                    self.finish_with_error(error);
-                    return;
-                }
+            if matches!(phase, ActiveStepPhase::Running)
+                && step.price_mode.is_some()
+                && let Err(error) = self.ensure_quote_ref(api).await
+            {
+                self.finish_with_error(error);
+                return;
             }
 
             if matches!(phase, ActiveStepPhase::Running) && !self.step_deadline_elapsed(step_index)

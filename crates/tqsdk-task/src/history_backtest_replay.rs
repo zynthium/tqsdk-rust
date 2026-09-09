@@ -115,6 +115,9 @@ pub struct HistoryBacktestReplayStream {
     refill_cursor: Option<usize>,
 }
 
+/// Largest bounded synchronous history replay batch.
+pub const MAX_HISTORY_REPLAY_BATCH_EVENTS: usize = 1_024;
+
 struct HistoryCursor {
     symbol: String,
     underlying_projection: UnderlyingProjection,
@@ -132,6 +135,8 @@ enum UnderlyingProjection {
 enum CursorProducer {
     Tick {
         reader: TickDataSeriesReader,
+        source: Arc<str>,
+        symbol: Arc<str>,
     },
     ProjectedTick(Box<ProjectedTickProducer>),
     SyntheticKline {
@@ -206,11 +211,16 @@ impl HistoryBacktestReplayStream {
                     request.end_ns,
                 ))
                 .map_err(data_error_to_task)?;
+            let event_symbol = Arc::<str>::from(symbol.clone());
             cursors.push(HistoryCursor {
                 symbol,
                 underlying_projection: UnderlyingProjection::None,
                 symbol_rank: 0,
-                producer: CursorProducer::Tick { reader },
+                producer: CursorProducer::Tick {
+                    reader,
+                    source: Arc::from("history-cache"),
+                    symbol: event_symbol,
+                },
                 next: None,
             });
         }
@@ -516,7 +526,11 @@ impl HistoryBacktestReplayStream {
         })
     }
 
-    fn next_event_sync(&mut self) -> Result<Option<ReplayMarketEvent>> {
+    /// Returns the next cache-backed event without boxing an async future.
+    ///
+    /// Use [`Self::next_batch_sync`] when strategy work can consume several
+    /// events together and wants to reduce per-event call overhead.
+    pub fn next_event_sync(&mut self) -> Result<Option<ReplayMarketEvent>> {
         if let Some(cursor_index) = self.refill_cursor.take() {
             let cursor = &mut self.cursors[cursor_index];
             push_next_event(cursor, cursor_index, &mut self.heap)?;
@@ -541,6 +555,28 @@ impl HistoryBacktestReplayStream {
         };
         self.refill_cursor = Some(item.cursor_index);
         Ok(Some(event))
+    }
+
+    /// Returns up to `max_events` ordered cache-backed events synchronously.
+    ///
+    /// The batch preserves the exact same `BinaryHeap` ordering as repeated
+    /// [`Self::next_event_sync`] calls. `max_events` must be within
+    /// `1..=MAX_HISTORY_REPLAY_BATCH_EVENTS`, keeping caller batching bounded.
+    pub fn next_batch_sync(&mut self, max_events: usize) -> Result<Vec<ReplayMarketEvent>> {
+        if !(1..=MAX_HISTORY_REPLAY_BATCH_EVENTS).contains(&max_events) {
+            return Err(TaskError::InvalidState(
+                "history replay batch size must be within 1..=1024",
+            ));
+        }
+
+        let mut events = Vec::with_capacity(max_events);
+        while events.len() < max_events {
+            let Some(event) = self.next_event_sync()? else {
+                break;
+            };
+            events.push(event);
+        }
+        Ok(events)
     }
 }
 
@@ -577,11 +613,16 @@ impl UnderlyingProjection {
 impl CursorProducer {
     fn next_event(&mut self, symbol: &str) -> Result<Option<QueuedEvent>> {
         match self {
-            Self::Tick { reader } => {
+            Self::Tick {
+                reader,
+                source,
+                symbol,
+            } => {
                 let Some(tick) = reader.next_tick().map_err(data_error_to_task)? else {
                     return Ok(None);
                 };
-                tick_event(symbol, tick).map(Some)
+                tick_event_with_shared_identity(Arc::clone(source), Arc::clone(symbol), tick)
+                    .map(Some)
             }
             Self::ProjectedTick(producer) => producer
                 .next_tick()?
@@ -929,10 +970,18 @@ fn validate_minute_underlying_segments(source: &HistoryBacktestMinuteKlineSource
 }
 
 fn tick_event(symbol: &str, tick: Tick) -> Result<QueuedEvent> {
+    tick_event_with_shared_identity(Arc::from("history-cache"), Arc::from(symbol), tick)
+}
+
+fn tick_event_with_shared_identity(
+    source: Arc<str>,
+    symbol: Arc<str>,
+    tick: Tick,
+) -> Result<QueuedEvent> {
     let row_id = tick.id;
     let source_datetime_ns = tick.datetime;
-    let event = ReplayMarketEvent::tick(
-        "history-cache",
+    let event = ReplayMarketEvent::tick_with_shared_identity(
+        source,
         symbol,
         source_datetime_ns,
         Some(source_datetime_ns),

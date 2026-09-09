@@ -7,7 +7,8 @@ use tqsdk_task::{
     HistoryBacktestMinuteKlineUnderlyingSegment, HistoryBacktestNativeKlineSource,
     HistoryBacktestProjectedReplayRequest, HistoryBacktestReplayRequest,
     HistoryBacktestReplayStream, HistoryBacktestSyntheticKlineSource, HistoryBacktestTickSource,
-    HistoryTickReplayStream, MinuteKlineSessionTemplate, ReplayMarketPayload,
+    HistoryTickReplayStream, MAX_HISTORY_REPLAY_BATCH_EVENTS, MinuteKlineSessionTemplate,
+    ReplayMarketPayload,
 };
 
 const MINUTE_NS: i64 = 60_000_000_000;
@@ -146,6 +147,40 @@ async fn history_backtest_replay_tick_only_matches_tick_stream_order() {
     assert_eq!(
         tick_stream.next_event().await.unwrap().unwrap().symbol(),
         "SHFE.rb2601"
+    );
+}
+
+#[test]
+fn history_backtest_replay_sync_batch_is_ordered_and_bounded() {
+    let dir = temp_dir("sync-batch-order");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    cache
+        .store_ticks("SHFE.rb2601", 1_000, 4_000, [tick(2, 2_000, 102.0, 2)])
+        .unwrap();
+    cache
+        .store_ticks("DCE.i2601", 1_000, 4_000, [tick(1, 1_000, 101.0, 1)])
+        .unwrap();
+
+    let mut stream = HistoryBacktestReplayStream::new(HistoryBacktestReplayRequest {
+        cache: HistorySeriesCache::open(&dir).unwrap(),
+        start_ns: 1_000,
+        end_ns: 4_000,
+        tick_symbols: vec!["SHFE.rb2601".to_string(), "DCE.i2601".to_string()],
+        native_klines: Vec::new(),
+        synthetic_klines: Vec::new(),
+    })
+    .unwrap();
+
+    let events = stream.next_batch_sync(2).unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].symbol(), "DCE.i2601");
+    assert_eq!(events[1].symbol(), "SHFE.rb2601");
+    assert!(stream.next_batch_sync(2).unwrap().is_empty());
+    assert!(stream.next_batch_sync(0).is_err());
+    assert!(
+        stream
+            .next_batch_sync(MAX_HISTORY_REPLAY_BATCH_EVENTS + 1)
+            .is_err()
     );
 }
 

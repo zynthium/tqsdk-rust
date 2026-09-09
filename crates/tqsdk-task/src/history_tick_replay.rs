@@ -2,18 +2,20 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use tqsdk_data::{HistorySeriesCache, TickDataSeriesReader, TickDataSeriesRequest};
 
 use crate::{BacktestMarketStream, ReplayMarketEvent, Result, TaskError};
 
 pub struct HistoryTickReplayStream {
+    source: Arc<str>,
     cursors: Vec<TickSeriesCursor>,
     heap: BinaryHeap<HeapItem>,
 }
 
 struct TickSeriesCursor {
-    symbol: String,
+    symbol: Arc<str>,
     symbol_rank: usize,
     reader: TickDataSeriesReader,
     next_tick: Option<tqsdk_core::Tick>,
@@ -35,7 +37,7 @@ impl HistoryTickReplayStream {
         let mut cursors = Vec::new();
         let mut heap = BinaryHeap::new();
         for request in requests {
-            let symbol = request.symbol().to_string();
+            let symbol = Arc::<str>::from(request.symbol().to_owned());
             let reader = cache.open_tick_data_series_reader(request)?;
             let cursor = TickSeriesCursor {
                 symbol,
@@ -48,7 +50,7 @@ impl HistoryTickReplayStream {
 
         let symbol_ranks = cursors
             .iter()
-            .map(|cursor| cursor.symbol.clone())
+            .map(|cursor| Arc::clone(&cursor.symbol))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .enumerate()
@@ -56,12 +58,16 @@ impl HistoryTickReplayStream {
             .collect::<BTreeMap<_, _>>();
         for (cursor_index, cursor) in cursors.iter_mut().enumerate() {
             cursor.symbol_rank = symbol_ranks
-                .get(cursor.symbol.as_str())
+                .get(&cursor.symbol)
                 .copied()
                 .unwrap_or(cursor_index);
             push_next_tick(cursor, cursor_index, &mut heap)?;
         }
-        Ok(Self { cursors, heap })
+        Ok(Self {
+            source: Arc::from("history-cache"),
+            cursors,
+            heap,
+        })
     }
 }
 
@@ -82,8 +88,9 @@ impl HistoryTickReplayStream {
         let Some(item) = self.heap.pop() else {
             return Ok(None);
         };
+        let source = Arc::clone(&self.source);
         let cursor = &mut self.cursors[item.cursor_index];
-        let symbol = cursor.symbol.clone();
+        let symbol = Arc::clone(&cursor.symbol);
         let tick = cursor
             .next_tick
             .take()
@@ -91,8 +98,8 @@ impl HistoryTickReplayStream {
         debug_assert_eq!(tick.datetime, item.datetime);
         debug_assert_eq!(tick.id, item.tick_id);
         push_next_tick(cursor, item.cursor_index, &mut self.heap).map_err(data_error_to_task)?;
-        ReplayMarketEvent::tick(
-            "history-cache",
+        ReplayMarketEvent::tick_with_shared_identity(
+            source,
             symbol,
             tick.datetime,
             Some(tick.datetime),

@@ -425,10 +425,10 @@ impl TqSim {
             .collect::<Vec<_>>();
         let mut outcomes = Vec::new();
         for order in pending {
-            if matches!(self.match_decision(&order.request), MatchDecision::Fill) {
-                if let Ok(outcome) = self.apply_order(order) {
-                    outcomes.push(outcome);
-                }
+            if matches!(self.match_decision(&order.request), MatchDecision::Fill)
+                && let Ok(outcome) = self.apply_order(order)
+            {
+                outcomes.push(outcome);
             }
         }
         self.report_from_outcomes(outcomes)

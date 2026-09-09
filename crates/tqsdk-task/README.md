@@ -47,7 +47,7 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
   - 可配置 `RiskEngine`，让 typed order builder 和 guarded insert 在提交前统一经过 risk gate
 - `RiskEngine`
   - 当前覆盖单笔最大手数、交易日内开仓次数、交易日内单合约开仓手数、合约组累计开仓手数、订单操作频率、最低可用资金、最大净持仓、quote 价格偏离、tick size 校验和 contract multiplier notional projection
-  - 开仓限额和订单频率是 task host 本进程内用量计数；不承诺跨进程持久审计或服务端风控替代
+- 开仓限额和订单频率是 task host 本进程内用量计数；进程或 `RiskEngine` 重建会重置该状态，不承诺跨进程持久审计或服务端风控替代，不能作为 crash/restart 后唯一的硬风控
   - 拒绝结果通过 typed `RiskRejection` 暴露
   - 读取现有 account / position / quote refs，不维护第二份资金或持仓状态
 - `trading_desk::TradingDeskProfile`
@@ -104,7 +104,9 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
   - `HistoryBacktestProjectedReplayRequest` / `HistoryBacktestTickSource` 让 cache-backed
     facade 按每个物理 tick range 回放到逻辑 symbol；`KQ.m@...` 主连因此读取具体合约
     cache file，同时为 replay quote 写入 `underlying_symbol`。source selection、coverage、metadata
-    sidecar 与远端 fill 仍归 `tqsdk-data`，本 crate 不直接管理 durable partition
+  sidecar 与远端 fill 仍归 `tqsdk-data`，本 crate 不直接管理 durable partition
+- `HistoryBacktestReplayStream::next_event_sync()` / `next_batch_sync(...)` 为纯 CacheOnly
+  历史回放提供无 future boxing 的同步读取；batch 保持 heap 事件顺序，且限制在 `1..=1024`
   - `HistoryBacktestSyntheticKlineSource` 可用 replay 起点之前的 Tick 前缀建立累计 volume
     baseline；该 priming Tick 只更新聚合器，不会泄漏为 strategy replay event
   - `HistoryBacktestMinuteKlineSource` 读取独立的 logical-symbol 60s monthly cache；

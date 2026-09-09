@@ -1021,10 +1021,10 @@ fn quote_from_tick(tick: &Tick) -> Quote {
 }
 
 fn quote_with_replay_underlying(mut quote: Quote, underlying_symbol: Option<&str>) -> Quote {
-    if quote.underlying_symbol.is_empty() {
-        if let Some(underlying_symbol) = underlying_symbol {
-            quote.underlying_symbol = underlying_symbol.to_owned();
-        }
+    if quote.underlying_symbol.is_empty()
+        && let Some(underlying_symbol) = underlying_symbol
+    {
+        quote.underlying_symbol = underlying_symbol.to_owned();
     }
     quote
 }

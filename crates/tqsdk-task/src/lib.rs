@@ -92,6 +92,7 @@ pub use history_backtest_replay::{
     HistoryBacktestMinuteKlineUnderlyingSegment, HistoryBacktestNativeKlineSource,
     HistoryBacktestProjectedReplayRequest, HistoryBacktestReplayRequest,
     HistoryBacktestReplayStream, HistoryBacktestSyntheticKlineSource, HistoryBacktestTickSource,
+    MAX_HISTORY_REPLAY_BATCH_EVENTS,
 };
 pub use history_tick_replay::HistoryTickReplayStream;
 pub use host::TaskHost;

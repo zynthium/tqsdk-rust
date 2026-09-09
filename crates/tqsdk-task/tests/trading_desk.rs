@@ -271,6 +271,38 @@ async fn trading_desk_precheck_rejection_does_not_submit_or_register_intent() {
     assert!(handle.drain_dispatches().unwrap().is_empty());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn dropping_prechecked_order_releases_prepared_intent() {
+    let (session, handle) = manual_session();
+    let desk = TradingDeskProfile::builder(session.clone())
+        .build()
+        .await
+        .unwrap();
+    seed_account_position_quote(&handle, 100_000.0, 0, 3_660.0);
+
+    let state = desk.read_market_trade_state();
+    let prechecked = desk
+        .precheck_order(&state, desk_intent(1), "abandoned-order")
+        .unwrap();
+    drop(state);
+    assert!(
+        session
+            .order_intent("sim", "abandoned-order")
+            .unwrap()
+            .is_some()
+    );
+
+    drop(prechecked);
+
+    assert!(
+        session
+            .order_intent("sim", "abandoned-order")
+            .unwrap()
+            .is_none()
+    );
+    assert!(handle.drain_dispatches().unwrap().is_empty());
+}
+
 #[test]
 fn trading_latency_cycle_reports_only_after_all_markers_are_present() {
     let probe = TradingLatencyProbe::enabled();

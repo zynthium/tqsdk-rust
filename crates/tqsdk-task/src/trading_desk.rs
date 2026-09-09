@@ -47,14 +47,52 @@ pub struct TradingDeskMarketEvent {
     latency_cycle: Option<TradingLatencyCycle>,
 }
 
-/// Order that passed state-bound risk checks and has a registered client id.
-#[derive(Debug, Clone)]
+/// Order that passed state-bound risk checks and owns a prepared client intent.
+///
+/// This is intentionally linear: dropping it before submission releases the
+/// prepared session intent, so abandoned prechecks cannot pin the ledger.
+#[derive(Debug)]
 pub struct TradingDeskPrecheckedOrder {
     client_order_id: String,
     intent: TaskOrderIntent,
     risk_report: RiskCheckReport,
     projection: RiskProjectionReport,
     registration: OrderIntentRegistration,
+    cleanup: Option<PendingOrderIntentCleanup>,
+}
+
+struct PendingOrderIntentCleanup {
+    session: SessionClient,
+    account_id: String,
+    client_order_id: String,
+    armed: bool,
+}
+
+impl PendingOrderIntentCleanup {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl std::fmt::Debug for PendingOrderIntentCleanup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingOrderIntentCleanup")
+            .field("account_id", &self.account_id)
+            .field("client_order_id", &self.client_order_id)
+            .field("armed", &self.armed)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for PendingOrderIntentCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self
+                .session
+                .forget_order_intent(&self.account_id, &self.client_order_id);
+        }
+    }
 }
 
 /// Ticket returned by the trading-desk order submit path.
@@ -93,6 +131,16 @@ pub enum TradingDeskOrderState {
     Cancelled,
     Rejected,
     Failed,
+}
+
+impl TradingDeskOrderState {
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Filled | Self::Cancelled | Self::Rejected | Self::Failed
+        )
+    }
 }
 
 /// Lightweight opt-in latency probe for trading-desk cycles.
@@ -188,6 +236,14 @@ impl TradingDeskProfile {
             limit_price: intent.limit_price.expect("intent was validated"),
         });
         let registration = self.session.remember_order_intent(record)?;
+        let cleanup = matches!(&registration, OrderIntentRegistration::Registered(_)).then(|| {
+            PendingOrderIntentCleanup {
+                session: self.session.clone(),
+                account_id: intent.account_id.clone(),
+                client_order_id: client_order_id.clone(),
+                armed: true,
+            }
+        });
 
         Ok(TradingDeskPrecheckedOrder {
             client_order_id,
@@ -195,49 +251,44 @@ impl TradingDeskProfile {
             risk_report,
             projection,
             registration,
+            cleanup,
         })
     }
 
     pub async fn submit_prechecked_order(
         &mut self,
-        prechecked: TradingDeskPrecheckedOrder,
+        mut prechecked: TradingDeskPrecheckedOrder,
     ) -> Result<TradingDeskOrderTicket> {
-        match prechecked.registration {
-            OrderIntentRegistration::Existing(existing) => {
-                Ok(TradingDeskOrderTicket::from_record(existing, false))
-            }
-            OrderIntentRegistration::Registered(_) => {
-                let command = insert_order_command(&prechecked.intent, &prechecked.client_order_id);
-                let submit = self.session.submit(command).await;
-                match submit {
-                    Ok(command_id) => {
-                        self.session.update_order_intent_command(
-                            &prechecked.intent.account_id,
-                            &prechecked.client_order_id,
-                            command_id,
-                        )?;
-                        if let Some(risk) = &mut self.risk {
-                            risk.record_accepted_order(&prechecked.intent)?;
-                        }
-                        Ok(TradingDeskOrderTicket {
-                            account_id: prechecked.intent.account_id,
-                            client_order_id: prechecked.client_order_id.clone(),
-                            order_id: prechecked.client_order_id,
-                            symbol: prechecked.intent.symbol,
-                            command_id: Some(command_id),
-                            submitted: true,
-                        })
-                    }
-                    Err(error) => {
-                        self.session.forget_order_intent(
-                            &prechecked.intent.account_id,
-                            &prechecked.client_order_id,
-                        )?;
-                        Err(error.into())
-                    }
-                }
-            }
+        if let OrderIntentRegistration::Existing(existing) = &prechecked.registration {
+            return Ok(TradingDeskOrderTicket::from_record(existing.clone(), false));
         }
+
+        self.session.begin_order_intent_submission(
+            &prechecked.intent.account_id,
+            &prechecked.client_order_id,
+        )?;
+        let command = insert_order_command(&prechecked.intent, &prechecked.client_order_id);
+        let command_id = self.session.submit(command).await?;
+        // The command has crossed the session boundary. Preserve its intent even
+        // if later local bookkeeping fails, so recovery can reconcile it.
+        prechecked.disarm_intent_cleanup();
+        self.session.update_order_intent_command(
+            &prechecked.intent.account_id,
+            &prechecked.client_order_id,
+            command_id,
+        )?;
+        if let Some(risk) = &mut self.risk {
+            risk.record_accepted_order(&prechecked.intent)?;
+        }
+
+        Ok(TradingDeskOrderTicket {
+            account_id: prechecked.intent.account_id.clone(),
+            client_order_id: prechecked.client_order_id.clone(),
+            order_id: prechecked.client_order_id.clone(),
+            symbol: prechecked.intent.symbol.clone(),
+            command_id: Some(command_id),
+            submitted: true,
+        })
     }
 
     fn market_event_from_commit(
@@ -344,6 +395,12 @@ impl TradingDeskMarketEvent {
 }
 
 impl TradingDeskPrecheckedOrder {
+    fn disarm_intent_cleanup(&mut self) {
+        if let Some(cleanup) = &mut self.cleanup {
+            cleanup.disarm();
+        }
+    }
+
     #[must_use]
     pub fn client_order_id(&self) -> &str {
         &self.client_order_id
@@ -418,12 +475,18 @@ impl TradingDeskOrderTicket {
         let order_state = trading_desk_state_from_ticket_state(&ticket_state);
         let order = order_from_ticket_state(&ticket_state).cloned();
 
-        Ok(TradingDeskOrderStatusReport {
+        let report = TradingDeskOrderStatusReport {
             revision: snapshot.revision(),
             command_id: self.command_id,
             state: order_state,
             order,
-        })
+        };
+        if report.state.is_terminal() {
+            let _ = desk
+                .session
+                .forget_order_intent(&self.account_id, &self.client_order_id);
+        }
+        Ok(report)
     }
 }
 

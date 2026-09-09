@@ -65,7 +65,10 @@
 - typed `TaskHost::orders(...)` order builder
 - `RiskEngine` / `RiskRejection` 最小前置风控
   - 覆盖官方 Python SDK 同类基础规则：开仓次数、开仓手数、合约组累计开仓手数和订单操作频率
-  - 这些计数是 task host 本进程内用量，不是跨进程持久风控服务
+  - 这些计数是 task host 本进程内用量；进程或 engine 重建即重置，不是跨进程持久风控服务，也不能作为 crash/restart 后唯一的硬风控
+  - 需要 durable、cross-process、fail-closed hard-risk admission 时，由调用方显式接入
+    `tqsdk-hard-risk`；它不改变 `RiskEngine` 或 `TradingDeskProfile` 的 owner，详见
+    [`api-hard-risk.md`](api-hard-risk.md)
 - `ExecutionGroup` / `ExecutionGroupOutcome` 两腿执行组 foundation
 - `AccountGroup` / `MultiAccountOrderTicket` 多账户执行 foundation
   - public family seam 是 `tqsdk_task::order_groups::*`；crate root 保持
@@ -135,8 +138,9 @@
     `60s` 是唯一持久 canonical K，且只由官方 server-side backtest terminal 确认后写入。
     task 不创建派生 K cache，只决定 replay 的 open/final event 时机；`61s` / `90s` 会拒绝。
     canonical minute 在 row timestamp 发 open-only、在 `+60s` 发 final row；高周期在 bar
-    start 发 open-only，随后每个关闭分钟更新一次。`HistoryBacktestReplayStream` 与 tick /
-    synthetic K 线按 event time 合并，而 `StrategyBacktest` 原子批处理相同 timestamp，避免
+start 发 open-only，随后每个关闭分钟更新一次。`HistoryBacktestReplayStream` 与 tick /
+synthetic K 线按 event time 合并；其 CacheOnly `next_event_sync()` / `next_batch_sync(1..=1024)`
+不引入 future boxing，且 batch 保持相同 heap 顺序。`StrategyBacktest` 原子批处理相同 timestamp，避免
     策略看到未来 OHLC。K-only `>=60s` 不读取 tick；quote fallback 隐式使用 60s minute。
     K 线 quote synthesis 所需 price tick / instrument spec 仍由显式 builder metadata 提供；
     caller-owned replay source 仍由 `replay_backtest(...)` 显式接入；`tqsdk::advanced`
@@ -164,10 +168,11 @@
   - `read_market_trade_state()` 返回同 revision 的 market + trade 分区读 guard
   - `precheck_order(&state, intent, client_order_id)` 在该 guard 上运行
     `RiskEngine::check_report_on_state` / `project_order_on_state`
-  - `submit_prechecked_order(...)` 注册 session-scoped client order id 并提交
-    runtime trade command；重复 client id 返回 existing ticket，不重复发单
-  - `TradingDeskOrderTicket::status(&desk)` 通过 typed command/order lifecycle
-    返回 `TradingDeskOrderStatusReport`
+- `precheck_order(...)` 返回不可复制的 prepared capability；若未提交即 drop，会释放其 prepared intent，不能永久占住 client id
+- `submit_prechecked_order(...)` 将 intent 原子推进 `Prepared → Submitting → Submitted(command_id)` 后提交
+ runtime trade command；重复 client id 返回 existing ticket，不重复发单
+- `TradingDeskOrderTicket::status(&desk)` 通过 typed command/order lifecycle
+ 返回 `TradingDeskOrderStatusReport`；terminal status 会回收进程内 intent
   - `TradingLatencyProbe` / `TradingLatencyCycle` / `TradingLatencyReport` 是 typed
     本进程 latency marker API，缺 marker 时返回 `None`
   - 慢日志、WAL、journal、落盘重试、audit sidecar 和跨进程恢复由调用方或上层服务拥有；`TradingDeskProfile` 不持有 sink、WAL、journal 或 cache writer。
@@ -372,6 +377,8 @@ while let Some(event) = desk.next_market_event(deadline).await? {
 - typed latency report 只记录 SDK 本进程 `Instant` 与 runtime revision，不承诺
   交易所或服务器时钟同步延迟。
 - 慢日志、WAL、journal、落盘重试、audit sidecar 和跨进程恢复由调用方或上层服务拥有；`TradingDeskProfile` 不持有 sink、WAL、journal 或 cache writer。
+  调用方若选择 SQLite/WAL hard-risk sidecar，必须在 `precheck`/network send 外单独执行其短事务，
+  不能把 blocking durable I/O 放进 market/trade read guard 或 runtime partition lock。
 
 ### root host
 
@@ -570,7 +577,8 @@ pub enum RiskRejection {
   partition read 面，不维护私有资金或持仓状态。
 - `daily_open_count_limit` / `daily_open_volume_limit` /
   `accumulated_open_volume_limit` / `order_rate_limit_per_second` 对齐官方
-  Python SDK 的基础风控规则形态，但只记录 task host 本进程内用量。
+  Python SDK 的基础风控规则形态，但只记录 task host 本进程内用量；进程或
+  `RiskEngine` 重建会清零，不能作为 crash/restart 后唯一的硬风控。
 - `TaskHost` 在成功报单后记录开仓/频率用量；`cancel_order_guarded` 也会经过订单
   操作频率限制。
 - 风控拒绝必须是 typed reason，不能要求业务代码解析字符串拒单原因。

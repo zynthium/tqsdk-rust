@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use std::{fs, io};
 
@@ -36,11 +37,11 @@ pub enum ReplayMarketPayloadKind {
 /// Normalized market event for task-level deterministic replay.
 #[derive(Debug, Clone)]
 pub struct ReplayMarketEvent {
-    source: String,
-    symbol: String,
+    source: Arc<str>,
+    symbol: Arc<str>,
     received_at_ns: i64,
     event_time_ns: i64,
-    underlying_symbol: Option<String>,
+    underlying_symbol: Option<Arc<str>>,
     payload: ReplayMarketPayload,
 }
 
@@ -770,17 +771,17 @@ impl ReplayMarketEvent {
             symbol: self.symbol().to_owned(),
             received_at_ns: self.received_at_ns(),
             event_time_ns: self.event_time_ns(),
-            underlying_symbol: self.underlying_symbol.clone(),
+            underlying_symbol: self.underlying_symbol.as_deref().map(str::to_owned),
         }
     }
 
     pub(crate) fn into_step_meta(self) -> ReplayStepMeta {
         ReplayStepMeta {
-            source: self.source,
-            symbol: self.symbol,
+            source: self.source.to_string(),
+            symbol: self.symbol.to_string(),
             received_at_ns: self.received_at_ns,
             event_time_ns: self.event_time_ns,
-            underlying_symbol: self.underlying_symbol,
+            underlying_symbol: self.underlying_symbol.map(|symbol| symbol.to_string()),
         }
     }
 
@@ -838,6 +839,22 @@ impl ReplayMarketEvent {
         )
     }
 
+    pub(crate) fn tick_with_shared_identity(
+        source: Arc<str>,
+        symbol: Arc<str>,
+        received_at_ns: i64,
+        event_time_ns: Option<i64>,
+        tick: Tick,
+    ) -> Result<Self> {
+        Self::new_shared(
+            source,
+            symbol,
+            received_at_ns,
+            event_time_ns,
+            ReplayMarketPayload::Tick(tick),
+        )
+    }
+
     fn new(
         source: impl Into<String>,
         symbol: impl Into<String>,
@@ -845,8 +862,22 @@ impl ReplayMarketEvent {
         event_time_ns: Option<i64>,
         payload: ReplayMarketPayload,
     ) -> Result<Self> {
-        let source = source.into();
-        let symbol = symbol.into();
+        Self::new_shared(
+            Arc::<str>::from(source.into()),
+            Arc::<str>::from(symbol.into()),
+            received_at_ns,
+            event_time_ns,
+            payload,
+        )
+    }
+
+    fn new_shared(
+        source: Arc<str>,
+        symbol: Arc<str>,
+        received_at_ns: i64,
+        event_time_ns: Option<i64>,
+        payload: ReplayMarketPayload,
+    ) -> Result<Self> {
         if source.trim().is_empty() {
             return Err(TaskError::InvalidState(
                 "replay market event source must not be empty",
@@ -884,7 +915,7 @@ impl ReplayMarketEvent {
                 "replay market event underlying_symbol must not be empty",
             ));
         }
-        self.underlying_symbol = Some(underlying_symbol.to_owned());
+        self.underlying_symbol = Some(Arc::<str>::from(underlying_symbol));
         Ok(self)
     }
 
@@ -1074,5 +1105,34 @@ fn checkpoint_io_error(operation: &'static str, path: &Path, error: io::Error) -
 fn invalid_checkpoint(reason: impl Into<String>) -> TaskError {
     TaskError::InvalidCheckpoint {
         reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+mod replay_market_event_tests {
+    use std::sync::Arc;
+
+    use tqsdk_core::Tick;
+
+    use super::ReplayMarketEvent;
+
+    #[test]
+    fn shared_tick_identity_and_event_clone_reuse_arc_storage() {
+        let source = Arc::<str>::from("history-cache");
+        let symbol = Arc::<str>::from("SHFE.au2602");
+        let event = ReplayMarketEvent::tick_with_shared_identity(
+            Arc::clone(&source),
+            Arc::clone(&symbol),
+            1,
+            Some(1),
+            Tick::default(),
+        )
+        .unwrap();
+        let cloned = event.clone();
+
+        assert!(Arc::ptr_eq(&event.source, &source));
+        assert!(Arc::ptr_eq(&event.symbol, &symbol));
+        assert!(Arc::ptr_eq(&event.source, &cloned.source));
+        assert!(Arc::ptr_eq(&event.symbol, &cloned.symbol));
     }
 }
