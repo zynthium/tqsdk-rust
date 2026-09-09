@@ -219,7 +219,14 @@ pub struct BacktestTickCacheLockRepairFile {
     pub error: Option<String>,
 }
 
-/// Legacy directory-level companion-lock repair status for one Tick TQBN partition.
+fn count_lock_status(
+    files: &[BacktestTickCacheLockRepairFile],
+    status: BacktestTickCacheLockRepairStatus,
+) -> usize {
+    files.iter().filter(|file| file.status == status).count()
+}
+
+/// Reserved compatibility record for retired directory-level Tick locks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BacktestTickCacheLegacyPartitionLockRepair {
     pub partition_dir: PathBuf,
@@ -232,7 +239,7 @@ pub struct BacktestTickCacheLegacyPartitionLockRepair {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BacktestTickCacheLockRepairReport {
     pub cache_dir: PathBuf,
-    /// Results for legacy `<partition>/.tqbn.lock` files, one per unique Tick partition.
+    /// Reserved compatibility field; always empty.
     pub legacy_partition_locks: Vec<BacktestTickCacheLegacyPartitionLockRepair>,
     pub legacy_partition_locks_missing: usize,
     pub legacy_partition_locks_created: usize,
@@ -641,49 +648,38 @@ impl BacktestTickCache {
         })
     }
 
-    /// Inspect or repair current and legacy companion locks for existing Tick TQBN partitions.
+    /// Inspect or repair current companion locks for existing Tick TQBN partitions.
     ///
     /// [`BacktestTickCacheLockRepairMode::DryRun`] never writes a companion lock.
-    /// [`BacktestTickCacheLockRepairMode::Apply`] first creates missing legacy
-    /// `<partition>/.tqbn.lock` files, then creates missing `<file>.tqbn.lock`
+    /// [`BacktestTickCacheLockRepairMode::Apply`] creates missing `<file>.tqbn.lock`
     /// files through the normal exclusive TQBN lock path. It never rewrites Tick
-    /// bytes, rows, coverage, or indexes. Callers that share a cache root must first
-    /// hold an exclusive [`Self::try_acquire_consistency_read_lock`] gate.
+    /// bytes, rows, coverage, or indexes. Apply acquires an exclusive cache-root
+    /// stable-view gate, or reuses one attached with [`Self::with_exclusive_root_gate`].
     pub fn repair_tick_locks(
         &self,
         mode: BacktestTickCacheLockRepairMode,
     ) -> Result<BacktestTickCacheLockRepairReport> {
-        match mode {
+        if mode == BacktestTickCacheLockRepairMode::DryRun {
+            return self.repair_tick_locks_under_root_gate(mode);
+        }
+
+        if self.exclusive_root_gate.is_some() {
+            return self
+                .with_attached_exclusive_root(|| self.repair_tick_locks_under_root_gate(mode));
+        }
+
+        let _root_gate = self.try_acquire_consistency_read_lock()?;
+        self.history
+            .with_caller_held_exclusive_root(|| self.repair_tick_locks_under_root_gate(mode))
+    }
+
+    fn repair_tick_locks_under_root_gate(
+        &self,
+        mode: BacktestTickCacheLockRepairMode,
+    ) -> Result<BacktestTickCacheLockRepairReport> {
+        let (files, missing_files, created_files, already_present_files, failed_files) = match mode
+        {
             BacktestTickCacheLockRepairMode::DryRun => {
-                let legacy_partition_locks = self
-                    .history
-                    .inspect_tick_legacy_partition_locks()?
-                    .into_iter()
-                    .map(|lock| BacktestTickCacheLegacyPartitionLockRepair {
-                        partition_dir: lock.partition_dir,
-                        lock_path: lock.lock_path,
-                        status: if lock.error.is_some() {
-                            BacktestTickCacheLockRepairStatus::Failed
-                        } else if lock.lock_exists {
-                            BacktestTickCacheLockRepairStatus::AlreadyPresent
-                        } else {
-                            BacktestTickCacheLockRepairStatus::Missing
-                        },
-                        error: lock.error,
-                    })
-                    .collect::<Vec<_>>();
-                let legacy_partition_locks_missing = legacy_partition_locks
-                    .iter()
-                    .filter(|lock| lock.status == BacktestTickCacheLockRepairStatus::Missing)
-                    .count();
-                let legacy_partition_locks_already_present = legacy_partition_locks
-                    .iter()
-                    .filter(|lock| lock.status == BacktestTickCacheLockRepairStatus::AlreadyPresent)
-                    .count();
-                let legacy_partition_locks_failed = legacy_partition_locks
-                    .iter()
-                    .filter(|lock| lock.status == BacktestTickCacheLockRepairStatus::Failed)
-                    .count();
                 let files = self
                     .history
                     .inspect_tick_locks()?
@@ -701,62 +697,13 @@ impl BacktestTickCache {
                         error: file.error,
                     })
                     .collect::<Vec<_>>();
-                let missing_files = files
-                    .iter()
-                    .filter(|file| file.status == BacktestTickCacheLockRepairStatus::Missing)
-                    .count();
-                let already_present_files = files
-                    .iter()
-                    .filter(|file| file.status == BacktestTickCacheLockRepairStatus::AlreadyPresent)
-                    .count();
-                let failed_files = files
-                    .iter()
-                    .filter(|file| file.status == BacktestTickCacheLockRepairStatus::Failed)
-                    .count();
-                Ok(BacktestTickCacheLockRepairReport {
-                    cache_dir: self.history.root_dir().to_path_buf(),
-                    legacy_partition_locks,
-                    legacy_partition_locks_missing,
-                    legacy_partition_locks_created: 0,
-                    legacy_partition_locks_already_present,
-                    legacy_partition_locks_failed,
-                    files,
-                    missing_files,
-                    created_files: 0,
-                    already_present_files,
-                    failed_files,
-                })
+                let missing = count_lock_status(&files, BacktestTickCacheLockRepairStatus::Missing);
+                let present =
+                    count_lock_status(&files, BacktestTickCacheLockRepairStatus::AlreadyPresent);
+                let failed = count_lock_status(&files, BacktestTickCacheLockRepairStatus::Failed);
+                (files, missing, 0, present, failed)
             }
             BacktestTickCacheLockRepairMode::Apply => {
-                let legacy_partition_locks = self
-                    .history
-                    .repair_tick_legacy_partition_locks()?
-                    .into_iter()
-                    .map(|lock| BacktestTickCacheLegacyPartitionLockRepair {
-                        partition_dir: lock.partition_dir,
-                        lock_path: lock.lock_path,
-                        status: if lock.error.is_some() {
-                            BacktestTickCacheLockRepairStatus::Failed
-                        } else if lock.lock_created {
-                            BacktestTickCacheLockRepairStatus::Created
-                        } else {
-                            BacktestTickCacheLockRepairStatus::AlreadyPresent
-                        },
-                        error: lock.error,
-                    })
-                    .collect::<Vec<_>>();
-                let legacy_partition_locks_created = legacy_partition_locks
-                    .iter()
-                    .filter(|lock| lock.status == BacktestTickCacheLockRepairStatus::Created)
-                    .count();
-                let legacy_partition_locks_already_present = legacy_partition_locks
-                    .iter()
-                    .filter(|lock| lock.status == BacktestTickCacheLockRepairStatus::AlreadyPresent)
-                    .count();
-                let legacy_partition_locks_failed = legacy_partition_locks
-                    .iter()
-                    .filter(|lock| lock.status == BacktestTickCacheLockRepairStatus::Failed)
-                    .count();
                 let files = self
                     .history
                     .repair_tick_locks()?
@@ -774,33 +721,27 @@ impl BacktestTickCache {
                         error: file.error,
                     })
                     .collect::<Vec<_>>();
-                let created_files = files
-                    .iter()
-                    .filter(|file| file.status == BacktestTickCacheLockRepairStatus::Created)
-                    .count();
-                let already_present_files = files
-                    .iter()
-                    .filter(|file| file.status == BacktestTickCacheLockRepairStatus::AlreadyPresent)
-                    .count();
-                let failed_files = files
-                    .iter()
-                    .filter(|file| file.status == BacktestTickCacheLockRepairStatus::Failed)
-                    .count();
-                Ok(BacktestTickCacheLockRepairReport {
-                    cache_dir: self.history.root_dir().to_path_buf(),
-                    legacy_partition_locks,
-                    legacy_partition_locks_missing: 0,
-                    legacy_partition_locks_created,
-                    legacy_partition_locks_already_present,
-                    legacy_partition_locks_failed,
-                    files,
-                    missing_files: 0,
-                    created_files,
-                    already_present_files,
-                    failed_files,
-                })
+                let created = count_lock_status(&files, BacktestTickCacheLockRepairStatus::Created);
+                let present =
+                    count_lock_status(&files, BacktestTickCacheLockRepairStatus::AlreadyPresent);
+                let failed = count_lock_status(&files, BacktestTickCacheLockRepairStatus::Failed);
+                (files, 0, created, present, failed)
             }
-        }
+        };
+
+        Ok(BacktestTickCacheLockRepairReport {
+            cache_dir: self.history.root_dir().to_path_buf(),
+            legacy_partition_locks: Vec::new(),
+            legacy_partition_locks_missing: 0,
+            legacy_partition_locks_created: 0,
+            legacy_partition_locks_already_present: 0,
+            legacy_partition_locks_failed: 0,
+            files,
+            missing_files,
+            created_files,
+            already_present_files,
+            failed_files,
+        })
     }
 
     /// Try to acquire the exclusive cache-root gate required by destructive

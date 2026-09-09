@@ -165,22 +165,6 @@ pub(crate) struct HistorySeriesTickLockRepair {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HistorySeriesTickLegacyPartitionLockInspection {
-    pub partition_dir: PathBuf,
-    pub lock_path: PathBuf,
-    pub lock_exists: bool,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HistorySeriesTickLegacyPartitionLockRepair {
-    pub partition_dir: PathBuf,
-    pub lock_path: PathBuf,
-    pub lock_created: bool,
-    pub error: Option<String>,
-}
-
 #[derive(Clone)]
 /// Coverage-aware local history series cache.
 ///
@@ -772,20 +756,8 @@ impl HistorySeriesCache {
         self.store.inspect_tick_locks()
     }
 
-    pub(crate) fn inspect_tick_legacy_partition_locks(
-        &self,
-    ) -> Result<Vec<HistorySeriesTickLegacyPartitionLockInspection>> {
-        self.store.inspect_tick_legacy_partition_locks()
-    }
-
     pub(crate) fn repair_tick_locks(&self) -> Result<Vec<HistorySeriesTickLockRepair>> {
         self.store.repair_tick_locks()
-    }
-
-    pub(crate) fn repair_tick_legacy_partition_locks(
-        &self,
-    ) -> Result<Vec<HistorySeriesTickLegacyPartitionLockRepair>> {
-        self.store.repair_tick_legacy_partition_locks()
     }
 
     pub fn enforce_limits(

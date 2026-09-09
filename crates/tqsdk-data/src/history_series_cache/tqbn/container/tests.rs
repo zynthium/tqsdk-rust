@@ -1,56 +1,19 @@
 use super::*;
 
 const SYMBOL: &str = "SHFE.test2601";
-// Keep container-only migration tests on an open/future partition. Closed-month
+// Keep container-only tests on an open/future partition. Closed-month
 // packing is exercised separately at the store layer.
 const DAY: &str = "20990105";
 
-fn assert_legacy_equivalent(f: &Fixture, batches: &[Vec<Tick>]) -> Vec<Tick> {
-    let legacy = TqbnHistoryStore::new(f.root.join("legacy")).unwrap();
-    let legacy_path = legacy.partition_series_path(DAY, SYMBOL, HistorySeriesKind::Tick);
-    ensure_parent_dir(&legacy_path).unwrap();
+fn write_batches_and_read_all(f: &Fixture, batches: &[Vec<Tick>]) -> Vec<Tick> {
     for batch in batches {
         f.write(batch);
-        with_exclusive_tqbn_lock(&legacy_path, || {
-            append_legacy_segment_to_file(
-                &legacy_path,
-                &HistorySeriesWriteSegment {
-                    symbol: SYMBOL,
-                    kind: HistorySeriesKind::Tick,
-                    declared_range_ns: None,
-                    rows: HistorySeriesWriteRows::Ticks(batch),
-                },
-            )
-        })
-        .unwrap();
     }
-    let request = f.request(0, 3600);
-    let mut reader = legacy
-        .open_reader(HistorySeriesReadRequest {
-            symbol: request.symbol,
-            kind: request.kind,
-            range_start_ns: request.range_start_ns,
-            range_end_ns: request.range_end_ns,
-        })
-        .unwrap();
-    let mut expected = Vec::new();
-    while let Some(HistorySeriesRow::Tick(row)) = reader.next_row().unwrap() {
-        expected.push(row);
-    }
-    let actual = f.all();
-    assert_eq!(
-        encode_fixed_tick_records(&actual, true).unwrap(),
-        encode_fixed_tick_records(&expected, true).unwrap()
-    );
-    assert_eq!(
-        actual.iter().map(|row| row.epoch).collect::<Vec<_>>(),
-        expected.iter().map(|row| row.epoch).collect::<Vec<_>>()
-    );
-    actual
+    f.all()
 }
 
 #[test]
-fn increasing_time_reused_id_matches_legacy_global_replay_rules() {
+fn increasing_time_reused_id_keeps_latest_snapshot() {
     let f = Fixture::new();
     let old = Tick {
         epoch: None,
@@ -60,64 +23,13 @@ fn increasing_time_reused_id_matches_legacy_global_replay_rules() {
         datetime: old.datetime + 10_000_000,
         ..old.clone()
     };
-    let actual = assert_legacy_equivalent(&f, &[vec![old], vec![replay.clone()]]);
+    let actual = write_batches_and_read_all(&f, &[vec![old], vec![replay.clone()]]);
     assert_eq!(actual.len(), 1);
     assert_eq!(actual[0].datetime, replay.datetime);
 }
 
-// Migration decision witness, not an all-range equivalence claim: the legacy
-// reader canonicalizes only rows within the requested range. A stable daily
-// canonical set cannot reproduce both of these answers after dropping rows.
 #[test]
-fn legacy_replay_canonicalization_depends_on_the_requested_range() {
-    let f = Fixture::new();
-    let legacy = TqbnHistoryStore::new(f.root.join("range-witness")).unwrap();
-    let legacy_path = legacy.partition_series_path(DAY, SYMBOL, HistorySeriesKind::Tick);
-    ensure_parent_dir(&legacy_path).unwrap();
-    let old = Tick {
-        epoch: None,
-        ..f.row(10)
-    };
-    let replay = Tick {
-        datetime: old.datetime + 10_000_000,
-        ..old.clone()
-    };
-    for row in [&old, &replay] {
-        with_exclusive_tqbn_lock(&legacy_path, || {
-            append_legacy_segment_to_file(
-                &legacy_path,
-                &HistorySeriesWriteSegment {
-                    symbol: SYMBOL,
-                    kind: HistorySeriesKind::Tick,
-                    declared_range_ns: None,
-                    rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(row)),
-                },
-            )
-        })
-        .unwrap();
-    }
-    for (end, expected_time) in [
-        (old.datetime + 5_000_000, old.datetime),
-        (replay.datetime + 1, replay.datetime),
-    ] {
-        let mut reader = legacy
-            .open_reader(HistorySeriesReadRequest {
-                symbol: SYMBOL.into(),
-                kind: HistorySeriesKind::Tick,
-                range_start_ns: old.datetime,
-                range_end_ns: end,
-            })
-            .unwrap();
-        let Some(HistorySeriesRow::Tick(row)) = reader.next_row().unwrap() else {
-            panic!("legacy reader must retain one range-local row");
-        };
-        assert_eq!(row.datetime, expected_time);
-        assert!(reader.next_row().unwrap().is_none());
-    }
-}
-
-#[test]
-fn incoming_id_reset_applies_replay_witnesses_from_old_partition() {
+fn incoming_id_reset_applies_replay_witnesses_from_existing_partition() {
     let f = Fixture::new();
     let old = Tick {
         epoch: None,
@@ -134,7 +46,7 @@ fn incoming_id_reset_applies_replay_witnesses_from_old_partition() {
         last_price: 42.0,
         ..old.clone()
     };
-    let actual = assert_legacy_equivalent(&f, &[vec![old], vec![replay, reset]]);
+    let actual = write_batches_and_read_all(&f, &[vec![old], vec![replay, reset]]);
     assert_eq!(actual.len(), 2);
 }
 
@@ -169,7 +81,7 @@ fn replay_chain_crosses_blocks_and_more_than_twenty_minutes() {
             ..row.clone()
         })
         .collect::<Vec<_>>();
-    let actual = assert_legacy_equivalent(&f, &[old, corrected]);
+    let actual = write_batches_and_read_all(&f, &[old, corrected]);
     assert_eq!(actual.len(), 9_000);
     assert_eq!(actual[0].id, 0);
     assert_eq!(actual[8_993].id, 18_993);
@@ -191,399 +103,6 @@ fn deep_inventory_identifies_common_schema_and_variable_width() {
 }
 
 #[test]
-fn legacy_partition_migration_is_verified_atomic_and_idempotent() {
-    let f = Fixture::new();
-    fs::remove_file(&f.path).unwrap();
-    let old = Tick {
-        epoch: None,
-        ..f.row(10)
-    };
-    let replay = Tick {
-        datetime: old.datetime + 10_000_000,
-        ..old.clone()
-    };
-    with_exclusive_tqbn_lock(&f.path, || {
-        append_legacy_segment_to_file(
-            &f.path,
-            &HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(&[old]),
-            },
-        )?;
-        append_legacy_segment_to_file(
-            &f.path,
-            &HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(&[replay]),
-            },
-        )?;
-        append_coverage_to_file(&f.path, &f.commit(0, 15))?;
-        append_provisional_to_file(
-            &f.path,
-            &HistorySeriesProvisionalCoverage {
-                symbol: SYMBOL.into(),
-                kind: HistorySeriesKind::Tick,
-                range_start_ns: f.start + 20 * NANOS_PER_SECOND,
-                complete_through_ns: f.start + 30 * NANOS_PER_SECOND,
-                as_of_ns: f.start + 40 * NANOS_PER_SECOND,
-                rows: 0,
-                id_range: None,
-            },
-        )
-    })
-    .unwrap();
-    assert!(!matches(&f.path).unwrap());
-    let before = parse_tqbn_series_file(&f.path, SYMBOL, HistorySeriesKind::Tick)
-        .unwrap()
-        .state;
-    let expected_rows = canonical(
-        before
-            .rows
-            .iter()
-            .map(|row| match row {
-                HistorySeriesRow::Tick(row) => row.clone(),
-                HistorySeriesRow::Kline(_) => panic!("legacy Tick file contains Kline"),
-            })
-            .collect(),
-    )
-    .unwrap();
-    let backup = f.path.with_extension("tqbn.test-backup");
-    fs::hard_link(&f.path, &backup).unwrap();
-    let backup_bytes = fs::read(&backup).unwrap();
-
-    f.store.migrate_tick_series_to_current(SYMBOL).unwrap();
-    assert!(matches(&f.path).unwrap());
-    let after = scan(&f.path, SYMBOL).unwrap();
-    assert_eq!(after.coverage, before.coverage);
-    assert_eq!(after.provisional, before.provisional);
-    assert_eq!(after.rows.len(), expected_rows.len());
-    for (left, right) in after.rows.iter().zip(&expected_rows) {
-        let HistorySeriesRow::Tick(left) = left else {
-            panic!("Tick migration emitted Kline rows");
-        };
-        assert_eq!(tick_to_spill_bytes(left), tick_to_spill_bytes(right));
-    }
-    assert_eq!(fs::read(&backup).unwrap(), backup_bytes);
-    f.store.migrate_tick_series_to_current(SYMBOL).unwrap();
-    assert_eq!(
-        scan(&f.path, SYMBOL).unwrap().rows.len(),
-        expected_rows.len()
-    );
-}
-
-#[test]
-fn migration_compares_normalized_overlapping_proof_semantics() {
-    let f = Fixture::new();
-    fs::remove_file(&f.path).unwrap();
-    with_exclusive_tqbn_lock(&f.path, || {
-        append_legacy_segment_to_file(
-            &f.path,
-            &HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(&[Tick {
-                    epoch: None,
-                    ..f.row(20)
-                }]),
-            },
-        )?;
-        for (from, through, as_of, rows) in [
-            (0, 10, 50, 0),
-            (20, 30, 40, 1),
-            (20, 35, 45, 2),
-            (20, 35, 45, 2),
-        ] {
-            append_provisional_to_file(
-                &f.path,
-                &HistorySeriesProvisionalCoverage {
-                    symbol: SYMBOL.into(),
-                    kind: HistorySeriesKind::Tick,
-                    range_start_ns: f.start + from * NANOS_PER_SECOND,
-                    complete_through_ns: f.start + through * NANOS_PER_SECOND,
-                    as_of_ns: f.start + as_of * NANOS_PER_SECOND,
-                    rows,
-                    id_range: (rows != 0).then_some((20, 21)),
-                },
-            )?;
-        }
-        append_coverage_to_file(&f.path, &f.commit(0, 15))?;
-        append_coverage_to_file(&f.path, &f.commit(25, 28))
-    })
-    .unwrap();
-    let before = parse_tqbn_checkpoint_file(&f.path, SYMBOL, HistorySeriesKind::Tick).unwrap();
-    f.store.migrate_tick_series_to_current(SYMBOL).unwrap();
-    let after = scan(&f.path, SYMBOL).unwrap();
-    assert!(observable_checkpoints_equal(
-        &before,
-        &TqbnIndexedCoverage {
-            coverage: after.coverage,
-            provisional: after.provisional,
-        },
-        (f.start, f.start + 24 * 60 * 60 * NANOS_PER_SECOND),
-    ));
-}
-
-#[test]
-fn rejected_migration_candidate_keeps_legacy_inode_and_retries() {
-    let f = Fixture::new();
-    fs::remove_file(&f.path).unwrap();
-    with_exclusive_tqbn_lock(&f.path, || {
-        append_legacy_segment_to_file(
-            &f.path,
-            &HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(&[
-                    Tick {
-                        epoch: None,
-                        ..f.row(10)
-                    },
-                    Tick {
-                        epoch: None,
-                        ..f.row(20)
-                    },
-                ]),
-            },
-        )
-    })
-    .unwrap();
-    let original = fs::read(&f.path).unwrap();
-    truncate_next_migration_candidate();
-    assert!(f.store.migrate_tick_series_to_current(SYMBOL).is_err());
-    assert_eq!(fs::read(&f.path).unwrap(), original);
-    assert!(!matches(&f.path).unwrap());
-    assert!(
-        fs::read_dir(f.path.parent().unwrap())
-            .unwrap()
-            .filter_map(std::result::Result::ok)
-            .all(|entry| !entry.file_name().to_string_lossy().contains(".cow-"))
-    );
-    f.store.migrate_tick_series_to_current(SYMBOL).unwrap();
-    assert!(matches(&f.path).unwrap());
-    assert_eq!(f.all().len(), 2);
-}
-
-#[test]
-fn migration_ignores_complete_and_torn_uncommitted_suffixes() {
-    for torn in [false, true] {
-        let f = Fixture::new();
-        fs::remove_file(&f.path).unwrap();
-        with_exclusive_tqbn_lock(&f.path, || {
-            append_legacy_segment_to_file(
-                &f.path,
-                &HistorySeriesWriteSegment {
-                    symbol: SYMBOL,
-                    kind: HistorySeriesKind::Tick,
-                    declared_range_ns: None,
-                    rows: HistorySeriesWriteRows::Ticks(&[Tick {
-                        epoch: None,
-                        ..f.row(10)
-                    }]),
-                },
-            )?;
-            let mut file = OpenOptions::new().read(true).append(true).open(&f.path)?;
-            let committed_len = file.metadata()?.len();
-            append_rows_block(
-                &mut file,
-                &HistorySeriesWriteSegment {
-                    symbol: SYMBOL,
-                    kind: HistorySeriesKind::Tick,
-                    declared_range_ns: None,
-                    rows: HistorySeriesWriteRows::Ticks(&[Tick {
-                        epoch: None,
-                        ..f.row(20)
-                    }]),
-                },
-            )?;
-            file.sync_data()?;
-            if torn {
-                file.set_len(committed_len + 7)?;
-                file.sync_data()?;
-            }
-            Ok(())
-        })
-        .unwrap();
-        f.store.migrate_tick_series_to_current(SYMBOL).unwrap();
-        let rows = f.all();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].id, 10);
-    }
-}
-
-#[test]
-fn migration_ignores_uncommitted_coverage_suffix() {
-    let f = Fixture::new();
-    fs::remove_file(&f.path).unwrap();
-    with_exclusive_tqbn_lock(&f.path, || {
-        append_legacy_segment_to_file(
-            &f.path,
-            &HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(&[Tick {
-                    epoch: None,
-                    ..f.row(10)
-                }]),
-            },
-        )?;
-        append_coverage_to_file(&f.path, &f.commit(0, 15))?;
-        let mut file = OpenOptions::new().read(true).append(true).open(&f.path)?;
-        let file_len = file.metadata()?.len();
-        let (_, first_block_offset) =
-            read_and_validate_tqbn_prefix(&mut file, SYMBOL, HistorySeriesKind::Tick)?;
-        let checkpoint =
-            load_tqbn_tail_checkpoint(&f.path, &mut file, first_block_offset as u64, file_len)?
-                .expect("committed schema 3 fixture must have a checkpoint");
-        append_coverage_block(
-            &mut file,
-            checkpoint.latest_coverage_index_offset,
-            f.start + 20 * NANOS_PER_SECOND,
-            f.start + 30 * NANOS_PER_SECOND,
-            0,
-            None,
-        )?;
-        file.sync_data()?;
-        Ok(())
-    })
-    .unwrap();
-
-    f.store.migrate_tick_series_to_current(SYMBOL).unwrap();
-    let state = scan(&f.path, SYMBOL).unwrap();
-    assert_eq!(
-        state.coverage,
-        vec![(f.start, f.start + 15 * NANOS_PER_SECOND)]
-    );
-}
-
-#[test]
-fn migration_rejects_missing_schema3_checkpoint_without_touching_source() {
-    let f = Fixture::new();
-    fs::remove_file(&f.path).unwrap();
-    with_exclusive_tqbn_lock(&f.path, || {
-        append_legacy_segment_to_file(
-            &f.path,
-            &HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(&[Tick {
-                    epoch: None,
-                    ..f.row(10)
-                }]),
-            },
-        )
-    })
-    .unwrap();
-    let source = fs::read(&f.path).unwrap();
-    fs::remove_file(tqbn_file_lock_path(&f.path)).unwrap();
-
-    assert!(f.store.migrate_tick_series_to_current(SYMBOL).is_err());
-    assert_eq!(fs::read(&f.path).unwrap(), source);
-    assert!(!matches(&f.path).unwrap());
-}
-
-#[test]
-fn migration_accepts_schema2_without_a_checkpoint() {
-    let f = Fixture::new();
-    fs::remove_file(&f.path).unwrap();
-    with_exclusive_tqbn_lock(&f.path, || {
-        append_legacy_segment_to_file(
-            &f.path,
-            &HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(&[Tick {
-                    epoch: None,
-                    ..f.row(10)
-                }]),
-            },
-        )
-    })
-    .unwrap();
-    let mut source = fs::read(&f.path).unwrap();
-    source[5..9].copy_from_slice(&TQBN_LEGACY_SCHEMA_VERSION.to_le_bytes());
-    fs::write(&f.path, source).unwrap();
-    fs::remove_file(tqbn_file_lock_path(&f.path)).unwrap();
-
-    f.store.migrate_tick_series_to_current(SYMBOL).unwrap();
-    assert!(matches(&f.path).unwrap());
-    assert_eq!(
-        f.all().iter().map(|row| row.id).collect::<Vec<_>>(),
-        vec![10]
-    );
-}
-
-#[test]
-fn migration_rejects_nonempty_invalid_checkpoint_without_touching_source() {
-    let f = Fixture::new();
-    fs::remove_file(&f.path).unwrap();
-    with_exclusive_tqbn_lock(&f.path, || {
-        append_legacy_segment_to_file(
-            &f.path,
-            &HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(&[Tick {
-                    epoch: None,
-                    ..f.row(10)
-                }]),
-            },
-        )
-    })
-    .unwrap();
-    let source = fs::read(&f.path).unwrap();
-    fs::write(tqbn_file_lock_path(&f.path), b"TQTC\x02\0\0").unwrap();
-    assert!(f.store.migrate_tick_series_to_current(SYMBOL).is_err());
-    assert_eq!(fs::read(&f.path).unwrap(), source);
-    assert!(!matches(&f.path).unwrap());
-}
-
-#[test]
-fn migration_idempotence_deeply_validates_common_commit_and_tail() {
-    for truncated_commit in [true, false] {
-        let f = Fixture::new();
-        f.write(&[f.row(10)]);
-        if truncated_commit {
-            OpenOptions::new()
-                .write(true)
-                .open(&f.path)
-                .unwrap()
-                .set_len(storage::MAGIC.len() as u64)
-                .unwrap();
-        } else {
-            let mut file = OpenOptions::new().append(true).open(&f.path).unwrap();
-            file.write_all(b"uncommitted-common-tail").unwrap();
-            file.sync_all().unwrap();
-        }
-        let source = fs::read(&f.path).unwrap();
-        assert!(f.store.migrate_tick_series_to_current(SYMBOL).is_err());
-        assert_eq!(fs::read(&f.path).unwrap(), source);
-    }
-}
-
-#[test]
-fn migration_idempotence_rejects_a_corrupt_common_index() {
-    let f = Fixture::new();
-    f.write(&[f.row(10)]);
-    let mut bytes = fs::read(&f.path).unwrap();
-    let last = bytes.last_mut().expect("common fixture must have an index");
-    *last ^= 0xff;
-    fs::write(&f.path, &bytes).unwrap();
-
-    assert!(f.store.migrate_tick_series_to_current(SYMBOL).is_err());
-    assert_eq!(fs::read(&f.path).unwrap(), bytes);
-}
-
-#[test]
 fn existing_session_id_reset_cannot_reenter_the_streaming_append_path() {
     let f = Fixture::new();
     let old = Tick {
@@ -599,7 +118,7 @@ fn existing_session_id_reset_cannot_reenter_the_streaming_append_path() {
         epoch: None,
         ..f.row(30)
     };
-    let actual = assert_legacy_equivalent(&f, &[vec![old, reset], vec![next]]);
+    let actual = write_batches_and_read_all(&f, &[vec![old, reset], vec![next]]);
     assert_eq!(actual.len(), 3);
     let mut file = File::open(&f.path).unwrap();
     let index = load(&mut file, &f.path, SYMBOL).unwrap();
@@ -812,9 +331,13 @@ fn sequential_fill_appends_and_does_not_decode_unrelated_payload() {
     assert!(reader.next_row().unwrap().is_none());
     assert_eq!(reader.read_telemetry().blocks_decoded, 1);
     assert!(scan(&f.path, SYMBOL).is_err());
-    let before_migration = fs::read(&f.path).unwrap();
-    assert!(f.store.migrate_tick_series_to_current(SYMBOL).is_err());
-    assert_eq!(fs::read(&f.path).unwrap(), before_migration);
+    let before_compaction = fs::read(&f.path).unwrap();
+    assert!(
+        f.store
+            .compact_series(SYMBOL, HistorySeriesKind::Tick)
+            .is_err()
+    );
+    assert_eq!(fs::read(&f.path).unwrap(), before_compaction);
 }
 
 #[test]

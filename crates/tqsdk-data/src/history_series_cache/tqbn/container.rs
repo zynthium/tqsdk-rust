@@ -1,6 +1,4 @@
-//! Tick adapter for common-container partitions during the explicit cutover.
-//! Dispatch uses file magic, not the retained .tqbn suffix. Legacy files remain
-//! on the legacy path until an offline migration has verified their candidate.
+//! Tick adapter for schema-4 common-container partitions.
 
 use super::*;
 use crate::history_container::{
@@ -9,16 +7,6 @@ use crate::history_container::{
 use serde::{Deserialize, Serialize};
 
 pub(super) const SCHEMA_VERSION: u32 = crate::BACKTEST_TICK_CACHE_SCHEMA_VERSION;
-
-#[cfg(test)]
-thread_local! {
-    static MIGRATION_TRUNCATE_CANDIDATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
-pub(super) fn truncate_next_migration_candidate() {
-    MIGRATION_TRUNCATE_CANDIDATE.with(|flag| flag.set(true));
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Metadata {
@@ -571,7 +559,7 @@ pub(super) fn update(
             .last()
             .is_some_and(|e| first.datetime < e.end_ns)
     });
-    // Match the legacy reader's streaming/spill boundary. Once IDs regress,
+    // Once IDs regress, switch from streaming to partition-wide canonicalization.
     // replay witnesses can propagate across the entire partition, so a fixed
     // tail window cannot preserve the historical canonicalization contract.
     let reused_ids = incoming.first().is_some_and(|first| {
@@ -697,14 +685,6 @@ pub(super) fn update(
     }
 }
 
-pub(super) fn migrate(path: &Path, symbol: &str, state: &TqbnSeriesState) -> Result<()> {
-    if matches(path)? {
-        scan(path, symbol)?;
-        return Ok(());
-    }
-    write_state(path, symbol, state)
-}
-
 pub(super) fn rewrite(path: &Path, symbol: &str, state: &TqbnSeriesState) -> Result<()> {
     write_state(path, symbol, state)
 }
@@ -717,7 +697,7 @@ fn write_state(path: &Path, symbol: &str, state: &TqbnSeriesState) -> Result<()>
             .map(|row| match row {
                 HistorySeriesRow::Tick(row) => Ok(row.clone()),
                 HistorySeriesRow::Kline(_) => Err(DataError::InvalidState(
-                    "legacy Tick migration received Kline rows",
+                    "Tick container rewrite received Kline rows",
                 )),
             })
             .collect::<Result<Vec<_>>>()?,
@@ -797,11 +777,6 @@ fn write_state(path: &Path, symbol: &str, state: &TqbnSeriesState) -> Result<()>
     validate_metadata(&index, path, symbol)?;
     storage::write_new(&mut candidate.file, &mut index, &blocks)?;
 
-    #[cfg(test)]
-    if MIGRATION_TRUNCATE_CANDIDATE.with(|flag| flag.replace(false)) {
-        candidate.file.set_len(8)?;
-    }
-
     let verified_index = load(&mut candidate.file, path, symbol)?;
     verified_index.require_clean_tail(&candidate.file)?;
     let verified_rows = read_all(&mut candidate.file, &verified_index)?;
@@ -810,7 +785,7 @@ fn write_state(path: &Path, symbol: &str, state: &TqbnSeriesState) -> Result<()>
         || verified_rows
             .iter()
             .zip(&rows)
-            .any(|(left, right)| tick_to_spill_bytes(left) != tick_to_spill_bytes(right))
+            .any(|(left, right)| !ticks_bitwise_equal(left, right))
         || !observable_checkpoints_equal(
             &TqbnIndexedCoverage {
                 coverage: state.coverage.clone(),
@@ -821,7 +796,7 @@ fn write_state(path: &Path, symbol: &str, state: &TqbnSeriesState) -> Result<()>
         )
     {
         return Err(DataError::InvalidResponse(
-            "Tick migration candidate changed rows or coverage".into(),
+            "Tick rewrite candidate changed rows or coverage".into(),
         ));
     }
     candidate.publish(path)

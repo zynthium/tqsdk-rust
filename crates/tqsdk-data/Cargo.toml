@@ -19,7 +19,6 @@ tqbn-zstd = ["dep:zstd"]
 chrono.workspace = true
 futures.workspace = true
 reqwest = { workspace = true, optional = true }
-rusqlite.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 sha1 = "0.10"

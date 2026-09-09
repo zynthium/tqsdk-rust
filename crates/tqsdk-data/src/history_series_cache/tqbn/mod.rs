@@ -24,16 +24,14 @@ use crate::history_series_cache::{
     HistorySeriesCoverageReport, HistorySeriesCoverageRequest, HistorySeriesKind,
     HistorySeriesProvisionalCoverage, HistorySeriesPurgeReport, HistorySeriesReadRequest,
     HistorySeriesReadTelemetry, HistorySeriesReader, HistorySeriesRow, HistorySeriesSegmentReport,
-    HistorySeriesStore, HistorySeriesTickLegacyPartitionLockInspection,
-    HistorySeriesTickLegacyPartitionLockRepair, HistorySeriesTickLockInspection,
-    HistorySeriesTickLockRepair, HistorySeriesWriteRows, HistorySeriesWriteSegment,
+    HistorySeriesStore, HistorySeriesTickLockInspection, HistorySeriesTickLockRepair,
+    HistorySeriesWriteRows, HistorySeriesWriteSegment,
 };
 use chrono::{
     DateTime, Datelike, Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveTime, TimeZone,
     Utc, Weekday,
 };
 use fs2::FileExt;
-use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use tqsdk_core::{Kline, Tick};
 
@@ -62,7 +60,6 @@ const MONTH_PACK_DIR_NAME: &str = "monthly";
 const TICK_DIR_NAME: &str = "tick";
 const KLINE_DIR_NAME: &str = "kline";
 const TQBN_FILE_EXTENSION: &str = "tqbn";
-const LEGACY_LOCK_FILE_NAME: &str = ".tqbn.lock";
 const TQBN_TAIL_CHECKPOINT_MAGIC: &[u8; 4] = b"TQTC";
 const TQBN_TAIL_CHECKPOINT_VERSION: u8 = 2;
 const TQBN_TAIL_CHECKPOINT_LEN: usize = 32;
@@ -74,16 +71,6 @@ const MAX_TQBN_PREFIX_METADATA_LEN: usize = 64 * 1024;
 const TQBN_BLOCK_HEADER_LEN: usize = 4 + 1 + 3 + 8 + 8;
 const MAX_TQBN_BLOCK_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 const TQBN_TARGET_RECORDS_BLOCK_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
-// Legacy Tick pages can require global replay canonicalization.  Keep that
-// compatibility path off the heap: SQLite owns its temporary indexes and the
-// resulting rows are read back through a length-delimited spool file.
-const TQBN_LEGACY_SPILL_CACHE_KIB: i64 = 4 * 1024;
-const TQBN_LEGACY_SPILL_MAX_ROW_BYTES: usize = 64 * 1024;
-const TQBN_LEGACY_SPILL_MAX_INPUT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-const TQBN_LEGACY_SPILL_CREATE_ATTEMPTS: u64 = 32;
-const TQBN_TICK_PAYLOAD_KEY_BYTES: usize = 225;
-const TQBN_TICK_SPILL_RECORD_BYTES: usize = 16 + TQBN_TICK_PAYLOAD_KEY_BYTES;
-static TQBN_LEGACY_SPILL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static CALLER_HELD_EXCLUSIVE_ROOTS: RefCell<Vec<PathBuf>> = const {
@@ -245,8 +232,6 @@ pub(super) struct TqbnHistoryStore {
     root_dir: Arc<PathBuf>,
     read_only: bool,
     #[cfg(test)]
-    legacy_new_tick_files: bool,
-    #[cfg(test)]
     interrupt_tick_month_after_publish: Arc<AtomicBool>,
 }
 
@@ -368,7 +353,6 @@ struct TqbnReader {
     range_end_ns: i64,
     rows: std::vec::IntoIter<HistorySeriesRow>,
     partition: Option<TqbnStreamingPartition>,
-    spilled_partition: Option<TqbnSpilledPartition>,
     spare_records: Vec<u8>,
     read_only: bool,
     telemetry: Arc<TqbnReadTelemetryState>,
@@ -389,22 +373,6 @@ struct TqbnStreamingPartition {
     active: Vec<TqbnStreamingBlockCursor>,
     spare_records: Vec<u8>,
     telemetry: Arc<TqbnReadTelemetryState>,
-}
-
-/// A reader-owned temporary result of legacy Tick canonicalization.
-///
-/// The directory is deleted when the reader drops.  It is never published
-/// into the history cache and has no mixed-version compatibility surface.
-struct TqbnSpilledPartition {
-    reader: File,
-    scratch: Vec<u8>,
-    // Keep this last so the open output handle is dropped before directory
-    // cleanup on platforms that do not permit unlinking open files.
-    _root: TqbnLegacySpillRoot,
-}
-
-struct TqbnLegacySpillRoot {
-    path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -513,170 +481,18 @@ impl TickPayloadKey {
             epoch: row.epoch,
         }
     }
-
-    fn to_spill_bytes(&self) -> [u8; TQBN_TICK_PAYLOAD_KEY_BYTES] {
-        let mut bytes = [0_u8; TQBN_TICK_PAYLOAD_KEY_BYTES];
-        let mut offset = 0;
-        macro_rules! write_u64 {
-            ($value:expr) => {{
-                bytes[offset..offset + 8].copy_from_slice(&$value.to_be_bytes());
-                offset += 8;
-            }};
-        }
-        write_u64!(self.last_price);
-        write_u64!(self.average);
-        write_u64!(self.highest);
-        write_u64!(self.lowest);
-        write_u64!(self.ask_price1);
-        write_u64!(self.ask_volume1 as u64);
-        write_u64!(self.bid_price1);
-        write_u64!(self.bid_volume1 as u64);
-        write_u64!(self.ask_price2);
-        write_u64!(self.ask_volume2 as u64);
-        write_u64!(self.bid_price2);
-        write_u64!(self.bid_volume2 as u64);
-        write_u64!(self.ask_price3);
-        write_u64!(self.ask_volume3 as u64);
-        write_u64!(self.bid_price3);
-        write_u64!(self.bid_volume3 as u64);
-        write_u64!(self.ask_price4);
-        write_u64!(self.ask_volume4 as u64);
-        write_u64!(self.bid_price4);
-        write_u64!(self.bid_volume4 as u64);
-        write_u64!(self.ask_price5);
-        write_u64!(self.ask_volume5 as u64);
-        write_u64!(self.bid_price5);
-        write_u64!(self.bid_volume5 as u64);
-        write_u64!(self.volume as u64);
-        write_u64!(self.amount);
-        write_u64!(self.open_interest as u64);
-        bytes[offset] = u8::from(self.epoch.is_some());
-        offset += 1;
-        write_u64!(self.epoch.unwrap_or_default() as u64);
-        debug_assert_eq!(offset, TQBN_TICK_PAYLOAD_KEY_BYTES);
-        bytes
-    }
 }
 
-fn tick_to_spill_bytes(row: &Tick) -> [u8; TQBN_TICK_SPILL_RECORD_BYTES] {
-    let mut bytes = [0_u8; TQBN_TICK_SPILL_RECORD_BYTES];
-    bytes[..8].copy_from_slice(&row.id.to_be_bytes());
-    bytes[8..16].copy_from_slice(&row.datetime.to_be_bytes());
-    bytes[16..].copy_from_slice(&TickPayloadKey::from_tick(row).to_spill_bytes());
-    bytes
-}
-
-fn tick_from_spill_bytes(bytes: &[u8]) -> Result<Tick> {
-    if bytes.len() != TQBN_TICK_SPILL_RECORD_BYTES {
-        return Err(DataError::InvalidResponse(format!(
-            "legacy TQBN spill Tick record is {} bytes, expected {TQBN_TICK_SPILL_RECORD_BYTES}",
-            bytes.len()
-        )));
-    }
-    let mut offset = 0;
-    let id = read_tqbn_spill_i64(bytes, &mut offset)?;
-    let datetime = read_tqbn_spill_i64(bytes, &mut offset)?;
-    let last_price = f64::from_bits(read_tqbn_spill_u64(bytes, &mut offset)?);
-    let average = f64::from_bits(read_tqbn_spill_u64(bytes, &mut offset)?);
-    let highest = f64::from_bits(read_tqbn_spill_u64(bytes, &mut offset)?);
-    let lowest = f64::from_bits(read_tqbn_spill_u64(bytes, &mut offset)?);
-    let ask_price1 = f64::from_bits(read_tqbn_spill_u64(bytes, &mut offset)?);
-    let ask_volume1 = read_tqbn_spill_i64(bytes, &mut offset)?;
-    let bid_price1 = f64::from_bits(read_tqbn_spill_u64(bytes, &mut offset)?);
-    let bid_volume1 = read_tqbn_spill_i64(bytes, &mut offset)?;
-    let ask_price2 = f64::from_bits(read_tqbn_spill_u64(bytes, &mut offset)?);
-    let ask_volume2 = read_tqbn_spill_i64(bytes, &mut offset)?;
-    let bid_price2 = f64::from_bits(read_tqbn_spill_u64(bytes, &mut offset)?);
-    let bid_volume2 = read_tqbn_spill_i64(bytes, &mut offset)?;
-    let ask_price3 = f64::from_bits(read_tqbn_spill_u64(bytes, &mut offset)?);
-    let ask_volume3 = read_tqbn_spill_i64(bytes, &mut offset)?;
-    let bid_price3 = f64::from_bits(read_tqbn_spill_u64(bytes, &mut offset)?);
-    let bid_volume3 = read_tqbn_spill_i64(bytes, &mut offset)?;
-    let ask_price4 = f64::from_bits(read_tqbn_spill_u64(bytes, &mut offset)?);
-    let ask_volume4 = read_tqbn_spill_i64(bytes, &mut offset)?;
-    let bid_price4 = f64::from_bits(read_tqbn_spill_u64(bytes, &mut offset)?);
-    let bid_volume4 = read_tqbn_spill_i64(bytes, &mut offset)?;
-    let ask_price5 = f64::from_bits(read_tqbn_spill_u64(bytes, &mut offset)?);
-    let ask_volume5 = read_tqbn_spill_i64(bytes, &mut offset)?;
-    let bid_price5 = f64::from_bits(read_tqbn_spill_u64(bytes, &mut offset)?);
-    let bid_volume5 = read_tqbn_spill_i64(bytes, &mut offset)?;
-    let volume = read_tqbn_spill_i64(bytes, &mut offset)?;
-    let amount = f64::from_bits(read_tqbn_spill_u64(bytes, &mut offset)?);
-    let open_interest = read_tqbn_spill_i64(bytes, &mut offset)?;
-    let epoch_tag = *bytes.get(offset).ok_or_else(|| {
-        DataError::InvalidResponse("legacy TQBN spill Tick epoch tag is missing".to_string())
-    })?;
-    offset += 1;
-    let epoch_value = read_tqbn_spill_i64(bytes, &mut offset)?;
-    let epoch = match epoch_tag {
-        0 => None,
-        1 => Some(epoch_value),
-        value => {
-            return Err(DataError::InvalidResponse(format!(
-                "legacy TQBN spill Tick epoch tag {value} is invalid"
-            )));
-        }
-    };
-    debug_assert_eq!(offset, TQBN_TICK_SPILL_RECORD_BYTES);
-    Ok(Tick {
-        id,
-        datetime,
-        last_price,
-        average,
-        highest,
-        lowest,
-        ask_price1,
-        ask_volume1,
-        bid_price1,
-        bid_volume1,
-        ask_price2,
-        ask_volume2,
-        bid_price2,
-        bid_volume2,
-        ask_price3,
-        ask_volume3,
-        bid_price3,
-        bid_volume3,
-        ask_price4,
-        ask_volume4,
-        bid_price4,
-        bid_volume4,
-        ask_price5,
-        ask_volume5,
-        bid_price5,
-        bid_volume5,
-        volume,
-        amount,
-        open_interest,
-        epoch,
-    })
-}
-
-fn read_tqbn_spill_u64(bytes: &[u8], offset: &mut usize) -> Result<u64> {
-    let end = offset.checked_add(8).ok_or_else(|| {
-        DataError::InvalidResponse("legacy TQBN spill Tick offset overflow".to_string())
-    })?;
-    let value = bytes.get(*offset..end).ok_or_else(|| {
-        DataError::InvalidResponse("legacy TQBN spill Tick record is truncated".to_string())
-    })?;
-    let value = <[u8; 8]>::try_from(value).map_err(|_| {
-        DataError::InvalidResponse("legacy TQBN spill Tick field width is invalid".to_string())
-    })?;
-    *offset = end;
-    Ok(u64::from_be_bytes(value))
-}
-
-fn read_tqbn_spill_i64(bytes: &[u8], offset: &mut usize) -> Result<i64> {
-    Ok(i64::from_be_bytes(
-        read_tqbn_spill_u64(bytes, offset)?.to_be_bytes(),
-    ))
+fn ticks_bitwise_equal(left: &Tick, right: &Tick) -> bool {
+    left.id == right.id
+        && left.datetime == right.datetime
+        && TickPayloadKey::from_tick(left) == TickPayloadKey::from_tick(right)
 }
 
 enum PreparedTqbnPartition {
     Common(Box<container::Reader>),
     Missing,
     Streaming(TqbnStreamingPartition),
-    Spilled(TqbnSpilledPartition),
     Materialized(Vec<HistorySeriesRow>),
 }
 
@@ -754,8 +570,6 @@ impl TqbnHistoryStore {
             root_dir: Arc::new(root_dir),
             read_only: false,
             #[cfg(test)]
-            legacy_new_tick_files: false,
-            #[cfg(test)]
             interrupt_tick_month_after_publish: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -764,8 +578,6 @@ impl TqbnHistoryStore {
         Self {
             root_dir: Arc::new(root_dir),
             read_only: true,
-            #[cfg(test)]
-            legacy_new_tick_files: false,
             #[cfg(test)]
             interrupt_tick_month_after_publish: Arc::new(AtomicBool::new(false)),
         }
@@ -854,10 +666,6 @@ impl TqbnHistoryStore {
         path: &Path,
         segment: &HistorySeriesWriteSegment<'_>,
     ) -> Result<HistorySeriesSegmentReport> {
-        #[cfg(test)]
-        if self.legacy_new_tick_files && !path.exists() {
-            return append_legacy_segment_to_file(path, segment);
-        }
         append_segment_to_file(path, segment)
     }
 
@@ -867,10 +675,6 @@ impl TqbnHistoryStore {
         segment: &HistorySeriesWriteSegment<'_>,
         coverage: &[HistorySeriesCoverageCommit],
     ) -> Result<HistorySeriesSegmentReport> {
-        #[cfg(test)]
-        if self.legacy_new_tick_files && !path.exists() {
-            return append_legacy_segment_and_coverage_to_file(path, segment, coverage);
-        }
         append_segment_and_coverage_to_file(path, segment, coverage)
     }
 
@@ -881,21 +685,6 @@ impl TqbnHistoryStore {
         end_ns: i64,
         source: &HistorySeriesCoverageCommit,
     ) -> Result<()> {
-        #[cfg(test)]
-        if self.legacy_new_tick_files && source.kind == HistorySeriesKind::Tick && !path.exists() {
-            let commit = HistorySeriesCoverageCommit {
-                symbol: source.symbol.clone(),
-                kind: source.kind,
-                range_start_ns: start_ns,
-                range_end_ns: end_ns,
-                rows: source.rows,
-                id_range: source.id_range,
-            };
-            ensure_parent_dir(path)?;
-            return with_exclusive_tqbn_lock(path, || {
-                append_legacy_coverage_to_file(path, &commit)
-            });
-        }
         append_coverage_to_partition_file(
             path,
             source.symbol.as_str(),
@@ -1077,6 +866,16 @@ impl TqbnHistoryStore {
 fn ensure_parent_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+fn reject_pre_schema4_tick(path: &Path, kind: HistorySeriesKind) -> Result<()> {
+    if kind == HistorySeriesKind::Tick && path.exists() && !container::matches(path)? {
+        return Err(DataError::InvalidResponse(format!(
+            "Tick cache file {} uses an unsupported pre-schema-4 format; restore and migrate it with tqsdk-cache-migrator-tick-v4-20260910",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -1427,35 +1226,6 @@ impl HistorySeriesStore for TqbnHistoryStore {
             .collect())
     }
 
-    fn inspect_tick_legacy_partition_locks(
-        &self,
-    ) -> Result<Vec<HistorySeriesTickLegacyPartitionLockInspection>> {
-        Ok(tick_tqbn_partition_dirs(self.root_dir.as_path())?
-            .into_iter()
-            .map(|partition_dir| {
-                let lock_path = partition_dir.join(LEGACY_LOCK_FILE_NAME);
-                let (lock_exists, error) = match fs::symlink_metadata(&lock_path) {
-                    Ok(metadata) if metadata.file_type().is_file() => (true, None),
-                    Ok(_) => (
-                        false,
-                        Some(format!(
-                            "history TQBN legacy partition lock {} is not a regular file",
-                            lock_path.display()
-                        )),
-                    ),
-                    Err(error) if error.kind() == ErrorKind::NotFound => (false, None),
-                    Err(error) => (false, Some(error.to_string())),
-                };
-                HistorySeriesTickLegacyPartitionLockInspection {
-                    partition_dir,
-                    lock_path,
-                    lock_exists,
-                    error,
-                }
-            })
-            .collect())
-    }
-
     fn repair_tick_locks(&self) -> Result<Vec<HistorySeriesTickLockRepair>> {
         self.ensure_writable()?;
         let _root_gate = self.acquire_shared_write_gate()?;
@@ -1492,47 +1262,6 @@ impl HistorySeriesStore for TqbnHistoryStore {
         Ok(repaired)
     }
 
-    fn repair_tick_legacy_partition_locks(
-        &self,
-    ) -> Result<Vec<HistorySeriesTickLegacyPartitionLockRepair>> {
-        self.ensure_writable()?;
-        let _root_gate = self.acquire_shared_write_gate()?;
-        let mut repaired = Vec::new();
-        for partition_dir in tick_tqbn_partition_dirs(self.root_dir.as_path())? {
-            let lock_path = partition_dir.join(LEGACY_LOCK_FILE_NAME);
-            let (lock_created, error) = match fs::symlink_metadata(&lock_path) {
-                Ok(metadata) if metadata.file_type().is_file() => (false, None),
-                Ok(_) => (
-                    false,
-                    Some(format!(
-                        "history TQBN legacy partition lock {} is not a regular file",
-                        lock_path.display()
-                    )),
-                ),
-                Err(error) if error.kind() == ErrorKind::NotFound => {
-                    match OpenOptions::new()
-                        .create(true)
-                        .read(true)
-                        .write(true)
-                        .truncate(false)
-                        .open(&lock_path)
-                    {
-                        Ok(_) => (true, None),
-                        Err(error) => (false, Some(error.to_string())),
-                    }
-                }
-                Err(error) => (false, Some(error.to_string())),
-            };
-            repaired.push(HistorySeriesTickLegacyPartitionLockRepair {
-                partition_dir,
-                lock_path,
-                lock_created,
-                error,
-            });
-        }
-        Ok(repaired)
-    }
-
     fn enforce_limits(
         &self,
         max_bytes: Option<u64>,
@@ -1558,19 +1287,17 @@ impl HistorySeriesStore for TqbnHistoryStore {
 
     fn migrate_tick_series_to_current(&self, symbol: &str) -> Result<()> {
         self.ensure_writable()?;
-        for path in self.partition_paths_for_series(symbol, HistorySeriesKind::Tick)? {
-            with_exclusive_tqbn_lock(&path, || {
-                if container::matches(&path)? {
-                    container::scan(&path, symbol)?;
-                    return Ok(());
-                }
-                let state = parse_tqbn_committed_tick_partition(&path, symbol)?;
-                container::migrate(&path, symbol, &state)
-            })?;
-        }
         let current_month = current_partition_month()?;
         let mut daily_paths = BTreeMap::<String, Vec<PathBuf>>::new();
-        for path in self.partition_paths_for_series(symbol, HistorySeriesKind::Tick)? {
+        let partition_paths = self.partition_paths_for_series(symbol, HistorySeriesKind::Tick)?;
+        // This public-hidden maintenance entry point can publish and delete more
+        // than one month. Validate the complete symbol generation before its
+        // first mutation so a later pre-schema-4 file cannot leave a partial seal.
+        for path in &partition_paths {
+            reject_pre_schema4_tick(path, HistorySeriesKind::Tick)?;
+            container::scan(path, symbol)?;
+        }
+        for path in partition_paths {
             let Some(TickPhysicalPartition::Day(day)) =
                 tick_physical_partition(self.root_dir.as_path(), &path)
             else {
@@ -2124,7 +1851,6 @@ impl HistorySeriesStore for TqbnHistoryStore {
                 range_end_ns: request.range_end_ns,
                 rows: Vec::new().into_iter(),
                 partition: None,
-                spilled_partition: None,
                 spare_records: Vec::new(),
                 read_only: self.read_only,
                 telemetry: Arc::new(TqbnReadTelemetryState::default()),
@@ -2206,13 +1932,6 @@ impl HistorySeriesReader for TqbnReader {
                 self.spare_records = partition.into_spare_records();
                 continue;
             }
-            if let Some(partition) = self.spilled_partition.as_mut() {
-                if let Some(row) = partition.next_row()? {
-                    return Ok(Some(row));
-                }
-                self.spilled_partition = None;
-                continue;
-            }
             if self.path_index >= self.paths.len() {
                 return Ok(None);
             }
@@ -2236,9 +1955,6 @@ impl HistorySeriesReader for TqbnReader {
                 }
                 PreparedTqbnPartition::Streaming(partition) => {
                     self.partition = Some(partition);
-                }
-                PreparedTqbnPartition::Spilled(partition) => {
-                    self.spilled_partition = Some(partition);
                 }
                 PreparedTqbnPartition::Materialized(rows) => {
                     self.telemetry.record_materialized_rows(rows.len());
@@ -2450,6 +2166,7 @@ fn append_segment_to_file(
     if segment.kind == HistorySeriesKind::Tick && (!path.exists() || container::matches(path)?) {
         return container::write_segment(path, segment, &[]);
     }
+    reject_pre_schema4_tick(path, segment.kind)?;
     append_legacy_segment_to_file(path, segment)
 }
 
@@ -2495,6 +2212,7 @@ fn append_segment_and_coverage_to_file(
     if segment.kind == HistorySeriesKind::Tick && (!path.exists() || container::matches(path)?) {
         return container::write_segment(path, segment, coverage);
     }
+    reject_pre_schema4_tick(path, segment.kind)?;
     append_legacy_segment_and_coverage_to_file(path, segment, coverage)
 }
 
@@ -2550,6 +2268,7 @@ fn append_coverage_to_file(path: &Path, commit: &HistorySeriesCoverageCommit) ->
             false,
         );
     }
+    reject_pre_schema4_tick(path, commit.kind)?;
     append_legacy_coverage_to_file(path, commit)
 }
 
@@ -2582,6 +2301,7 @@ fn append_provisional_to_file(
     if commit.kind == HistorySeriesKind::Tick && (!path.exists() || container::matches(path)?) {
         return container::update(path, &commit.symbol, &[], &[], Some(commit), false);
     }
+    reject_pre_schema4_tick(path, commit.kind)?;
     let (mut file, first_block_offset) =
         open_tqbn_file_for_append(path, commit.symbol.as_str(), commit.kind, true)?;
     let mut coverage_index_offset =
@@ -3495,6 +3215,7 @@ fn parse_tqbn_series_file(
             error: None,
         });
     }
+    reject_pre_schema4_tick(path, kind)?;
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(ParsedTqbnSeries::default()),
@@ -3513,53 +3234,6 @@ fn parse_tqbn_series_file(
         }
     }
     Ok(parsed)
-}
-
-fn parse_tqbn_committed_tick_partition(path: &Path, symbol: &str) -> Result<TqbnSeriesState> {
-    let mut file = File::open(path)?;
-    let (prefix, first_block_offset) =
-        read_and_validate_tqbn_prefix(&mut file, symbol, HistorySeriesKind::Tick)?;
-    let physical_len = file.metadata()?.len();
-    let checkpoint =
-        load_tqbn_tail_checkpoint(path, &mut file, first_block_offset as u64, physical_len)?;
-    let checkpoint_bytes = match fs::metadata(tqbn_file_lock_path(path)) {
-        Ok(metadata) => metadata.len(),
-        Err(error) if error.kind() == ErrorKind::NotFound => 0,
-        Err(error) => return Err(error.into()),
-    };
-    if checkpoint.is_none()
-        && (checkpoint_bytes != 0 || prefix.schema_version == TQBN_SCHEMA_VERSION)
-    {
-        return Err(DataError::InvalidResponse(
-            "legacy Tick schema 3 migration requires a valid tail checkpoint; schema 2 may omit it"
-                .into(),
-        ));
-    }
-    let snapshot_len = checkpoint.map_or(physical_len, |checkpoint| checkpoint.valid_len);
-    let day = path
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::file_name)
-        .and_then(|value| value.to_str())
-        .and_then(|value| NaiveDate::parse_from_str(value, "%Y%m%d").ok())
-        .ok_or(DataError::InvalidState(
-            "invalid legacy Tick partition path",
-        ))?;
-    let (_, start_ns, end_ns) = trading_day_range(day)?;
-    let rows = parse_tqbn_rows_for_range(
-        file,
-        symbol,
-        HistorySeriesKind::Tick,
-        TqbnReadRange { start_ns, end_ns },
-        snapshot_len,
-        None,
-    )?;
-    let checkpoints = parse_tqbn_checkpoint_file(path, symbol, HistorySeriesKind::Tick)?;
-    Ok(TqbnSeriesState {
-        rows,
-        coverage: checkpoints.coverage,
-        provisional: checkpoints.provisional,
-    })
 }
 
 fn prepare_tqbn_partition(
@@ -3588,6 +3262,7 @@ fn prepare_tqbn_partition(
             container::Reader::new(file, index, range, telemetry),
         )));
     }
+    reject_pre_schema4_tick(path, kind)?;
     let (_, first_block_offset) = read_and_validate_tqbn_prefix(&mut file, symbol, kind)?;
     let physical_len = file.metadata()?.len();
     let checkpoint =
@@ -3607,36 +3282,25 @@ fn prepare_tqbn_partition(
             spare_records,
             Some(telemetry.as_ref()),
         )? {
-            Ok(PreparedTqbnPartition::Streaming(TqbnStreamingPartition {
+            return Ok(PreparedTqbnPartition::Streaming(TqbnStreamingPartition {
                 file,
                 blocks,
                 next_block_index: 0,
                 active: Vec::new(),
                 spare_records: std::mem::take(spare_records),
                 telemetry: Arc::clone(&telemetry),
-            }))
-        } else if kind == HistorySeriesKind::Tick {
-            Ok(PreparedTqbnPartition::Spilled(
-                spill_tqbn_legacy_ticks_for_range(
-                    file,
-                    symbol,
-                    range,
-                    snapshot_len,
-                    Some(telemetry.as_ref()),
-                )?,
-            ))
-        } else {
-            Ok(PreparedTqbnPartition::Materialized(
-                parse_tqbn_rows_for_range(
-                    file,
-                    symbol,
-                    kind,
-                    range,
-                    snapshot_len,
-                    Some(telemetry.as_ref()),
-                )?,
-            ))
+            }));
         }
+        Ok(PreparedTqbnPartition::Materialized(
+            parse_tqbn_rows_for_range(
+                file,
+                symbol,
+                kind,
+                range,
+                snapshot_len,
+                Some(telemetry.as_ref()),
+            )?,
+        ))
     })();
     if release_before_decode {
         return prepared;
@@ -3896,468 +3560,6 @@ fn scan_tqbn_streaming_block(
     })
 }
 
-fn spill_tqbn_legacy_ticks_for_range(
-    mut file: File,
-    symbol: &str,
-    range: TqbnReadRange,
-    snapshot_len: u64,
-    telemetry: Option<&TqbnReadTelemetryState>,
-) -> Result<TqbnSpilledPartition> {
-    let root = TqbnLegacySpillRoot::create()?;
-    let database_path = root.path.join("canonicalize.sqlite");
-    let mut connection = Connection::open(&database_path).map_err(tqbn_spill_error)?;
-    initialize_tqbn_legacy_spill_database(&connection)?;
-
-    file.seek(SeekFrom::Start(0))?;
-    let (_, first_block_offset) =
-        read_and_validate_tqbn_prefix(&mut file, symbol, HistorySeriesKind::Tick)?;
-    file.seek(SeekFrom::Start(first_block_offset as u64))?;
-
-    let mut strictly_increasing = true;
-    let mut previous = None;
-    let mut stored_bytes = 0_u64;
-    let mut write_order = 0_i64;
-    {
-        let transaction = connection.transaction().map_err(tqbn_spill_error)?;
-        let mut insert = transaction
-            .prepare(
-                "INSERT INTO ticks (write_order, id, datetime, payload, tick_bytes) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-            )
-            .map_err(tqbn_spill_error)?;
-        let mut next_block_offset = first_block_offset as u64;
-        while let Some(descriptor) = read_next_tqbn_records_block_descriptor_for_range(
-            &mut file,
-            range,
-            snapshot_len,
-            &mut next_block_offset,
-            telemetry,
-        )? {
-            let records = read_decoded_tqbn_block_payload(&mut file, descriptor, telemetry)?;
-            if let Some(telemetry) = telemetry {
-                telemetry.record_decoded_block(descriptor.payload_len, records.len());
-            }
-            let mut state = TqbnSeriesState::default();
-            decode_records_payload(&records, HistorySeriesKind::Tick, &mut state)?;
-            for row in state.rows {
-                let HistorySeriesRow::Tick(row) = row else {
-                    return Err(DataError::InvalidState(
-                        "TQBN Tick spill decoded a non-Tick row",
-                    ));
-                };
-                if previous.is_some_and(|(previous_id, previous_datetime)| {
-                    row.id <= previous_id || row.datetime <= previous_datetime
-                }) {
-                    strictly_increasing = false;
-                }
-                previous = Some((row.id, row.datetime));
-                if row.datetime < range.start_ns || row.datetime >= range.end_ns {
-                    continue;
-                }
-
-                let tick_bytes = tick_to_spill_bytes(&row);
-                if tick_bytes.len() > TQBN_LEGACY_SPILL_MAX_ROW_BYTES {
-                    return Err(DataError::InvalidResponse(format!(
-                        "legacy TQBN Tick spill row is {} bytes, exceeding max {TQBN_LEGACY_SPILL_MAX_ROW_BYTES}",
-                        tick_bytes.len()
-                    )));
-                }
-                let row_bytes = u64::try_from(tick_bytes.len()).map_err(|_| {
-                    DataError::InvalidResponse(
-                        "legacy TQBN Tick spill row length overflows u64".to_string(),
-                    )
-                })?;
-                stored_bytes = stored_bytes.checked_add(row_bytes).ok_or_else(|| {
-                    DataError::InvalidResponse(
-                        "legacy TQBN Tick spill byte accounting overflow".to_string(),
-                    )
-                })?;
-                if stored_bytes > TQBN_LEGACY_SPILL_MAX_INPUT_BYTES {
-                    return Err(DataError::InvalidResponse(format!(
-                        "legacy TQBN Tick spill input exceeds {TQBN_LEGACY_SPILL_MAX_INPUT_BYTES}-byte limit"
-                    )));
-                }
-
-                let payload = TickPayloadKey::from_tick(&row).to_spill_bytes();
-                insert
-                    .execute(params![
-                        write_order,
-                        row.id,
-                        row.datetime,
-                        &payload[..],
-                        &tick_bytes[..]
-                    ])
-                    .map_err(tqbn_spill_error)?;
-                write_order = write_order.checked_add(1).ok_or_else(|| {
-                    DataError::InvalidResponse(
-                        "legacy TQBN Tick spill write order overflow".to_string(),
-                    )
-                })?;
-            }
-        }
-        drop(insert);
-        transaction.commit().map_err(tqbn_spill_error)?;
-    }
-
-    if !strictly_increasing {
-        canonicalize_tqbn_legacy_spill(&connection)?;
-    }
-
-    let output_path = root.path.join("canonicalized.rows");
-    {
-        let mut output = File::create(&output_path)?;
-        let mut statement = connection
-            .prepare(
-                "SELECT tick_bytes FROM ticks \
-                 WHERE NOT EXISTS (\
-                    SELECT 1 FROM stale_replay_orders \
-                    WHERE stale_replay_orders.write_order = ticks.write_order\
-                 ) \
-                 ORDER BY datetime, id",
-            )
-            .map_err(tqbn_spill_error)?;
-        let mut rows = statement.query([]).map_err(tqbn_spill_error)?;
-        while let Some(row) = rows.next().map_err(tqbn_spill_error)? {
-            let tick_bytes: Vec<u8> = row.get(0).map_err(tqbn_spill_error)?;
-            write_tqbn_spill_record(&mut output, &tick_bytes)?;
-        }
-        output.flush()?;
-    }
-    drop(connection);
-
-    Ok(TqbnSpilledPartition {
-        _root: root,
-        reader: File::open(output_path)?,
-        scratch: Vec::new(),
-    })
-}
-
-fn initialize_tqbn_legacy_spill_database(connection: &Connection) -> Result<()> {
-    connection
-        .pragma_update(None, "page_size", 4096_i64)
-        .map_err(tqbn_spill_error)?;
-    connection
-        .pragma_update(None, "cache_size", -TQBN_LEGACY_SPILL_CACHE_KIB)
-        .map_err(tqbn_spill_error)?;
-    connection
-        .execute_batch(
-            "PRAGMA temp_store = FILE;\
-             PRAGMA cache_spill = ON;\
-             CREATE TABLE ticks (\
-                write_order INTEGER PRIMARY KEY,\
-                id INTEGER NOT NULL,\
-                datetime INTEGER NOT NULL,\
-                payload BLOB NOT NULL,\
-                tick_bytes BLOB NOT NULL\
-             );\
-             CREATE TABLE stale_replay_orders(write_order INTEGER PRIMARY KEY);",
-        )
-        .map_err(tqbn_spill_error)
-}
-
-fn canonicalize_tqbn_legacy_spill(connection: &Connection) -> Result<()> {
-    let max = i64::MAX;
-    let tiny = TQBN_TICK_LEGACY_TIMESTAMP_SKEW_NS;
-    let same_id = TQBN_TICK_LEGACY_SAME_ID_TIMESTAMP_SKEW_NS;
-    let corroborated = TQBN_TICK_LEGACY_CORROBORATED_PAYLOAD_SKEW_NS;
-    let replay = TQBN_TICK_LEGACY_ID_REPLAY_SKEW_NS;
-    let sql = format!(
-        r#"
-        CREATE INDEX ticks_by_id_datetime_order ON ticks(id, datetime, write_order);
-        CREATE INDEX ticks_by_payload_datetime_order ON ticks(payload, datetime, write_order);
-        CREATE INDEX ticks_by_datetime_order ON ticks(datetime, write_order);
-
-        DELETE FROM ticks
-        WHERE write_order <> (
-            SELECT MAX(newer.write_order)
-            FROM ticks AS newer
-            WHERE newer.id = ticks.id AND newer.datetime = ticks.datetime
-        );
-
-        CREATE TABLE same_id_replay_orders(write_order INTEGER PRIMARY KEY);
-        INSERT OR IGNORE INTO same_id_replay_orders(write_order)
-        WITH ordered AS (
-            SELECT
-                write_order,
-                id,
-                datetime,
-                LAG(write_order) OVER (ORDER BY id, datetime, write_order) AS previous_write_order,
-                LAG(id) OVER (ORDER BY id, datetime, write_order) AS previous_id,
-                LAG(datetime) OVER (ORDER BY id, datetime, write_order) AS previous_datetime
-            FROM ticks
-        )
-        SELECT write_order FROM ordered
-        WHERE id = previous_id
-          AND datetime >= previous_datetime
-          AND (previous_datetime > {max_minus_replay} OR datetime <= previous_datetime + {replay})
-        UNION
-        SELECT previous_write_order FROM ordered
-        WHERE id = previous_id
-          AND datetime >= previous_datetime
-          AND (previous_datetime > {max_minus_replay} OR datetime <= previous_datetime + {replay});
-
-        CREATE TABLE payload_pairs AS
-        WITH ordered AS (
-            SELECT
-                write_order AS left_write_order,
-                id AS left_id,
-                datetime AS left_datetime,
-                payload AS left_payload,
-                LEAD(write_order) OVER (ORDER BY payload, datetime, write_order) AS right_write_order,
-                LEAD(id) OVER (ORDER BY payload, datetime, write_order) AS right_id,
-                LEAD(datetime) OVER (ORDER BY payload, datetime, write_order) AS right_datetime,
-                LEAD(payload) OVER (ORDER BY payload, datetime, write_order) AS right_payload
-            FROM ticks
-        )
-        SELECT * FROM ordered
-        WHERE right_write_order IS NOT NULL AND left_payload = right_payload;
-
-        CREATE TABLE stale_out_of_order_payload_orders(write_order INTEGER PRIMARY KEY);
-        INSERT OR IGNORE INTO stale_out_of_order_payload_orders(write_order)
-        SELECT CASE
-            WHEN right_datetime = left_datetime THEN MIN(left_write_order, right_write_order)
-            WHEN right_datetime >= left_datetime
-             AND (left_datetime > {max_minus_same_id} OR right_datetime <= left_datetime + {same_id})
-             AND left_id = right_id
-                THEN MIN(left_write_order, right_write_order)
-            ELSE right_write_order
-        END
-        FROM payload_pairs
-        WHERE right_datetime = left_datetime
-           OR (right_datetime >= left_datetime
-               AND (left_datetime > {max_minus_same_id} OR right_datetime <= left_datetime + {same_id})
-               AND left_id = right_id)
-           OR (right_datetime >= left_datetime
-               AND (left_datetime > {max_minus_tiny} OR right_datetime <= left_datetime + {tiny})
-               AND left_write_order > right_write_order);
-
-        CREATE TABLE payload_replay_with_later_write_orders(write_order INTEGER PRIMARY KEY);
-        INSERT OR IGNORE INTO payload_replay_with_later_write_orders(write_order)
-        SELECT CASE
-            WHEN right_datetime >= left_datetime
-             AND (left_datetime > {max_minus_tiny} OR right_datetime <= left_datetime + {tiny})
-                THEN MIN(left_write_order, right_write_order)
-            ELSE right_write_order
-        END
-        FROM payload_pairs
-        WHERE left_id <> right_id
-          AND (
-              (right_datetime >= left_datetime
-               AND (left_datetime > {max_minus_tiny} OR right_datetime <= left_datetime + {tiny}))
-              OR
-              (right_datetime >= left_datetime
-               AND (left_datetime > {max_minus_replay} OR right_datetime <= left_datetime + {replay})
-               AND left_write_order > right_write_order)
-          );
-
-        CREATE TABLE IF NOT EXISTS stale_replay_orders(write_order INTEGER PRIMARY KEY);
-        INSERT OR IGNORE INTO stale_replay_orders(write_order)
-        SELECT same_id_replay_orders.write_order
-        FROM same_id_replay_orders
-        INNER JOIN payload_replay_with_later_write_orders
-          ON payload_replay_with_later_write_orders.write_order = same_id_replay_orders.write_order;
-        INSERT OR IGNORE INTO stale_replay_orders(write_order)
-        SELECT write_order FROM stale_out_of_order_payload_orders;
-
-        INSERT OR IGNORE INTO stale_replay_orders(write_order)
-        WITH candidates AS (
-            SELECT
-                CASE
-                    WHEN left_write_order < right_write_order THEN left_write_order
-                    ELSE right_write_order
-                END AS write_order,
-                CASE WHEN left_write_order < right_write_order THEN left_id ELSE right_id END AS id,
-                CASE WHEN left_write_order < right_write_order THEN left_datetime ELSE right_datetime END AS datetime,
-                left_payload AS payload
-            FROM payload_pairs
-            WHERE left_id <> right_id
-              AND right_datetime >= left_datetime
-              AND (left_datetime > {max_minus_corroborated}
-                   OR right_datetime <= left_datetime + {corroborated})
-        )
-        SELECT candidates.write_order
-        FROM candidates
-        WHERE EXISTS (
-            SELECT 1 FROM ticks AS peer
-            WHERE peer.id = candidates.id
-              AND peer.write_order > candidates.write_order
-              AND peer.datetime < candidates.datetime
-              AND (peer.datetime > {max_minus_replay}
-                   OR candidates.datetime <= peer.datetime + {replay})
-              AND peer.payload <> candidates.payload
-        );
-
-        CREATE TABLE confirmed_stale_orders AS
-        SELECT write_order FROM stale_replay_orders;
-        CREATE TABLE same_timestamp_overlay_orders AS
-        SELECT older.write_order
-        FROM ticks AS older
-        WHERE EXISTS (
-            SELECT 1 FROM ticks AS newer
-            WHERE newer.datetime = older.datetime
-              AND newer.write_order > older.write_order
-        );
-        "#,
-        max_minus_tiny = max - tiny,
-        max_minus_same_id = max - same_id,
-        max_minus_corroborated = max - corroborated,
-        max_minus_replay = max - replay,
-    );
-    connection.execute_batch(&sql).map_err(tqbn_spill_error)?;
-
-    let sql = format!(
-        r#"
-        INSERT OR IGNORE INTO stale_replay_orders(write_order)
-        SELECT second.write_order
-        FROM ticks AS first
-        INNER JOIN ticks AS second ON second.write_order = first.write_order + 1
-        INNER JOIN ticks AS third ON third.write_order = second.write_order + 1
-        INNER JOIN confirmed_stale_orders AS first_stale ON first_stale.write_order = first.write_order
-        INNER JOIN confirmed_stale_orders AS third_stale ON third_stale.write_order = third.write_order
-        INNER JOIN same_timestamp_overlay_orders AS first_overlay ON first_overlay.write_order = first.write_order
-        INNER JOIN same_timestamp_overlay_orders AS third_overlay ON third_overlay.write_order = third.write_order
-        WHERE ((first.id < {max} AND second.id = first.id + 1)
-               OR (first.id = {max} AND second.id = first.id))
-          AND ((second.id < {max} AND third.id = second.id + 1)
-               OR (second.id = {max} AND third.id = second.id))
-          AND first.datetime < second.datetime
-          AND second.datetime < third.datetime
-          AND (first.datetime > {max_minus_replay} OR second.datetime <= first.datetime + {replay})
-          AND (second.datetime > {max_minus_replay} OR third.datetime <= second.datetime + {replay});
-
-        INSERT OR IGNORE INTO stale_replay_orders(write_order)
-        SELECT third.write_order
-        FROM ticks AS first
-        INNER JOIN ticks AS second ON second.write_order = first.write_order + 1
-        INNER JOIN ticks AS third ON third.write_order = second.write_order + 1
-        INNER JOIN confirmed_stale_orders AS first_stale ON first_stale.write_order = first.write_order
-        INNER JOIN confirmed_stale_orders AS second_stale ON second_stale.write_order = second.write_order
-        INNER JOIN same_timestamp_overlay_orders AS first_overlay ON first_overlay.write_order = first.write_order
-        INNER JOIN same_timestamp_overlay_orders AS second_overlay ON second_overlay.write_order = second.write_order
-        WHERE ((first.id < {max} AND second.id = first.id + 1)
-               OR (first.id = {max} AND second.id = first.id))
-          AND ((second.id < {max} AND third.id = second.id + 1)
-               OR (second.id = {max} AND third.id = second.id))
-          AND first.datetime < second.datetime
-          AND second.datetime < third.datetime
-          AND (first.datetime > {max_minus_tiny} OR second.datetime <= first.datetime + {tiny})
-          AND (second.datetime > {max_minus_tiny} OR third.datetime <= second.datetime + {tiny});
-        "#,
-        max_minus_tiny = max - tiny,
-        max_minus_replay = max - replay,
-    );
-    connection.execute_batch(&sql).map_err(tqbn_spill_error)?;
-
-    let propagate_sql = format!(
-        r#"
-        INSERT OR IGNORE INTO stale_replay_orders(write_order)
-        SELECT first.write_order
-        FROM ticks AS first
-        INNER JOIN ticks AS second ON second.write_order = first.write_order + 1
-        INNER JOIN ticks AS third ON third.write_order = second.write_order + 1
-        INNER JOIN stale_replay_orders AS second_stale ON second_stale.write_order = second.write_order
-        INNER JOIN stale_replay_orders AS third_stale ON third_stale.write_order = third.write_order
-        INNER JOIN same_timestamp_overlay_orders AS first_overlay ON first_overlay.write_order = first.write_order
-        WHERE ((first.id < {max} AND second.id = first.id + 1)
-               OR (first.id = {max} AND second.id = first.id))
-          AND ((second.id < {max} AND third.id = second.id + 1)
-               OR (second.id = {max} AND third.id = second.id))
-          AND first.datetime < second.datetime
-          AND second.datetime <= third.datetime
-          AND (first.datetime > {max_minus_replay} OR second.datetime <= first.datetime + {replay});
-        "#,
-        max_minus_replay = max - replay,
-    );
-    while connection
-        .execute(&propagate_sql, [])
-        .map_err(tqbn_spill_error)?
-        > 0
-    {}
-    Ok(())
-}
-
-fn tqbn_spill_error(error: rusqlite::Error) -> DataError {
-    DataError::InvalidResponse(format!("legacy TQBN spill failed: {error}"))
-}
-
-fn write_tqbn_spill_record(output: &mut File, tick_bytes: &[u8]) -> Result<()> {
-    if tick_bytes.len() > TQBN_LEGACY_SPILL_MAX_ROW_BYTES
-        || tick_bytes.len() != TQBN_TICK_SPILL_RECORD_BYTES
-    {
-        return Err(DataError::InvalidResponse(format!(
-            "legacy TQBN Tick spill output row is {} bytes, expected {TQBN_TICK_SPILL_RECORD_BYTES}",
-            tick_bytes.len()
-        )));
-    }
-    let length = u32::try_from(tick_bytes.len()).map_err(|_| {
-        DataError::InvalidResponse(
-            "legacy TQBN Tick spill output row length overflows u32".to_string(),
-        )
-    })?;
-    output.write_all(&length.to_le_bytes())?;
-    output.write_all(tick_bytes)?;
-    Ok(())
-}
-
-impl TqbnLegacySpillRoot {
-    fn create() -> Result<Self> {
-        let temp_dir = std::env::temp_dir();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        for attempt in 0..TQBN_LEGACY_SPILL_CREATE_ATTEMPTS {
-            let sequence = TQBN_LEGACY_SPILL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let path = temp_dir.join(format!(
-                "tqsdk-tqbn-spill-{}-{now}-{sequence}-{attempt}",
-                std::process::id(),
-            ));
-            match fs::create_dir(&path) {
-                Ok(()) => return Ok(Self { path }),
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Err(DataError::InvalidResponse(format!(
-            "could not create a unique legacy TQBN spill directory after {TQBN_LEGACY_SPILL_CREATE_ATTEMPTS} attempts"
-        )))
-    }
-}
-
-impl Drop for TqbnLegacySpillRoot {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-impl TqbnSpilledPartition {
-    fn next_row(&mut self) -> Result<Option<HistorySeriesRow>> {
-        let mut length = [0_u8; 4];
-        if self.reader.read(&mut length[..1])? == 0 {
-            return Ok(None);
-        }
-        read_exact_tqbn(&mut self.reader, &mut length[1..], || {
-            "legacy TQBN spill output length is truncated".to_string()
-        })?;
-        let length = usize::try_from(u32::from_le_bytes(length)).map_err(|_| {
-            DataError::InvalidResponse(
-                "legacy TQBN spill output length does not fit usize".to_string(),
-            )
-        })?;
-        if length > TQBN_LEGACY_SPILL_MAX_ROW_BYTES || length != TQBN_TICK_SPILL_RECORD_BYTES {
-            return Err(DataError::InvalidResponse(format!(
-                "legacy TQBN spill output row is {length} bytes, expected {TQBN_TICK_SPILL_RECORD_BYTES}"
-            )));
-        }
-        self.scratch.resize(length, 0);
-        read_exact_tqbn(&mut self.reader, &mut self.scratch, || {
-            "legacy TQBN spill output row is truncated".to_string()
-        })?;
-        let tick = tick_from_spill_bytes(&self.scratch)?;
-        Ok(Some(HistorySeriesRow::Tick(tick)))
-    }
-}
-
 fn parse_tqbn_rows_for_range(
     mut file: File,
     symbol: &str,
@@ -4404,6 +3606,7 @@ fn parse_tqbn_checkpoint_file(
             &mut file, path, symbol,
         )?));
     }
+    reject_pre_schema4_tick(path, kind)?;
     let (_, offset) = read_and_validate_tqbn_prefix(&mut file, symbol, kind)?;
     let file_len = file.metadata()?.len();
     let checkpoint = load_tqbn_tail_checkpoint(path, &mut file, offset as u64, file_len)?;
@@ -4432,17 +3635,6 @@ fn parse_tqbn_checkpoint_file(
         }
     })?;
     Ok(indexed)
-}
-
-#[cfg(test)]
-fn try_parse_tqbn_coverage_index_chain(
-    file: &mut File,
-    first_block_offset: u64,
-) -> Result<Option<Vec<(i64, i64)>>> {
-    Ok(
-        try_parse_tqbn_checkpoint_index_chain(file, first_block_offset)?
-            .map(|indexed| indexed.coverage),
-    )
 }
 
 fn try_parse_tqbn_checkpoint_index_chain(
@@ -6028,6 +5220,8 @@ fn list_tqbn_file_metas(root_dir: &Path) -> Result<Vec<TqbnSeriesMeta>> {
     Ok(files)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn tick_tqbn_partition_dirs(root_dir: &Path) -> Result<BTreeSet<PathBuf>> {
     let mut partition_dirs = BTreeSet::new();
     for file in list_tqbn_file_metas(root_dir)?
@@ -6183,6 +5377,7 @@ fn compact_tqbn_file_locked(path: &Path, symbol: &str, kind: HistorySeriesKind) 
     if kind == HistorySeriesKind::Tick && container::matches(path)? {
         return container::update(path, symbol, &[], &[], None, true);
     }
+    reject_pre_schema4_tick(path, kind)?;
     if fs::metadata(path)
         .map(|metadata| metadata.len() == 0)
         .unwrap_or(true)
@@ -6439,23 +5634,6 @@ fn with_exclusive_tqbn_lock<T>(path: &Path, f: impl FnOnce() -> Result<T>) -> Re
     })?;
     fs::create_dir_all(lock_dir)?;
     let lock_path = tqbn_file_lock_path(path);
-    let legacy_lock_path = lock_dir.join(LEGACY_LOCK_FILE_NAME);
-    let legacy_lock = if !lock_path.exists() {
-        match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&legacy_lock_path)
-        {
-            Ok(file) => {
-                FileExt::lock_exclusive(&file)?;
-                Some(file)
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        }
-    } else {
-        None
-    };
     let lock_file = OpenOptions::new()
         .create(true)
         .read(true)
@@ -6473,18 +5651,11 @@ fn with_exclusive_tqbn_lock<T>(path: &Path, f: impl FnOnce() -> Result<T>) -> Re
     };
     let result = f();
     let data_unlock_result = data_lock.as_ref().map_or(Ok(()), FileExt::unlock);
-    let unlock_result = fs2::FileExt::unlock(&lock_file);
-    let legacy_unlock_result = legacy_lock.as_ref().map_or(Ok(()), FileExt::unlock);
-    match (
-        result,
-        data_unlock_result,
-        unlock_result,
-        legacy_unlock_result,
-    ) {
-        (Ok(value), Ok(()), Ok(()), Ok(())) => Ok(value),
-        (Err(error), _, _, _) => Err(error),
-        (Ok(_), Err(error), _, _) | (Ok(_), Ok(()), Err(error), _) => Err(DataError::from(error)),
-        (Ok(_), Ok(()), Ok(()), Err(error)) => Err(DataError::from(error)),
+    let unlock_result = FileExt::unlock(&lock_file);
+    match (result, data_unlock_result, unlock_result) {
+        (Ok(value), Ok(()), Ok(())) => Ok(value),
+        (Err(error), _, _) => Err(error),
+        (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => Err(DataError::from(error)),
     }
 }
 
@@ -6492,70 +5663,40 @@ fn acquire_tqbn_shared_lock(path: &Path, read_only: bool) -> Result<Option<File>
     let lock_dir = path.parent().ok_or_else(|| {
         DataError::InvalidResponse("history TQBN lock path is invalid".to_string())
     })?;
+    if !read_only {
+        fs::create_dir_all(lock_dir)?;
+    }
     let lock_path = tqbn_file_lock_path(path);
-    let legacy_path = lock_dir.join(LEGACY_LOCK_FILE_NAME);
-    let open_lock_file = |candidate: &Path| {
-        OpenOptions::new()
-            .read(true)
-            .write(!read_only)
-            .open(candidate)
-    };
-    let lock_file = match open_lock_file(&lock_path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => match open_lock_file(&legacy_path) {
-            Ok(legacy_file) => {
-                FileExt::lock_shared(&legacy_file)?;
-                match open_lock_file(&lock_path) {
-                    Ok(file_lock) => {
-                        FileExt::lock_shared(&file_lock)?;
-                        FileExt::unlock(&legacy_file)?;
-                        return Ok(Some(file_lock));
-                    }
-                    Err(recheck_error) if recheck_error.kind() == ErrorKind::NotFound => {
-                        return Ok(Some(legacy_file));
-                    }
-                    Err(recheck_error) => return Err(recheck_error.into()),
+    let open_lock_file = || OpenOptions::new().read(true).open(&lock_path);
+    match open_lock_file() {
+        Ok(file) => {
+            FileExt::lock_shared(&file)?;
+            Ok(Some(file))
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            let data_file = match File::open(path) {
+                Ok(file) => file,
+                Err(data_error) if data_error.kind() == ErrorKind::NotFound => return Ok(None),
+                Err(data_error) => return Err(data_error.into()),
+            };
+            FileExt::lock_shared(&data_file)?;
+            match open_lock_file() {
+                Ok(file_lock) => {
+                    FileExt::lock_shared(&file_lock)?;
+                    FileExt::unlock(&data_file)?;
+                    Ok(Some(file_lock))
+                }
+                Err(recheck_error) if recheck_error.kind() == ErrorKind::NotFound => {
+                    Ok(Some(data_file))
+                }
+                Err(recheck_error) => {
+                    FileExt::unlock(&data_file)?;
+                    Err(recheck_error.into())
                 }
             }
-            Err(legacy_error) if legacy_error.kind() == ErrorKind::NotFound => {
-                let data_file = match File::open(path) {
-                    Ok(file) => file,
-                    Err(data_error) if data_error.kind() == ErrorKind::NotFound => {
-                        for candidate in [&lock_path, &legacy_path] {
-                            match open_lock_file(candidate) {
-                                Ok(file) => {
-                                    FileExt::lock_shared(&file)?;
-                                    return Ok(Some(file));
-                                }
-                                Err(recheck_error)
-                                    if recheck_error.kind() == ErrorKind::NotFound => {}
-                                Err(recheck_error) => return Err(recheck_error.into()),
-                            }
-                        }
-                        return Ok(None);
-                    }
-                    Err(data_error) => return Err(data_error.into()),
-                };
-                FileExt::lock_shared(&data_file)?;
-                for candidate in [&lock_path, &legacy_path] {
-                    match open_lock_file(candidate) {
-                        Ok(file) => {
-                            FileExt::unlock(&data_file)?;
-                            FileExt::lock_shared(&file)?;
-                            return Ok(Some(file));
-                        }
-                        Err(recheck_error) if recheck_error.kind() == ErrorKind::NotFound => {}
-                        Err(recheck_error) => return Err(recheck_error.into()),
-                    }
-                }
-                return Ok(Some(data_file));
-            }
-            Err(legacy_error) => return Err(legacy_error.into()),
-        },
-        Err(error) => return Err(error.into()),
-    };
-    FileExt::lock_shared(&lock_file)?;
-    Ok(Some(lock_file))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn with_shared_tqbn_lock<T>(
@@ -7091,8 +6232,8 @@ impl<'a> RecordReader<'a> {
 mod tests {
     include!("hardlink_tests.rs");
 
-    use std::fs::{File, OpenOptions};
-    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::fs::OpenOptions;
+    use std::io::Write;
     use std::sync::{Arc, mpsc};
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -7103,24 +6244,16 @@ mod tests {
     use crate::client::{KlineDataSeriesRequest, TickDataSeriesRequest};
     use crate::error::DataError;
     use crate::history_series_cache::{
-        HistorySeriesCache, HistorySeriesCacheFileStatus, HistorySeriesCoverageCommit,
-        HistorySeriesCoverageRequest, HistorySeriesKind, HistorySeriesProvisionalCoverage,
-        HistorySeriesReader, HistorySeriesRow, HistorySeriesStore, HistorySeriesWriteRows,
-        HistorySeriesWriteSegment,
+        HistorySeriesCache, HistorySeriesCoverageCommit, HistorySeriesCoverageRequest,
+        HistorySeriesKind, HistorySeriesProvisionalCoverage, HistorySeriesReader, HistorySeriesRow,
+        HistorySeriesStore, HistorySeriesWriteRows, HistorySeriesWriteSegment,
     };
 
-    use super::codec::{
-        TqbnBlockType, decode_blocks, decode_file_prefix, encode_block, encode_file_prefix,
-    };
+    use super::codec::{TqbnBlockType, decode_blocks, encode_block, encode_file_prefix};
     use super::{
-        TQBN_BLOCK_HEADER_LEN, TQBN_COVERAGE_INDEX_PAYLOAD_LEN, TqbnHistoryStore, TqbnMetadata,
-        TqbnReadTelemetryState, TqbnReader, append_legacy_segment_to_file, coverage_record,
-        encode_metadata, ensure_parent_dir, history_row_id, history_rows_are_strictly_increasing,
-        load_tqbn_tail_checkpoint, parse_tqbn_coverage_file, plan_tqbn_streaming_blocks,
-        read_and_validate_tqbn_prefix, read_tqbn_block_descriptor_at, read_tqbn_coverage_index_at,
-        rows_for_request, tick_level_depth, tqbn_file_lock_path, trading_day_range,
-        try_parse_tqbn_checkpoint_index_chain_at, try_parse_tqbn_coverage_index_chain,
-        write_coverage_record_bytes,
+        TqbnHistoryStore, TqbnMetadata, TqbnReadTelemetryState, TqbnReader, encode_metadata,
+        ensure_parent_dir, history_row_id, history_rows_are_strictly_increasing, rows_for_request,
+        tick_level_depth, tqbn_file_lock_path, trading_day_range,
     };
 
     const SYMBOL: &str = "SHFE.rb2601";
@@ -7138,7 +6271,7 @@ mod tests {
     }
 
     #[test]
-    fn tqbn_spill_tick_codec_preserves_non_finite_float_bits() {
+    fn tqbn_tick_bitwise_equality_preserves_non_finite_float_bits() {
         let mut tick = Tick {
             id: -17,
             datetime: 42,
@@ -7152,14 +6285,10 @@ mod tests {
         tick.open_interest = i64::MIN + 5;
         tick.epoch = Some(-11);
 
-        let actual = super::tick_from_spill_bytes(&super::tick_to_spill_bytes(&tick)).unwrap();
-
-        assert_eq!(actual.id, tick.id);
-        assert_eq!(actual.datetime, tick.datetime);
-        assert_eq!(
-            super::TickPayloadKey::from_tick(&actual),
-            super::TickPayloadKey::from_tick(&tick)
-        );
+        let mut actual = tick.clone();
+        assert!(super::ticks_bitwise_equal(&actual, &tick));
+        actual.amount = f64::from_bits(tick.amount.to_bits() + 1);
+        assert!(!super::ticks_bitwise_equal(&actual, &tick));
     }
 
     #[test]
@@ -7239,170 +6368,6 @@ mod tests {
             .unwrap();
         assert_eq!(series.rows()[0].last_price, 618.5);
         assert_eq!(series.rows()[0].ask_price5, 623.5);
-    }
-
-    #[test]
-    fn tqbn_sparse_tick_block_round_trips_every_snapshot() {
-        let store = tqbn_store("sparse_tick_block");
-        let mut rows = Vec::new();
-        let mut current = tick5(1, 1_000, f64::NAN, 623.5);
-        current.volume = 0;
-        current.amount = f64::NAN;
-        current.epoch = None;
-
-        for index in 0_i64..512 {
-            let mut row = current.clone();
-            row.id = index + 1;
-            row.datetime = 1_000 + index * 500_000_000;
-            if index % 32 == 0 {
-                row.bid_volume1 += index / 32;
-            }
-            current = row.clone();
-            rows.push(row);
-        }
-
-        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
-        ensure_parent_dir(&path).unwrap();
-        append_legacy_segment_to_file(
-            &path,
-            &HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: Some((1_000, 1_000 + 512 * 500_000_000)),
-                rows: HistorySeriesWriteRows::Ticks(&rows),
-            },
-        )
-        .unwrap();
-        let bytes = std::fs::read(path).unwrap();
-        let (_, first_block_offset) = decode_file_prefix(&bytes).unwrap();
-        let blocks = decode_blocks(&bytes[first_block_offset..]).unwrap();
-        assert!(
-            blocks.iter().any(|block| {
-                block.block_type == TqbnBlockType::Records
-                    && block
-                        .records
-                        .starts_with(&super::codec::TQBN_TICK_DELTA_MAGIC)
-            }),
-            "sparse Tick block must use TickDelta encoding"
-        );
-
-        let cache = HistorySeriesCache::from_store(Arc::new(store));
-        let actual = cache
-            .read_tick_data_series(TickDataSeriesRequest::new(
-                SYMBOL,
-                1_000,
-                1_000 + 512 * 500_000_000,
-            ))
-            .unwrap();
-        assert_eq!(actual.rows().len(), rows.len());
-        for (expected, actual) in rows.iter().zip(actual.rows()) {
-            assert_eq!(actual.id, expected.id);
-            assert_eq!(actual.datetime, expected.datetime);
-            assert_eq!(actual.last_price.to_bits(), expected.last_price.to_bits());
-            assert_eq!(actual.ask_price1.to_bits(), expected.ask_price1.to_bits());
-            assert_eq!(actual.bid_price1.to_bits(), expected.bid_price1.to_bits());
-            assert_eq!(actual.ask_price5.to_bits(), expected.ask_price5.to_bits());
-            assert_eq!(actual.bid_price5.to_bits(), expected.bid_price5.to_bits());
-            assert_eq!(actual.bid_volume1, expected.bid_volume1);
-            assert_eq!(actual.volume, expected.volume);
-            assert_eq!(actual.amount.to_bits(), expected.amount.to_bits());
-            assert_eq!(actual.open_interest, expected.open_interest);
-            assert_eq!(actual.epoch, expected.epoch);
-        }
-    }
-
-    #[test]
-    fn tqbn_range_reader_skips_out_of_range_indexed_records_blocks() {
-        let cache = tqbn_cache("range_reader_skips_unrelated_block");
-        cache
-            .write_tick_range(SYMBOL, 1_000, 2_000, &[tick5(1, 1_000, 618.5, 623.5)])
-            .unwrap();
-        cache
-            .write_tick_range(SYMBOL, 3_000, 4_000, &[tick5(2, 3_000, 619.5, 624.5)])
-            .unwrap();
-
-        let path = cache
-            .root_dir()
-            .join("series")
-            .join("19700101")
-            .join("tick")
-            .join("SHFE.rb2601.tqbn");
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .unwrap();
-        let (_, first_block_offset) =
-            read_and_validate_tqbn_prefix(&mut file, SYMBOL, HistorySeriesKind::Tick).unwrap();
-        let file_len = file.metadata().unwrap().len();
-        let mut offset = first_block_offset as u64;
-        let payload_offset = loop {
-            let descriptor = read_tqbn_block_descriptor_at(&mut file, offset, file_len).unwrap();
-            if descriptor.block_type == TqbnBlockType::Records as u8 {
-                break descriptor.payload_offset;
-            }
-            offset = descriptor.end_offset;
-        };
-        file.seek(SeekFrom::Start(payload_offset)).unwrap();
-        let mut byte = [0_u8; 1];
-        file.read_exact(&mut byte).unwrap();
-        file.seek(SeekFrom::Start(payload_offset)).unwrap();
-        file.write_all(&[byte[0] ^ 0xff]).unwrap();
-        file.sync_data().unwrap();
-        drop(file);
-
-        let series = cache
-            .read_tick_data_series(TickDataSeriesRequest::new(SYMBOL, 3_000, 4_000))
-            .unwrap();
-
-        assert_eq!(series.rows().len(), 1);
-        assert_eq!(series.rows()[0].id, 2);
-    }
-
-    #[test]
-    fn tqbn_range_reader_rejects_unknown_flags_in_skipped_block() {
-        let cache = tqbn_cache("range_reader_validates_skipped_block_flags");
-        cache
-            .write_tick_range(SYMBOL, 1_000, 2_000, &[tick5(1, 1_000, 618.5, 623.5)])
-            .unwrap();
-        cache
-            .write_tick_range(SYMBOL, 3_000, 4_000, &[tick5(2, 3_000, 619.5, 624.5)])
-            .unwrap();
-
-        let path = cache
-            .root_dir()
-            .join("series")
-            .join("19700101")
-            .join("tick")
-            .join("SHFE.rb2601.tqbn");
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .unwrap();
-        let (_, first_block_offset) =
-            read_and_validate_tqbn_prefix(&mut file, SYMBOL, HistorySeriesKind::Tick).unwrap();
-        let file_len = file.metadata().unwrap().len();
-        let mut offset = first_block_offset as u64;
-        let block_offset = loop {
-            let descriptor = read_tqbn_block_descriptor_at(&mut file, offset, file_len).unwrap();
-            if descriptor.block_type == TqbnBlockType::Records as u8 {
-                break offset;
-            }
-            offset = descriptor.end_offset;
-        };
-        file.seek(SeekFrom::Start(block_offset + 5)).unwrap();
-        file.write_all(&[0x80]).unwrap();
-        file.sync_data().unwrap();
-        drop(file);
-
-        let error = cache
-            .read_tick_data_series(TickDataSeriesRequest::new(SYMBOL, 3_000, 4_000))
-            .unwrap_err();
-
-        assert!(
-            matches!(error, DataError::InvalidResponse(message) if message.contains("unsupported bits"))
-        );
     }
 
     #[test]
@@ -7495,209 +6460,7 @@ mod tests {
     }
 
     #[test]
-    fn tqbn_coverage_index_chain_round_trips_multiple_commits() {
-        let store = tqbn_store("coverage_index_chain");
-        let kind = HistorySeriesKind::Tick;
-        for (start_ns, end_ns) in [(1_000, 2_000), (2_000, 3_000)] {
-            store
-                .append_coverage(HistorySeriesCoverageCommit {
-                    symbol: SYMBOL.to_string(),
-                    kind,
-                    range_start_ns: start_ns,
-                    range_end_ns: end_ns,
-                    rows: 0,
-                    id_range: None,
-                })
-                .unwrap();
-        }
-
-        let path = store.partition_series_path("19700101", SYMBOL, kind);
-        let mut file = File::open(path).unwrap();
-        let (_, first_block_offset) =
-            read_and_validate_tqbn_prefix(&mut file, SYMBOL, kind).unwrap();
-
-        assert_eq!(
-            try_parse_tqbn_coverage_index_chain(&mut file, first_block_offset as u64).unwrap(),
-            Some(vec![(1_000, 2_000), (2_000, 3_000)])
-        );
-    }
-
-    #[test]
-    fn tqbn_coverage_index_falls_back_after_trailing_rows() {
-        let store = tqbn_store("coverage_index_trailing_rows");
-        let kind = HistorySeriesKind::Tick;
-        store
-            .write_segment(HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind,
-                declared_range_ns: Some((1_000, 2_000)),
-                rows: HistorySeriesWriteRows::Ticks(&[tick5(1, 1_000, 618.5, 623.5)]),
-            })
-            .unwrap();
-        store
-            .write_segment(HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(&[tick5(2, 1_500, 618.6, 623.6)]),
-            })
-            .unwrap();
-
-        let path = store.partition_series_path("19700101", SYMBOL, kind);
-        let mut file = File::open(&path).unwrap();
-        let (_, first_block_offset) =
-            read_and_validate_tqbn_prefix(&mut file, SYMBOL, kind).unwrap();
-        assert_eq!(
-            try_parse_tqbn_coverage_index_chain(&mut file, first_block_offset as u64).unwrap(),
-            None
-        );
-        assert_eq!(
-            parse_tqbn_coverage_file(&path, SYMBOL, kind).unwrap(),
-            vec![(1_000, 2_000)]
-        );
-    }
-
-    #[test]
-    fn tqbn_coverage_index_rejects_corrupt_referenced_coverage_block() {
-        let store = tqbn_store("coverage_index_corrupt_block");
-        let kind = HistorySeriesKind::Tick;
-        store
-            .append_coverage(HistorySeriesCoverageCommit {
-                symbol: SYMBOL.to_string(),
-                kind,
-                range_start_ns: 1_000,
-                range_end_ns: 2_000,
-                rows: 0,
-                id_range: None,
-            })
-            .unwrap();
-
-        let path = store.partition_series_path("19700101", SYMBOL, kind);
-        let mut file = File::open(&path).unwrap();
-        let (_, first_block_offset) =
-            read_and_validate_tqbn_prefix(&mut file, SYMBOL, kind).unwrap();
-        let file_len = file.metadata().unwrap().len();
-        let tail_offset =
-            file_len - (TQBN_BLOCK_HEADER_LEN + TQBN_COVERAGE_INDEX_PAYLOAD_LEN) as u64;
-        let index = read_tqbn_coverage_index_at(&mut file, tail_offset, file_len)
-            .unwrap()
-            .unwrap();
-        drop(file);
-
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .unwrap();
-        file.seek(SeekFrom::Start(
-            index.coverage_block_offset + TQBN_BLOCK_HEADER_LEN as u64,
-        ))
-        .unwrap();
-        file.write_all(&[0xff]).unwrap();
-        file.sync_data().unwrap();
-        drop(file);
-
-        let mut file = File::open(&path).unwrap();
-        assert_eq!(
-            try_parse_tqbn_coverage_index_chain(&mut file, first_block_offset as u64).unwrap(),
-            None
-        );
-        let error = parse_tqbn_coverage_file(&path, SYMBOL, kind).unwrap_err();
-        assert!(
-            matches!(error, DataError::InvalidResponse(message) if message.contains("checksum mismatch"))
-        );
-    }
-
-    #[test]
-    fn tqbn_coverage_index_falls_back_for_legacy_file_and_compaction_upgrades_it() {
-        let store = tqbn_store("coverage_index_legacy");
-        let kind = HistorySeriesKind::Tick;
-        let path = store.partition_series_path("19700101", SYMBOL, kind);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let record = coverage_record(1_000, 2_000, 0, None).unwrap();
-        let mut records = Vec::new();
-        write_coverage_record_bytes(&mut records, &record).unwrap();
-        let mut bytes = valid_tick_prefix().bytes;
-        bytes.extend_from_slice(&encode_block(TqbnBlockType::Records, &records));
-        std::fs::write(&path, bytes).unwrap();
-
-        let mut file = File::open(&path).unwrap();
-        let (_, first_block_offset) =
-            read_and_validate_tqbn_prefix(&mut file, SYMBOL, kind).unwrap();
-        assert_eq!(
-            try_parse_tqbn_coverage_index_chain(&mut file, first_block_offset as u64).unwrap(),
-            None
-        );
-        assert_eq!(
-            parse_tqbn_coverage_file(&path, SYMBOL, kind).unwrap(),
-            vec![(1_000, 2_000)]
-        );
-
-        store.compact_series(SYMBOL, kind).unwrap();
-        let mut file = File::open(&path).unwrap();
-        let (_, first_block_offset) =
-            read_and_validate_tqbn_prefix(&mut file, SYMBOL, kind).unwrap();
-        let compacted_len = file.metadata().unwrap().len();
-        assert_eq!(
-            try_parse_tqbn_coverage_index_chain(&mut file, first_block_offset as u64).unwrap(),
-            Some(vec![(1_000, 2_000)])
-        );
-        assert_eq!(
-            load_tqbn_tail_checkpoint(&path, &mut file, first_block_offset as u64, compacted_len,)
-                .unwrap()
-                .map(|checkpoint| checkpoint.valid_len),
-            Some(compacted_len),
-            "compaction must refresh the append checkpoint for the replacement inode",
-        );
-    }
-
-    #[test]
-    fn tqbn_compaction_migrates_legacy_tick_records_to_delta_schema() {
-        let store = tqbn_store("migrate_legacy_tick_delta");
-        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let rows = vec![tick5(1, 1_000, 618.5, 623.5), tick5(2, 1_500, 618.5, 623.5)];
-        let records = super::encode_fixed_tick_records(&rows, true).unwrap();
-        let mut bytes = legacy_tick_prefix().bytes;
-        bytes.extend_from_slice(&encode_block(TqbnBlockType::Records, &records));
-        std::fs::write(&path, bytes).unwrap();
-        assert_eq!(
-            store.scan().unwrap().files[0].schema_version,
-            Some(super::TQBN_LEGACY_SCHEMA_VERSION)
-        );
-        store
-            .append_coverage(HistorySeriesCoverageCommit {
-                symbol: SYMBOL.to_string(),
-                kind: HistorySeriesKind::Tick,
-                range_start_ns: 1_000,
-                range_end_ns: 2_000,
-                rows: rows.len(),
-                id_range: Some((1, 3)),
-            })
-            .unwrap();
-
-        store
-            .compact_series(SYMBOL, HistorySeriesKind::Tick)
-            .unwrap();
-
-        let bytes = std::fs::read(path).unwrap();
-        let (prefix, _) = decode_file_prefix(&bytes).unwrap();
-        assert_eq!(prefix.schema_version, super::TQBN_SCHEMA_VERSION);
-        assert!(
-            prefix.schema_version > super::TQBN_LEGACY_SCHEMA_VERSION,
-            "compaction must replace the legacy format identity"
-        );
-        let cache = HistorySeriesCache::from_store(Arc::new(store));
-        let actual = cache
-            .read_tick_data_series(TickDataSeriesRequest::new(SYMBOL, 1_000, 2_000))
-            .unwrap();
-        assert_eq!(actual.rows().len(), rows.len());
-        assert_eq!(actual.rows()[0].id, rows[0].id);
-        assert_eq!(actual.rows()[1].id, rows[1].id);
-    }
-
-    #[test]
-    fn tqbn_legacy_tick_file_rejects_append_until_migrated() {
+    fn tqbn_pre_schema4_tick_file_fails_closed_without_mutation() {
         let cache = tqbn_cache("legacy_tick_append_rejected");
         let path = cache
             .root_dir()
@@ -7710,14 +6473,15 @@ mod tests {
         let records = super::encode_fixed_tick_records(&rows, true).unwrap();
         let mut bytes = legacy_tick_prefix().bytes;
         bytes.extend_from_slice(&encode_block(TqbnBlockType::Records, &records));
-        std::fs::write(path, bytes).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
 
         let error = cache
             .write_tick_range(SYMBOL, 2_000, 3_000, &[tick5(2, 2_000, 618.5, 623.5)])
             .unwrap_err();
 
-        assert!(matches!(error, DataError::InvalidState(_)));
-        assert!(error.to_string().contains("run tqsdk-cache migrate"));
+        assert!(matches!(error, DataError::InvalidResponse(_)));
+        assert!(error.to_string().contains("unsupported pre-schema-4"));
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
 
     #[test]
@@ -7770,75 +6534,6 @@ mod tests {
             HistorySeriesRow::Tick(tick5(1, 2_000, 618.6, 623.6)),
         ];
         assert!(!history_rows_are_strictly_increasing(&duplicate, kind));
-    }
-
-    #[test]
-    fn tqbn_reader_streams_strictly_increasing_indexed_blocks() {
-        let store = tqbn_store("reader_streams_increasing_blocks");
-        let kind = HistorySeriesKind::Tick;
-        for row in [tick5(1, 1_000, 618.5, 623.5), tick5(2, 2_000, 618.6, 623.6)] {
-            store
-                .write_segment(HistorySeriesWriteSegment {
-                    symbol: SYMBOL,
-                    kind,
-                    declared_range_ns: None,
-                    rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&row)),
-                })
-                .unwrap();
-        }
-        let path = store.partition_series_path("19700101", SYMBOL, kind);
-        let mut reader = TqbnReader {
-            common_partition: None,
-            paths: vec![path.clone()],
-            path_index: 0,
-            symbol: SYMBOL.to_string(),
-            kind,
-            range_start_ns: 1_000,
-            range_end_ns: 3_000,
-            rows: Vec::new().into_iter(),
-            partition: None,
-            spilled_partition: None,
-            spare_records: Vec::new(),
-            read_only: false,
-            telemetry: Arc::new(super::TqbnReadTelemetryState::default()),
-        };
-
-        let first = reader.next_row().unwrap().unwrap();
-        assert_eq!(history_row_id(&first, kind), Some(1));
-        assert_eq!(
-            reader.rows.len(),
-            0,
-            "strictly increasing partitions must retain only the current records block"
-        );
-        let second = reader.next_row().unwrap().unwrap();
-        assert_eq!(history_row_id(&second, kind), Some(2));
-        assert!(reader.next_row().unwrap().is_none());
-        let telemetry = reader.read_telemetry();
-        assert!(telemetry.blocks_decoded >= 2);
-        assert!(telemetry.bytes_read > 0);
-        assert!(telemetry.bytes_decompressed > 0);
-        assert_eq!(telemetry.materialized_rows, 0);
-
-        let mut skipped_reader = TqbnReader {
-            common_partition: None,
-            paths: vec![path],
-            path_index: 0,
-            symbol: SYMBOL.to_string(),
-            kind,
-            range_start_ns: 1_500,
-            range_end_ns: 3_000,
-            rows: Vec::new().into_iter(),
-            partition: None,
-            spilled_partition: None,
-            spare_records: Vec::new(),
-            read_only: false,
-            telemetry: Arc::new(super::TqbnReadTelemetryState::default()),
-        };
-        let row = skipped_reader.next_row().unwrap().unwrap();
-        assert_eq!(history_row_id(&row, kind), Some(2));
-        let telemetry = skipped_reader.read_telemetry();
-        assert!(telemetry.blocks_skipped >= 1);
-        assert_eq!(telemetry.materialized_rows, 0);
     }
 
     #[test]
@@ -7896,7 +6591,6 @@ mod tests {
             range_end_ns: 2_000,
             rows: Vec::new().into_iter(),
             partition: None,
-            spilled_partition: None,
             spare_records: Vec::new(),
             read_only: false,
             telemetry: Arc::new(super::TqbnReadTelemetryState::default()),
@@ -7930,437 +6624,6 @@ mod tests {
             index.streaming.is_none(),
             "legacy indexes must fall back to the conservative payload scanner"
         );
-    }
-
-    #[test]
-    fn tqbn_records_index_v2_plans_full_tick_block_without_payload_scan() {
-        let store = tqbn_store("records_index_v2_streaming_plan");
-        let kind = HistorySeriesKind::Tick;
-        let rows = (1_i64..=512)
-            .map(|id| tick5(id, id * 1_000, 618.5, 623.5))
-            .collect::<Vec<_>>();
-        store
-            .write_segment(HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(&rows),
-            })
-            .unwrap();
-
-        let path = store.partition_series_path("19700101", SYMBOL, kind);
-        let mut file = File::open(path).unwrap();
-        let (_, first_block_offset) =
-            read_and_validate_tqbn_prefix(&mut file, SYMBOL, kind).unwrap();
-        let file_len = file.metadata().unwrap().len();
-        let mut spare_records = Vec::new();
-        let plan = plan_tqbn_streaming_blocks(
-            &mut file,
-            kind,
-            super::TqbnReadRange {
-                start_ns: 1_000,
-                end_ns: 513_000,
-            },
-            file_len,
-            first_block_offset as u64,
-            &mut spare_records,
-            None,
-        )
-        .unwrap()
-        .unwrap();
-
-        assert_eq!(plan.len(), 1);
-        assert!(
-            spare_records.is_empty(),
-            "v2 ordering facts must avoid the planner's records-payload decode"
-        );
-    }
-
-    #[test]
-    fn tqbn_reader_streams_strictly_increasing_tick_delta_blocks() {
-        let store = tqbn_store("reader_streams_tick_delta");
-        let kind = HistorySeriesKind::Tick;
-        let rows = (1_i64..=512)
-            .map(|id| tick5(id, id * 1_000, 618.5, 623.5))
-            .collect::<Vec<_>>();
-        store
-            .write_segment(HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(&rows),
-            })
-            .unwrap();
-
-        let path = store.partition_series_path("19700101", SYMBOL, kind);
-        let mut reader = TqbnReader {
-            common_partition: None,
-            paths: vec![path],
-            path_index: 0,
-            symbol: SYMBOL.to_string(),
-            kind,
-            range_start_ns: 1_000,
-            range_end_ns: 513_000,
-            rows: Vec::new().into_iter(),
-            partition: None,
-            spilled_partition: None,
-            spare_records: Vec::new(),
-            read_only: false,
-            telemetry: Arc::new(super::TqbnReadTelemetryState::default()),
-        };
-
-        let first = reader.next_row().unwrap().unwrap();
-        assert_eq!(history_row_id(&first, kind), Some(1));
-        assert!(
-            reader.partition.is_some(),
-            "strictly increasing TickDelta blocks must stay streaming"
-        );
-
-        let mut count = 1;
-        while reader.next_row().unwrap().is_some() {
-            count += 1;
-        }
-        assert_eq!(count, rows.len());
-    }
-
-    #[test]
-    fn tqbn_reader_spills_overlapping_blocks_with_last_write_wins() {
-        let store = tqbn_store("reader_streams_overlapping_blocks");
-        let kind = HistorySeriesKind::Tick;
-        let first_block = [
-            tick5(1, 1_000, 618.5, 623.5),
-            tick5(2, 2_000, 618.6, 623.6),
-            tick5(3, 3_000, 618.7, 623.7),
-        ];
-        let second_block = [
-            tick5(2, 2_000, 628.6, 633.6),
-            tick5(3, 3_000, 628.7, 633.7),
-            tick5(4, 4_000, 628.8, 633.8),
-        ];
-        for rows in [&first_block[..], &second_block[..]] {
-            store
-                .write_segment(HistorySeriesWriteSegment {
-                    symbol: SYMBOL,
-                    kind,
-                    declared_range_ns: None,
-                    rows: HistorySeriesWriteRows::Ticks(rows),
-                })
-                .unwrap();
-        }
-
-        let path = store.partition_series_path("19700101", SYMBOL, kind);
-        let mut reader = TqbnReader {
-            common_partition: None,
-            paths: vec![path],
-            path_index: 0,
-            symbol: SYMBOL.to_string(),
-            kind,
-            range_start_ns: 1_000,
-            range_end_ns: 5_000,
-            rows: Vec::new().into_iter(),
-            partition: None,
-            spilled_partition: None,
-            spare_records: Vec::new(),
-            read_only: false,
-            telemetry: Arc::new(super::TqbnReadTelemetryState::default()),
-        };
-
-        let first = reader.next_row().unwrap().unwrap();
-        assert_eq!(history_row_id(&first, kind), Some(1));
-        assert!(
-            reader.partition.is_none(),
-            "overlapping Tick blocks must not use the monotonic streaming cursor"
-        );
-        assert!(
-            reader.spilled_partition.is_some(),
-            "overlapping Tick blocks must use the bounded canonicalized spool"
-        );
-
-        let mut rows = vec![first];
-        while let Some(row) = reader.next_row().unwrap() {
-            rows.push(row);
-        }
-        let ticks = rows
-            .into_iter()
-            .map(|row| match row {
-                HistorySeriesRow::Tick(row) => row,
-                HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            ticks.iter().map(|row| row.id).collect::<Vec<_>>(),
-            vec![1, 2, 3, 4]
-        );
-        assert_eq!(ticks[1].last_price, 628.6);
-        assert_eq!(ticks[2].last_price, 628.7);
-    }
-
-    #[test]
-    fn tqbn_reader_spills_nonoverlapping_id_replay_blocks_for_payload_canonicalization() {
-        let store = tqbn_store("reader_spills_id_replay_blocks");
-        let kind = HistorySeriesKind::Tick;
-        let original = tick5(519, 1_500_000_000, 618.5, 623.5);
-        let corrected = tick5(523, 3_000_001_000, 628.5, 633.5);
-        let stale = Tick {
-            id: original.id,
-            datetime: 3_000_000_000,
-            ..corrected.clone()
-        };
-        store
-            .write_segment(HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&original)),
-            })
-            .unwrap();
-        store
-            .write_segment(HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(&[stale, corrected.clone()]),
-            })
-            .unwrap();
-
-        let path = store.partition_series_path("19700101", SYMBOL, kind);
-        let mut reader = TqbnReader {
-            common_partition: None,
-            paths: vec![path],
-            path_index: 0,
-            symbol: SYMBOL.to_string(),
-            kind,
-            range_start_ns: 1_000_000_000,
-            range_end_ns: 4_000_000_000,
-            rows: Vec::new().into_iter(),
-            partition: None,
-            spilled_partition: None,
-            spare_records: Vec::new(),
-            read_only: false,
-            telemetry: Arc::new(super::TqbnReadTelemetryState::default()),
-        };
-
-        let first = reader.next_row().unwrap().unwrap();
-        assert!(reader.partition.is_none());
-        assert!(
-            reader.spilled_partition.is_some(),
-            "id-replay Tick blocks must use bounded spill canonicalization"
-        );
-
-        let mut rows = vec![first];
-        while let Some(row) = reader.next_row().unwrap() {
-            rows.push(row);
-        }
-        let ticks = rows
-            .into_iter()
-            .map(|row| match row {
-                HistorySeriesRow::Tick(row) => row,
-                HistorySeriesRow::Kline(_) => unreachable!("tick reader returned kline"),
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            ticks.iter().map(|row| row.id).collect::<Vec<_>>(),
-            vec![original.id, corrected.id]
-        );
-        assert_eq!(
-            ticks.iter().map(|row| row.datetime).collect::<Vec<_>>(),
-            vec![original.datetime, corrected.datetime]
-        );
-    }
-
-    #[test]
-    fn tqbn_reader_reuses_decoded_records_buffer_across_partitions() {
-        let store = tqbn_store("reader_reuses_records_across_partitions");
-        let kind = HistorySeriesKind::Tick;
-        let second_day_ns = 86_400 * super::NANOS_PER_SECOND + 1_000;
-        for row in [
-            tick5(1, 1_000, 618.5, 623.5),
-            tick5(2, second_day_ns, 618.6, 623.6),
-        ] {
-            store
-                .write_segment(HistorySeriesWriteSegment {
-                    symbol: SYMBOL,
-                    kind,
-                    declared_range_ns: None,
-                    rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&row)),
-                })
-                .unwrap();
-        }
-
-        let mut reader = TqbnReader {
-            common_partition: None,
-            paths: vec![
-                store.partition_series_path("19700101", SYMBOL, kind),
-                store.partition_series_path("19700102", SYMBOL, kind),
-            ],
-            path_index: 0,
-            symbol: SYMBOL.to_string(),
-            kind,
-            range_start_ns: 0,
-            range_end_ns: second_day_ns + 1_000,
-            rows: Vec::new().into_iter(),
-            partition: None,
-            spilled_partition: None,
-            spare_records: Vec::new(),
-            read_only: false,
-            telemetry: Arc::new(super::TqbnReadTelemetryState::default()),
-        };
-
-        assert_eq!(
-            history_row_id(&reader.next_row().unwrap().unwrap(), kind),
-            Some(1)
-        );
-        let first_buffer = reader
-            .partition
-            .as_ref()
-            .expect("first partition remains open")
-            .spare_records
-            .as_ptr();
-
-        assert_eq!(
-            history_row_id(&reader.next_row().unwrap().unwrap(), kind),
-            Some(2)
-        );
-        let second_buffer = reader
-            .partition
-            .as_ref()
-            .expect("second partition remains open")
-            .spare_records
-            .as_ptr();
-        assert_eq!(second_buffer, first_buffer);
-        assert!(reader.next_row().unwrap().is_none());
-    }
-
-    #[test]
-    fn tqbn_reader_spills_out_of_order_indexed_blocks() {
-        let store = tqbn_store("reader_spills_out_of_order_blocks");
-        let kind = HistorySeriesKind::Tick;
-        let rows = [tick5(2, 1_000, 618.5, 623.5), tick5(1, 2_000, 618.6, 623.6)];
-        store
-            .write_segment(HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(&rows),
-            })
-            .unwrap();
-        let path = store.partition_series_path("19700101", SYMBOL, kind);
-        let mut reader = TqbnReader {
-            common_partition: None,
-            paths: vec![path],
-            path_index: 0,
-            symbol: SYMBOL.to_string(),
-            kind,
-            range_start_ns: 1_000,
-            range_end_ns: 3_000,
-            rows: Vec::new().into_iter(),
-            partition: None,
-            spilled_partition: None,
-            spare_records: Vec::new(),
-            read_only: false,
-            telemetry: Arc::new(super::TqbnReadTelemetryState::default()),
-        };
-
-        let first = reader.next_row().unwrap().unwrap();
-        assert_eq!(history_row_id(&first, kind), Some(2));
-        assert!(
-            reader.spilled_partition.is_some(),
-            "out-of-order partitions must retain a bounded canonicalized spool"
-        );
-        let telemetry = reader.read_telemetry();
-        assert_eq!(telemetry.materialized_rows, 0);
-        assert!(telemetry.blocks_decoded > 0);
-        assert!(telemetry.bytes_read > 0);
-        let second = reader.next_row().unwrap().unwrap();
-        assert_eq!(history_row_id(&second, kind), Some(1));
-        assert!(reader.next_row().unwrap().is_none());
-    }
-
-    #[test]
-    fn tqbn_reader_spill_matches_legacy_canonicalization_without_result_materialization() {
-        const ROWS: i64 = 12_000;
-
-        let store = tqbn_store("reader_spill_matches_legacy_canonicalization");
-        let kind = HistorySeriesKind::Tick;
-        let mut input = (0..ROWS)
-            .map(|index| {
-                tick5(
-                    if index % 31 == 0 { 17 } else { ROWS - index },
-                    ((index * 47) % ROWS + 1) * 1_000_000,
-                    618.5 + (index % 17) as f64,
-                    623.5 + (index % 17) as f64,
-                )
-            })
-            .collect::<Vec<_>>();
-        let mut corrected_duplicate = input[17].clone();
-        corrected_duplicate.last_price += 100.0;
-        input.push(corrected_duplicate);
-        let expected = rows_for_request(
-            input.iter().cloned().map(HistorySeriesRow::Tick).collect(),
-            kind,
-            0,
-            (ROWS + 1) * 1_000_000,
-        )
-        .into_iter()
-        .map(|row| match row {
-            HistorySeriesRow::Tick(row) => (row.id, row.datetime, row.last_price.to_bits()),
-            HistorySeriesRow::Kline(_) => unreachable!("Tick reader returned Kline"),
-        })
-        .collect::<Vec<_>>();
-        let path = store.partition_series_path("19700101", SYMBOL, kind);
-        ensure_parent_dir(&path).unwrap();
-        append_legacy_segment_to_file(
-            &path,
-            &HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(&input),
-            },
-        )
-        .unwrap();
-        let mut reader = TqbnReader {
-            common_partition: None,
-            paths: vec![path],
-            path_index: 0,
-            symbol: SYMBOL.to_string(),
-            kind,
-            range_start_ns: 0,
-            range_end_ns: (ROWS + 1) * 1_000_000,
-            rows: Vec::new().into_iter(),
-            partition: None,
-            spilled_partition: None,
-            spare_records: Vec::new(),
-            read_only: false,
-            telemetry: Arc::new(super::TqbnReadTelemetryState::default()),
-        };
-
-        let first = reader.next_row().unwrap().unwrap();
-        let spill_path = reader
-            .spilled_partition
-            .as_ref()
-            .expect("out-of-order Tick page must use a spill partition")
-            ._root
-            .path
-            .clone();
-        assert!(spill_path.exists());
-
-        let mut actual = vec![first];
-        while let Some(row) = reader.next_row().unwrap() {
-            actual.push(row);
-        }
-        let actual = actual
-            .into_iter()
-            .map(|row| match row {
-                HistorySeriesRow::Tick(row) => (row.id, row.datetime, row.last_price.to_bits()),
-                HistorySeriesRow::Kline(_) => unreachable!("Tick reader returned Kline"),
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(actual, expected);
-        assert_eq!(reader.read_telemetry().materialized_rows, 0);
-        assert!(reader.spilled_partition.is_none());
-        assert!(!spill_path.exists());
     }
 
     #[test]
@@ -9343,162 +7606,6 @@ mod tests {
     }
 
     #[test]
-    fn tqbn_scan_reports_truncated_block_but_coverage_rejects_it() {
-        let store = tqbn_store("truncated-coverage");
-        write_truncated_tick_file(&store);
-
-        let scan = store.scan().unwrap();
-        assert_eq!(scan.files.len(), 1);
-        assert_eq!(
-            scan.files[0].status,
-            HistorySeriesCacheFileStatus::IncompleteWrite
-        );
-        assert!(
-            scan.files[0]
-                .error
-                .as_deref()
-                .is_some_and(|message| message.contains("truncated"))
-        );
-
-        let error = store
-            .coverage(HistorySeriesCoverageRequest {
-                symbol: SYMBOL.to_string(),
-                kind: HistorySeriesKind::Tick,
-                range_start_ns: 1_000,
-                range_end_ns: 2_000,
-            })
-            .unwrap_err();
-        assert!(
-            matches!(error, DataError::InvalidResponse(message) if message.contains("truncated") && message.contains("block"))
-        );
-    }
-
-    #[test]
-    fn tqbn_read_rejects_truncated_block() {
-        let store = tqbn_store("truncated-read-path");
-        write_truncated_tick_file(&store);
-        let cache = HistorySeriesCache::from_store(Arc::new(store));
-
-        let error = cache
-            .read_tick_data_series(TickDataSeriesRequest::new(SYMBOL, 1_000, 2_000))
-            .unwrap_err();
-
-        assert!(
-            matches!(error, DataError::InvalidResponse(message) if message.contains("truncated") && message.contains("block"))
-        );
-    }
-
-    #[test]
-    fn tqbn_append_repairs_a_truncated_tail_before_writing() {
-        let store = tqbn_store("truncated-tail-recovery");
-        write_truncated_tick_file(&store);
-        let row = tick5(1, 1_000, 618.5, 623.5);
-
-        store
-            .write_segment(HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: Some((1_000, 2_000)),
-                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&row)),
-            })
-            .expect("a writer must truncate only the incomplete tail and resume");
-
-        let scan = store.scan().unwrap();
-        assert_eq!(scan.files.len(), 1);
-        assert_eq!(scan.files[0].status, HistorySeriesCacheFileStatus::Readable);
-        assert_eq!(scan.files[0].rows, 1);
-        assert!(
-            store
-                .coverage(HistorySeriesCoverageRequest {
-                    symbol: SYMBOL.to_string(),
-                    kind: HistorySeriesKind::Tick,
-                    range_start_ns: 1_000,
-                    range_end_ns: 2_000,
-                })
-                .unwrap()
-                .is_complete()
-        );
-    }
-
-    #[test]
-    fn tqbn_append_recovers_an_empty_interrupted_initialization() {
-        let store = tqbn_store("empty-initialization-recovery");
-        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        File::create(&path).unwrap();
-
-        let row = tick5(1, 1_000, 618.5, 623.5);
-        store
-            .write_segment(HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: Some((1_000, 2_000)),
-                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&row)),
-            })
-            .unwrap();
-
-        let scan = store.scan().unwrap();
-        assert_eq!(scan.files.len(), 1);
-        assert_eq!(scan.files[0].status, HistorySeriesCacheFileStatus::Readable);
-        assert_eq!(scan.files[0].rows, 1);
-    }
-
-    #[test]
-    fn tqbn_tail_checkpoint_limits_recovery_to_the_unconfirmed_suffix() {
-        let store = tqbn_store("tail-checkpoint-recovery");
-        let first = tick5(1, 1_000, 618.5, 623.5);
-        store
-            .write_segment(HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&first)),
-            })
-            .unwrap();
-
-        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
-        let mut file = OpenOptions::new()
-            .read(true)
-            .append(true)
-            .open(&path)
-            .unwrap();
-        let (_, first_block_offset) =
-            read_and_validate_tqbn_prefix(&mut file, SYMBOL, HistorySeriesKind::Tick).unwrap();
-        let confirmed_len = file.metadata().unwrap().len();
-        assert_eq!(
-            load_tqbn_tail_checkpoint(&path, &mut file, first_block_offset as u64, confirmed_len,)
-                .unwrap()
-                .map(|checkpoint| checkpoint.valid_len),
-            Some(confirmed_len)
-        );
-
-        let mut interrupted_block = encode_block(TqbnBlockType::Records, &[]);
-        interrupted_block.pop();
-        file.write_all(&interrupted_block).unwrap();
-        file.flush().unwrap();
-        drop(file);
-
-        let second = tick5(2, 2_000, 618.6, 623.6);
-        store
-            .write_segment(HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: Some((1_000, 3_000)),
-                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&second)),
-            })
-            .expect("recovery must scan only bytes after the confirmed tail");
-
-        let cache = HistorySeriesCache::from_store(Arc::new(store));
-        let rows = cache
-            .read_tick_data_series(TickDataSeriesRequest::new(SYMBOL, 1_000, 3_000))
-            .unwrap();
-        assert_eq!(
-            rows.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
-            vec![1, 2]
-        );
-    }
-
-    #[test]
     fn tqbn_tail_checkpoint_hides_an_unconfirmed_suffix_from_reads() {
         let store = tqbn_store("tail-checkpoint-read-snapshot");
         let first = tick5(1, 1_000, 618.5, 623.5);
@@ -9535,121 +7642,6 @@ mod tests {
             .unwrap();
         assert_eq!(rows.rows().len(), 1);
         assert_eq!(rows.rows()[0].id, 1);
-    }
-
-    #[test]
-    fn tqbn_tail_checkpoint_keeps_coverage_lookup_indexed_during_partial_fill() {
-        let store = tqbn_store("tail-checkpoint-coverage-head");
-        let first = tick5(1, 1_000, 618.5, 623.5);
-        store
-            .write_segment(HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: Some((1_000, 2_000)),
-                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&first)),
-            })
-            .unwrap();
-
-        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
-        let mut file = File::open(&path).unwrap();
-        let (_, first_block_offset) =
-            read_and_validate_tqbn_prefix(&mut file, SYMBOL, HistorySeriesKind::Tick).unwrap();
-        let first_len = file.metadata().unwrap().len();
-        let first_checkpoint =
-            load_tqbn_tail_checkpoint(&path, &mut file, first_block_offset as u64, first_len)
-                .unwrap()
-                .unwrap();
-        let coverage_head = first_checkpoint
-            .latest_coverage_index_offset
-            .expect("final coverage must have an indexed head");
-        drop(file);
-
-        let second = tick5(2, 2_000, 618.6, 623.6);
-        store
-            .write_segment(HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&second)),
-            })
-            .unwrap();
-
-        let mut file = File::open(&path).unwrap();
-        let file_len = file.metadata().unwrap().len();
-        let checkpoint =
-            load_tqbn_tail_checkpoint(&path, &mut file, first_block_offset as u64, file_len)
-                .unwrap()
-                .unwrap();
-        assert!(checkpoint.valid_len > first_checkpoint.valid_len);
-        assert_eq!(checkpoint.latest_coverage_index_offset, Some(coverage_head));
-        assert_eq!(
-            try_parse_tqbn_coverage_index_chain(&mut file, first_block_offset as u64).unwrap(),
-            None,
-            "trailing partial rows mean the coverage head is no longer the tail block",
-        );
-        assert_eq!(
-            try_parse_tqbn_checkpoint_index_chain_at(
-                &mut file,
-                first_block_offset as u64,
-                coverage_head,
-                checkpoint.valid_len,
-            )
-            .unwrap()
-            .unwrap()
-            .coverage,
-            vec![(1_000, 2_000)],
-        );
-        assert_eq!(
-            parse_tqbn_coverage_file(&path, SYMBOL, HistorySeriesKind::Tick).unwrap(),
-            vec![(1_000, 2_000)],
-        );
-    }
-
-    #[test]
-    fn tqbn_recovery_discards_coverage_without_its_adjacent_index() {
-        let store = tqbn_store("orphan-coverage-recovery");
-        let first = tick5(1, 1_000, 618.5, 623.5);
-        store
-            .write_segment(HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: Some((1_000, 2_000)),
-                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&first)),
-            })
-            .unwrap();
-
-        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
-        let index_block_len =
-            u64::try_from(TQBN_BLOCK_HEADER_LEN + TQBN_COVERAGE_INDEX_PAYLOAD_LEN).unwrap();
-        let file = OpenOptions::new().write(true).open(&path).unwrap();
-        let truncated_len = file.metadata().unwrap().len() - index_block_len;
-        file.set_len(truncated_len).unwrap();
-        file.sync_data().unwrap();
-        drop(file);
-
-        let second = tick5(2, 2_000, 618.6, 623.6);
-        store
-            .write_segment(HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: None,
-                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&second)),
-            })
-            .expect("writer must discard an unindexed coverage tail before resuming");
-
-        std::fs::remove_file(super::tqbn_file_lock_path(&path)).unwrap();
-        let coverage = store
-            .coverage(HistorySeriesCoverageRequest {
-                symbol: SYMBOL.to_string(),
-                kind: HistorySeriesKind::Tick,
-                range_start_ns: 1_000,
-                range_end_ns: 2_000,
-            })
-            .unwrap();
-        assert!(
-            !coverage.is_complete(),
-            "a strict legacy scan must not resurrect coverage that never acquired its index"
-        );
     }
 
     #[test]
@@ -9748,42 +7740,37 @@ mod tests {
     }
 
     #[test]
-    fn tqbn_scan_reports_oversized_block_without_allocating_payload() {
-        let store = tqbn_store("oversized-scan");
-        write_oversized_tick_block_header(&store);
+    fn tick_month_pack_preflights_every_partition_before_mutation() {
+        let store = tqbn_store("tick-month-pack-preflight");
+        let first_day = NaiveDate::parse_from_str("19700105", "%Y%m%d").unwrap();
+        let later_day = NaiveDate::parse_from_str("19700205", "%Y%m%d").unwrap();
+        let (_, first_start, first_end) = trading_day_range(first_day).unwrap();
+        let (_, later_start, later_end) = trading_day_range(later_day).unwrap();
+        for (start, end, id) in [(first_start, first_end, 1), (later_start, later_end, 2)] {
+            let row = tick5(id, start + 1_000, 10.0 + id as f64, 10.1 + id as f64);
+            store
+                .write_segment(HistorySeriesWriteSegment {
+                    symbol: SYMBOL,
+                    kind: HistorySeriesKind::Tick,
+                    declared_range_ns: Some((start, end)),
+                    rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&row)),
+                })
+                .unwrap();
+        }
 
-        let scan = store.scan().unwrap();
+        let first_path =
+            store.hot_partition_series_path("19700105", SYMBOL, HistorySeriesKind::Tick);
+        let later_path =
+            store.hot_partition_series_path("19700205", SYMBOL, HistorySeriesKind::Tick);
+        let first_bytes = std::fs::read(&first_path).unwrap();
+        let legacy_bytes = b"TQBN-pre-schema-4";
+        std::fs::write(&later_path, legacy_bytes).unwrap();
 
-        assert_eq!(scan.files.len(), 1);
-        assert_eq!(
-            scan.files[0].status,
-            HistorySeriesCacheFileStatus::IncompleteWrite
-        );
-        assert!(
-            scan.files[0]
-                .error
-                .as_deref()
-                .is_some_and(|message| message.contains("exceeds max"))
-        );
-    }
-
-    #[test]
-    fn tqbn_read_rejects_oversized_block_without_allocating_payload() {
-        let store = tqbn_store("oversized-read");
-        write_oversized_tick_block_header(&store);
-        let cache = HistorySeriesCache::from_store(Arc::new(store));
-
-        let error = cache
-            .read_tick_data_series(TickDataSeriesRequest::new(SYMBOL, 1_000, 2_000))
-            .unwrap_err();
-
-        assert!(
-            matches!(error, DataError::InvalidResponse(message) if message.contains("exceeds max"))
-        );
-    }
-
-    fn tqbn_cache(test_name: &str) -> HistorySeriesCache {
-        HistorySeriesCache::from_store(Arc::new(tqbn_store(test_name)))
+        let error = store.migrate_tick_series_to_current(SYMBOL).unwrap_err();
+        assert!(error.to_string().contains("unsupported pre-schema-4"));
+        assert_eq!(std::fs::read(&first_path).unwrap(), first_bytes);
+        assert_eq!(std::fs::read(&later_path).unwrap(), legacy_bytes);
+        assert!(!store.monthly_tick_pack_path("197001", SYMBOL).exists());
     }
 
     #[test]
@@ -10027,9 +8014,11 @@ mod tests {
     }
 
     fn tqbn_store(test_name: &str) -> TqbnHistoryStore {
-        let mut store = TqbnHistoryStore::new(test_root(test_name)).unwrap();
-        store.legacy_new_tick_files = true;
-        store
+        TqbnHistoryStore::new(test_root(test_name)).unwrap()
+    }
+
+    fn tqbn_cache(test_name: &str) -> HistorySeriesCache {
+        HistorySeriesCache::from_store(Arc::new(tqbn_store(test_name)))
     }
 
     fn test_root(test_name: &str) -> std::path::PathBuf {
@@ -10041,30 +8030,6 @@ mod tests {
             "tqsdk-data-tqbn-{test_name}-{unique}-{}",
             std::process::id()
         ))
-    }
-
-    fn write_truncated_tick_file(store: &TqbnHistoryStore) {
-        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let prefix = valid_tick_prefix();
-        let mut bytes = prefix.bytes;
-        let mut block = encode_block(TqbnBlockType::Records, &[]);
-        block.pop();
-        bytes.extend_from_slice(&block);
-        std::fs::write(path, bytes).unwrap();
-    }
-
-    fn write_oversized_tick_block_header(store: &TqbnHistoryStore) {
-        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let prefix = valid_tick_prefix();
-        let mut bytes = prefix.bytes;
-        bytes.extend_from_slice(b"TQBB");
-        bytes.push(TqbnBlockType::Records as u8);
-        bytes.extend_from_slice(&[0, 0, 0]);
-        bytes.extend_from_slice(&(64 * 1024 * 1024 + 1_u64).to_le_bytes());
-        bytes.extend_from_slice(&0_u64.to_le_bytes());
-        std::fs::write(path, bytes).unwrap();
     }
 
     fn valid_tick_prefix() -> super::codec::TqbnFilePrefix {

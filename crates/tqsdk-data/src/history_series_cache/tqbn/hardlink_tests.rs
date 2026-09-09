@@ -7,19 +7,16 @@ mod hardlink_tests {
     fn retained_partition(label: &str) -> (TqbnHistoryStore, PathBuf, PathBuf, Vec<u8>) {
         let store = tqbn_store(label);
         let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
-        ensure_parent_dir(&path).unwrap();
         let row = tick5(1, 1_000, 618.5, 623.5);
-        append_legacy_segment_to_file(
-            &path,
-            &HistorySeriesWriteSegment {
+        store
+            .write_segment(HistorySeriesWriteSegment {
                 symbol: SYMBOL,
                 kind: HistorySeriesKind::Tick,
                 declared_range_ns: Some((1_000, 2_000)),
                 rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&row)),
-            },
-        )
-        .unwrap();
-        let retained = store.root_dir.join("retained.tqbn");
+            })
+            .unwrap();
+        let retained = path.parent().unwrap().join("retained.tqbn");
         fs::hard_link(&path, &retained).unwrap();
         fs::copy(tqbn_file_lock_path(&path), tqbn_file_lock_path(&retained)).unwrap();
         let bytes = fs::read(&retained).unwrap();
@@ -142,27 +139,6 @@ mod hardlink_tests {
         assert_retained(&path, &retained, &bytes);
     }
 
-    #[test]
-    fn hardlinked_checkpoint_is_rejected_before_data_changes() {
-        let (store, path, retained, bytes) = retained_partition("cow-shared-lock");
-        let checkpoint = tqbn_file_lock_path(&path);
-        let shared_checkpoint = store.root_dir.join("shared-checkpoint");
-        fs::hard_link(&checkpoint, &shared_checkpoint).unwrap();
-        let old_checkpoint = fs::read(&checkpoint).unwrap();
-        let row = tick5(2, 2_000, 618.5, 623.5);
-        let error = store
-            .write_segment(HistorySeriesWriteSegment {
-                symbol: SYMBOL,
-                kind: HistorySeriesKind::Tick,
-                declared_range_ns: Some((2_000, 3_000)),
-                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&row)),
-            })
-            .expect_err("shared checkpoint must not be modified or silently replaced");
-        assert!(error.to_string().contains("hardlinked"), "{error}");
-        assert_eq!(fs::read(&path).unwrap(), bytes);
-        assert_eq!(fs::read(&retained).unwrap(), bytes);
-        assert_eq!(fs::read(&shared_checkpoint).unwrap(), old_checkpoint);
-    }
 
     #[test]
     fn copy_failure_preserves_both_links_and_removes_own_temporary() {
