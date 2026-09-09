@@ -2,7 +2,7 @@
 name = "tqsdk-ctpse-helper"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Private isolated loader for official tqsdk-ctpse client-system collectors"
 license.workspace = true
 repository = "https://github.com/zynthium/tqsdk-rust"

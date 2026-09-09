@@ -2,7 +2,7 @@
 name = "tqsdk"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "User-facing facade crate for tqsdk-rust"
 documentation = "https://docs.rs/tqsdk"
 readme = "README.md"

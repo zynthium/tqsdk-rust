@@ -2,7 +2,7 @@
 name = "tqsdk-cache"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Tick history cache management CLI for tqsdk-rust"
 license.workspace = true
 repository = "https://github.com/zynthium/tqsdk-rust"
