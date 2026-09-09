@@ -1,12 +1,32 @@
 # History Cache Format
 
+## P2 分区与编码决策
+
+Daily、Minute、Tick 共用 `TQHIST01` envelope、双提交槽、checksum、index/extent/slice 和原子发布协议，但不共用 payload codec：Daily/Minute 使用 Kline codec，Tick 使用 `TickXorV1`。`.tqdk`、`.tqmk`、`.tqbn` 继续作为数据族和物理布局提示；magic/index 才是编码身份，因此不为统一后缀做全盘重命名。
+
+物理分区按实测规模固定如下：
+
+| family | 热/冷分区 | 原因 |
+| --- | --- | --- |
+| Tick | 开放月按交易日；封闭月按合约×交易月 | 默认缓存约 289,599 个日文件；月包预计约 15,549 个，历史最大约 47.5 MiB、p99 约 18.9 MiB |
+| Minute | 合约×交易月，不增加年包 | 每年最多 12 个文件；年包会放大局部刷新、修复与锁冲突 |
+| Daily | 每逻辑合约一个全历史文件 | 每日只追加最新日期；全量 payload 校验只属于 doctor/显式迁移 |
+
+Tick 开放月份写入 `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn`（`partition_scheme=1`）；显式迁移把封闭月份合并到 `series/monthly/<YYYYMM>/tick/<escaped-symbol>.tqbn`（`partition_scheme=2`）。月包内仍按交易日规范化行；server chart 的 Tick id 只在同一交易日内参与 replay 去重，不能跨日比较。
+
+封存按“候选文件深验并原子发布 → 删除源日文件”执行。月包一旦发布即为该月权威；若进程在两步之间中断，reader 优先选择月包，重跑只在残留日文件的 row key 与 coverage 均被月包包含时删除残留，绝不把残留反向合并进月包。已封存月的迟到写入直接更新月包，不重建日文件。范围 purge 以交易日为逻辑删除单位，重写相交月包、同步删除相交残留日文件并保留其余日期，避免旧日数据复活。
+
+锁粒度绑定物理 mutation 单元：开放 Tick 日文件、封闭 Tick 月包、Minute 月文件、Daily 合约文件各自使用文件锁；不同物理文件可以并发，同一文件串行。普通 fill/query mutation 持 root shared gate；lazy reader 从枚举物理路径到所有候选路径均已打开/固定同样持 root shared gate，随后由 opened-file snapshot 固定剩余内容。月包封存、格式迁移和破坏性 purge 持 root exclusive gate；无法取得时 fail-fast 为 `CacheBusy`，再按稳定路径顺序取得文件锁。logical symbol lease 只负责远端补洞去重，不能替代文件锁。
+
+快速库存把物理月包映射回 index/coverage 中的逻辑交易日，仅读 common header/index，不扫描 Tick payload。完整 migration backup 使用独立 v2 manifest：cache root 内持久化 generation identity，manifest 逐文件记录相对路径、长度、原 schema 与 SHA-256。重试在 exclusive gate 内先清理严格命名的未发布 generation/COW 候选，再校验 generation、备份摘要和当前仍存在的输入；只有 legacy→当前 schema 的合法原子改写可解释源摘要变化。
+
 ## P1 工作区过渡：统一容器（尚未部署）
 
 当前工作区的 native daily/Minute reader/writer 已接入 `TQHIST01`；Tick store 已按 magic
 接入 common Tick schema 4；既有 TQBN 按 magic 保持读写兼容，但只有已存在的 legacy 文件继续追加。Minute 公开身份为
 `tqsdk.minute-kline.monthly.v6`，交易月目录仍不变。
-默认真实缓存和已安装的 P0 程序尚未切换，
-不能把此阶段构建直接覆盖到现有运行环境。三类容器接入已完成；冷数据重分区、真实数据迁移和部署仍未完成。
+默认真实缓存和已安装程序尚未切换，不能把此阶段构建直接覆盖到现有运行环境。
+三类容器与冷 Tick 月包实现已完成；真实数据迁移和部署仍未完成。
 下文旧 Kline KLOG 描述是迁移输入合同，不再是本工作区的新写入格式。
 
 Minute 新 reader 固定 FD/index 后逐相交块解码，保留有界单块缓冲；空覆盖 extent 无需
@@ -337,6 +357,12 @@ cache 文件。此 phase 与 official high-period chart 的实际一致性不由
   路径，不代表单个物理文件；`scan()`、coverage、purge 和 compact 会遍历匹配的全部日分区文件。
 
 ## 文件锁、opened-file snapshot 与尾部恢复
+
+`.tqsdk-cache-operation.lock` 是可写 cache root 的根级门禁。普通写者与命中已有文件的 reader 取得
+shared；迁移、purge、maintenance 与 `Refresh` 取得 exclusive。reader 先枚举候选路径；没有任何实际
+文件时直接返回 miss，不为只读空根创建锁。命中时在 shared 根锁内重新枚举，并在全部候选文件打开、
+固定 FD 后释放根锁。调用方已持同根 exclusive token 时，只有显式 token-aware 的同步 Tick 写、coverage
+复查与范围 compact 可跳过重复取锁；授权按线程作用域收回，不能使其他线程绕过 exclusive。
 
 这里的 per-file lock 保护 writable cache root 内的文件操作；它不同于 generation
 `lease.lock`。已发布 generation 必须只读，relay 的 shared generation lease 保护整个 detached

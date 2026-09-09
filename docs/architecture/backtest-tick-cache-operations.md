@@ -117,8 +117,12 @@ checkpoint 的范围、高水位和 as-of 必须在同一 TQBN 日分区。远�
 
 tick 补洞按 trading day 顺序处理，接受 rows 以 8192 行缓冲后追加，避免逐事件持锁/fsync 和长窗口
 全量 materialization。fill-only warmup 不回读刚写入的 rows；报告的 `rows_written` 是实际物理写入数，
-同一 shared fill 被多个 logical request 复用时只累计一次，完整命中为 `0`。final 成功后只对本轮实际远端
-回填的 `symbol × trading day` 范围去重 compact；provisional fill 跳过 compaction，等 closed-day reconcile。
+同一 shared fill 被多个 logical request 复用时只累计一次，完整命中为 `0`。facade `Refresh` 在调用方独占
+root token 下只对本轮实际远端回填的 `symbol × trading day` 范围去重 compact；普通 `RemoteOnMiss`
+仍持共享 root token 时跳过即时独占 compact，保留可读 append blocks，交给后续显式维护。provisional fill
+同样跳过 compaction，等 closed-day reconcile。
+`Refresh` 的输入解析先在短共享读门禁下固定候选文件，之后独占 token 连续覆盖 purge、Tick rows/coverage
+提交和上述范围 compact；token 只授权持有线程内的同步调用跳过重复根锁，其他线程和进程仍被独占门禁阻挡。
 交易日仍是 coverage/recovery checkpoint，不再是连接生命周期：同一有界 source lane 在显式 terminal 和
 chart cleanup 成功后复用 session；取消、网络/协议错误或 cleanup 失败时销毁该 lane。
 
@@ -217,9 +221,17 @@ prefix；随后可从 opened-file snapshot 读取而不长期挡住 writer/compa
 边界恢复。无有效 checkpoint 的旧文件严格全量校验。该协议不承诺新旧 binary 进程长期混用，升级访问
 同一 root 的服务时应同步重启。
 
+### 封闭月分区
+
+普通 fill 继续把开放月份写成独立交易日文件；它只读取目标分区的 committed index/coverage，不为每日追加深验全部历史 payload。离线 `migrate --kind tick` 在 root exclusive gate 内把封闭月份原子封存为月包。封存中断不会回退已提交进度：月包一旦发布即成为首选，未删除的日文件只作为下次重跑的待合并源。
+
+月包仍由 index/extent/slice 提供交易日级范围读取；迟到数据只锁定对应月包。按日范围 purge 会重写一个月包而不是删除整月。Minute 继续使用交易月文件，Daily 继续使用单合约全历史文件；两者均无年包。
+
 ## 4. 用 CacheOnly 和实际回放验收
 
 预热成功后，必须在不提供 auth 的条件下验证相同窗口。第一步验证 coverage，第二步实际消费
+canonical reader 的全部行。CLI `verify --replay` 从第一步到第二步持续持有同一 exclusive root gate，
+所以计数不会混合迁移/清理前后的两个物理 generation；读取按流式块进行，不构造全窗口 `Vec<Tick>`。
 缓存中的 tick：
 
 ```rust
@@ -326,4 +338,4 @@ E2E_OK remote_rows=2691170 remote_missing=0 cache_only_missing=0 replay_ticks=39
 
 - [持久缓存预热 contract example](../../crates/tqsdk/examples/api_contract_s45_facade_backtest_cache_warmup.rs)
 - [`tqsdk` facade cache 语义](../../crates/tqsdk/README.md)
-- [TQBN daily v3 格式合同](history-cache-format.md)
+- [TQBN common schema 4 与热日/冷月分区合同](history-cache-format.md)

@@ -129,7 +129,7 @@ fill 在远端操作前解析并固定 catalog；遇到发布后 fsync 失败会
 
 | `--kind` | 管理对象 | 可用命令 |
 | --- | --- | --- |
-| `tick` | `series/<YYYYMMDD>/tick/<symbol>.tqbn` | `inventory`、`inspect`、`fill`、`verify`、`doctor`、`purge`、`repair-locks` |
+| `tick` | `series/<YYYYMMDD>/tick/<symbol>.tqbn`（开放月）/ `series/monthly/<YYYYMM>/tick/<symbol>.tqbn`（封闭月） | `inventory`、`inspect`、`fill`、`verify`、`doctor`、`purge`、`repair-locks`、`migrate` |
 | `minute` | canonical final-60s `.tqmk` | `inventory`、`inspect`、`fill`、`verify`、`doctor`、`purge` |
 | `daily` | `daily-kline-v1/<logical-symbol>.tqdk` native final-1d single file | `inventory`、`inspect`、`fill`、`verify`、`doctor`、`purge` |
 | `all` | tick、minute 与 daily cache 的汇总 | 仅 `inventory`、`doctor` |
@@ -139,6 +139,15 @@ daily 的 `inspect` / `verify` 都针对显式 logical symbol 和 closed-day win
 header 与 embedded logical symbol，`doctor` 完整解码 `.tqdk` 并校验 checksum/rows；`--kind all`
 同时包含三类缓存。
 `metadata-refresh` 不属于 cache family；保留默认 `--kind tick`，只支持 `--market futures`。
+
+Tick 显式迁移同时完成旧 schema 转换与封闭月份打包。DryRun 会报告 `legacy_files`、`pack_source_files`、`pending_month_packs`、迁移合约和容量估算；即使旧 schema 已全部转换，只要仍有待封存的 current 日文件，`--apply` 也会继续执行。Apply 必须停止同一 root 的旧进程，并把完整 mixed generation 备份到 cache root 外：
+
+```bash
+tqsdk-cache migrate --kind tick --cache-dir DIR
+tqsdk-cache migrate --kind tick --cache-dir DIR --apply --backup-dir DIR-before-tick-v4
+```
+
+每个月包先深验并原子发布，再删除源日文件；发布后月包即为权威，残留日文件只允许在 row key/coverage 被月包包含时校验删除，不能覆盖月包修订。完整 backup 的 v2 durable manifest 绑定持久化 cache generation，并记录每个数据/锁文件的 SHA-256。Ctrl-C/崩溃若发生在改写阶段，使用同一 cache root 与 backup 目录重跑会先清理严格命名的未发布 generation/COW 候选，再验证整代备份及当前待迁移输入并续作；错根、备份损坏、同路径源被非迁移替换、畸形候选、非空但无完整 manifest 或出现未受保护的新输入均 fail closed。
 它显式调用官方 metadata source，在 exclusive root remote-fill lock 内保存 immutable sidecar；不会改写
 `.tqbn` 或 minute 文件。新 snapshot 覆盖请求窗口即可供 `CacheOnly` 解析；除 `KQ.m@` 外的 native daily fill 会忽略覆盖较窄的 retained sidecar，主连/tick/minute 仍要求完整 metadata。若已有更宽、兼容的 active
 snapshot，显式维护仍原子推进 active pointer；旧 snapshot 按 content hash 保留，可供已绑定旧 cache
@@ -565,14 +574,19 @@ root advisory gate 的规则固定如下：
 | --- | --- |
 | 普通 tick/minute/daily fill、`query --policy remote-on-miss` | shared |
 | tick `repair-locks`（含 DryRun） | exclusive |
+| tick schema 迁移与封闭月打包 | exclusive |
 | cache refresh、`fill --repair-stale`、tick/minute/daily verify/doctor、真实 tick/minute/daily purge | exclusive |
 | inventory、fill dry-run、tick/minute/daily purge dry-run | none |
 
-shared gate 允许不同 series 并发，同时阻止 destructive/stable-view maintenance 穿插。每个实际补洞再取
+shared gate 允许不同 series 并发，同时阻止 destructive/stable-view maintenance 穿插。lazy TQBN reader 从分区路径枚举到所有候选路径均已打开/固定始终持有 shared gate，随后由 opened-file snapshot 固定剩余内容；需要替换路径集合的迁移拿不到 exclusive gate 时返回 `CacheBusy`，不能把延迟打开时消失的文件静默当成空分区。每个实际补洞再取
 `cache family × cache symbol` 的跨进程 lease；等待者重查 coverage 后复用已有结果，不重复发远端请求。
-TQBN 日分区和 minute 月分区仍使用各自文件锁。TQBN reader 在锁内打开文件并固定 checkpoint-confirmed
+Tick 热日/冷月、minute 月文件和 daily 合约文件各自使用物理文件锁。TQBN reader 在锁内打开文件并固定 checkpoint-confirmed
 prefix，之后从 opened-file snapshot 读取；首次初始化用 sync + atomic rename，未确认坏 suffix 可在下一次
 fill 恢复，无 checkpoint 的旧文件严格全量校验。该协议不保证新旧 binary 进程长期混跑。
+
+Tick `inventory` 快速路径会读取冷月包的 common index/coverage 来恢复逻辑交易日数，但不解码 payload。
+`verify --replay` 从 coverage 检查到 canonical reader 流式解码/计数全程持同一 exclusive root gate。
+空的既有 root 可只读报告 incomplete 且不创建 operation lock；非空 root 缺失该锁则 fail closed。
 
 query 的 shared gate 在 `collect_all()` 和 terminal/coverage 验证完成后释放；JSONL/LLM payload 渲染与
 stdout/文件发布不持锁。第一次 Ctrl-C/SIGTERM/SIGHUP 停止新任务，给当前窗口最多 5 秒收尾，

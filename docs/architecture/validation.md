@@ -101,6 +101,24 @@ TQBN streaming reader 基线使用：
 cargo run -p tqsdk-data --release --example history_series_cache_microbench
 ```
 
+Tick 热日/冷月分区必须额外验证：
+
+```bash
+cargo test -p tqsdk-data history_series_cache::tqbn::tests::closed_tick_month_pack_resumes_routes_updates_and_purges_by_day
+cargo test -p tqsdk-data history_series_cache::tqbn::tests::lazy_reader_pins_root_gate_until_all_enumerated_partitions_are_opened
+cargo test -p tqsdk-data history_series_cache::tqbn::tests::nonempty_read_only_legacy_root_without_operation_lock_fails_closed
+cargo test -p tqsdk-data exclusive_caller_root_gate_allows_tick_rows_and_coverage_commit
+cargo test -p tqsdk-data --test history_series_tqbn_compaction caller_held_exclusive_root_gate_can_compact_tick_range
+cargo test -p tqsdk-data --test backtest_tick_cache_ops fast_inventory_
+cargo test -p tqsdk-cache tick_migration_dry_run_and_apply_convert_a_frozen_schema3_fixture
+cargo test -p tqsdk-cache tick_migration_backup_survives_atomic_source_replacement
+cargo test -p tqsdk-cache tick_verify_
+```
+
+前三项覆盖月包原子发布故障注入、同一 Tick id 跨日保留、发布后更新路由、残留日文件只校验删除而不覆盖晚到修订、purge 后不复活、lazy reader 在候选路径打开/固定前的 root gate、缺根锁非空旧目录 fail-closed 和源 companion lock 清理；随后两项证明 caller-held exclusive token 能提交 Tick rows/coverage 并做范围 compact，且不发生自锁；快速库存回归覆盖纯月包与热日/月包混合统计；迁移回归覆盖 DryRun 计划、完整 generation 备份、逐文件 SHA-256、错代际/替换拒绝、同一 manifest 目录中断重试、legacy 转换与封闭月打包；verify 回归覆盖空 root、覆盖到流式回放全程同一 root generation 及精确行数。默认真实缓存迁移前后还必须各运行一次 `tqsdk-cache --kind tick migrate` DryRun：迁移前记录 `legacy_files`、`pack_source_files`、`pending_month_packs`、wall time 和峰值 RSS，迁移后要求三类待办计数均为零。DryRun/doctor 可全量深验；普通 fill/CacheOnly 更新不得借此引入全缓存扫描。
+
+2026-09-09 默认缓存迁移前基线：292,967 个 legacy 文件、292,358 个封闭月源文件、15,820 个目标月包、0 problem，源数据 46,504,459,771 bytes；release DryRun wall/user/system 分别为 548.467/476.510/27.752 秒。容量估算要求 146,325,000,003 bytes，实测可用 243,003,564,032 bytes。该次运行未取得可靠 peak RSS；Apply 与迁移后复验必须补录。
+
 其中 `stream_tick_reader_1pct` 专测 partial-range streaming 读取；输出的
 `blocks_decoded` 必须只按触及 records block 计数，且 `materialized_rows=0`。
 

@@ -58,7 +58,7 @@ fail closed，不发布 semantic catalog/plan。
 
 | kind | 物理分区 | symbol 语义 | 命令 |
 | --- | --- | --- | --- |
-| `tick` | `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn` | physical cache symbol | `inventory`、`inspect`、`fill`、`verify`、`doctor`、`purge`、`repair-locks`、`migrate` |
+| `tick` | 开放月：`series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn`；封闭月：`series/monthly/<YYYYMM>/tick/<escaped-symbol>.tqbn` | physical cache symbol | `inventory`、`inspect`、`fill`、`verify`、`doctor`、`purge`、`repair-locks`、`migrate` |
 | `minute` | `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk` | logical cache symbol | `inventory`、`inspect`、`fill`、`verify`、`doctor`、`purge` |
 | `daily` | `daily-kline-v1/<escaped-symbol>.tqdk` | logical cache symbol | `inventory`、`inspect`、`fill`、`verify`、`doctor`、`purge` |
 | `all` | tick、minute 与 daily 汇总 | 不接受 symbol/range 操作 | 仅 `inventory`、`doctor` |
@@ -113,17 +113,25 @@ exclusive TQBN/file lock。
 
 ## Tick TQBN v2/v3 到 common schema 4 迁移
 
-`migrate` 默认只深度诊断并报告计划，不创建 root、lock、backup 或数据文件。结果中的容量字段是保守估算，
+`migrate` 默认只深度诊断并报告计划，不创建 root、lock、backup 或数据文件。计划同时报告
+`legacy_files`、`pack_source_files`、`pending_month_packs`、`migration_symbols` 与容量估算；即使
+legacy 文件已全部转成 schema 4，只要封闭月份仍是日文件，Apply 仍可继续封存。容量是保守估算，
 不是磁盘上界；迁移中途遇到 `ENOSPC` 会停止，保留已完成分区和完整 backup，重启可继续。
 
-`--apply` 必须同时给出一个尚不存在的 `--backup-dir`；该目录必须位于 cache root 外且与 cache 同文件系统。
-CLI 取得 exclusive root stable-view gate 后重新深度诊断，硬链接备份所有已识别 Tick 数据文件，并复制现有
-`<file>.tqbn.lock` 与 `<partition>/.tqbn.lock`。备份目录逐级 fsync 完成后，才按 symbol 生成 common schema 4
-候选、逐字段比对 rows/coverage/provisional、深度复检并原子发布。
+`--apply` 必须同时给出 `--backup-dir`；首次运行时目录必须不存在或为空，并位于 cache root 外且与 cache 同文件系统。完整备份发布 v2 durable manifest：绑定 cache root 路径与持久化 generation identity，并为每个数据/锁文件记录长度和 SHA-256。若进程在数据改写阶段中断，以完全相同的 cache root 和 backup 目录重跑会先在 exclusive gate 内清理严格命名的未发布 generation/COW 候选，随后验证 manifest、全部备份文件及当前待迁移输入均已受该代备份保护，再从剩余 symbol/月继续。错根、备份摘要不符、同路径源被非迁移替换、畸形候选、非空但无完整 manifest 或出现未受备份保护的新迁移输入时 fail closed。
 
-任一 backup、rewrite 或验证失败都会停止，保留 backup，绝不自动删除或回滚部分迁移。成功条件是所有 Tick
-文件可深度解码且 schema 均为 4。`legacy_binary_rollback_safe` 只有在迁移前不存在 common 文件时为 true；
+封闭月包原子发布后立即成为该月权威。发布与日源文件清理之间中断时，重跑只验证残留日文件的 row key/coverage 已被月包包含并删除残留，不允许残留覆盖月包中的晚到修订；range purge 同时删除目标交易日的残留日文件。lazy reader 从分区枚举到所有候选路径均已打开/固定期间持 shared root gate，随后由 opened-file snapshot 固定内容；因此与需要替换尚未打开路径的迁移互斥。竞争时维护返回 `CacheBusy`，reader 不会把消失路径当成空分区。
+CLI 取得 exclusive root stable-view gate 后重新深度诊断，硬链接备份所有已识别 Tick 数据文件（完整 mixed generation），并复制现有
+`<file>.tqbn.lock` 与 `<partition>/.tqbn.lock`。备份目录逐级 fsync 完成后，才按 symbol 生成 common schema 4
+候选、逐字段比对 rows/coverage/provisional、深度复检并原子发布；随后把已封闭交易月写成
+`partition_scheme=2` 月包，并在月包发布成功后删除源日文件和逐文件 companion lock。
+
+任一 backup、rewrite 或验证失败都会停止，保留 backup，绝不自动删除或回滚部分迁移。若在月包发布与
+源文件删除之间中断，reader 优先选择月包；同一命令重跑只在确认月包已包含残留数据后删除残留。成功条件是所有 Tick
+文件可深度解码、schema 均为 4，且不存在待封存的封闭月日文件。`legacy_binary_rollback_safe` 只有在迁移前不存在 common 文件时为 true；
 旧 binary 回滚必须恢复任何 common writer 启动前保留的整代数据。migration 不访问 remote、auth 或 minute cache。
+
+Tick 快速 `inventory` 对热日文件只读 metadata/magic，对冷月包再读取 common index/coverage 以统计逻辑交易日，仍不解码 payload。`verify --replay` 在一把 exclusive root gate 内连续完成 coverage 检查和 canonical reader 流式解码/计数，中间不会放锁。空的既有 root 可只读返回 incomplete 且不创建 operation lock；非空 root 缺锁直接 fail closed。
 
 
 ## 数据来源与 finality

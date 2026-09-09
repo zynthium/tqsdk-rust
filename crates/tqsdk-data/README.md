@@ -7,11 +7,12 @@ TQBN 追加前会保护已有共享 data inode：Unix / Windows 多链接数据�
 Fill 的日线分段、分钟 terminal 子窗口 journal、两阶段取消及 durability telemetry
 统一由本层拥有。见 [中断与续填](../../docs/architecture/history-fill-recovery.md)。
 
-工作区统一容器 P1 尚未部署：daily/Minute/Tick 已接入 `TQHIST01`；Minute 公开身份为
-`tqsdk.minute-kline.monthly.v6`，物理路径仍按交易月。旧 raw/KLOG 仅供显式离线迁移。
+工作区统一容器尚未部署：daily/Minute/Tick 已接入 `TQHIST01`；Minute 公开身份为
+`tqsdk.minute-kline.monthly.v6`，物理路径仍按交易月。Tick 开放月按交易日写入，封闭月由显式迁移封存为
+`series/monthly/<YYYYMM>/tick/<symbol>.tqbn`。旧 raw/KLOG/TQBN 仅供显式离线迁移。
 真实缓存和已安装 P0 程序尚未切换；旧 daily KLOG 也仅接受显式离线迁移。
 Tick store 已按 magic 接入新容器读写、coverage/provisional、压实和诊断；新分区默认创建 common schema 4，
-既有 TQBN 文件继续兼容追加。离线 Tick 迁移及真实默认目录切换尚未完成。
+既有 TQBN 文件继续兼容追加。离线 Tick 格式迁移与冷月封存已实现；真实默认目录切换尚未完成。
 新容器 `Unverified` 行不能推导完整 coverage；不得据此提前迁移真实目录。
 Tick 规范化决策已批准：迁移与 common reader 按稳定交易日语义去重，不再保留随请求范围变化的旧异常结果。
 日线范围读取现在按独立块选取并固定已打开 FD，doctor 保持全量审计。
@@ -19,6 +20,8 @@ Tick 规范化决策已批准：迁移与 common reader 按稳定交易日语义
 和诊断负责 payload 校验。顺序续填追加，重叠更新、snapshot 变化与定期压实使用原子替换。
 Snapshot clone 对 Kline 文件必须使用 copy/reflink。见
 [格式、兼容与恢复合同](../../docs/architecture/history-cache-format.md)。
+
+Tick 封存持 root exclusive gate：先验证并原子发布月包，再删除日文件及逐文件 companion lock。中断后已发布月包优先且立即成为权威；残留日文件在重跑时只能验证已被包含后删除，不能反向合并。范围 purge 同时删除命中的月包 slice 与残留日文件，并保留同月其他数据。普通迟到写入锁定并更新月包，不重新创建日文件。
 
 TradingTimeline rebuild 使用 root 共享生命周期锁和目标指数分钟月分区共享 pin，
 从 metadata/coverage 检查前保持到发布完成；不再与无关 Tick fill 互斥。
@@ -262,7 +265,7 @@ runtime commit 清理。这样保留 cursor/revision 语义，同时避免默认
   `tqsdk.history-container.tick.v1` / schema 4，迁移期仍按 magic 读取 TQBN daily v2/v3。旧 Tick
  首 snapshot 完整持久化，后续 snapshot 只写变化字段与 id/time delta；每条接收的 snapshot 都保留，
  不按 tick 频率填充，也不删除无成交或重复盘口。v2 文件写入前须执行
- `tqsdk-cache migrate --apply --backup-dir DIR`。
+ `tqsdk-cache migrate --apply --backup-dir DIR`。Tick 封闭月迁移先原子发布月包，再清理日源文件；月包发布后即为权威，中断重跑只能验证/删除被包含的残留日文件，不能把旧内容合回月包。完整 backup 的 v2 durable manifest 绑定持久化 cache generation，并记录每个数据/锁文件的 SHA-256；同一目录重跑会先验证备份完整性与保护范围。
   TQBN 是 tqsdk-specific DBN-like binary format，使用 fixed-width records、fixed-point
   price storage、self-describing metadata、explicit final coverage records、non-final
   provisional checkpoint records 和 forward-compatible record lengths；market-data records
@@ -272,7 +275,7 @@ runtime commit 清理。这样保留 cursor/revision 语义，同时避免默认
  继续保守扫描；新建/compact 日分区还会维护
   coverage index chain。每个 `.tqbn.lock` sidecar 还记录已确认 file length、bounded tail checksum 和
   最新 coverage-index head；coverage/range reader 只读取该 confirmed prefix，不要求物理文件尾恰好是
-  coverage index。reader 在 shared lock 内打开 data file 并固定 snapshot，checkpoint 有效时可释放锁后
+ coverage index。reader 从物理路径枚举到所有候选路径均已打开/固定持有 root shared gate；迁移/封存需要 root exclusive gate，竞争时返回 `CacheBusy`。reader 另在 per-file shared lock 内打开 data file 并固定 snapshot，checkpoint 有效时可释放 root 与该文件锁后
   从 opened file handle 解码；并发 append/atomic-rename compaction 不改变该 snapshot。首次初始化写临时
   文件并 sync 后原子 rename。checkpoint 后未确认的截断或坏 checksum suffix 不阻止下次 writer 恢复；
   无有效 checkpoint 的旧文件按锁内捕获的完整物理长度严格校验，不能忽略坏 suffix，但 snapshot planning
