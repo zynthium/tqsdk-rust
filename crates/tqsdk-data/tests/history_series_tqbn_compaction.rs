@@ -182,6 +182,45 @@ fn backtest_tick_cache_range_compaction_touches_only_intersecting_days() {
     );
 }
 
+#[test]
+fn caller_held_exclusive_root_gate_can_compact_tick_range() {
+    let dir = temp_dir("exclusive-root-range-compaction");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let range =
+        backtest_tick_trading_day_range(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap()).unwrap();
+    let datetime = range.start_ns.saturating_add(1);
+    cache
+        .append_partial_ticks("DCE.i2601", [tick(7, datetime, 100.0)])
+        .unwrap();
+    cache
+        .append_partial_ticks("DCE.i2601", [tick(7, datetime, 110.0)])
+        .unwrap();
+    cache
+        .mark_complete("DCE.i2601", range.start_ns, range.end_ns, 1, Some((7, 8)))
+        .unwrap();
+    let root_gate = cache.try_acquire_remote_fill_lock().unwrap();
+
+    cache
+        .compact_symbol_ticks_in_range_with_lock(
+            &root_gate,
+            "DCE.i2601",
+            range.start_ns,
+            range.end_ns,
+        )
+        .unwrap();
+    drop(root_gate);
+    let rows = HistorySeriesCache::open(&dir)
+        .unwrap()
+        .read_tick_data_series(TickDataSeriesRequest::new(
+            "DCE.i2601",
+            range.start_ns,
+            range.end_ns,
+        ))
+        .unwrap();
+    assert_eq!(rows.rows().len(), 1);
+    assert_eq!(rows.rows()[0].last_price, 110.0);
+}
+
 fn tick(id: i64, datetime: i64, last_price: f64) -> Tick {
     Tick {
         id,

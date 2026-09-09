@@ -10,11 +10,12 @@ use tokio::task::JoinSet;
 use tqsdk_core::{Kline, Tick};
 
 use crate::aggregation::{DailyKlineAggregator, MinuteKlineAggregator, TickKlineAggregator};
-use crate::backtest_tick_cache::BacktestTickCache;
+use crate::backtest_tick_cache::{BacktestTickCache, BacktestTickCacheOperationLock};
 use crate::daily_kline_cache::DailyKlineCache;
 use crate::minute_kline_cache::MinuteKlineCache;
 use crate::{
-    BacktestHistoryMetadataCache, DataError, Result, resolve_minute_cache_metadata_snapshot,
+    BacktestHistoryMetadataCache, DataError, HistorySeriesCache, Result,
+    resolve_minute_cache_metadata_snapshot,
 };
 
 use super::BacktestHistoryRequestId;
@@ -59,6 +60,7 @@ pub(crate) struct BacktestHistoryExecutionState {
     event_reservations: BacktestHistoryRunReservations,
     shared_scan_metrics: Arc<SharedScanMetrics>,
     prepared_plans: BTreeMap<BacktestHistoryRequestId, PlannedBacktestHistoryRequest>,
+    root_gate: Option<Arc<BacktestTickCacheOperationLock>>,
 }
 
 impl BacktestHistoryExecutionState {
@@ -76,11 +78,20 @@ impl BacktestHistoryExecutionState {
             event_reservations,
             shared_scan_metrics,
             prepared_plans: BTreeMap::new(),
+            root_gate: None,
         }
     }
 
     pub(crate) fn with_prepared_plan(mut self, plan: PlannedBacktestHistoryRequest) -> Self {
         self.prepared_plans.insert(plan.request_id, plan);
+        self
+    }
+
+    pub(crate) fn with_root_gate(
+        mut self,
+        root_gate: Option<Arc<BacktestTickCacheOperationLock>>,
+    ) -> Self {
+        self.root_gate = root_gate;
         self
     }
 }
@@ -882,6 +893,7 @@ pub(crate) async fn execute_batch(
         event_reservations,
         shared_scan_metrics,
         mut prepared_plans,
+        root_gate,
     } = execution_state;
     let logical_permits = Arc::new(Semaphore::new(config.logical_concurrency));
     let blocking_permits = Arc::new(Semaphore::new(config.blocking_workers));
@@ -900,6 +912,7 @@ pub(crate) async fn execute_batch(
         let failure_reasons = Arc::clone(&failure_reasons);
         let resources = resources.clone();
         let event_reservations = event_reservations.clone();
+        let root_gate = root_gate.clone();
         tasks.spawn(async move {
             let request_id = request.request_id;
             let symbol = request.symbol.clone();
@@ -924,6 +937,7 @@ pub(crate) async fn execute_batch(
                         failure_reasons,
                         resources,
                         event_reservations,
+                        root_gate,
                     };
                     run_request(context, request, prepared_plan).await
                 }
@@ -1120,6 +1134,7 @@ struct RequestExecutionContext {
     failure_reasons: super::BacktestHistoryFailureReasons,
     resources: Option<super::BacktestHistorySnapshotQueryResources>,
     event_reservations: BacktestHistoryRunReservations,
+    root_gate: Option<Arc<BacktestTickCacheOperationLock>>,
 }
 
 async fn execute_request(
@@ -1135,7 +1150,7 @@ async fn execute_request(
         Some(plan) => plan,
         None => await_or_request_cancelled(
             cancellation.as_ref(),
-            plan_request_for_execution(config, request),
+            plan_request_for_execution(config, request, context.root_gate.as_deref()),
         )
         .await
         .map_err(|error| ExecutionFailure {
@@ -1156,7 +1171,8 @@ async fn execute_request(
     let mut remote_filled_ranges = Vec::new();
     let mut remote_used = false;
     let mut rows_written = 0usize;
-    let fill_coordinator = RemoteFillCoordinator::new(Arc::clone(config), telemetry.clone());
+    let fill_coordinator = RemoteFillCoordinator::new(Arc::clone(config), telemetry.clone())
+        .with_root_gate(context.root_gate.clone());
     for slice in &plan.source_slices {
         if cancellation.is_cancelled() {
             return Err(ExecutionFailure {
@@ -1164,8 +1180,8 @@ async fn execute_request(
                 emitted_rows: 0,
             });
         }
-        let inspection =
-            inspect_source(config, &plan, slice).map_err(|error| ExecutionFailure {
+        let inspection = inspect_source(config, &plan, slice, context.root_gate.as_deref())
+            .map_err(|error| ExecutionFailure {
                 error,
                 emitted_rows: 0,
             })?;
@@ -1313,6 +1329,7 @@ async fn acquire_logical_permit_until_cancelled(
 pub(crate) async fn plan_request_for_execution(
     config: &Arc<BacktestHistoryClientConfig>,
     request: ValidatedBacktestHistoryRequest,
+    root_gate: Option<&BacktestTickCacheOperationLock>,
 ) -> Result<PlannedBacktestHistoryRequest> {
     let requested_range = (request.start_ns, request.end_ns);
     let base_source = classify_request(&request)?;
@@ -1357,10 +1374,11 @@ pub(crate) async fn plan_request_for_execution(
             request.end_ns,
         )
         .await?;
-        return plan_request(config.cache_dir.as_path(), request);
+        return plan_request_with_root_gate(config.cache_dir.as_path(), request, root_gate);
     }
 
-    let fallback_plan = plan_request(config.cache_dir.as_path(), request.clone())?;
+    let fallback_plan =
+        plan_request_with_root_gate(config.cache_dir.as_path(), request.clone(), root_gate)?;
     if !requires_metadata
         || config.policy != BacktestHistoryPolicy::RemoteOnMiss
         || active_metadata.is_some()
@@ -1371,7 +1389,7 @@ pub(crate) async fn plan_request_for_execution(
     let has_cache_miss = fallback_plan
         .source_slices
         .iter()
-        .map(|slice| inspect_source(config, &fallback_plan, slice))
+        .map(|slice| inspect_source(config, &fallback_plan, slice, root_gate))
         .collect::<Result<Vec<_>>>()?
         .iter()
         .any(|inspection| !inspection.missing_ranges.is_empty());
@@ -1387,7 +1405,20 @@ pub(crate) async fn plan_request_for_execution(
         request.end_ns,
     )
     .await?;
-    plan_request(config.cache_dir.as_path(), request)
+    plan_request_with_root_gate(config.cache_dir.as_path(), request, root_gate)
+}
+
+fn plan_request_with_root_gate(
+    cache_dir: &std::path::Path,
+    request: ValidatedBacktestHistoryRequest,
+    root_gate: Option<&BacktestTickCacheOperationLock>,
+) -> Result<PlannedBacktestHistoryRequest> {
+    let Some(root_gate) = root_gate.filter(|root_gate| root_gate.is_exclusive()) else {
+        return plan_request(cache_dir, request);
+    };
+    root_gate.require_exclusive_for(cache_dir)?;
+    HistorySeriesCache::open_read_only(cache_dir)
+        .with_caller_held_exclusive_root(|| plan_request(cache_dir, request))
 }
 
 struct SourceInspection {
@@ -1406,7 +1437,7 @@ pub(crate) async fn strict_inspect_request(
     config: Arc<BacktestHistoryClientConfig>,
     request: ValidatedBacktestHistoryRequest,
 ) -> std::result::Result<super::report::BacktestHistoryRequestReport, StrictInspectionFailure> {
-    let plan = plan_request_for_execution(&config, request)
+    let plan = plan_request_for_execution(&config, request, None)
         .await
         .map_err(StrictInspectionFailure::Planning)?;
     strict_inspect_plan(config.as_ref(), &plan)
@@ -1424,7 +1455,7 @@ pub(crate) fn strict_inspect_plan(
     let mut missing_ranges = Vec::new();
     for slice in &plan.source_slices {
         let inspection =
-            inspect_source(config, plan, slice).map_err(StrictInspectionFailure::Source)?;
+            inspect_source(config, plan, slice, None).map_err(StrictInspectionFailure::Source)?;
         cached_ranges.extend(inspection.cached_ranges);
         missing_ranges.extend(inspection.missing_ranges);
     }
@@ -1440,14 +1471,22 @@ fn inspect_source(
     config: &BacktestHistoryClientConfig,
     plan: &PlannedBacktestHistoryRequest,
     slice: &super::planner::PlannedSourceSlice,
+    root_gate: Option<&BacktestTickCacheOperationLock>,
 ) -> Result<SourceInspection> {
     match plan.base_source {
         PlannedBaseSource::Tick => {
-            let coverage = BacktestTickCache::open_read_only(config.cache_dir.as_path()).coverage(
-                slice.cache_symbol.as_str(),
-                slice.range.0,
-                slice.range.1,
-            )?;
+            let cache = BacktestTickCache::open_read_only(config.cache_dir.as_path());
+            let coverage = match root_gate.filter(|root_gate| root_gate.is_exclusive()) {
+                Some(root_gate) => cache.coverage_with_lock(
+                    root_gate,
+                    slice.cache_symbol.as_str(),
+                    slice.range.0,
+                    slice.range.1,
+                )?,
+                None => {
+                    cache.coverage(slice.cache_symbol.as_str(), slice.range.0, slice.range.1)?
+                }
+            };
             Ok(SourceInspection {
                 cached_ranges: coverage.cached_ranges,
                 missing_ranges: coverage.missing_ranges,
@@ -2536,6 +2575,64 @@ mod tests {
             crate::backtest_history::store_worker::scan_open_counts(),
             (1, 1)
         );
+    }
+
+    #[tokio::test]
+    async fn supplied_exclusive_root_gate_inspects_complete_tick_cache() {
+        let root = temp_dir("exclusive-root-inspect");
+        let symbol = "SHFE.au2608";
+        let start_ns = utc_ns(2026, 1, 5, 1, 0, 0);
+        let day = backtest_tick_trading_day_for_timestamp_ns(start_ns).unwrap();
+        let day_range = backtest_tick_trading_day_range(day).unwrap();
+        let cache = BacktestTickCache::open(&root).unwrap();
+        cache
+            .store_ticks(
+                symbol,
+                day_range.start_ns,
+                day_range.end_ns,
+                [tick(1, start_ns, 10.0, 10)],
+            )
+            .unwrap();
+        let root_gate = Arc::new(cache.try_acquire_remote_fill_lock().unwrap());
+        let client = BacktestHistoryClient::builder(&root)
+            .policy(BacktestHistoryPolicy::RemoteOnMiss)
+            .build()
+            .unwrap();
+        let validated =
+            BacktestHistoryRequest::tick(99, symbol, day_range.start_ns, day_range.end_ns)
+                .validate()
+                .unwrap();
+        let plan =
+            super::plan_request_for_execution(&client.config, validated, Some(root_gate.as_ref()))
+                .await
+                .unwrap();
+        let inspection = super::inspect_source(
+            client.config.as_ref(),
+            &plan,
+            &plan.source_slices[0],
+            Some(root_gate.as_ref()),
+        )
+        .unwrap();
+        assert!(inspection.missing_ranges.is_empty());
+
+        let mut run = client
+            .materialize_cache_run_with_root_gate(
+                [BacktestHistoryRequest::tick(
+                    1,
+                    symbol,
+                    day_range.start_ns,
+                    day_range.end_ns,
+                )],
+                Arc::clone(&root_gate),
+            )
+            .await
+            .unwrap();
+        while run.next().await.is_some() {}
+        let report = run.finish().await;
+
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert_eq!(report.completed.len(), 1, "{report:?}");
+        drop(root_gate);
     }
 
     fn tick(id: i64, datetime: i64, last_price: f64, volume: i64) -> Tick {

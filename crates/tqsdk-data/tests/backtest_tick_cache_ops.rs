@@ -51,6 +51,87 @@ fn fast_inventory_counts_valid_daily_tqbn_files_without_decoding_rows() {
 }
 
 #[test]
+fn fast_inventory_counts_monthly_tick_pack_days_from_common_index() {
+    let dir = temp_dir("fast-inventory-monthly");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let symbol = "SHFE.rb2601";
+    for (id, date) in [
+        (1, NaiveDate::from_ymd_opt(1970, 1, 5).unwrap()),
+        (2, NaiveDate::from_ymd_opt(1970, 1, 6).unwrap()),
+    ] {
+        let day = backtest_tick_trading_day_range(date).unwrap();
+        cache
+            .store_ticks(
+                symbol,
+                day.start_ns,
+                day.end_ns,
+                [tick(id, day.start_ns + 1_000)],
+            )
+            .unwrap();
+    }
+    let lock = cache.try_acquire_consistency_read_lock().unwrap();
+    cache.validate_tick_migration_source(&lock).unwrap();
+    cache
+        .migrate_symbol_ticks_to_current(&lock, symbol)
+        .unwrap();
+    drop(lock);
+
+    let inventory = cache.fast_inventory().unwrap();
+
+    assert_eq!(inventory.total_files, 1);
+    assert_eq!(inventory.total_days, 2);
+    assert_eq!(inventory.problem_files, 0);
+    assert_eq!(inventory.symbols.len(), 1);
+    assert_eq!(inventory.symbols[0].files, 1);
+    assert_eq!(inventory.symbols[0].days, 2);
+}
+
+#[test]
+fn fast_inventory_merges_daily_and_monthly_tick_partitions() {
+    let dir = temp_dir("fast-inventory-mixed");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let symbol = "SHFE.rb2601";
+    for (id, date) in [
+        (1, NaiveDate::from_ymd_opt(1970, 1, 5).unwrap()),
+        (2, NaiveDate::from_ymd_opt(1970, 1, 6).unwrap()),
+    ] {
+        let day = backtest_tick_trading_day_range(date).unwrap();
+        cache
+            .store_ticks(
+                symbol,
+                day.start_ns,
+                day.end_ns,
+                [tick(id, day.start_ns + 1_000)],
+            )
+            .unwrap();
+    }
+    let lock = cache.try_acquire_consistency_read_lock().unwrap();
+    cache.validate_tick_migration_source(&lock).unwrap();
+    cache
+        .migrate_symbol_ticks_to_current(&lock, symbol)
+        .unwrap();
+    drop(lock);
+    let hot =
+        backtest_tick_trading_day_range(NaiveDate::from_ymd_opt(1970, 2, 2).unwrap()).unwrap();
+    cache
+        .store_ticks(
+            symbol,
+            hot.start_ns,
+            hot.end_ns,
+            [tick(3, hot.start_ns + 1_000)],
+        )
+        .unwrap();
+
+    let inventory = cache.fast_inventory().unwrap();
+
+    assert_eq!(inventory.total_files, 2);
+    assert_eq!(inventory.total_days, 3);
+    assert_eq!(inventory.problem_files, 0);
+    assert_eq!(inventory.symbols[0].files, 2);
+    assert_eq!(inventory.symbols[0].days, 3);
+}
+
+#[test]
 fn fast_inventory_and_diagnostics_report_bad_tqbn_magic() {
     let dir = temp_dir("fast-inventory-bad-magic");
     let path = daily_tick_file(&dir, "19700101", "SHFE.rb2601");
@@ -450,6 +531,12 @@ fn tick_migration_preflight_rejects_symlinks_and_unknown_series_objects() {
     std::fs::remove_file(series.join("alias")).unwrap();
     std::fs::write(series.join("unknown.bin"), b"unknown").unwrap();
     assert!(cache.validate_tick_migration_source(&lock).is_err());
+    std::fs::remove_file(series.join("unknown.bin")).unwrap();
+
+    let interrupted = series.join("SHFE.test2601.tqbn.cow-123-456-0");
+    std::fs::write(&interrupted, b"unpublished").unwrap();
+    cache.validate_tick_migration_source(&lock).unwrap();
+    assert!(!interrupted.exists());
 }
 
 #[test]

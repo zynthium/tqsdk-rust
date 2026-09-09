@@ -2675,6 +2675,15 @@ impl BacktestBuilder {
                 minute_cache.purge_range(symbol, self.start_ns, self.end_ns)?;
             }
         }
+        let inspection_cache = match remote_fill_lock
+            .as_ref()
+            .filter(|root_gate| root_gate.is_exclusive())
+        {
+            Some(root_gate) => cache
+                .clone()
+                .with_exclusive_root_gate(Arc::clone(root_gate))?,
+            None => cache.clone(),
+        };
 
         let remote_fill_runtime = self.remote_fill_runtime();
         let total_ranges = physical_ranges.len();
@@ -2684,7 +2693,7 @@ impl BacktestBuilder {
         let mut before_by_range = BTreeMap::new();
         let mut fill_requests = Vec::new();
         for (symbol, start_ns, end_ns, before) in
-            inspect_backtest_tick_cache_ranges(cache.clone(), &physical_ranges).await?
+            inspect_backtest_tick_cache_ranges(inspection_cache.clone(), &physical_ranges).await?
         {
             let is_complete = before.is_complete();
             checked_ranges = checked_ranges.saturating_add(1);
@@ -2871,12 +2880,14 @@ impl BacktestBuilder {
             })
             .cloned()
             .collect::<Vec<_>>();
-        let after_by_range =
-            inspect_backtest_tick_cache_ranges(cache.clone(), ranges_to_reinspect.as_slice())
-                .await?
-                .into_iter()
-                .map(|(symbol, start_ns, end_ns, status)| ((symbol, start_ns, end_ns), status))
-                .collect::<BTreeMap<_, _>>();
+        let after_by_range = inspect_backtest_tick_cache_ranges(
+            inspection_cache.clone(),
+            ranges_to_reinspect.as_slice(),
+        )
+        .await?
+        .into_iter()
+        .map(|(symbol, start_ns, end_ns, status)| ((symbol, start_ns, end_ns), status))
+        .collect::<BTreeMap<_, _>>();
 
         let mut symbols = Vec::new();
         let mut reported_rows_by_symbol = BTreeSet::new();
@@ -3238,13 +3249,8 @@ impl BacktestBuilder {
         if refresh && self.base.auth.is_none() {
             return Err(data_validation("remote backtest cache fill requires auth"));
         }
-        let remote_fill_lock = if matches!(
-            self.cache_policy,
-            BacktestCachePolicy::RemoteOnMiss | BacktestCachePolicy::Refresh
-        ) {
-            Some(Arc::new(
-                self.acquire_remote_fill_lock(cache, refresh).await?,
-            ))
+        let remote_fill_lock = if matches!(self.cache_policy, BacktestCachePolicy::RemoteOnMiss) {
+            Some(Arc::new(self.acquire_remote_fill_lock(cache, false).await?))
         } else {
             None
         };
@@ -3285,6 +3291,14 @@ impl BacktestBuilder {
                 "canonical 60-second Kline cache cannot fill a current or future trading day without provisional_open_day_fill",
             ));
         }
+        // Resolve cache-backed inputs under their own shared read gates before
+        // taking the fill owner's exclusive root gate. Acquiring these in the
+        // opposite order self-deadlocks when a reader pins its partition set.
+        let remote_fill_lock = if refresh {
+            Some(Arc::new(self.acquire_remote_fill_lock(cache, true).await?))
+        } else {
+            remote_fill_lock
+        };
         if refresh {
             let root_gate = remote_fill_lock
                 .as_deref()
@@ -3309,12 +3323,21 @@ impl BacktestBuilder {
                 daily_cache.purge_symbol(symbol)?;
             }
         }
+        let tick_coverage_cache = if refresh {
+            cache.clone().with_exclusive_root_gate(Arc::clone(
+                remote_fill_lock
+                    .as_ref()
+                    .expect("refresh policy holds an exclusive cache-root gate"),
+            ))?
+        } else {
+            cache.clone()
+        };
         let mut missing_tick_symbols = Vec::new();
         let mut tick_fill_requests = Vec::new();
         for (symbol, range_start_ns, range_end_ns) in
             prepared_input_physical_tick_ranges(&prepared_inputs)
         {
-            let coverage = cache.coverage(symbol, range_start_ns, range_end_ns)?;
+            let coverage = tick_coverage_cache.coverage(symbol, range_start_ns, range_end_ns)?;
             if !coverage.is_complete() {
                 tick_fill_requests.extend(fill_requests_from_coverage(&coverage));
                 missing_tick_symbols.push(coverage);
@@ -3832,7 +3855,10 @@ impl PreparedBacktest {
             .ok_or_else(|| data_validation("prepared backtest cache missing"))?;
         let remote_fill_runtime = builder.remote_fill_runtime();
         let mut inputs = match mode {
-            PreparedBacktestMode::CacheHit { inputs } => inputs,
+            PreparedBacktestMode::CacheHit { inputs } => {
+                drop(remote_fill_lock);
+                inputs
+            }
             PreparedBacktestMode::RemoteCaching {
                 inputs: _,
                 tick_fill_requests,
@@ -3888,6 +3914,9 @@ impl PreparedBacktest {
                 // snapshot. Re-resolve replay inputs after it completes so
                 // minute readers and Tick-derived Klines use the same session
                 // and cache identity that wrote the durable rows.
+                // The fill owner's root gate must be gone before any replay
+                // input opens its own root-gated reader.
+                drop(remote_fill_lock);
                 builder.resolved_prepared_inputs().await?
             }
         };
@@ -5510,6 +5539,7 @@ mod tests {
 #[cfg(test)]
 mod builder_contract_tests {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use chrono::{NaiveDate, TimeZone};
@@ -5523,7 +5553,7 @@ mod builder_contract_tests {
 
     use super::{
         Auth, AutoTradeLogin, BacktestConfig, BacktestKlineSource, BacktestKlineSpec,
-        BacktestTickSpec, Error, FacadeMarketKind, LOCAL_BACKTEST_ACCOUNT_ID,
+        BacktestTickSpec, Error, FacadeMarketKind, LOCAL_BACKTEST_ACCOUNT_ID, PreparedBacktest,
         PreparedBacktestInputs, PreparedBacktestMode, Tq, TqBuilder, backtest_kline_source,
         continuous_mapping_query_window, continuous_tick_sources, duration_to_ns,
         history_backtest_stream, physical_tick_ranges, plan_backtest_inputs, session_builder,
@@ -6147,6 +6177,88 @@ mod builder_contract_tests {
                 panic!("missing canonical-minute cache should request remote fill")
             }
         }
+    }
+
+    #[tokio::test]
+    async fn warmup_reuses_exclusive_root_gate_for_tick_inspection() {
+        let dir = temp_cache_dir("facade-exclusive-warmup");
+        let symbol = "SHFE.rb2601";
+        let day = tqsdk_data::backtest_tick_trading_day_range(
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(),
+        )
+        .unwrap();
+        let cache = tqsdk_data::BacktestTickCache::open(&dir).unwrap();
+        cache
+            .store_ticks(
+                symbol,
+                day.start_ns,
+                day.end_ns,
+                [tick(1, cst_datetime_ns(2026, 1, 5, 9, 0, 0), 101.0, 1)],
+            )
+            .unwrap();
+
+        let report = TqBuilder::new()
+            .backtest(day.start_ns, day.end_ns)
+            .cache_dir(&dir)
+            .unwrap()
+            .remote_on_miss()
+            .repair_stale_minute_partitions()
+            .symbol(symbol)
+            .warmup()
+            .await
+            .unwrap();
+
+        assert!(!report.remote_used);
+        assert_eq!(report.symbols.len(), 1);
+        assert!(report.symbols[0].after.is_complete());
+    }
+
+    #[tokio::test]
+    async fn prepared_connect_releases_root_gate_before_reader_open() {
+        let dir = temp_cache_dir("facade-connect-root-gate");
+        let symbol = "SHFE.rb2601";
+        let day = tqsdk_data::backtest_tick_trading_day_range(
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(),
+        )
+        .unwrap();
+        let cache = tqsdk_data::BacktestTickCache::open(&dir).unwrap();
+        cache
+            .store_ticks(
+                symbol,
+                day.start_ns,
+                day.end_ns,
+                [tick(1, cst_datetime_ns(2026, 1, 5, 9, 0, 0), 101.0, 1)],
+            )
+            .unwrap();
+        let prepared = TqBuilder::new()
+            .backtest(day.start_ns, day.end_ns)
+            .cache_dir(&dir)
+            .unwrap()
+            .remote_on_miss()
+            .tick(symbol, 10)
+            .prepare()
+            .await
+            .unwrap();
+        let PreparedBacktest {
+            builder,
+            data_report,
+            mode,
+            remote_fill_lock,
+        } = prepared;
+        drop(remote_fill_lock);
+        let root_gate = Arc::new(cache.try_acquire_remote_fill_lock().unwrap());
+        let prepared = PreparedBacktest {
+            builder,
+            data_report,
+            mode,
+            remote_fill_lock: Some(root_gate),
+        };
+
+        let connected = tokio::time::timeout(Duration::from_secs(2), prepared.connect())
+            .await
+            .expect("reader open must not wait on its caller-owned root gate")
+            .unwrap();
+        drop(connected);
     }
 
     fn tick(id: i64, datetime: i64, last_price: f64, volume: i64) -> Tick {

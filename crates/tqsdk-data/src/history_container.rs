@@ -224,7 +224,7 @@ impl<M> Index<M> {
     pub fn validate(&self, index_offset: u64) -> Result<()> {
         if self.identity.symbol.is_empty()
             || self.identity.symbol.len() > 4096
-            || self.identity.partition_scheme != 1
+            || !matches!(self.identity.partition_scheme, 1 | 2)
             || self.identity.metadata_schema != 1
             || matches!(self.identity.kind, SeriesKind::Kline { duration_ns } if duration_ns <= 0)
             || self

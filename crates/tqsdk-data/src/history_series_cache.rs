@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -440,6 +441,21 @@ impl HistorySeriesCache {
         self.store.write_segment_with_coverage(segment, coverage)
     }
 
+    pub(crate) fn with_caller_held_exclusive_root<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        tqbn::with_caller_held_exclusive_root(self.root_dir(), operation)
+    }
+
+    pub(crate) fn tick_pack_coverage_days(
+        &self,
+        path: &Path,
+        symbol: &str,
+    ) -> Result<BTreeSet<String>> {
+        tqbn::tick_pack_coverage_days(path, symbol)
+    }
+
     pub(crate) fn append_coverage(&self, commit: HistorySeriesCoverageCommit) -> Result<()> {
         self.store.append_coverage(commit)
     }
@@ -702,6 +718,27 @@ impl HistorySeriesCache {
         while let Some(row) = reader.next_row()? {
             if let HistorySeriesRow::Tick(row) = row {
                 rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+
+    pub(crate) fn count_tick_window(
+        &self,
+        symbol: &str,
+        start_datetime_ns: i64,
+        end_datetime_ns: i64,
+    ) -> Result<u64> {
+        let mut reader = self.open_reader(HistorySeriesReadRequest {
+            symbol: symbol.to_string(),
+            kind: HistorySeriesKind::Tick,
+            range_start_ns: start_datetime_ns,
+            range_end_ns: end_datetime_ns,
+        })?;
+        let mut rows = 0_u64;
+        while let Some(row) = reader.next_row()? {
+            if matches!(row, HistorySeriesRow::Tick(_)) {
+                rows = rows.saturating_add(1);
             }
         }
         Ok(rows)

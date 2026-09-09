@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::NaiveDate;
 use fs2::FileExt;
@@ -39,6 +40,7 @@ pub enum BacktestCachePolicy {
 #[derive(Clone)]
 pub struct BacktestTickCache {
     history: HistorySeriesCache,
+    exclusive_root_gate: Option<Arc<BacktestTickCacheOperationLock>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,6 +273,11 @@ impl BacktestTickCacheOperationLock {
         Ok(())
     }
     #[must_use]
+    #[doc(hidden)]
+    pub const fn is_exclusive(&self) -> bool {
+        self.exclusive
+    }
+    #[must_use]
     pub fn cache_dir(&self) -> &Path {
         self.cache_dir.as_path()
     }
@@ -311,7 +318,10 @@ pub struct BacktestTickFill {
 impl BacktestTickCache {
     #[must_use]
     pub fn new(history: HistorySeriesCache) -> Self {
-        Self { history }
+        Self {
+            history,
+            exclusive_root_gate: None,
+        }
     }
 
     pub fn open(root_dir: impl AsRef<Path>) -> Result<Self> {
@@ -329,6 +339,24 @@ impl BacktestTickCache {
         self.history.root_dir()
     }
 
+    #[doc(hidden)]
+    pub fn with_exclusive_root_gate(
+        mut self,
+        root_gate: Arc<BacktestTickCacheOperationLock>,
+    ) -> Result<Self> {
+        root_gate.require_exclusive_for(self.history.root_dir())?;
+        self.exclusive_root_gate = Some(root_gate);
+        Ok(self)
+    }
+
+    fn with_attached_exclusive_root<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        let Some(root_gate) = self.exclusive_root_gate.as_deref() else {
+            return operation();
+        };
+        root_gate.require_exclusive_for(self.history.root_dir())?;
+        self.history.with_caller_held_exclusive_root(operation)
+    }
+
     pub fn coverage(
         &self,
         symbol: impl AsRef<str>,
@@ -336,18 +364,32 @@ impl BacktestTickCache {
         range_end_ns: i64,
     ) -> Result<BacktestTickCoverage> {
         let symbol = symbol.as_ref();
-        validate_range(symbol, range_start_ns, range_end_ns)?;
-        let report = self
-            .history
-            .tick_coverage(symbol, range_start_ns, range_end_ns)?;
-        Ok(BacktestTickCoverage {
-            cache_dir: self.history.root_dir().to_path_buf(),
-            symbol: report.symbol,
-            range_start_ns: report.range_start_ns,
-            range_end_ns: report.range_end_ns,
-            cached_ranges: report.cached_ranges,
-            missing_ranges: report.missing_ranges,
+        self.with_attached_exclusive_root(|| {
+            validate_range(symbol, range_start_ns, range_end_ns)?;
+            let report = self
+                .history
+                .tick_coverage(symbol, range_start_ns, range_end_ns)?;
+            Ok(BacktestTickCoverage {
+                cache_dir: self.history.root_dir().to_path_buf(),
+                symbol: report.symbol,
+                range_start_ns: report.range_start_ns,
+                range_end_ns: report.range_end_ns,
+                cached_ranges: report.cached_ranges,
+                missing_ranges: report.missing_ranges,
+            })
         })
+    }
+
+    pub(crate) fn coverage_with_lock(
+        &self,
+        lock: &BacktestTickCacheOperationLock,
+        symbol: impl AsRef<str>,
+        range_start_ns: i64,
+        range_end_ns: i64,
+    ) -> Result<BacktestTickCoverage> {
+        lock.require_exclusive_for(self.history.root_dir())?;
+        self.history
+            .with_caller_held_exclusive_root(|| self.coverage(symbol, range_start_ns, range_end_ns))
     }
 
     pub fn inspect(
@@ -463,7 +505,7 @@ impl BacktestTickCache {
 
         let series_root = self.history.root_dir().join("series");
         if series_root.is_dir() {
-            for day_entry in fs::read_dir(series_root)? {
+            for day_entry in fs::read_dir(&series_root)? {
                 let day_entry = day_entry?;
                 if !day_entry.file_type()?.is_dir() {
                     continue;
@@ -497,6 +539,57 @@ impl BacktestTickCache {
                         .entry(symbol.clone())
                         .or_insert_with(|| FastInventorySymbolAccumulator::new(symbol))
                         .push(size_bytes, &trading_day, is_problem);
+                }
+            }
+
+            let monthly_root = series_root.join("monthly");
+            if monthly_root.is_dir() {
+                for month_entry in fs::read_dir(monthly_root)? {
+                    let month_entry = month_entry?;
+                    if !month_entry.file_type()?.is_dir() {
+                        continue;
+                    }
+                    let month = month_entry.file_name().to_string_lossy().into_owned();
+                    if NaiveDate::parse_from_str(&format!("{month}01"), "%Y%m%d").is_err() {
+                        continue;
+                    }
+                    let tick_dir = month_entry.path().join("tick");
+                    if !tick_dir.is_dir() {
+                        continue;
+                    }
+                    for file_entry in fs::read_dir(tick_dir)? {
+                        let file_entry = file_entry?;
+                        if !file_entry.file_type()?.is_file() {
+                            continue;
+                        }
+                        let path = file_entry.path();
+                        let Some(symbol) = fast_tick_symbol_from_path(&path) else {
+                            continue;
+                        };
+                        let size_bytes = file_entry.metadata()?.len();
+                        let mut is_problem = fast_tqbn_magic_is_problem(&path, size_bytes)?;
+                        let pack_days = if is_problem {
+                            BTreeSet::new()
+                        } else {
+                            match self.history.tick_pack_coverage_days(&path, symbol.as_str()) {
+                                Ok(pack_days) => pack_days,
+                                Err(_) => {
+                                    is_problem = true;
+                                    BTreeSet::new()
+                                }
+                            }
+                        };
+                        total_files = total_files.saturating_add(1);
+                        total_bytes = total_bytes.saturating_add(size_bytes);
+                        if is_problem {
+                            problem_files = problem_files.saturating_add(1);
+                        }
+                        days.extend(pack_days.iter().cloned());
+                        symbols
+                            .entry(symbol.clone())
+                            .or_insert_with(|| FastInventorySymbolAccumulator::new(symbol))
+                            .push_days(size_bytes, pack_days, is_problem);
+                    }
                 }
             }
         }
@@ -943,10 +1036,8 @@ impl BacktestTickCache {
         self.history.compact_series(symbol, HistorySeriesKind::Tick)
     }
 
-    /// Rewrites every legacy Tick partition for `symbol` into current format.
-    ///
-    /// The caller must retain a verified external backup until the complete
-    /// cache-root migration has passed post-publication diagnostics.
+    /// Validates the offline migration namespace and removes unpublished
+    /// candidates left by an interrupted writer.
     #[doc(hidden)]
     pub fn validate_tick_migration_source(
         &self,
@@ -958,7 +1049,10 @@ impl BacktestTickCache {
         reject_tick_migration_namespace_objects(&root.join("series"))
     }
 
-    /// Rewrites one symbol after [`Self::validate_tick_migration_source`].
+    /// Rewrites one symbol and seals its closed Tick months after
+    /// [`Self::validate_tick_migration_source`]. The caller must retain the
+    /// verified external backup until root-wide post-publication diagnostics
+    /// pass.
     #[doc(hidden)]
     pub fn migrate_symbol_ticks_to_current(
         &self,
@@ -992,6 +1086,20 @@ impl BacktestTickCache {
             range_start_ns,
             range_end_ns,
         )
+    }
+
+    #[doc(hidden)]
+    pub fn compact_symbol_ticks_in_range_with_lock(
+        &self,
+        lock: &BacktestTickCacheOperationLock,
+        symbol: impl AsRef<str>,
+        range_start_ns: i64,
+        range_end_ns: i64,
+    ) -> Result<()> {
+        lock.require_exclusive_for(self.history.root_dir())?;
+        self.history.with_caller_held_exclusive_root(|| {
+            self.compact_symbol_ticks_in_range(symbol, range_start_ns, range_end_ns)
+        })
     }
 
     pub fn store_ticks(
@@ -1036,6 +1144,17 @@ impl BacktestTickCache {
             rows,
             std::iter::empty::<(i64, i64, usize, Option<(i64, i64)>)>(),
         )
+    }
+
+    pub(crate) fn append_partial_ticks_with_lock(
+        &self,
+        lock: &BacktestTickCacheOperationLock,
+        symbol: impl AsRef<str>,
+        rows: impl IntoIterator<Item = Tick>,
+    ) -> Result<BacktestTickCacheWriteReport> {
+        lock.require_exclusive_for(self.history.root_dir())?;
+        self.history
+            .with_caller_held_exclusive_root(|| self.append_partial_ticks(symbol, rows))
     }
 
     pub(crate) fn append_partial_ticks_with_coverage(
@@ -1169,6 +1288,32 @@ impl BacktestTickCache {
         Ok(())
     }
 
+    // Thin token-aware twin of `mark_provisional_without_inspection`; keeping the
+    // arguments identical makes the caller-held lock boundary explicit.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn mark_provisional_without_inspection_with_lock(
+        &self,
+        lock: &BacktestTickCacheOperationLock,
+        symbol: impl AsRef<str>,
+        range_start_ns: i64,
+        complete_through_ns: i64,
+        as_of_ns: i64,
+        rows: usize,
+        id_range: Option<(i64, i64)>,
+    ) -> Result<()> {
+        lock.require_exclusive_for(self.history.root_dir())?;
+        self.history.with_caller_held_exclusive_root(|| {
+            self.mark_provisional_without_inspection(
+                symbol,
+                range_start_ns,
+                complete_through_ns,
+                as_of_ns,
+                rows,
+                id_range,
+            )
+        })
+    }
+
     /// Return the longest non-final checkpoint that starts at or before the
     /// requested range and is not already superseded by final coverage.
     pub fn provisional_coverage(
@@ -1223,6 +1368,27 @@ impl BacktestTickCache {
         })
     }
 
+    pub(crate) fn mark_complete_without_inspection_with_lock(
+        &self,
+        lock: &BacktestTickCacheOperationLock,
+        symbol: impl AsRef<str>,
+        range_start_ns: i64,
+        range_end_ns: i64,
+        rows: usize,
+        id_range: Option<(i64, i64)>,
+    ) -> Result<()> {
+        lock.require_exclusive_for(self.history.root_dir())?;
+        self.history.with_caller_held_exclusive_root(|| {
+            self.mark_complete_without_inspection(
+                symbol,
+                range_start_ns,
+                range_end_ns,
+                rows,
+                id_range,
+            )
+        })
+    }
+
     pub fn load_series(&self, request: TickDataSeriesRequest) -> Result<TickDataSeries> {
         self.require_coverage(
             request.symbol(),
@@ -1230,6 +1396,29 @@ impl BacktestTickCache {
             request.end_datetime_ns(),
         )?;
         self.history.read_tick_data_series(request)
+    }
+
+    /// Stream and count a final-only Tick range while retaining a caller-owned
+    /// exclusive cache-root verification token.
+    #[doc(hidden)]
+    pub fn verify_replay_rows_with_lock(
+        &self,
+        lock: &BacktestTickCacheOperationLock,
+        request: TickDataSeriesRequest,
+    ) -> Result<u64> {
+        lock.require_exclusive_for(self.history.root_dir())?;
+        self.history.with_caller_held_exclusive_root(|| {
+            self.require_coverage(
+                request.symbol(),
+                request.start_datetime_ns(),
+                request.end_datetime_ns(),
+            )?;
+            self.history.count_tick_window(
+                request.symbol(),
+                request.start_datetime_ns(),
+                request.end_datetime_ns(),
+            )
+        })
     }
 
     /// Open the cache-backed reader used by the backtest-history query path.
@@ -1439,9 +1628,18 @@ impl FastInventorySymbolAccumulator {
     }
 
     fn push(&mut self, bytes: u64, trading_day: &str, is_problem: bool) {
+        self.push_days(bytes, [trading_day.to_string()], is_problem);
+    }
+
+    fn push_days(
+        &mut self,
+        bytes: u64,
+        trading_days: impl IntoIterator<Item = String>,
+        is_problem: bool,
+    ) {
         self.files = self.files.saturating_add(1);
         self.bytes = self.bytes.saturating_add(bytes);
-        self.days.insert(trading_day.to_string());
+        self.days.extend(trading_days);
         if is_problem {
             self.problem_files = self.problem_files.saturating_add(1);
         }
@@ -1503,6 +1701,16 @@ fn reject_tick_migration_namespace_objects(path: &Path) -> Result<()> {
         }
         return Ok(());
     }
+    if metadata.is_file()
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_unpublished_tqbn_candidate)
+    {
+        fs::remove_file(path)?;
+        crate::cache_file::sync_parent(path)?;
+        return Ok(());
+    }
     if !metadata.is_file()
         || !path
             .file_name()
@@ -1517,6 +1725,26 @@ fn reject_tick_migration_namespace_objects(path: &Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn is_unpublished_tqbn_candidate(name: &str) -> bool {
+    let Some((base, suffix)) = name.split_once(".tqbn.cow-") else {
+        return false;
+    };
+    if base.is_empty() {
+        return false;
+    }
+    let mut fields = suffix.split('-');
+    fields
+        .next()
+        .is_some_and(|field| !field.is_empty() && field.bytes().all(|byte| byte.is_ascii_digit()))
+        && fields.next().is_some_and(|field| {
+            !field.is_empty() && field.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        && fields.next().is_some_and(|field| {
+            !field.is_empty() && field.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        && fields.next().is_none()
 }
 
 fn fast_tqbn_magic_is_problem(path: &Path, size_bytes: u64) -> Result<bool> {

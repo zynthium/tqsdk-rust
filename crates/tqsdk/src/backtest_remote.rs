@@ -1082,7 +1082,7 @@ async fn fill_backtest_history_cache(
             data_requests,
             data_config,
             data_cancellation,
-            root_gate,
+            Arc::clone(&root_gate),
             move |event| {
                 observed
                     .lock()
@@ -1141,9 +1141,10 @@ async fn fill_backtest_history_cache(
     }
 
     let compaction_ranges = final_tick_compaction_ranges(kind, &filled_ranges_by_symbol)?;
-    if !compaction_ranges.is_empty() {
+    if !compaction_ranges.is_empty() && root_gate.is_exclusive() {
         let compaction_cache_dir = cache_dir.to_path_buf();
         let compaction_runtime = runtime.clone();
+        let compaction_root_gate = Arc::clone(&root_gate);
         tokio::task::spawn_blocking(move || -> Result<()> {
             let cache = BacktestTickCache::open(compaction_cache_dir)?;
             for (symbol, ranges) in compaction_ranges {
@@ -1151,7 +1152,12 @@ async fn fill_backtest_history_cache(
                     if compaction_runtime.is_cancelled() {
                         return Ok(());
                     }
-                    cache.compact_symbol_ticks_in_range(&symbol, start_ns, end_ns)?;
+                    cache.compact_symbol_ticks_in_range_with_lock(
+                        compaction_root_gate.as_ref(),
+                        &symbol,
+                        start_ns,
+                        end_ns,
+                    )?;
                 }
             }
             Ok(())

@@ -29,7 +29,8 @@ use tqsdk_session::{
 };
 
 use crate::backtest_tick_cache::{
-    BacktestTickCache, BacktestTickFillReport, backtest_tick_trading_day_for_timestamp_ns,
+    BacktestTickCache, BacktestTickCacheOperationLock, BacktestTickCacheWriteReport,
+    BacktestTickFillReport, backtest_tick_trading_day_for_timestamp_ns,
     backtest_tick_trading_day_range,
 };
 use crate::daily_kline_cache::DailyKlineCache;
@@ -722,11 +723,79 @@ impl ServerHistorySourceFactory for UnavailableServerHistorySourceFactory {
 pub(crate) struct RemoteFillCoordinator {
     config: Arc<BacktestHistoryClientConfig>,
     telemetry: TelemetryHub,
+    root_gate: Option<Arc<BacktestTickCacheOperationLock>>,
 }
 
 impl RemoteFillCoordinator {
     pub(crate) fn new(config: Arc<BacktestHistoryClientConfig>, telemetry: TelemetryHub) -> Self {
-        Self { config, telemetry }
+        Self {
+            config,
+            telemetry,
+            root_gate: None,
+        }
+    }
+
+    pub(crate) fn with_root_gate(
+        mut self,
+        root_gate: Option<Arc<BacktestTickCacheOperationLock>>,
+    ) -> Self {
+        self.root_gate = root_gate;
+        self
+    }
+
+    fn exclusive_root_gate(&self) -> Option<&BacktestTickCacheOperationLock> {
+        self.root_gate
+            .as_deref()
+            .filter(|root_gate| root_gate.is_exclusive())
+    }
+
+    fn append_partial_ticks(
+        &self,
+        cache: &BacktestTickCache,
+        symbol: &str,
+        rows: impl IntoIterator<Item = Tick>,
+    ) -> Result<BacktestTickCacheWriteReport> {
+        match self.exclusive_root_gate() {
+            Some(root_gate) => cache.append_partial_ticks_with_lock(root_gate, symbol, rows),
+            None => cache.append_partial_ticks(symbol, rows),
+        }
+    }
+
+    fn mark_tick_complete(
+        &self,
+        cache: &BacktestTickCache,
+        symbol: &str,
+        range: (i64, i64),
+        rows: usize,
+        id_range: Option<(i64, i64)>,
+    ) -> Result<()> {
+        match self.exclusive_root_gate() {
+            Some(root_gate) => cache.mark_complete_without_inspection_with_lock(
+                root_gate, symbol, range.0, range.1, rows, id_range,
+            ),
+            None => {
+                cache.mark_complete_without_inspection(symbol, range.0, range.1, rows, id_range)
+            }
+        }
+    }
+
+    fn mark_tick_provisional(
+        &self,
+        cache: &BacktestTickCache,
+        symbol: &str,
+        range: (i64, i64),
+        as_of_ns: i64,
+        rows: usize,
+        id_range: Option<(i64, i64)>,
+    ) -> Result<()> {
+        match self.exclusive_root_gate() {
+            Some(root_gate) => cache.mark_provisional_without_inspection_with_lock(
+                root_gate, symbol, range.0, range.1, as_of_ns, rows, id_range,
+            ),
+            None => cache.mark_provisional_without_inspection(
+                symbol, range.0, range.1, as_of_ns, rows, id_range,
+            ),
+        }
     }
 
     pub(crate) async fn ensure_coverage(
@@ -1019,7 +1088,8 @@ impl RemoteFillCoordinator {
                             pending_rows.push(row);
                             if pending_rows.len() >= TICK_WRITE_BUFFER_ROWS {
                                 self.ensure_not_cancelled(shared)?;
-                                let report = cache.append_partial_ticks(
+                                let report = self.append_partial_ticks(
+                                    &cache,
                                     request.cache_symbol.as_str(),
                                     pending_rows.drain(..),
                                 )?;
@@ -1056,8 +1126,11 @@ impl RemoteFillCoordinator {
             .await;
 
         if !pending_rows.is_empty() {
-            let report = cache
-                .append_partial_ticks(request.cache_symbol.as_str(), pending_rows.drain(..))?;
+            let report = self.append_partial_ticks(
+                &cache,
+                request.cache_symbol.as_str(),
+                pending_rows.drain(..),
+            )?;
             written_rows = written_rows.saturating_add(report.rows);
         }
         consume_result?;
@@ -1072,18 +1145,18 @@ impl RemoteFillCoordinator {
         }
         self.ensure_not_cancelled(shared)?;
         match request.provisional_as_of_ns {
-            Some(as_of_ns) => cache.mark_provisional_without_inspection(
+            Some(as_of_ns) => self.mark_tick_provisional(
+                &cache,
                 request.cache_symbol.as_str(),
-                request.range.0,
-                request.range.1,
+                request.range,
                 as_of_ns,
                 report.unique_rows,
                 report.id_range,
             )?,
-            None => cache.mark_complete_without_inspection(
+            None => self.mark_tick_complete(
+                &cache,
                 request.cache_symbol.as_str(),
-                request.range.0,
-                request.range.1,
+                request.range,
                 report.unique_rows,
                 report.id_range,
             )?,
@@ -1483,15 +1556,24 @@ impl RemoteFillCoordinator {
 
     fn missing_ranges(&self, request: &BacktestHistoryFillRequest) -> Result<Vec<(i64, i64)>> {
         match request.family {
-            FillFamily::Tick => Ok(BacktestTickCache::open_read_only(
-                self.config.cache_dir.as_path(),
-            )
-            .coverage(
-                request.cache_symbol.as_str(),
-                request.range.0,
-                request.range.1,
-            )?
-            .missing_ranges),
+            FillFamily::Tick => {
+                let coverage = match self.exclusive_root_gate() {
+                    Some(root_gate) => BacktestTickCache::open(self.config.cache_dir.as_path())?
+                        .coverage_with_lock(
+                            root_gate,
+                            request.cache_symbol.as_str(),
+                            request.range.0,
+                            request.range.1,
+                        )?,
+                    None => BacktestTickCache::open_read_only(self.config.cache_dir.as_path())
+                        .coverage(
+                            request.cache_symbol.as_str(),
+                            request.range.0,
+                            request.range.1,
+                        )?,
+                };
+                Ok(coverage.missing_ranges)
+            }
             FillFamily::CanonicalMinute => {
                 let snapshot = request
                     .minute_snapshot
@@ -2226,6 +2308,54 @@ mod tests {
         assert_eq!(auth_calls.load(Ordering::SeqCst), 1);
         assert!(
             BacktestTickCache::open_read_only(root)
+                .coverage("SHFE.au2608", range.0, range.1)
+                .unwrap()
+                .is_complete()
+        );
+    }
+
+    #[tokio::test]
+    async fn exclusive_caller_root_gate_allows_tick_rows_and_coverage_commit() {
+        let root = temporary_root("fill-exclusive-root-gate");
+        let range = closed_range();
+        let cache = BacktestTickCache::open(&root).unwrap();
+        let root_gate = Arc::new(cache.try_acquire_remote_fill_lock().unwrap());
+        let opens = Arc::new(AtomicUsize::new(0));
+        let coordinator = coordinator(
+            root.clone(),
+            Arc::new(ScriptedFactory::new(
+                Arc::clone(&opens),
+                vec![
+                    ServerBacktestHistoryEvent::Ticks {
+                        chart_id: "tick".to_string(),
+                        symbol: "SHFE.au2608".to_string(),
+                        rows: vec![tick(1, range.0.saturating_add(1))],
+                    },
+                    ServerBacktestHistoryEvent::StreamCompleted,
+                ],
+                Duration::ZERO,
+            )),
+            Arc::new(CountingAuth::new(Arc::new(AtomicUsize::new(0)))),
+        )
+        .with_root_gate(Some(Arc::clone(&root_gate)));
+
+        let outcome = coordinator
+            .ensure_coverage(BacktestHistoryFillRequest::tick(
+                "SHFE.au2608",
+                range,
+                None,
+                Some(1),
+                "SHFE.au2608",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.rows_written, 1);
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+        drop(coordinator);
+        drop(root_gate);
+        assert!(
+            cache
                 .coverage("SHFE.au2608", range.0, range.1)
                 .unwrap()
                 .is_complete()

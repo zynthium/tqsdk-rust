@@ -174,7 +174,7 @@ impl BacktestHistoryLiveCache {
                     error.to_string(),
                 )
             })?;
-        let plan = plan_request_for_execution(&self.client.config, validated.clone())
+        let plan = plan_request_for_execution(&self.client.config, validated.clone(), None)
             .await
             .map_err(|error| {
                 let (reason, message) = map_planning_error(error);
@@ -715,7 +715,7 @@ impl BacktestHistorySnapshot {
                 error.to_string(),
             )
         })?;
-        let plan = plan_request_for_execution(&self.client.config, validated)
+        let plan = plan_request_for_execution(&self.client.config, validated, None)
             .await
             .map_err(|error| {
                 let (reason, message) = map_planning_error(error);

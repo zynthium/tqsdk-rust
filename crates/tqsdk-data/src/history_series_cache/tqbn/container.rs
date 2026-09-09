@@ -103,37 +103,49 @@ pub(super) fn write_segment(
     })
 }
 
-fn day(path: &Path) -> Result<String> {
-    path.parent()
+fn physical_partition(path: &Path) -> Result<(String, u32, (i64, i64))> {
+    let partition_dir = path
+        .parent()
         .and_then(Path::parent)
-        .and_then(Path::file_name)
+        .ok_or(DataError::InvalidState("invalid Tick partition path"))?;
+    let label = partition_dir
+        .file_name()
         .and_then(|name| name.to_str())
-        .filter(|day| is_partition_day(day))
-        .map(str::to_owned)
-        .ok_or(DataError::InvalidState("invalid Tick partition path"))
+        .ok_or(DataError::InvalidState("invalid Tick partition path"))?;
+    if is_partition_day(label) {
+        let date = NaiveDate::parse_from_str(label, "%Y%m%d")
+            .map_err(|_| DataError::InvalidState("invalid Tick partition day"))?;
+        let (normalized, start, end) = trading_day_range(date)?;
+        if normalized != date {
+            return Err(DataError::InvalidState("Tick partition is not trading day"));
+        }
+        return Ok((label.to_owned(), 1, (start, end)));
+    }
+    if is_partition_month(label)
+        && partition_dir
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some(MONTH_PACK_DIR_NAME)
+    {
+        return Ok((label.to_owned(), 2, trading_month_range(label)?));
+    }
+    Err(DataError::InvalidState("invalid Tick partition path"))
 }
 
 fn empty(path: &Path, symbol: &str) -> Result<Index<Metadata>> {
-    let day = day(path)?;
-    let date = NaiveDate::parse_from_str(&day, "%Y%m%d")
-        .map_err(|_| DataError::InvalidState("invalid Tick partition day"))?;
-    let (normalized, start, end) = trading_day_range(date)?;
-    if normalized != date {
-        return Err(DataError::InvalidState(
-            "Tick partition is not a trading day",
-        ));
-    }
+    let (partition, partition_scheme, (start, end)) = physical_partition(path)?;
     Ok(Index::new(
         Identity {
             symbol: symbol.to_owned(),
             kind: SeriesKind::Tick,
-            partition_scheme: 1,
+            partition_scheme,
             pack_range: Some((start, end)),
             metadata_schema: 1,
         },
         vec![Metadata {
             symbol: symbol.to_owned(),
-            day,
+            day: partition,
             start_ns: 0,
             end_ns: 0,
             rows: 0,
@@ -320,7 +332,18 @@ fn read_all(file: &mut File, index: &Index<Metadata>) -> Result<Vec<Tick>> {
     Ok(rows)
 }
 
-fn canonical(rows: Vec<Tick>) -> Vec<Tick> {
+fn canonical(rows: Vec<Tick>) -> Result<Vec<Tick>> {
+    let mut by_day = BTreeMap::<String, Vec<Tick>>::new();
+    for row in rows {
+        by_day
+            .entry(partition_day_for_timestamp_ns(row.datetime)?)
+            .or_default()
+            .push(row);
+    }
+    Ok(by_day.into_values().flat_map(canonical_day).collect())
+}
+
+fn canonical_day(rows: Vec<Tick>) -> Vec<Tick> {
     if rows
         .windows(2)
         .all(|p| p[0].datetime < p[1].datetime && p[0].id < p[1].id)
@@ -570,14 +593,14 @@ pub(super) fn update(
             || original.extents.len() >= 64
             || original.retired_index_bytes() > 256 * 1024);
     if !compact {
-        rows = canonical(rows);
+        rows = canonical(rows)?;
     }
     let mut index = original.clone();
     let blocks;
     if compact {
         let mut all = read_all(&mut file, &original)?;
         all.extend(rows);
-        rows = canonical(all);
+        rows = canonical(all)?;
         index = empty(path, symbol)?;
         index.metadata = original.metadata.clone();
         blocks = add_blocks(&mut index, &rows)?;
@@ -679,6 +702,14 @@ pub(super) fn migrate(path: &Path, symbol: &str, state: &TqbnSeriesState) -> Res
         scan(path, symbol)?;
         return Ok(());
     }
+    write_state(path, symbol, state)
+}
+
+pub(super) fn rewrite(path: &Path, symbol: &str, state: &TqbnSeriesState) -> Result<()> {
+    write_state(path, symbol, state)
+}
+
+fn write_state(path: &Path, symbol: &str, state: &TqbnSeriesState) -> Result<()> {
     let rows = canonical(
         state
             .rows
@@ -690,7 +721,7 @@ pub(super) fn migrate(path: &Path, symbol: &str, state: &TqbnSeriesState) -> Res
                 )),
             })
             .collect::<Result<Vec<_>>>()?,
-    );
+    )?;
     let mut index = empty(path, symbol)?;
     let blocks = add_blocks(&mut index, &rows)?;
     let base = empty(path, symbol)?;

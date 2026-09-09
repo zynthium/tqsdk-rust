@@ -643,7 +643,7 @@ fn classify_cache_relative_path(
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| SnapshotManifestError::corrupt("snapshot cache path is not UTF-8"))?;
-    if is_rebuildable_cache_lock(file_name) {
+    if is_rebuildable_cache_control(file_name) {
         return Ok(BacktestHistorySnapshotFileDisposition::Rebuild);
     }
     // A crash before COW publication can leave a private copy. Recognize only
@@ -1510,7 +1510,7 @@ fn collect_cache_inventory(
         }
         let file_name = entry.file_name();
         let file_name = file_name.to_string_lossy();
-        if is_rebuildable_cache_lock(file_name.as_ref()) {
+        if is_rebuildable_cache_control(file_name.as_ref()) {
             continue;
         }
         let relative = path.strip_prefix(generation_dir).map_err(|_| {
@@ -1536,8 +1536,9 @@ fn collect_cache_inventory(
     Ok(())
 }
 
-fn is_rebuildable_cache_lock(file_name: &str) -> bool {
+fn is_rebuildable_cache_control(file_name: &str) -> bool {
     file_name == ".tqsdk-cache-operation.lock"
+        || file_name == ".tqsdk-cache-generation-v1"
         || file_name == ".metadata.lock"
         || file_name.ends_with(".tqbn.lock")
         || file_name.ends_with(".tqmk.lock")
@@ -2008,6 +2009,14 @@ mod tests {
         assert!(matches!(
             classify_cache_relative_path(Path::new("series/20260901/tick/SHFE.ag.tqbn")),
             Ok(BacktestHistorySnapshotFileDisposition::Include(_))
+        ));
+        assert!(matches!(
+            classify_cache_relative_path(Path::new(".tqsdk-cache-generation-v1")),
+            Ok(BacktestHistorySnapshotFileDisposition::Rebuild)
+        ));
+        assert!(matches!(
+            classify_cache_relative_path(Path::new(".tqsdk-cache-generation-v1")),
+            Ok(BacktestHistorySnapshotFileDisposition::Rebuild)
         ));
         for name in [
             "SHFE.ag.tqbn.cow-12",

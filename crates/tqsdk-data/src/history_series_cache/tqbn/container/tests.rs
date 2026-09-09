@@ -1,7 +1,9 @@
 use super::*;
 
 const SYMBOL: &str = "SHFE.test2601";
-const DAY: &str = "20260105";
+// Keep container-only migration tests on an open/future partition. Closed-month
+// packing is exercised separately at the store layer.
+const DAY: &str = "20990105";
 
 fn assert_legacy_equivalent(f: &Fixture, batches: &[Vec<Tick>]) -> Vec<Tick> {
     let legacy = TqbnHistoryStore::new(f.root.join("legacy")).unwrap();
@@ -247,7 +249,8 @@ fn legacy_partition_migration_is_verified_atomic_and_idempotent() {
                 HistorySeriesRow::Kline(_) => panic!("legacy Tick file contains Kline"),
             })
             .collect(),
-    );
+    )
+    .unwrap();
     let backup = f.path.with_extension("tqbn.test-backup");
     fs::hard_link(&f.path, &backup).unwrap();
     let backup_bytes = fs::read(&backup).unwrap();
@@ -627,7 +630,7 @@ impl Fixture {
         let path = store.partition_series_path(DAY, SYMBOL, HistorySeriesKind::Tick);
         with_exclusive_tqbn_lock(&path, || update(&path, SYMBOL, &[], &[], None, false)).unwrap();
         let (_, start, _) =
-            trading_day_range(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap()).unwrap();
+            trading_day_range(NaiveDate::from_ymd_opt(2099, 1, 5).unwrap()).unwrap();
         Self {
             root,
             store,
@@ -706,7 +709,7 @@ fn new_tick_partitions_default_to_the_common_container() {
     ));
     let store = TqbnHistoryStore::new(root.clone()).unwrap();
     let path = store.partition_series_path(DAY, SYMBOL, HistorySeriesKind::Tick);
-    let (_, start, _) = trading_day_range(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap()).unwrap();
+    let (_, start, _) = trading_day_range(NaiveDate::from_ymd_opt(2099, 1, 5).unwrap()).unwrap();
     store
         .write_segment(HistorySeriesWriteSegment {
             symbol: SYMBOL,

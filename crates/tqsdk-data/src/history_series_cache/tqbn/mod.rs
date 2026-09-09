@@ -4,10 +4,13 @@ mod fixed;
 mod format;
 mod metadata;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -55,6 +58,7 @@ pub(super) use format::{TQBN_FORMAT_ID, TQBN_SCHEMA_VERSION};
 const TQBN_LEGACY_SCHEMA_VERSION: u32 = format::TQBN_LEGACY_SCHEMA_VERSION;
 
 const ROOT_DIR_NAME: &str = "series";
+const MONTH_PACK_DIR_NAME: &str = "monthly";
 const TICK_DIR_NAME: &str = "tick";
 const KLINE_DIR_NAME: &str = "kline";
 const TQBN_FILE_EXTENSION: &str = "tqbn";
@@ -80,6 +84,49 @@ const TQBN_LEGACY_SPILL_CREATE_ATTEMPTS: u64 = 32;
 const TQBN_TICK_PAYLOAD_KEY_BYTES: usize = 225;
 const TQBN_TICK_SPILL_RECORD_BYTES: usize = 16 + TQBN_TICK_PAYLOAD_KEY_BYTES;
 static TQBN_LEGACY_SPILL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    static CALLER_HELD_EXCLUSIVE_ROOTS: RefCell<Vec<PathBuf>> = const {
+        RefCell::new(Vec::new())
+    };
+}
+
+struct CallerHeldExclusiveRootGuard;
+
+impl Drop for CallerHeldExclusiveRootGuard {
+    fn drop(&mut self) {
+        CALLER_HELD_EXCLUSIVE_ROOTS.with(|roots| {
+            roots.borrow_mut().pop();
+        });
+    }
+}
+
+pub(super) fn with_caller_held_exclusive_root<T>(
+    root: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    CALLER_HELD_EXCLUSIVE_ROOTS.with(|roots| {
+        roots.borrow_mut().push(root.to_path_buf());
+    });
+    let _guard = CallerHeldExclusiveRootGuard;
+    operation()
+}
+
+pub(super) fn tick_pack_coverage_days(path: &Path, symbol: &str) -> Result<BTreeSet<String>> {
+    let mut file = File::open(path)?;
+    let index = container::load(&mut file, path, symbol)?;
+    let mut days = BTreeSet::new();
+    for (start_ns, end_ns) in container::checkpoints(&index).coverage {
+        for partition in partition_ranges(start_ns, end_ns)? {
+            days.insert(partition.day);
+        }
+    }
+    Ok(days)
+}
+
+fn caller_holds_exclusive_root(root: &Path) -> bool {
+    CALLER_HELD_EXCLUSIVE_ROOTS.with(|roots| roots.borrow().iter().any(|held| held == root))
+}
 // Planner fallback may retain already-decoded records for the first streaming
 // consumption pass, but must never turn an entire partition into a memory cache.
 const TQBN_PLANNER_REUSE_MAX_BYTES: usize = TQBN_TARGET_RECORDS_BLOCK_PAYLOAD_BYTES;
@@ -199,6 +246,8 @@ pub(super) struct TqbnHistoryStore {
     read_only: bool,
     #[cfg(test)]
     legacy_new_tick_files: bool,
+    #[cfg(test)]
+    interrupt_tick_month_after_publish: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Default)]
@@ -323,6 +372,14 @@ struct TqbnReader {
     spare_records: Vec<u8>,
     read_only: bool,
     telemetry: Arc<TqbnReadTelemetryState>,
+}
+
+struct RootGatedTqbnReader {
+    // Keep the root shared gate while any enumerated path is still unopened.
+    // Once the last path is opened, its file descriptor pins the snapshot and
+    // pathname-replacing maintenance can safely proceed.
+    _root_gate: Option<File>,
+    inner: TqbnReader,
 }
 
 struct TqbnStreamingPartition {
@@ -698,6 +755,8 @@ impl TqbnHistoryStore {
             read_only: false,
             #[cfg(test)]
             legacy_new_tick_files: false,
+            #[cfg(test)]
+            interrupt_tick_month_after_publish: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -707,6 +766,8 @@ impl TqbnHistoryStore {
             read_only: true,
             #[cfg(test)]
             legacy_new_tick_files: false,
+            #[cfg(test)]
+            interrupt_tick_month_after_publish: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -719,7 +780,10 @@ impl TqbnHistoryStore {
         Ok(())
     }
 
-    fn acquire_shared_write_gate(&self) -> Result<File> {
+    fn acquire_shared_write_gate(&self) -> Result<Option<File>> {
+        if caller_holds_exclusive_root(self.root_dir.as_path()) {
+            return Ok(None);
+        }
         let path = self.root_dir.join(".tqsdk-cache-operation.lock");
         let file = OpenOptions::new()
             .create(true)
@@ -728,7 +792,7 @@ impl TqbnHistoryStore {
             .truncate(false)
             .open(path)?;
         match FileExt::try_lock_shared(&file) {
-            Ok(()) => Ok(file),
+            Ok(()) => Ok(Some(file)),
             Err(error) if error.kind() == ErrorKind::WouldBlock => Err(DataError::CacheBusy {
                 cache_dir: self.root_dir.as_ref().clone(),
                 operation: "history cache write",
@@ -737,7 +801,37 @@ impl TqbnHistoryStore {
         }
     }
 
-    fn acquire_exclusive_maintenance_gate(&self) -> Result<File> {
+    fn acquire_shared_read_gate(&self) -> Result<Option<File>> {
+        if caller_holds_exclusive_root(self.root_dir.as_path()) {
+            return Ok(None);
+        }
+        if !self.read_only {
+            return self.acquire_shared_write_gate();
+        }
+        let path = self.root_dir.join(".tqsdk-cache-operation.lock");
+        let file = match OpenOptions::new().read(true).open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Err(DataError::InvalidState(
+                    "non-empty read-only history cache is missing its root operation lock",
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        match FileExt::try_lock_shared(&file) {
+            Ok(()) => Ok(Some(file)),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Err(DataError::CacheBusy {
+                cache_dir: self.root_dir.as_ref().clone(),
+                operation: "history cache read",
+            }),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn acquire_exclusive_maintenance_gate(&self) -> Result<Option<File>> {
+        if caller_holds_exclusive_root(self.root_dir.as_path()) {
+            return Ok(None);
+        }
         let path = self.root_dir.join(".tqsdk-cache-operation.lock");
         let file = OpenOptions::new()
             .create(true)
@@ -746,7 +840,7 @@ impl TqbnHistoryStore {
             .truncate(false)
             .open(path)?;
         match FileExt::try_lock_exclusive(&file) {
-            Ok(()) => Ok(file),
+            Ok(()) => Ok(Some(file)),
             Err(error) if error.kind() == ErrorKind::WouldBlock => Err(DataError::CacheBusy {
                 cache_dir: self.root_dir.as_ref().clone(),
                 operation: "history cache maintenance",
@@ -839,6 +933,23 @@ impl TqbnHistoryStore {
     }
 
     fn partition_series_path(&self, day: &str, symbol: &str, kind: HistorySeriesKind) -> PathBuf {
+        if kind == HistorySeriesKind::Tick
+            && let Ok(month) = partition_month_for_day(day)
+        {
+            let pack = self.monthly_tick_pack_path(month.as_str(), symbol);
+            if pack.is_file() {
+                return pack;
+            }
+        }
+        self.hot_partition_series_path(day, symbol, kind)
+    }
+
+    fn hot_partition_series_path(
+        &self,
+        day: &str,
+        symbol: &str,
+        kind: HistorySeriesKind,
+    ) -> PathBuf {
         let file_name = format!(
             "{}.{}",
             escape_symbol_path_component(symbol),
@@ -861,6 +972,19 @@ impl TqbnHistoryStore {
         }
     }
 
+    fn monthly_tick_pack_path(&self, month: &str, symbol: &str) -> PathBuf {
+        self.root_dir
+            .join(ROOT_DIR_NAME)
+            .join(MONTH_PACK_DIR_NAME)
+            .join(month)
+            .join(TICK_DIR_NAME)
+            .join(format!(
+                "{}.{}",
+                escape_symbol_path_component(symbol),
+                TQBN_FILE_EXTENSION
+            ))
+    }
+
     fn partition_paths_for_range(
         &self,
         symbol: &str,
@@ -869,9 +993,13 @@ impl TqbnHistoryStore {
         end_ns: i64,
     ) -> Result<Vec<PathBuf>> {
         partition_ranges(start_ns, end_ns).map(|partitions| {
+            let mut seen = BTreeSet::new();
             partitions
                 .into_iter()
-                .map(|partition| self.partition_series_path(partition.day.as_str(), symbol, kind))
+                .filter_map(|partition| {
+                    let path = self.partition_series_path(partition.day.as_str(), symbol, kind);
+                    seen.insert(path.clone()).then_some(path)
+                })
                 .collect()
         })
     }
@@ -882,20 +1010,10 @@ impl TqbnHistoryStore {
         kind: HistorySeriesKind,
     ) -> Result<Vec<PathBuf>> {
         let mut paths = Vec::new();
-        for file in list_tqbn_file_metas(self.root_dir.as_path())? {
-            if file.symbol == symbol && file.kind == kind {
-                paths.push(file.path);
-            }
-        }
-        paths.sort();
-        Ok(paths)
-    }
-
-    fn series_has_files(&self, symbol: &str, kind: HistorySeriesKind) -> Result<bool> {
         let series_root = self.root_dir.join(ROOT_DIR_NAME);
         let entries = match fs::read_dir(&series_root) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(paths),
             Err(error) => return Err(error.into()),
         };
         for entry in entries {
@@ -903,19 +1021,44 @@ impl TqbnHistoryStore {
             if !entry.file_type()?.is_dir() {
                 continue;
             }
-            let day = entry.file_name().to_string_lossy().into_owned();
-            if !is_partition_day(&day) {
+            let partition = entry.file_name().to_string_lossy().into_owned();
+            if is_partition_day(&partition) {
+                let path = self.hot_partition_series_path(partition.as_str(), symbol, kind);
+                match fs::symlink_metadata(&path) {
+                    Ok(metadata) if metadata.file_type().is_file() => paths.push(path),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
                 continue;
             }
-            let path = self.partition_series_path(day.as_str(), symbol, kind);
-            match fs::symlink_metadata(path) {
-                Ok(metadata) if metadata.file_type().is_file() => return Ok(true),
-                Ok(_) => {}
-                Err(error) if error.kind() == ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
+            if partition != MONTH_PACK_DIR_NAME || kind != HistorySeriesKind::Tick {
+                continue;
+            }
+            for month in fs::read_dir(entry.path())? {
+                let month = month?;
+                if !month.file_type()?.is_dir() {
+                    continue;
+                }
+                let label = month.file_name().to_string_lossy().into_owned();
+                if !is_partition_month(&label) {
+                    continue;
+                }
+                let path = self.monthly_tick_pack_path(label.as_str(), symbol);
+                match fs::symlink_metadata(&path) {
+                    Ok(metadata) if metadata.file_type().is_file() => paths.push(path),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
         }
-        Ok(false)
+        paths.sort();
+        Ok(paths)
+    }
+
+    fn series_has_files(&self, symbol: &str, kind: HistorySeriesKind) -> Result<bool> {
+        Ok(!self.partition_paths_for_series(symbol, kind)?.is_empty())
     }
 
     fn write_segment_with_coverage_fallback(
@@ -1141,10 +1284,79 @@ fn format_partition_day(day: NaiveDate) -> String {
     day.format("%Y%m%d").to_string()
 }
 
+fn partition_month_for_day(day: &str) -> Result<String> {
+    if !is_partition_day(day) {
+        return Err(DataError::InvalidState("invalid Tick partition day"));
+    }
+    Ok(day[..6].to_string())
+}
+
+fn trading_month_range(month: &str) -> Result<(i64, i64)> {
+    if !is_partition_month(month) {
+        return Err(DataError::InvalidState("invalid Tick partition month"));
+    }
+    let year = month[..4]
+        .parse::<i32>()
+        .map_err(|_| DataError::InvalidState("invalid Tick partition month"))?;
+    let number = month[4..]
+        .parse::<u32>()
+        .map_err(|_| DataError::InvalidState("invalid Tick partition month"))?;
+    let first = NaiveDate::from_ymd_opt(year, number, 1)
+        .ok_or(DataError::InvalidState("invalid Tick partition month"))?;
+    let (next_year, next_month) = if number == 12 {
+        (year + 1, 1)
+    } else {
+        (year, number + 1)
+    };
+    let next = NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .ok_or(DataError::InvalidState("invalid Tick partition month"))?;
+    Ok((trading_day_range(first)?.1, trading_day_range(next)?.1))
+}
+
 fn is_partition_day(value: &str) -> bool {
     value.len() == 8
         && value.bytes().all(|byte| byte.is_ascii_digit())
         && NaiveDate::parse_from_str(value, "%Y%m%d").is_ok()
+}
+
+fn is_partition_month(value: &str) -> bool {
+    value.len() == 6
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value
+            .get(..4)
+            .and_then(|year| year.parse::<i32>().ok())
+            .zip(value.get(4..).and_then(|month| month.parse::<u32>().ok()))
+            .and_then(|(year, month)| NaiveDate::from_ymd_opt(year, month, 1))
+            .is_some()
+}
+
+fn current_partition_month() -> Result<String> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| DataError::InvalidState("system clock predates Unix epoch"))?;
+    let timestamp_ns = i64::try_from(elapsed.as_nanos())
+        .map_err(|_| DataError::InvalidState("system clock exceeds timestamp range"))?;
+    partition_month_for_day(partition_day_for_timestamp_ns(timestamp_ns)?.as_str())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TickPhysicalPartition {
+    Day(String),
+    Month(String),
+}
+
+fn tick_physical_partition(root_dir: &Path, path: &Path) -> Option<TickPhysicalPartition> {
+    let relative = path.strip_prefix(root_dir.join(ROOT_DIR_NAME)).ok()?;
+    let mut components = relative.components();
+    let first = components.next()?.as_os_str().to_str()?;
+    if is_partition_day(first) {
+        return Some(TickPhysicalPartition::Day(first.to_owned()));
+    }
+    if first != MONTH_PACK_DIR_NAME {
+        return None;
+    }
+    let month = components.next()?.as_os_str().to_str()?;
+    is_partition_month(month).then(|| TickPhysicalPartition::Month(month.to_owned()))
 }
 
 impl HistorySeriesStore for TqbnHistoryStore {
@@ -1356,6 +1568,65 @@ impl HistorySeriesStore for TqbnHistoryStore {
                 container::migrate(&path, symbol, &state)
             })?;
         }
+        let current_month = current_partition_month()?;
+        let mut daily_paths = BTreeMap::<String, Vec<PathBuf>>::new();
+        for path in self.partition_paths_for_series(symbol, HistorySeriesKind::Tick)? {
+            let Some(TickPhysicalPartition::Day(day)) =
+                tick_physical_partition(self.root_dir.as_path(), &path)
+            else {
+                continue;
+            };
+            let month = partition_month_for_day(day.as_str())?;
+            if month < current_month {
+                daily_paths.entry(month).or_default().push(path);
+            }
+        }
+
+        for (month, paths) in daily_paths {
+            let pack = self.monthly_tick_pack_path(month.as_str(), symbol);
+            if pack.is_file() {
+                let state = container::scan(&pack, symbol)?;
+                validate_closed_tick_month_state(&state)?;
+                for path in &paths {
+                    let source = container::scan(path, symbol)?;
+                    validate_closed_tick_month_state(&source)?;
+                    validate_tick_daily_source_contained_in_pack(&source, &state)?;
+                }
+            } else {
+                let mut state = TqbnSeriesState::default();
+                for path in &paths {
+                    let source = container::scan(path, symbol)?;
+                    state.rows.extend(source.rows);
+                    state.coverage.extend(source.coverage);
+                    for checkpoint in source.provisional {
+                        if !state.provisional.contains(&checkpoint) {
+                            state.provisional.push(checkpoint);
+                        }
+                    }
+                }
+                validate_closed_tick_month_state(&state)?;
+                state.coverage = super::merge_datetime_ranges(state.coverage);
+                ensure_parent_dir(&pack)?;
+                with_exclusive_tqbn_lock(&pack, || {
+                    container::rewrite(&pack, symbol, &state)?;
+                    container::scan(&pack, symbol)?;
+                    Ok(())
+                })?;
+                #[cfg(test)]
+                if self
+                    .interrupt_tick_month_after_publish
+                    .swap(false, Ordering::SeqCst)
+                {
+                    return Err(DataError::InvalidState(
+                        "injected interruption after Tick month publication",
+                    ));
+                }
+            }
+            for path in paths {
+                with_exclusive_tqbn_lock(&path, || remove_tqbn_file_locked(&path).map(|_| ()))?;
+                remove_orphan_tqbn_file_lock(&path)?;
+            }
+        }
         Ok(())
     }
 
@@ -1383,13 +1654,26 @@ impl HistorySeriesStore for TqbnHistoryStore {
         &self,
         request: HistorySeriesCoverageRequest,
     ) -> Result<HistorySeriesCoverageReport> {
-        let mut coverage = Vec::new();
-        for path in self.partition_paths_for_range(
+        let mut paths = self.partition_paths_for_range(
             request.symbol.as_str(),
             request.kind,
             request.range_start_ns,
             request.range_end_ns,
-        )? {
+        )?;
+        let _root_gate = if !paths.iter().any(|path| path.is_file()) {
+            None
+        } else {
+            let gate = self.acquire_shared_read_gate()?;
+            paths = self.partition_paths_for_range(
+                request.symbol.as_str(),
+                request.kind,
+                request.range_start_ns,
+                request.range_end_ns,
+            )?;
+            gate
+        };
+        let mut coverage = Vec::new();
+        for path in paths {
             if let Some(partition_coverage) =
                 with_shared_tqbn_lock(path.as_path(), self.read_only, || {
                     parse_tqbn_coverage_file(&path, request.symbol.as_str(), request.kind)
@@ -1420,14 +1704,27 @@ impl HistorySeriesStore for TqbnHistoryStore {
         &self,
         request: HistorySeriesCoverageRequest,
     ) -> Result<Option<HistorySeriesProvisionalCoverage>> {
-        let mut provisional = Vec::new();
-        let mut final_coverage = Vec::new();
-        for path in self.partition_paths_for_range(
+        let mut paths = self.partition_paths_for_range(
             request.symbol.as_str(),
             request.kind,
             request.range_start_ns,
             request.range_end_ns,
-        )? {
+        )?;
+        let _root_gate = if !paths.iter().any(|path| path.is_file()) {
+            None
+        } else {
+            let gate = self.acquire_shared_read_gate()?;
+            paths = self.partition_paths_for_range(
+                request.symbol.as_str(),
+                request.kind,
+                request.range_start_ns,
+                request.range_end_ns,
+            )?;
+            gate
+        };
+        let mut provisional = Vec::new();
+        let mut final_coverage = Vec::new();
+        for path in paths {
             let Some(parsed) = with_shared_tqbn_lock(path.as_path(), self.read_only, || {
                 parse_tqbn_checkpoint_file(&path, request.symbol.as_str(), request.kind)
             })?
@@ -1725,16 +2022,70 @@ impl HistorySeriesStore for TqbnHistoryStore {
             removed_files: 0,
             removed_bytes: 0,
         };
+        let removed_ranges = partition_ranges(range_start_ns, range_end_ns)?
+            .into_iter()
+            .map(|partition| (partition.start_ns, partition.end_ns))
+            .collect::<Vec<_>>();
         for file_path in
             self.partition_paths_for_range(symbol, kind, range_start_ns, range_end_ns)?
         {
             with_exclusive_tqbn_lock(&file_path, || {
+                if kind == HistorySeriesKind::Tick
+                    && matches!(
+                        tick_physical_partition(self.root_dir.as_path(), &file_path),
+                        Some(TickPhysicalPartition::Month(_))
+                    )
+                {
+                    let old_size = fs::metadata(&file_path)?.len();
+                    let mut state = container::scan(&file_path, symbol)?;
+                    if !state.provisional.is_empty() {
+                        return Err(DataError::InvalidState(
+                            "closed Tick month still has provisional coverage",
+                        ));
+                    }
+                    state.rows.retain(|row| {
+                        !removed_ranges.iter().any(|&(start_ns, end_ns)| {
+                            history_row_in_datetime_range(row, start_ns, end_ns)
+                        })
+                    });
+                    state.coverage = super::rangeset_difference(&state.coverage, &removed_ranges);
+                    if state.rows.is_empty() && state.coverage.is_empty() {
+                        if let Some(size_bytes) = remove_tqbn_file_locked(&file_path)? {
+                            report.removed_files += 1;
+                            report.removed_bytes = report.removed_bytes.saturating_add(size_bytes);
+                        }
+                    } else {
+                        container::rewrite(&file_path, symbol, &state)?;
+                        let new_size = fs::metadata(&file_path)?.len();
+                        report.removed_bytes = report
+                            .removed_bytes
+                            .saturating_add(old_size.saturating_sub(new_size));
+                    }
+                    return Ok(());
+                }
                 if let Some(size_bytes) = remove_tqbn_file_locked(&file_path)? {
                     report.removed_files += 1;
                     report.removed_bytes = report.removed_bytes.saturating_add(size_bytes);
                 }
                 Ok(())
             })?;
+        }
+        if kind == HistorySeriesKind::Tick {
+            for partition in partition_ranges(range_start_ns, range_end_ns)? {
+                let daily_path = self.hot_partition_series_path(
+                    partition.day.as_str(),
+                    symbol,
+                    HistorySeriesKind::Tick,
+                );
+                with_exclusive_tqbn_lock(&daily_path, || {
+                    if let Some(size_bytes) = remove_tqbn_file_locked(&daily_path)? {
+                        report.removed_files += 1;
+                        report.removed_bytes = report.removed_bytes.saturating_add(size_bytes);
+                    }
+                    Ok(())
+                })?;
+                remove_orphan_tqbn_file_lock(&daily_path)?;
+            }
         }
         Ok(report)
     }
@@ -1743,27 +2094,91 @@ impl HistorySeriesStore for TqbnHistoryStore {
         &self,
         request: HistorySeriesReadRequest,
     ) -> Result<Box<dyn HistorySeriesReader>> {
-        let paths = self.partition_paths_for_range(
+        let mut paths = self.partition_paths_for_range(
             request.symbol.as_str(),
             request.kind,
             request.range_start_ns,
             request.range_end_ns,
         )?;
-        Ok(Box::new(TqbnReader {
-            common_partition: None,
-            paths,
-            path_index: 0,
-            symbol: request.symbol,
-            kind: request.kind,
-            range_start_ns: request.range_start_ns,
-            range_end_ns: request.range_end_ns,
-            rows: Vec::new().into_iter(),
-            partition: None,
-            spilled_partition: None,
-            spare_records: Vec::new(),
-            read_only: self.read_only,
-            telemetry: Arc::new(TqbnReadTelemetryState::default()),
+        let root_gate = if !paths.iter().any(|path| path.is_file()) {
+            None
+        } else {
+            let gate = self.acquire_shared_read_gate()?;
+            paths = self.partition_paths_for_range(
+                request.symbol.as_str(),
+                request.kind,
+                request.range_start_ns,
+                request.range_end_ns,
+            )?;
+            gate
+        };
+        Ok(Box::new(RootGatedTqbnReader {
+            _root_gate: root_gate,
+            inner: TqbnReader {
+                common_partition: None,
+                paths,
+                path_index: 0,
+                symbol: request.symbol,
+                kind: request.kind,
+                range_start_ns: request.range_start_ns,
+                range_end_ns: request.range_end_ns,
+                rows: Vec::new().into_iter(),
+                partition: None,
+                spilled_partition: None,
+                spare_records: Vec::new(),
+                read_only: self.read_only,
+                telemetry: Arc::new(TqbnReadTelemetryState::default()),
+            },
         }))
+    }
+}
+
+fn validate_closed_tick_month_state(state: &TqbnSeriesState) -> Result<()> {
+    if !state.provisional.is_empty() {
+        return Err(DataError::InvalidState(
+            "closed Tick month still has provisional coverage",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_tick_daily_source_contained_in_pack(
+    source: &TqbnSeriesState,
+    pack: &TqbnSeriesState,
+) -> Result<()> {
+    let pack_keys = pack
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            HistorySeriesRow::Tick(tick) => Some((tick.id, tick.datetime)),
+            HistorySeriesRow::Kline(_) => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let rows_contained = source.rows.iter().all(|row| match row {
+        HistorySeriesRow::Tick(tick) => pack_keys.contains(&(tick.id, tick.datetime)),
+        HistorySeriesRow::Kline(_) => false,
+    });
+    let coverage_contained =
+        super::rangeset_difference(&source.coverage, &pack.coverage).is_empty();
+    if !rows_contained || !coverage_contained {
+        return Err(DataError::InvalidState(
+            "closed Tick daily source is not contained in published month pack",
+        ));
+    }
+    Ok(())
+}
+
+impl HistorySeriesReader for RootGatedTqbnReader {
+    fn next_row(&mut self) -> Result<Option<HistorySeriesRow>> {
+        let row = self.inner.next_row()?;
+        if self.inner.path_index >= self.inner.paths.len() {
+            self._root_gate = None;
+        }
+        Ok(row)
+    }
+
+    fn read_telemetry(&self) -> HistorySeriesReadTelemetry {
+        self.inner.read_telemetry()
     }
 }
 
@@ -5732,6 +6147,26 @@ fn remove_tqbn_file_locked(path: &Path) -> Result<Option<u64>> {
     }
 }
 
+fn remove_orphan_tqbn_file_lock(path: &Path) -> Result<()> {
+    if path.exists() {
+        return Err(DataError::InvalidState(
+            "cannot remove Tick lock while data file exists",
+        ));
+    }
+    let lock_path = tqbn_file_lock_path(path);
+    match fs::symlink_metadata(&lock_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            fs::remove_file(&lock_path)?;
+            sync_parent_dir(&lock_path)
+        }
+        Ok(_) => Err(DataError::InvalidState(
+            "Tick companion lock is not a regular file",
+        )),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn record_removed_tqbn_file(size_bytes: u64, report: &mut HistorySeriesCacheMaintenanceReport) {
     report.removed_files += 1;
     report.removed_bytes = report.removed_bytes.saturating_add(size_bytes);
@@ -5944,8 +6379,14 @@ fn parse_series_tree_path(root_dir: &Path, path: &Path) -> Option<(String, Histo
     let series_root = root_dir.join(ROOT_DIR_NAME);
     let relative = path.strip_prefix(series_root).ok()?;
     let mut components = relative.components();
-    let day = components.next()?.as_os_str().to_string_lossy();
-    if !is_partition_day(&day) {
+    let partition = components.next()?.as_os_str().to_string_lossy();
+    let monthly = partition == MONTH_PACK_DIR_NAME;
+    if monthly {
+        let month = components.next()?.as_os_str().to_string_lossy();
+        if !is_partition_month(&month) {
+            return None;
+        }
+    } else if !is_partition_day(&partition) {
         return None;
     }
     let kind_dir = components.next()?.as_os_str().to_string_lossy();
@@ -5958,6 +6399,9 @@ fn parse_series_tree_path(root_dir: &Path, path: &Path) -> Option<(String, Histo
             (symbol_file, HistorySeriesKind::Tick)
         }
         KLINE_DIR_NAME => {
+            if monthly {
+                return None;
+            }
             let duration = components
                 .next()?
                 .as_os_str()
@@ -9340,6 +9784,246 @@ mod tests {
 
     fn tqbn_cache(test_name: &str) -> HistorySeriesCache {
         HistorySeriesCache::from_store(Arc::new(tqbn_store(test_name)))
+    }
+
+    #[test]
+    fn closed_tick_month_pack_resumes_routes_updates_and_purges_by_day() {
+        let store = tqbn_store("closed-tick-month-pack");
+        let first_day = NaiveDate::parse_from_str("19700105", "%Y%m%d").unwrap();
+        let second_day = NaiveDate::parse_from_str("19700106", "%Y%m%d").unwrap();
+        let (_, first_start, first_end) = trading_day_range(first_day).unwrap();
+        let (_, second_start, second_end) = trading_day_range(second_day).unwrap();
+        let first = tick5(1, first_start + 1_000, 10.0, 10.1);
+        let second = tick5(1, second_start + 1_000, 11.0, 11.1);
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: Some((first_start, first_end)),
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&first)),
+            })
+            .unwrap();
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: Some((second_start, second_end)),
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&second)),
+            })
+            .unwrap();
+
+        let first_path =
+            store.hot_partition_series_path("19700105", SYMBOL, HistorySeriesKind::Tick);
+        let second_path =
+            store.hot_partition_series_path("19700106", SYMBOL, HistorySeriesKind::Tick);
+        store
+            .interrupt_tick_month_after_publish
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = store.migrate_tick_series_to_current(SYMBOL).unwrap_err();
+        assert!(matches!(error, DataError::InvalidState(_)));
+        let pack = store.monthly_tick_pack_path("197001", SYMBOL);
+        assert!(pack.is_file());
+        assert!(first_path.is_file());
+        assert!(second_path.is_file());
+        store.migrate_tick_series_to_current(SYMBOL).unwrap();
+        assert!(!first_path.exists());
+        assert!(!second_path.exists());
+        assert!(!tqbn_file_lock_path(&first_path).exists());
+        assert!(!tqbn_file_lock_path(&second_path).exists());
+        let packed = super::container::scan(&pack, SYMBOL).unwrap();
+        assert_eq!(packed.rows.len(), 2, "same Tick id across days is retained");
+        assert_eq!(
+            store
+                .partition_paths_for_range(SYMBOL, HistorySeriesKind::Tick, first_start, second_end)
+                .unwrap(),
+            vec![pack.clone()]
+        );
+
+        let appended = tick5(2, second_start + 2_000, 11.2, 11.3);
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: None,
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&appended)),
+            })
+            .unwrap();
+        assert!(
+            !second_path.exists(),
+            "closed-month writes stay in the pack"
+        );
+        assert_eq!(super::container::scan(&pack, SYMBOL).unwrap().rows.len(), 3);
+
+        // Simulate interruption after pack publication but before source cleanup.
+        ensure_parent_dir(&first_path).unwrap();
+        super::container::rewrite(
+            &first_path,
+            SYMBOL,
+            &super::TqbnSeriesState {
+                rows: vec![HistorySeriesRow::Tick(first.clone())],
+                coverage: vec![(first_start, first_end)],
+                provisional: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        // A later correction in the published pack is authoritative. Retry
+        // must only validate/delete the stale daily source, never merge it.
+        let corrected_first = tick5(1, first.datetime, 10.4, 10.5);
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: None,
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&corrected_first)),
+            })
+            .unwrap();
+        store.migrate_tick_series_to_current(SYMBOL).unwrap();
+        assert!(!first_path.exists());
+        assert!(!tqbn_file_lock_path(&first_path).exists());
+        let corrected = super::container::scan(&pack, SYMBOL).unwrap();
+        assert_eq!(corrected.rows.len(), 3);
+        let corrected_row = corrected
+            .rows
+            .iter()
+            .find_map(|row| match row {
+                HistorySeriesRow::Tick(tick) if tick.datetime == first.datetime => Some(tick),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(corrected_row.last_price, corrected_first.last_price);
+
+        // A second interrupted cleanup must be purged together with the pack,
+        // so a later migration retry cannot resurrect the deleted day.
+        super::container::rewrite(
+            &first_path,
+            SYMBOL,
+            &super::TqbnSeriesState {
+                rows: vec![HistorySeriesRow::Tick(first.clone())],
+                coverage: vec![(first_start, first_end)],
+                provisional: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let report = store
+            .purge_series_range(SYMBOL, HistorySeriesKind::Tick, first_start, first_end)
+            .unwrap();
+        assert_eq!(report.removed_files, 1);
+        assert!(report.removed_bytes > 0);
+        assert!(report.removed());
+        assert!(!first_path.exists());
+        store.migrate_tick_series_to_current(SYMBOL).unwrap();
+        let remaining = super::container::scan(&pack, SYMBOL).unwrap();
+        assert_eq!(remaining.rows.len(), 2);
+        let HistorySeriesRow::Tick(remaining_tick) = &remaining.rows[0] else {
+            panic!("Tick month pack emitted Kline row");
+        };
+        assert_eq!(remaining_tick.id, second.id);
+        assert_eq!(remaining_tick.datetime, second.datetime);
+        let HistorySeriesRow::Tick(appended_tick) = &remaining.rows[1] else {
+            panic!("Tick month pack emitted Kline row");
+        };
+        assert_eq!(appended_tick.id, appended.id);
+        assert_eq!(appended_tick.datetime, appended.datetime);
+        assert_eq!(remaining.coverage, vec![(second_start, second_end)]);
+    }
+
+    #[test]
+    fn lazy_reader_pins_root_gate_until_all_enumerated_partitions_are_opened() {
+        let store = tqbn_store("lazy-reader-pins-root-gate");
+        let first_day = NaiveDate::parse_from_str("19700105", "%Y%m%d").unwrap();
+        let second_day = NaiveDate::parse_from_str("19700106", "%Y%m%d").unwrap();
+        let (_, first_start, first_end) = trading_day_range(first_day).unwrap();
+        let (_, second_start, second_end) = trading_day_range(second_day).unwrap();
+        let first = tick5(1, first_start + 1_000, 10.0, 10.1);
+        let second = tick5(2, second_start + 1_000, 10.2, 10.3);
+        let third = tick5(3, second_start + 2_000, 10.4, 10.5);
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: Some((first_start, first_end)),
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&first)),
+            })
+            .unwrap();
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: Some((second_start, second_end)),
+                rows: HistorySeriesWriteRows::Ticks(&[second, third]),
+            })
+            .unwrap();
+
+        let mut reader = store
+            .open_reader(super::HistorySeriesReadRequest {
+                symbol: SYMBOL.to_string(),
+                kind: HistorySeriesKind::Tick,
+                range_start_ns: first_start,
+                range_end_ns: second_end,
+            })
+            .unwrap();
+        let cache = crate::BacktestTickCache::open(store.root_dir.as_path()).unwrap();
+        let error = cache.try_acquire_consistency_read_lock().unwrap_err();
+        assert!(matches!(error, DataError::CacheBusy { .. }));
+        assert!(matches!(
+            reader.next_row().unwrap(),
+            Some(HistorySeriesRow::Tick(_))
+        ));
+        let error = cache.try_acquire_consistency_read_lock().unwrap_err();
+        assert!(matches!(error, DataError::CacheBusy { .. }));
+        assert!(matches!(
+            reader.next_row().unwrap(),
+            Some(HistorySeriesRow::Tick(_))
+        ));
+        let lock = cache.try_acquire_consistency_read_lock().unwrap();
+        cache
+            .migrate_symbol_ticks_to_current(&lock, SYMBOL)
+            .unwrap();
+        assert!(matches!(
+            reader.next_row().unwrap(),
+            Some(HistorySeriesRow::Tick(_))
+        ));
+        assert!(reader.next_row().unwrap().is_none());
+        drop(reader);
+        assert!(store.monthly_tick_pack_path("197001", SYMBOL).is_file());
+    }
+
+    #[test]
+    fn nonempty_read_only_legacy_root_without_operation_lock_fails_closed() {
+        let store = tqbn_store("read-only-missing-root-lock");
+        let day = NaiveDate::parse_from_str("19700105", "%Y%m%d").unwrap();
+        let (_, start, end) = trading_day_range(day).unwrap();
+        let tick = tick5(1, start + 1_000, 10.0, 10.1);
+        store
+            .write_segment(HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: Some((start, end)),
+                rows: HistorySeriesWriteRows::Ticks(std::slice::from_ref(&tick)),
+            })
+            .unwrap();
+        let operation_lock = store.root_dir.join(".tqsdk-cache-operation.lock");
+        std::fs::remove_file(operation_lock).unwrap();
+
+        let read_only = TqbnHistoryStore::new_read_only(store.root_dir.as_ref().clone());
+        let error = match read_only.open_reader(super::HistorySeriesReadRequest {
+            symbol: SYMBOL.to_string(),
+            kind: HistorySeriesKind::Tick,
+            range_start_ns: start,
+            range_end_ns: end,
+        }) {
+            Ok(_) => panic!("non-empty read-only cache opened without a root operation lock"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, DataError::InvalidState(_)));
+
+        let cache = crate::BacktestTickCache::open(store.root_dir.as_path()).unwrap();
+        let lock = cache.try_acquire_consistency_read_lock().unwrap();
+        cache
+            .migrate_symbol_ticks_to_current(&lock, SYMBOL)
+            .unwrap();
     }
 
     fn tqbn_store(test_name: &str) -> TqbnHistoryStore {

@@ -109,7 +109,7 @@ pub struct HistorySeriesPurgeReport {
 impl HistorySeriesPurgeReport {
     #[must_use]
     pub fn removed(&self) -> bool {
-        self.removed_files > 0
+        self.removed_files > 0 || self.removed_bytes > 0
     }
 }
 

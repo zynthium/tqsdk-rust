@@ -376,7 +376,6 @@ impl BacktestHistoryClient {
         let shared_scan_metrics_for_task = Arc::clone(&shared_scan_metrics);
         let telemetry_for_task = telemetry.clone();
         let coordinator = tokio::spawn(async move {
-            let _root_gate = root_gate;
             let report = executor::execute_batch(
                 config,
                 requests,
@@ -391,7 +390,8 @@ impl BacktestHistoryClient {
                         resources,
                         task_event_reservations,
                         shared_scan_metrics_for_task,
-                    );
+                    )
+                    .with_root_gate(root_gate);
                     match prepared_plan {
                         Some(plan) => state.with_prepared_plan(plan),
                         None => state,
