@@ -1,8 +1,8 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use tqsdk_core::{
-    AccountId, AdapterRegistry, AuthDerivedTradeTarget, EndpointConfig, MarketSessionTarget,
-    ProtocolDomain, RuntimeHandle, SessionConfig, TradeSessionTarget,
+    AccountId, AdapterRegistry, AuthDerivedTradeTarget, CommitLogRetention, EndpointConfig,
+    MarketSessionTarget, ProtocolDomain, RuntimeHandle, SessionConfig, TradeSessionTarget,
 };
 
 #[cfg(feature = "services")]
@@ -28,7 +28,7 @@ pub struct SessionClientBuilder {
     query_enabled: bool,
     market_target: MarketSessionTarget,
     trade_targets: Vec<TradeSessionTarget>,
-    commit_log_retention: Option<usize>,
+    commit_log_retention: Option<(usize, usize)>,
 }
 
 impl SessionClientBuilder {
@@ -53,14 +53,31 @@ impl SessionClientBuilder {
         }
     }
 
-    /// Overrides the target retained runtime commit count for this session.
+    /// Overrides the hard retained runtime commit count for this session.
     ///
-    /// Values below one are clamped to one. The default runtime retention is
-    /// preserved when this method is not called. An active lagging cursor can
-    /// temporarily keep more commits so required revisions are not truncated.
+    /// Values below one are clamped to one. Lagging cursors receive an explicit
+    /// recovery signal instead of extending the process memory budget.
     #[must_use]
     pub fn commit_log_retention(mut self, max_entries: usize) -> Self {
-        self.commit_log_retention = Some(max_entries.max(1));
+        self.commit_log_retention = Some((
+            max_entries.max(1),
+            CommitLogRetention::default().max_retained_bytes(),
+        ));
+        self
+    }
+
+    /// Overrides the hard retained runtime commit count and byte budget.
+    ///
+    /// Both values are clamped to at least one. The byte budget accounts for
+    /// retained commit payloads and prevents a small number of oversized
+    /// commits from bypassing the entry limit.
+    #[must_use]
+    pub fn commit_log_retention_limits(
+        mut self,
+        max_entries: usize,
+        max_retained_bytes: usize,
+    ) -> Self {
+        self.commit_log_retention = Some((max_entries.max(1), max_retained_bytes.max(1)));
         self
     }
 
@@ -237,8 +254,12 @@ impl SessionClientBuilder {
         let mut adapters = AdapterRegistry::new();
         adapters.register_default_adapters();
         let handle = match commit_log_retention {
-            Some(max_entries) => {
-                RuntimeHandle::with_adapters_and_commit_log_retention(adapters, max_entries)
+            Some((max_entries, max_retained_bytes)) => {
+                RuntimeHandle::with_adapters_and_commit_log_retention_limits(
+                    adapters,
+                    max_entries,
+                    max_retained_bytes,
+                )
             }
             None => RuntimeHandle::with_adapters(adapters),
         };
@@ -441,11 +462,14 @@ fn session_config(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "live")]
     use serde_json::json;
+    #[cfg(feature = "live")]
     use tqsdk_core::{CommitScope, InputPayload, IoEvent, ProtocolDomain, Revision, RuntimeInput};
 
     use super::SessionClientBuilder;
 
+    #[cfg(feature = "live")]
     #[test]
     fn configured_commit_log_retention_bounds_built_session() {
         let session = SessionClientBuilder::new("test-user", "test-pass")
@@ -487,5 +511,19 @@ mod tests {
             reader.next(&mut retained_cursor).unwrap().revision,
             Revision::new(3)
         );
+    }
+
+    #[cfg(not(feature = "live"))]
+    #[test]
+    fn build_requires_live_feature() {
+        match SessionClientBuilder::new("test-user", "test-pass").build() {
+            Ok(_) => panic!("session builder must reject live setup without the `live` feature"),
+            Err(error) => {
+                assert!(matches!(
+                    &error,
+                    crate::error::SessionFacadeError::InvalidState(_)
+                ));
+            }
+        }
     }
 }

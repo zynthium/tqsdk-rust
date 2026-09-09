@@ -275,7 +275,9 @@ revision-bound readiness。这个接口只检查状态，不提交订阅或登�
 `OrderIntentRecord` + `SessionClient::remember_order_intent(...)` 记录稳定
 client order id 与 runtime order id 的对应关系。这个 ledger 会随
 `SessionClient::clone()` 和 `TqApi::into_session()` 共享，但不是跨进程持久化存储，
-也不替代 runtime command ledger 或交易回报对账。
+也不替代 runtime command ledger 或交易回报对账。它有明确容量上限，并将状态区分为
+`Prepared → Submitting → Submitted(command_id)`；上层未提交的 prepared capability 必须在 drop/abort 时释放，
+terminal order 则由 ticket/status 路径清理。
 
 ## 建议的 Direct Query 接口层次
 

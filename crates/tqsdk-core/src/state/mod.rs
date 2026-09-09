@@ -14,5 +14,5 @@ pub use domain::{
 };
 pub use path::{ObjectKey, PathSegment, SeriesKey, StatePath};
 pub use read::StateReadView;
-pub use store::StateSnapshot;
-pub(crate) use store::{StatePartitionReadGuard, StateStore};
+pub(crate) use store::{SnapshotRoots, StatePartitionReadGuard, StateStore};
+pub use store::{StateReadTelemetry, StateSnapshot};

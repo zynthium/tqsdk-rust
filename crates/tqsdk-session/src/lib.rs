@@ -66,7 +66,9 @@ pub use direct_query::{
 };
 pub use error::{Result, SessionErrorDiagnostic, SessionErrorKind, SessionFacadeError};
 pub use instrument::{InstrumentClass, InstrumentSpec, SymbolInfo};
-pub use order_intent::{OrderIntentRecord, OrderIntentRegistration, OrderIntentSpec};
+pub use order_intent::{
+    OrderIntentLifecycle, OrderIntentRecord, OrderIntentRegistration, OrderIntentSpec,
+};
 pub use recovery::{StartupRecoverySpec, StartupRecoveryStatus};
 #[cfg(all(feature = "services", feature = "tq-auth"))]
 pub use replay_service::{ServerReplayBuilder, ServerReplaySession};

@@ -93,8 +93,10 @@ research 代码反复解析 `YYYY-MM-DD` 字符串。
 | `RuntimeReader` | 标准读侧入口 |
 | `SnapshotReadGuard` / `StateReadView` | revision-bound 的快照读取 |
 | `MarketStateReadGuard` / `TradeStateReadGuard` / `MarketTradeStateReadGuard` | hot path 分区读面；组合 guard 用于同 revision 读取 market + trade |
+| `StateReadTelemetry` | COW snapshot shared-root / clone=0 与 read-lock wait/hold 累计指标 |
 | `CommitReadGuard` | exact revision 的 commit + state 读面 |
 | `UpdateCursor` | 独立推进的 commit 消费游标 |
+| `CommitLogRetention` / `CommitLogTelemetry` | hard entry + accounted-byte 保留边界，以及 cursor lag / idle telemetry |
 | `AdapterRegistry` | 协议域 adapter 的注册、命令编码、输入解码；单一 interested adapter 可消费输入，多个 adapter 保持借用式 fan-out |
 | `OutboundDispatch` | 已解析 domain / account 的低层 route dispatch |
 | `tqsdk_core::transport::{Transport, SessionRouteConnector, DefaultRouteConnector}` | 底层 transport seam 与默认 route connector |
@@ -218,6 +220,12 @@ live 示例另外会用到：
   `Option<u32>` 解读。
 - hot path 应优先使用 `read_market_state()` / `read_trade_state()`；同一决策需要同时
   读取行情与交易状态时使用 `read_market_trade_state()`，不要退回 full snapshot clone。
+- `StateSnapshot` 共享 immutable partition root；后续 mutation 只 COW 被写 partition。`next_view()`
+  只能返回其 exact revision root，retention 缺口返回 `CursorLagged`，不得用当前 head 替代历史状态。
+- `RuntimeReader::state_read_telemetry()` 的 live-guard 指标只在 guard 释放分区锁后累计；它用于定位
+  snapshot clone 与 lock contention，不能成为交易状态锁内的同步 telemetry。
+- commit log 的 entry 与 accounted-byte 都是 hard bound。慢 cursor 不能 pin 住内存；需要逐 revision
+  的消费者必须自行选择 durable replay / fail，允许丢历史的消费者可显式 `resync_cursor_to_head()`。
 - 未来 `wait_update`、callback、fan-out facade 都应该只消费这个 substrate，而不是重定义内核。
 - `StateSnapshot`、`CommitLog` 这类兼容/底层原语仍然保留，但它们不定义主要读模型。
 

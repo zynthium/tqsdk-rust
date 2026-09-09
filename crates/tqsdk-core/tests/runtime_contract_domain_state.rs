@@ -144,33 +144,37 @@ fn runtime_reader_exposes_partition_scoped_domain_state_reads() {
         .expect("domain state mutations should publish a commit");
 
     let reader = handle.reader();
-    let market = reader.read_market_state();
-    let trade = reader.read_trade_state();
-
-    assert_eq!(market.revision(), handle.latest_snapshot().revision());
-    assert_eq!(trade.revision(), handle.latest_snapshot().revision());
-    assert_eq!(market.quote(&symbol).unwrap().unwrap().last_price, 619.5);
-    assert_eq!(
-        market
-            .trading_status(&symbol)
-            .unwrap()
-            .unwrap()
-            .trade_status,
-        "CONTINOUS"
-    );
-    assert_eq!(trade.account(&account_id).unwrap().unwrap().balance, 2000.0);
-    assert_eq!(
-        trade
-            .position(&account_id, &symbol)
-            .unwrap()
-            .unwrap()
-            .pos_long,
-        3
-    );
-    assert_eq!(
-        trade.order(&account_id, &order_id).unwrap().unwrap().status,
-        "ALIVE"
-    );
+    let revision = handle.latest_snapshot().revision();
+    {
+        let market = reader.read_market_state();
+        assert_eq!(market.revision(), revision);
+        assert_eq!(market.quote(&symbol).unwrap().unwrap().last_price, 619.5);
+        assert_eq!(
+            market
+                .trading_status(&symbol)
+                .unwrap()
+                .unwrap()
+                .trade_status,
+            "CONTINOUS"
+        );
+    }
+    {
+        let trade = reader.read_trade_state();
+        assert_eq!(trade.revision(), revision);
+        assert_eq!(trade.account(&account_id).unwrap().unwrap().balance, 2000.0);
+        assert_eq!(
+            trade
+                .position(&account_id, &symbol)
+                .unwrap()
+                .unwrap()
+                .pos_long,
+            3
+        );
+        assert_eq!(
+            trade.order(&account_id, &order_id).unwrap().unwrap().status,
+            "ALIVE"
+        );
+    }
 }
 
 #[test]

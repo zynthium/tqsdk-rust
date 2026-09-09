@@ -5,18 +5,34 @@ use serde_json::Value;
 
 use crate::{ContractError, Result, ids::Revision};
 
-use super::{MarketStateView, TradeStateView};
+use super::{MarketStateView, SnapshotRoots, TradeStateView};
 
 /// Borrowed, revision-bound view into the runtime state tree.
 #[derive(Clone, Copy)]
 pub struct StateReadView<'a> {
     revision: Revision,
-    data: &'a Value,
+    source: StateReadSource<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum StateReadSource<'a> {
+    Materialized(&'a Value),
+    Roots(&'a SnapshotRoots),
 }
 
 impl<'a> StateReadView<'a> {
     pub(crate) fn new(revision: Revision, data: &'a Value) -> Self {
-        Self { revision, data }
+        Self {
+            revision,
+            source: StateReadSource::Materialized(data),
+        }
+    }
+
+    pub(crate) fn from_roots(revision: Revision, roots: &'a SnapshotRoots) -> Self {
+        Self {
+            revision,
+            source: StateReadSource::Roots(roots),
+        }
     }
 
     /// Returns the snapshot revision this view is bound to.
@@ -40,7 +56,10 @@ impl<'a> StateReadView<'a> {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        get_at_path(self.data, path)
+        match self.source {
+            StateReadSource::Materialized(data) => get_at_path(data, path),
+            StateReadSource::Roots(roots) => roots.get(path),
+        }
     }
 
     /// Looks up a value using a borrowed path slice.
@@ -48,7 +67,10 @@ impl<'a> StateReadView<'a> {
     /// This avoids per-segment ownership when the caller already has
     /// `&str` segments and is the preferred hot-path lookup surface.
     pub fn get_path(&self, path: &[&str]) -> Option<&'a Value> {
-        get_at_path(self.data, path.iter().copied())
+        match self.source {
+            StateReadSource::Materialized(data) => get_at_path(data, path.iter().copied()),
+            StateReadSource::Roots(roots) => roots.get(path.iter().copied()),
+        }
     }
 
     /// Decodes a value at the provided path into `T`.

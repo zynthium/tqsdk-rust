@@ -1,4 +1,4 @@
-use std::sync::RwLockReadGuard;
+use std::sync::{Arc, RwLockReadGuard};
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -10,6 +10,7 @@ use crate::{
 use super::{
     StateReadView,
     read::{decode_value_at_path, get_at_path},
+    store::LiveGuardTelemetry,
 };
 
 #[derive(Clone, Copy)]
@@ -135,24 +136,27 @@ impl<'a> MarketStateView<'a> {
 
 pub struct MarketStateReadGuard<'a> {
     revision: Revision,
-    quotes: RwLockReadGuard<'a, Value>,
-    trading_status: RwLockReadGuard<'a, Value>,
-    charts: RwLockReadGuard<'a, Value>,
-    klines: RwLockReadGuard<'a, Value>,
-    ticks: RwLockReadGuard<'a, Value>,
-    other: RwLockReadGuard<'a, Value>,
+    quotes: RwLockReadGuard<'a, Arc<Value>>,
+    trading_status: RwLockReadGuard<'a, Arc<Value>>,
+    charts: RwLockReadGuard<'a, Arc<Value>>,
+    klines: RwLockReadGuard<'a, Arc<Value>>,
+    ticks: RwLockReadGuard<'a, Arc<Value>>,
+    other: RwLockReadGuard<'a, Arc<Value>>,
+    // Must remain after all lock fields: its Drop records after they release.
+    _hold_telemetry: LiveGuardTelemetry<'a>,
 }
 
 impl<'a> MarketStateReadGuard<'a> {
     pub(crate) fn new(
         revision: Revision,
-        quotes: RwLockReadGuard<'a, Value>,
-        trading_status: RwLockReadGuard<'a, Value>,
-        charts: RwLockReadGuard<'a, Value>,
-        klines: RwLockReadGuard<'a, Value>,
-        ticks: RwLockReadGuard<'a, Value>,
-        other: RwLockReadGuard<'a, Value>,
+        quotes: RwLockReadGuard<'a, Arc<Value>>,
+        trading_status: RwLockReadGuard<'a, Arc<Value>>,
+        charts: RwLockReadGuard<'a, Arc<Value>>,
+        klines: RwLockReadGuard<'a, Arc<Value>>,
+        ticks: RwLockReadGuard<'a, Arc<Value>>,
+        other_and_telemetry: (RwLockReadGuard<'a, Arc<Value>>, LiveGuardTelemetry<'a>),
     ) -> Self {
+        let (other, hold_telemetry) = other_and_telemetry;
         Self {
             revision,
             quotes,
@@ -161,6 +165,7 @@ impl<'a> MarketStateReadGuard<'a> {
             klines,
             ticks,
             other,
+            _hold_telemetry: hold_telemetry,
         }
     }
 
@@ -299,12 +304,22 @@ impl<'a> TradeStateView<'a> {
 
 pub struct TradeStateReadGuard<'a> {
     revision: Revision,
-    trade: RwLockReadGuard<'a, Value>,
+    trade: RwLockReadGuard<'a, Arc<Value>>,
+    // Must remain after `trade`: its Drop records after the lock releases.
+    _hold_telemetry: LiveGuardTelemetry<'a>,
 }
 
 impl<'a> TradeStateReadGuard<'a> {
-    pub(crate) fn new(revision: Revision, trade: RwLockReadGuard<'a, Value>) -> Self {
-        Self { revision, trade }
+    pub(crate) fn new(
+        revision: Revision,
+        trade: RwLockReadGuard<'a, Arc<Value>>,
+        hold_telemetry: LiveGuardTelemetry<'a>,
+    ) -> Self {
+        Self {
+            revision,
+            trade,
+            _hold_telemetry: hold_telemetry,
+        }
     }
 
     pub fn view(&self) -> TradeStateView<'_> {

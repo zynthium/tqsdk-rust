@@ -149,18 +149,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        if let Some(multi_kline_serial) = &multi_kline_serial {
-            if multi_kline_serial.is_ready()? && step.is_changing(multi_kline_serial) {
-                let window = multi_kline_serial.window()?;
-                let last_primary_id = window.last().map(|row| row.primary_id());
-                println!(
-                    "multi_kline_window primary={} symbols={:?} len={} last_primary_id={:?}",
-                    window.primary_symbol(),
-                    window.symbols(),
-                    window.len(),
-                    last_primary_id
-                );
-            }
+        if let Some(multi_kline_serial) = &multi_kline_serial
+            && multi_kline_serial.is_ready()?
+            && step.is_changing(multi_kline_serial)
+        {
+            let window = multi_kline_serial.window()?;
+            let last_primary_id = window.last().map(|row| row.primary_id());
+            println!(
+                "multi_kline_window primary={} symbols={:?} len={} last_primary_id={:?}",
+                window.primary_symbol(),
+                window.symbols(),
+                window.len(),
+                last_primary_id
+            );
         }
     }
 

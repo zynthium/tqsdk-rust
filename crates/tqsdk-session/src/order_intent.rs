@@ -2,6 +2,17 @@
 
 use tqsdk_core::{CommandId, TradeDirection, TradeOffset};
 
+/// Session-local lifecycle for a registered client order intent.
+///
+/// This tracks submission ownership only. Runtime command and order state stay
+/// authoritative for exchange-visible lifecycle transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderIntentLifecycle {
+    Prepared,
+    Submitting,
+    Submitted,
+}
+
 /// User-provided shape of an order intent before it is submitted.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderIntentSpec {
@@ -30,6 +41,7 @@ pub struct OrderIntentRecord {
     volume: i64,
     limit_price: f64,
     command_id: Option<CommandId>,
+    lifecycle: OrderIntentLifecycle,
 }
 
 impl OrderIntentRecord {
@@ -45,6 +57,7 @@ impl OrderIntentRecord {
             volume: spec.volume,
             limit_price: spec.limit_price,
             command_id: None,
+            lifecycle: OrderIntentLifecycle::Prepared,
         }
     }
 
@@ -94,6 +107,11 @@ impl OrderIntentRecord {
     }
 
     #[must_use]
+    pub fn lifecycle(&self) -> OrderIntentLifecycle {
+        self.lifecycle
+    }
+
+    #[must_use]
     pub fn request_matches(&self, other: &Self) -> bool {
         self.account_id == other.account_id
             && self.client_order_id == other.client_order_id
@@ -105,8 +123,27 @@ impl OrderIntentRecord {
             && self.limit_price == other.limit_price
     }
 
-    pub(crate) fn set_command_id(&mut self, command_id: CommandId) {
+    pub(crate) fn begin_submission(&mut self) -> bool {
+        if self.lifecycle != OrderIntentLifecycle::Prepared {
+            return false;
+        }
+        self.lifecycle = OrderIntentLifecycle::Submitting;
+        true
+    }
+
+    pub(crate) fn mark_submitted(&mut self, command_id: CommandId) -> bool {
+        // Keep the pre-existing update helper compatible for callers that
+        // record a command synchronously, while still traversing the same
+        // Prepared -> Submitting -> Submitted state machine under one lock.
+        if self.lifecycle == OrderIntentLifecycle::Prepared {
+            self.lifecycle = OrderIntentLifecycle::Submitting;
+        }
+        if self.lifecycle != OrderIntentLifecycle::Submitting {
+            return false;
+        }
         self.command_id = Some(command_id);
+        self.lifecycle = OrderIntentLifecycle::Submitted;
+        true
     }
 
     pub(crate) fn key(&self) -> (String, String) {

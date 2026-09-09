@@ -41,7 +41,10 @@ session 推进必须由一个 runtime actor 串行拥有。
 
 ### 单一状态树
 所有可见状态都必须进入同一棵 runtime state tree，包括 query、schema、trade、replay 和 system 状态。
-`RuntimeReader` 读取的是这棵树的 revision-bound 借用视图；`StateSnapshot` 只是兼容性的 owned clone。
+`RuntimeReader` 读取的是这棵树的 revision-bound 借用视图；`StateSnapshot` 是共享 immutable
+partition root 的 COW revision snapshot，完整 JSON root 仅在兼容性读取需要时惰性物化。
+`RuntimeReader::state_read_telemetry()` 公开累计 shared-root、bytes/nodes cloned、以及 snapshot/live
+guard lock wait/hold 指标；live guard 只会在释放分区锁后记账，telemetry 不得延长状态锁临界区。
 
 ### 单一因果语义
 命令的后续结果、错误和状态变化必须通过统一的 command causality 进入 commit。
@@ -95,7 +98,8 @@ pub trait Runtime {
 - `RuntimeReader::read()` 提供当前 head 的 zero-copy 读视图
 - `RuntimeReader::next()` 返回 `SharedCommitResult`，使写侧返回、commit log
   和 fan-out 消费共享同一份不可变提交元数据
-- `RuntimeReader::next_view()` 提供“exact revision 或明确 lagged”的底层一致性原语
+- `RuntimeReader::next_view()` 从 commit log 中保留的同 revision immutable root 读取；它不得把
+  当前 head snapshot 当作历史 revision，retention 缺口必须返回明确 `CursorLagged`
 - `SnapshotReadGuard` / `CommitReadGuard` / `StateReadView` 可以按路径 `decode<T>()` 成官方 schema，但这仍然只是底层 schema decode，不是 typed state facade
 - `types::*` 只提供纯 schema/type，不提供 facade/view 或用户便利行为
 - schema 刷新结果必须按 `schema_id` 进入状态树，不能把 transport route label 当成逻辑对象键
@@ -103,8 +107,9 @@ pub trait Runtime {
 - V1 不直接公开 `wait_update()`、callback、fan-out facade
 - 未来 `wait_update` 和 callback/fan-out 都只能建立在 `RuntimeReader + SnapshotReadGuard + UpdateCursor` 之上
 - `StateSnapshot` 与 `CommitLog` 保留给 detached ownership、兼容层和测试，不应反向定义核心读模型
-- `CommitLog` 必须是 indexable 且受 retention 约束，不能在长会话里线性退化或无界增长
-- 专用单消费者 session 可以通过 builder 收窄 commit retention；默认值不变，且 retention 仍不得截断活动 cursor 所需提交
+- `CommitLog` 必须是 indexable 且受 hard entry + accounted-byte retention 约束，不能在长会话里线性退化或无界增长
+- 专用单消费者 session 可以通过 builder 收窄 commit retention；lagging cursor 不得 pin 住内存，必须显式
+  选择 resync-to-head、持久重放或失败退出
 - `runtime.commands/*` 属于本地控制面状态，可做 retention-bounded 保留；terminal 命令一旦超出保留上限必须被裁剪且保持幂等写回
 
 ## 进一步阅读

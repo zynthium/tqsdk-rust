@@ -191,10 +191,10 @@ async fn collect_preferred_client_info(
     if config.python_explicit {
         return collect_official_client_info(config.python).await;
     }
-    if let Some(helper) = adjacent_helper_executable() {
-        if let Ok(collected) = collect_native_client_info(helper, None).await {
-            return Ok(collected);
-        }
+    if let Some(helper) = adjacent_helper_executable()
+        && let Ok(collected) = collect_native_client_info(helper, None).await
+    {
+        return Ok(collected);
     }
     collect_official_client_info(config.python).await
 }

@@ -8,11 +8,11 @@ use crate::{
     ids::Revision,
     state::{
         CommitResult, MarketStateReadGuard, MarketTradeStateReadGuard, SharedCommitResult,
-        StateReadView, StateSnapshot, TradeStateReadGuard, UpdateCursor,
+        StateReadTelemetry, StateReadView, StateSnapshot, TradeStateReadGuard, UpdateCursor,
     },
 };
 
-use super::SharedState;
+use super::{CommitLogLagged, CommitLogTelemetry, SharedState};
 
 /// Revision-bound read guard over a materialized runtime state snapshot.
 pub struct SnapshotReadGuard<'a> {
@@ -155,6 +155,16 @@ impl CursorLagged {
     }
 }
 
+impl From<CommitLogLagged> for CursorLagged {
+    fn from(lagged: CommitLogLagged) -> Self {
+        Self {
+            expected_revision: lagged.expected_revision(),
+            oldest_available_revision: lagged.oldest_available_revision(),
+            current_revision: lagged.current_revision(),
+        }
+    }
+}
+
 /// Canonical read-side surface for state reads and cursor-driven commit
 /// consumption.
 #[derive(Clone)]
@@ -187,6 +197,11 @@ impl RuntimeReader {
     }
 
     /// Acquires a revision-bound snapshot read guard.
+    ///
+    /// This briefly acquires every live state partition before returning a
+    /// detached immutable snapshot. Do not call it while holding a live
+    /// partition guard from this reader: a waiting writer can otherwise make
+    /// the nested read block indefinitely.
     pub fn read(&self) -> SnapshotReadGuard<'_> {
         SnapshotReadGuard {
             snapshot: self.state.snapshot(),
@@ -195,23 +210,70 @@ impl RuntimeReader {
     }
 
     /// Borrows only market state partitions needed by typed market readers.
+    ///
+    /// Do not acquire another live partition guard while this guard is held.
+    /// Use [`Self::read_market_trade_state`] when market and trade state must be
+    /// read together.
     pub fn read_market_state(&self) -> MarketStateReadGuard<'_> {
         self.state.read_market_state()
     }
 
     /// Borrows only the trade state partition needed by typed trade readers.
+    ///
+    /// Do not acquire another live partition guard while this guard is held.
+    /// Use [`Self::read_market_trade_state`] when market and trade state must be
+    /// read together.
     pub fn read_trade_state(&self) -> TradeStateReadGuard<'_> {
         self.state.read_trade_state()
     }
 
     /// Borrows market and trade partitions under one revision-bound guard.
+    ///
+    /// Do not call this while holding any live partition guard from this
+    /// reader. Use this method as the one combined acquisition instead of
+    /// nesting market, trade, or full-state reads.
     pub fn read_market_trade_state(&self) -> MarketTradeStateReadGuard<'_> {
         self.state.read_market_trade_state()
+    }
+
+    /// Returns cumulative COW snapshot and live-partition lock telemetry.
+    ///
+    /// Counters are recorded after read locks release, so collecting them does
+    /// not extend a runtime-state lock critical section.
+    #[must_use]
+    pub fn state_read_telemetry(&self) -> StateReadTelemetry {
+        self.state.read_telemetry()
     }
 
     /// Returns the next retained commit for the provided cursor, if available.
     pub fn next(&self, cursor: &mut UpdateCursor) -> Option<SharedCommitResult> {
         self.commit_log.next(cursor)
+    }
+
+    /// Returns the next commit, or explicitly reports that retention trimmed it.
+    ///
+    /// On lag, `cursor` remains unchanged. Call
+    /// [`Self::resync_cursor_to_head`] only when losing the intervening commits is
+    /// an accepted recovery policy.
+    pub fn next_checked(
+        &self,
+        cursor: &mut UpdateCursor,
+    ) -> std::result::Result<Option<SharedCommitResult>, CursorLagged> {
+        self.commit_log.next_checked(cursor).map_err(Into::into)
+    }
+
+    /// Moves a lagged cursor after the current commit-log head.
+    ///
+    /// This is explicit lossy recovery. Consumers requiring every revision must
+    /// instead rebuild from a durable checkpoint or fail their work.
+    pub fn resync_cursor_to_head(&self, cursor: &mut UpdateCursor) -> Option<Revision> {
+        self.commit_log.resync_cursor_to_head(cursor)
+    }
+
+    /// Returns bounded-log and cursor-lag telemetry.
+    #[must_use]
+    pub fn commit_log_telemetry(&self) -> CommitLogTelemetry {
+        self.commit_log.telemetry()
     }
 
     /// Returns a guard pairing the next commit with the matching state
@@ -220,27 +282,12 @@ impl RuntimeReader {
         &self,
         cursor: &mut UpdateCursor,
     ) -> std::result::Result<Option<CommitReadGuard<'_>>, CursorLagged> {
-        let snapshot = self.state.snapshot();
-        let current_revision = snapshot.revision();
         let expected_revision = cursor.next_revision();
-
-        if current_revision.get() < expected_revision.get() {
-            return Ok(None);
-        }
-
-        if current_revision != expected_revision {
-            let oldest_available_revision = self
-                .commit_log
-                .oldest_revision()
-                .unwrap_or(expected_revision);
-            return Err(CursorLagged {
-                expected_revision,
-                oldest_available_revision,
-                current_revision,
-            });
-        }
-
-        let Some(commit) = self.commit_log.commit_at(expected_revision) else {
+        let Some((commit, snapshot)) = self
+            .commit_log
+            .view_at(expected_revision)
+            .map_err(CursorLagged::from)?
+        else {
             return Ok(None);
         };
         cursor.set_next_revision(Revision::new(commit.revision.get() + 1));

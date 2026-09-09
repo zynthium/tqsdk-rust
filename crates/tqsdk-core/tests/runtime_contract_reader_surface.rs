@@ -68,6 +68,50 @@ fn runtime_reader_exposes_zero_copy_snapshot_reads_and_cursor_access() {
 }
 
 #[test]
+fn state_read_telemetry_reports_shared_snapshots_and_released_live_guards() {
+    let handle = runtime_with_default_adapters();
+    let reader = handle.reader();
+    let before = reader.state_read_telemetry();
+
+    {
+        let snapshot = reader.read();
+        assert_eq!(snapshot.revision(), Revision::new(0));
+    }
+    {
+        let market = reader.read_market_state();
+        assert_eq!(market.revision(), Revision::new(0));
+    }
+    {
+        let trade = reader.read_trade_state();
+        assert_eq!(trade.revision(), Revision::new(0));
+    }
+    {
+        let combined = reader.read_market_trade_state();
+        assert_eq!(combined.revision(), Revision::new(0));
+    }
+
+    let after = reader.state_read_telemetry();
+    assert_eq!(
+        after.snapshot_reads,
+        before.snapshot_reads.saturating_add(1)
+    );
+    assert_eq!(
+        after.snapshot_shared_roots,
+        before.snapshot_shared_roots.saturating_add(12)
+    );
+    assert_eq!(after.snapshot_bytes_cloned, before.snapshot_bytes_cloned);
+    assert_eq!(after.snapshot_nodes_cloned, before.snapshot_nodes_cloned);
+    assert_eq!(
+        after.live_guard_acquisitions,
+        before.live_guard_acquisitions.saturating_add(3)
+    );
+    assert!(after.snapshot_lock_wait_ns >= before.snapshot_lock_wait_ns);
+    assert!(after.snapshot_lock_hold_ns >= before.snapshot_lock_hold_ns);
+    assert!(after.live_guard_lock_wait_ns >= before.live_guard_lock_wait_ns);
+    assert!(after.live_guard_lock_hold_ns >= before.live_guard_lock_hold_ns);
+}
+
+#[test]
 fn runtime_reader_next_view_returns_revision_consistent_zero_copy_guard() {
     let handle = runtime_with_default_adapters();
     let reader = handle.reader();
@@ -90,7 +134,7 @@ fn runtime_reader_next_view_returns_revision_consistent_zero_copy_guard() {
 }
 
 #[test]
-fn runtime_reader_next_view_reports_lagged_cursor_when_head_has_advanced() {
+fn runtime_reader_next_view_reads_each_exact_revision_after_head_advances() {
     let handle = runtime_with_default_adapters();
     let reader = handle.reader();
     let mut cursor = reader.cursor();
@@ -98,13 +142,49 @@ fn runtime_reader_next_view_reports_lagged_cursor_when_head_has_advanced() {
     ingest_quote(&handle, 512.0);
     ingest_quote(&handle, 513.0);
 
-    let lagged = match reader.next_view(&mut cursor) {
-        Err(lagged) => lagged,
-        Ok(result) => panic!("expected lagged cursor error, got {result:?}"),
-    };
+    let first = reader
+        .next_view(&mut cursor)
+        .expect("retained revision must be readable")
+        .expect("first commit should exist");
+    assert_eq!(first.revision(), Revision::new(1));
+    assert_eq!(
+        first.get(["quotes", "SHFE.au2602", "last_price"]),
+        Some(&json!(512.0))
+    );
+
+    let second = reader
+        .next_view(&mut cursor)
+        .expect("retained revision must be readable")
+        .expect("second commit should exist");
+    assert_eq!(second.revision(), Revision::new(2));
+    assert_eq!(
+        second.get(["quotes", "SHFE.au2602", "last_price"]),
+        Some(&json!(513.0))
+    );
+    assert!(reader.next_view(&mut cursor).unwrap().is_none());
+}
+
+#[test]
+fn runtime_reader_next_view_reports_lag_and_requires_explicit_recovery() {
+    let handle = runtime_with_retention(1);
+    let reader = handle.reader();
+    let mut cursor = reader.cursor();
+
+    ingest_quote(&handle, 512.0);
+    ingest_quote(&handle, 513.0);
+
+    let lagged = reader
+        .next_view(&mut cursor)
+        .expect_err("hard retention must explicitly signal a lost revision");
     assert_eq!(lagged.expected_revision(), Revision::new(1));
+    assert_eq!(lagged.oldest_available_revision(), Revision::new(2));
     assert_eq!(lagged.current_revision(), Revision::new(2));
-    assert_eq!(lagged.oldest_available_revision(), Revision::new(1));
+
+    assert_eq!(
+        reader.resync_cursor_to_head(&mut cursor),
+        Some(Revision::new(3))
+    );
+    assert!(reader.next_view(&mut cursor).unwrap().is_none());
 }
 
 #[test]
@@ -388,6 +468,12 @@ fn runtime_with_default_adapters() -> RuntimeHandle {
     let mut registry = AdapterRegistry::new();
     registry.register_default_adapters();
     RuntimeHandle::with_adapters(registry)
+}
+
+fn runtime_with_retention(max_commit_log_entries: usize) -> RuntimeHandle {
+    let mut registry = AdapterRegistry::new();
+    registry.register_default_adapters();
+    RuntimeHandle::with_adapters_and_commit_log_retention(registry, max_commit_log_entries)
 }
 
 fn ingest_quote(handle: &RuntimeHandle, last_price: f64) {

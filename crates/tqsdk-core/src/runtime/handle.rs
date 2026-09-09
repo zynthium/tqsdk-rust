@@ -89,16 +89,31 @@ impl RuntimeHandle {
         adapters: AdapterRegistry,
         max_commit_log_entries: usize,
     ) -> Self {
-        Self::with_adapters_and_retention_limits(
+        Self::with_adapters_and_commit_log_retention_limits(
             adapters,
             max_commit_log_entries,
+            CommitLog::new().retention().max_retained_bytes(),
+        )
+    }
+
+    /// Creates a runtime with hard entry and byte bounds for its commit log.
+    pub fn with_adapters_and_commit_log_retention_limits(
+        adapters: AdapterRegistry,
+        max_commit_log_entries: usize,
+        max_commit_log_bytes: usize,
+    ) -> Self {
+        Self::with_adapters_and_all_retention_limits(
+            adapters,
+            max_commit_log_entries,
+            max_commit_log_bytes,
             super::CommandLedger::DEFAULT_MAX_RETAINED_TERMINAL_COMMANDS,
         )
     }
 
-    pub fn with_adapters_and_retention_limits(
+    fn with_adapters_and_all_retention_limits(
         adapters: AdapterRegistry,
         max_commit_log_entries: usize,
+        max_commit_log_bytes: usize,
         max_retained_terminal_commands: usize,
     ) -> Self {
         Self {
@@ -108,8 +123,28 @@ impl RuntimeHandle {
             ))),
             commit_gate: Arc::new(Mutex::new(())),
             state: Arc::new(StateStore::new(Revision::new(0))),
-            commit_log: CommitLog::with_retention(max_commit_log_entries),
+            commit_log: CommitLog::with_retention_limits(
+                max_commit_log_entries,
+                max_commit_log_bytes,
+            ),
         }
+    }
+
+    /// Creates a runtime with bounded commit and terminal-command retention.
+    ///
+    /// Commit log bytes use the default hard byte budget. Use
+    /// [`Self::with_adapters_and_commit_log_retention_limits`] to configure it.
+    pub fn with_adapters_and_retention_limits(
+        adapters: AdapterRegistry,
+        max_commit_log_entries: usize,
+        max_retained_terminal_commands: usize,
+    ) -> Self {
+        Self::with_adapters_and_all_retention_limits(
+            adapters,
+            max_commit_log_entries,
+            CommitLog::new().retention().max_retained_bytes(),
+            max_retained_terminal_commands,
+        )
     }
 
     pub fn commit_log(&self) -> CommitLog {
@@ -230,19 +265,15 @@ impl RuntimeHandle {
         let state_apply_started = Instant::now();
         let mut state_apply = Duration::ZERO;
         let mut publish = Duration::ZERO;
-        let commit = CommitEngine::apply(
-            &self.state,
-            mutations,
-            domains,
-            caused_by,
-            scope,
-            |commit| {
-                state_apply = state_apply_started.elapsed();
-                let publish_started = Instant::now();
-                self.commit_log.publish(commit);
-                publish = publish_started.elapsed();
-            },
-        );
+        let commit = CommitEngine::apply(&self.state, mutations, domains, caused_by, scope, |_| {
+            state_apply = state_apply_started.elapsed();
+        });
+        if let Some(commit) = &commit {
+            let publish_started = Instant::now();
+            self.commit_log
+                .publish(Arc::clone(commit), self.state.snapshot());
+            publish = publish_started.elapsed();
+        }
         timing.state_apply = if commit.is_some() {
             state_apply
         } else {
@@ -611,14 +642,11 @@ impl RuntimeHandle {
             normalize_order_lifecycle_mutations(&self.state, mutations)?
         };
         validate_mutation_domains(&mutations)?;
-        let commit = CommitEngine::apply(
-            &self.state,
-            mutations,
-            domains,
-            caused_by,
-            scope,
-            |commit| self.commit_log.publish(commit),
-        );
+        let commit = CommitEngine::apply(&self.state, mutations, domains, caused_by, scope, |_| {});
+        if let Some(commit) = &commit {
+            self.commit_log
+                .publish(Arc::clone(commit), self.state.snapshot());
+        }
         Ok(commit)
     }
 }

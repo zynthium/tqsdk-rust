@@ -75,13 +75,14 @@ pub use ids::{
 };
 pub use order_lifecycle::OrderLifecycle;
 pub use runtime::{
-    CommitLog, CommitReadGuard, CursorLagged, Runtime, RuntimeHandle, RuntimeReader,
-    SnapshotReadGuard,
+    CommitLog, CommitLogCursorTelemetry, CommitLogLagged, CommitLogRetention, CommitLogTelemetry,
+    CommitReadGuard, CursorLagged, Runtime, RuntimeHandle, RuntimeReader, SnapshotReadGuard,
 };
 pub use state::{
     ChangeHit, ChangeSet, CommitResult, CommitScope, MarketStateReadGuard, MarketStateView,
     MarketTradeStateReadGuard, ObjectKey, PathSegment, SeriesKey, SharedCommitResult, StatePath,
-    StateReadView, StateSnapshot, TradeStateReadGuard, TradeStateView, UpdateCursor,
+    StateReadTelemetry, StateReadView, StateSnapshot, TradeStateReadGuard, TradeStateView,
+    UpdateCursor,
 };
 pub use trading_session::{
     TradingSessionPhase, TradingSessionSchedule, TradingSessionSegment, TradingSessionStatus,

@@ -30,6 +30,7 @@ use super::{
     SharedTopologyResolver, market_interest::MarketInterestRegistry,
 };
 use crate::testing::ManualSession;
+use crate::{OrderIntentRecord, OrderIntentSpec};
 #[derive(Clone, Default)]
 struct TestAuthProvider {
     auth_id: Option<String>,
@@ -1462,6 +1463,80 @@ fn test_live_client(
         http_executor,
         Arc::new(TestAuthProvider::default()),
     )
+}
+
+#[test]
+fn full_order_intent_ledger_prunes_terminal_submitted_records_before_rejecting() {
+    let mut adapters = AdapterRegistry::new();
+    adapters.register_default_adapters();
+    let handle = RuntimeHandle::with_adapters(adapters);
+    let client = ManualSession::from_runtime(handle.clone()).into_client();
+
+    let record = |client_order_id: String| {
+        OrderIntentRecord::new(OrderIntentSpec {
+            account_id: "sim".to_string(),
+            client_order_id: client_order_id.clone(),
+            order_id: client_order_id,
+            symbol: "SHFE.rb2601".to_string(),
+            direction: TradeDirection::Buy,
+            offset: Some(TradeOffset::Open),
+            volume: 1,
+            limit_price: 618.0,
+        })
+    };
+    let mut terminal = record("terminal-order".to_string());
+    assert!(terminal.mark_submitted(CommandId::new(1)));
+    {
+        let mut order_intents = client.order_intents.lock().unwrap();
+        order_intents.insert(terminal.key(), terminal);
+        for index in 1..super::MAX_SESSION_ORDER_INTENTS {
+            let intent = record(format!("prepared-{index}"));
+            order_intents.insert(intent.key(), intent);
+        }
+    }
+
+    handle
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "trade".to_string(),
+                domains: vec![ProtocolDomain::Trade],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "trade": {
+                            "sim": {
+                                "orders": {
+                                    "terminal-order": {
+                                        "user_id": "sim",
+                                        "order_id": "terminal-order",
+                                        "status": "FINISHED",
+                                        "is_dead": true,
+                                        "volume_orign": 1,
+                                        "volume_left": 0,
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("terminal order seed should commit");
+
+    let replacement = record("replacement-order".to_string());
+    assert_eq!(
+        client.remember_order_intent(replacement.clone()).unwrap(),
+        crate::OrderIntentRegistration::Registered(replacement)
+    );
+    assert!(
+        client
+            .order_intent("sim", "terminal-order")
+            .unwrap()
+            .is_none()
+    );
 }
 
 fn test_live_client_with_auth(

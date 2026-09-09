@@ -10,7 +10,7 @@ use std::{
 use serde_json::{Map, Number, Value};
 use tqsdk_core::{
     AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
-    RuntimeInput, RuntimeReader, Symbol,
+    RuntimeInput, RuntimeReader, StateReadTelemetry, Symbol,
 };
 
 const DEFAULT_SINGLE_ITERS: u64 = 20_000;
@@ -39,8 +39,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("profile: run with --release for useful numbers");
     println!();
     println!(
-        "{:<32} {:>10} {:>10} {:>10} {:>14} {:>14}",
-        "case", "iters", "items/it", "commits", "ns/iter", "ns/item"
+        "{:<32} {:>8} {:>8} {:>10} {:>11} {:>11} {:>11} {:>11} {:>13}",
+        "case", "iters", "items/it", "commits", "p50 ns", "p95 ns", "p99 ns", "p999 ns", "events/s"
     );
 
     let single_symbols = bench_symbols(1);
@@ -131,9 +131,12 @@ fn run_parse_case(
 ) -> Result<BenchResult, serde_json::Error> {
     let text = quote_rtn_data(symbols, 1).to_string();
     let start = Instant::now();
+    let mut latencies = Vec::new();
     for _ in 0..iterations {
+        let iteration_start = Instant::now();
         let value: Value = serde_json::from_str(&text)?;
         black_box(value);
+        latencies.push(iteration_start.elapsed());
     }
     Ok(BenchResult {
         name,
@@ -141,6 +144,8 @@ fn run_parse_case(
         items_per_iter: symbols.len(),
         commits: 0,
         elapsed: start.elapsed(),
+        latencies,
+        state_read_telemetry: None,
     })
 }
 
@@ -184,13 +189,16 @@ fn run_text_ingest_case(
     let handle = runtime_handle();
     let iterations = texts.len() as u64;
     let start = Instant::now();
+    let mut latencies = Vec::new();
     let mut commits = 0_u64;
     for text in &texts {
+        let iteration_start = Instant::now();
         let input = market_input(serde_json::from_str(text)?);
         if let Some(commit) = handle.ingest(input, Vec::new(), CommitScope::RealtimeUpdate)? {
             commits += 1;
             black_box(commit.revision);
         }
+        latencies.push(iteration_start.elapsed());
     }
     Ok(BenchResult {
         name,
@@ -198,6 +206,8 @@ fn run_text_ingest_case(
         items_per_iter,
         commits,
         elapsed: start.elapsed(),
+        latencies,
+        state_read_telemetry: None,
     })
 }
 
@@ -217,12 +227,15 @@ fn run_ingest_inputs_with_handle(
 ) -> tqsdk_core::Result<BenchResult> {
     let iterations = inputs.len() as u64;
     let start = Instant::now();
+    let mut latencies = Vec::new();
     let mut commits = 0_u64;
     for input in inputs {
+        let iteration_start = Instant::now();
         if let Some(commit) = handle.ingest(input, Vec::new(), CommitScope::RealtimeUpdate)? {
             commits += 1;
             black_box(commit.revision);
         }
+        latencies.push(iteration_start.elapsed());
     }
     Ok(BenchResult {
         name,
@@ -230,6 +243,8 @@ fn run_ingest_inputs_with_handle(
         items_per_iter,
         commits,
         elapsed: start.elapsed(),
+        latencies,
+        state_read_telemetry: None,
     })
 }
 
@@ -242,9 +257,12 @@ fn run_decode_case(
     let mut adapters = AdapterRegistry::new();
     adapters.register_default_adapters();
     let start = Instant::now();
+    let mut latencies = Vec::new();
     for input in &inputs {
+        let iteration_start = Instant::now();
         let mutations = adapters.decode_input(input)?;
         black_box(mutations.len());
+        latencies.push(iteration_start.elapsed());
     }
     Ok(BenchResult {
         name,
@@ -252,6 +270,8 @@ fn run_decode_case(
         items_per_iter,
         commits: 0,
         elapsed: start.elapsed(),
+        latencies,
+        state_read_telemetry: None,
     })
 }
 
@@ -264,10 +284,13 @@ fn run_text_decode_case(
     let mut adapters = AdapterRegistry::new();
     adapters.register_default_adapters();
     let start = Instant::now();
+    let mut latencies = Vec::new();
     for text in &texts {
+        let iteration_start = Instant::now();
         let input = market_input(serde_json::from_str(text)?);
         let mutations = adapters.decode_input(&input)?;
         black_box(mutations.len());
+        latencies.push(iteration_start.elapsed());
     }
     Ok(BenchResult {
         name,
@@ -275,6 +298,8 @@ fn run_text_decode_case(
         items_per_iter,
         commits: 0,
         elapsed: start.elapsed(),
+        latencies,
+        state_read_telemetry: None,
     })
 }
 
@@ -294,13 +319,16 @@ fn run_noop_case(
 
     let inputs = noop_inputs(iterations, payload);
     let start = Instant::now();
+    let mut latencies = Vec::new();
     let mut commits = 0_u64;
     for input in inputs {
+        let iteration_start = Instant::now();
         let commit = handle.ingest(input, Vec::new(), CommitScope::RealtimeUpdate)?;
         if commit.is_some() {
             commits += 1;
         }
         black_box(commit);
+        latencies.push(iteration_start.elapsed());
     }
 
     Ok(BenchResult {
@@ -309,6 +337,8 @@ fn run_noop_case(
         items_per_iter: symbols.len(),
         commits,
         elapsed: start.elapsed(),
+        latencies,
+        state_read_telemetry: None,
     })
 }
 
@@ -325,10 +355,14 @@ fn run_typed_read_case(
         .iter()
         .map(|symbol| Symbol::new(symbol.clone()))
         .collect::<Vec<_>>();
+    let telemetry_before = reader.state_read_telemetry();
     let start = Instant::now();
+    let mut latencies = Vec::new();
     for index in 0..iterations {
+        let iteration_start = Instant::now();
         let quote = read_one_quote(&reader, &symbols[index as usize % symbols.len()])?;
         black_box(quote);
+        latencies.push(iteration_start.elapsed());
     }
 
     Ok(BenchResult {
@@ -337,6 +371,11 @@ fn run_typed_read_case(
         items_per_iter: 1,
         commits: 0,
         elapsed: start.elapsed(),
+        latencies,
+        state_read_telemetry: Some(state_read_telemetry_delta(
+            telemetry_before,
+            reader.state_read_telemetry(),
+        )),
     })
 }
 
@@ -355,6 +394,39 @@ fn read_one_quote(
     symbol: &Symbol,
 ) -> tqsdk_core::Result<Option<tqsdk_core::Quote>> {
     reader.read_market_state().quote(symbol)
+}
+
+fn state_read_telemetry_delta(
+    before: StateReadTelemetry,
+    after: StateReadTelemetry,
+) -> StateReadTelemetry {
+    StateReadTelemetry {
+        snapshot_reads: after.snapshot_reads.saturating_sub(before.snapshot_reads),
+        snapshot_shared_roots: after
+            .snapshot_shared_roots
+            .saturating_sub(before.snapshot_shared_roots),
+        snapshot_bytes_cloned: after
+            .snapshot_bytes_cloned
+            .saturating_sub(before.snapshot_bytes_cloned),
+        snapshot_nodes_cloned: after
+            .snapshot_nodes_cloned
+            .saturating_sub(before.snapshot_nodes_cloned),
+        snapshot_lock_wait_ns: after
+            .snapshot_lock_wait_ns
+            .saturating_sub(before.snapshot_lock_wait_ns),
+        snapshot_lock_hold_ns: after
+            .snapshot_lock_hold_ns
+            .saturating_sub(before.snapshot_lock_hold_ns),
+        live_guard_acquisitions: after
+            .live_guard_acquisitions
+            .saturating_sub(before.live_guard_acquisitions),
+        live_guard_lock_wait_ns: after
+            .live_guard_lock_wait_ns
+            .saturating_sub(before.live_guard_lock_wait_ns),
+        live_guard_lock_hold_ns: after
+            .live_guard_lock_hold_ns
+            .saturating_sub(before.live_guard_lock_hold_ns),
+    }
 }
 
 fn runtime_handle() -> RuntimeHandle {
@@ -566,18 +638,97 @@ struct BenchResult {
     items_per_iter: usize,
     commits: u64,
     elapsed: Duration,
+    latencies: Vec<Duration>,
+    state_read_telemetry: Option<StateReadTelemetry>,
+}
+
+impl BenchResult {
+    fn events_per_second(&self) -> f64 {
+        let seconds = self.elapsed.as_secs_f64();
+        if seconds == 0.0 {
+            return 0.0;
+        }
+
+        self.iterations as f64 * self.items_per_iter as f64 / seconds
+    }
+
+    fn percentile_ns(&self, percentile: f64) -> f64 {
+        if self.latencies.is_empty() {
+            return 0.0;
+        }
+
+        let mut samples = self
+            .latencies
+            .iter()
+            .map(Duration::as_nanos)
+            .collect::<Vec<_>>();
+        samples.sort_unstable();
+        let index = ((samples.len() - 1) as f64 * percentile).ceil() as usize;
+        samples[index] as f64
+    }
 }
 
 fn print_result(result: BenchResult) {
-    let ns_per_iter = result.elapsed.as_nanos() as f64 / result.iterations as f64;
-    let ns_per_item = ns_per_iter / result.items_per_iter as f64;
     println!(
-        "{:<32} {:>10} {:>10} {:>10} {:>14.1} {:>14.1}",
+        "{:<32} {:>8} {:>8} {:>10} {:>11.1} {:>11.1} {:>11.1} {:>11.1} {:>13.1}",
         result.name,
         result.iterations,
         result.items_per_iter,
         result.commits,
-        ns_per_iter,
-        ns_per_item
+        result.percentile_ns(0.50),
+        result.percentile_ns(0.95),
+        result.percentile_ns(0.99),
+        result.percentile_ns(0.999),
+        result.events_per_second(),
     );
+
+    if let Some(telemetry) = result.state_read_telemetry {
+        println!(
+            "  snapshots={} shared_roots={} bytes_cloned={} nodes_cloned={} lock_wait_ns={} lock_hold_ns={}",
+            telemetry.snapshot_reads,
+            telemetry.snapshot_shared_roots,
+            telemetry.snapshot_bytes_cloned,
+            telemetry.snapshot_nodes_cloned,
+            telemetry.snapshot_lock_wait_ns,
+            telemetry.snapshot_lock_hold_ns,
+        );
+        println!(
+            "  live_guards={} lock_wait_ns={} lock_hold_ns={}",
+            telemetry.live_guard_acquisitions,
+            telemetry.live_guard_lock_wait_ns,
+            telemetry.live_guard_lock_hold_ns,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::BenchResult;
+
+    #[test]
+    fn benchmark_result_reports_nearest_rank_tail_latencies() {
+        let result = BenchResult {
+            name: "test",
+            iterations: 5,
+            items_per_iter: 2,
+            commits: 0,
+            elapsed: Duration::from_secs(2),
+            latencies: vec![
+                Duration::from_nanos(1),
+                Duration::from_nanos(2),
+                Duration::from_nanos(3),
+                Duration::from_nanos(4),
+                Duration::from_nanos(5),
+            ],
+            state_read_telemetry: None,
+        };
+
+        assert_eq!(result.percentile_ns(0.50), 3.0);
+        assert_eq!(result.percentile_ns(0.95), 5.0);
+        assert_eq!(result.percentile_ns(0.99), 5.0);
+        assert_eq!(result.percentile_ns(0.999), 5.0);
+        assert_eq!(result.events_per_second(), 5.0);
+    }
 }

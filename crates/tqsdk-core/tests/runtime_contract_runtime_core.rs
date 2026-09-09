@@ -217,7 +217,7 @@ fn commit_log_retention_drops_old_commits_when_no_cursor_needs_them() {
 }
 
 #[test]
-fn commit_log_retention_preserves_old_commits_while_cursor_is_active() {
+fn commit_log_retention_lags_active_cursor_at_hard_bound() {
     let handle = runtime_with_retention(2);
     let log = handle.commit_log();
     let mut protected_cursor = handle.cursor_from(Revision::new(1));
@@ -226,19 +226,16 @@ fn commit_log_retention_preserves_old_commits_while_cursor_is_active() {
     ingest_quote(&handle, 612.0);
     ingest_quote(&handle, 613.0);
 
-    assert_eq!(
-        log.next(&mut protected_cursor).unwrap().revision,
-        Revision::new(1)
-    );
-    assert_eq!(
-        log.next(&mut protected_cursor).unwrap().revision,
-        Revision::new(2)
-    );
-    assert_eq!(
-        log.next(&mut protected_cursor).unwrap().revision,
-        Revision::new(3)
-    );
+    let lagged = log
+        .next_checked(&mut protected_cursor)
+        .expect_err("hard retention must not let a live cursor pin memory");
+    assert_eq!(lagged.expected_revision(), Revision::new(1));
+    assert_eq!(lagged.oldest_available_revision(), Revision::new(2));
+    assert_eq!(lagged.current_revision(), Revision::new(3));
+
+    // Legacy callers resync to head and cannot remain permanently stalled.
     assert_eq!(log.next(&mut protected_cursor), None);
+    assert_eq!(protected_cursor.next_revision(), Revision::new(4));
 }
 
 fn runtime_with_default_adapters() -> RuntimeHandle {

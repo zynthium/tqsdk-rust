@@ -139,7 +139,7 @@ wait facade。
 - 多合约 K 线使用 `kline_multi([...], duration, data_length)`，一个 `chart_id` 对应逗号拼接的 `ins_list`。和 Python TqSdk 一样，多合约 K 线启动请求使用 `view_width=10000` 让服务端补齐足够窗口；客户端返回 `MultiKlineWindow`，以第一个合约为主合约，并通过主合约 K 线分区下的 `binding/{secondary}/{primary_id}` 把副合约行对齐到同一行。缺少任一副合约 binding 或 row 的主合约行不会进入窗口。
 - Tick serial 不支持多合约。`tick("A,B", ...)` 会直接报错；需要多个合约 tick 时应分别创建多个单合约 `tick(...)` handle 或自建 event 管线。
 - `insert_order` / `insert_limit_order` / `cancel_order` / `confirm_settlement` 只提交到底层 command contract，不做本地伪造状态；其中 `insert_order` 使用 `OrderPrice` 明确表达 `any/best/five_level/limit` 语义，而不是接受 `serde_json::Value` 或魔法字符串
-- `limit_order(...).client_intent(...).send_once()` 会把用户稳定 intent id 映射为 runtime `order_id`，并通过底层 `SessionClient` 的 session-scoped intent ledger 防止相同 intent 在同一 session 内重复提交；完整断线重连对账仍属于后续 session/runtime 一致性能力
+- `limit_order(...).client_intent(...).send_once()` 会把用户稳定 intent id 映射为 runtime `order_id`，并通过底层 `SessionClient` 的 session-scoped intent ledger 防止相同 intent 在同一 session 内重复提交；`OrderTicket::status()` / reconnect-safe terminal wait 观测到终态后会回收该进程内记录。完整断线重连对账仍属于后续 session/runtime 一致性能力
 - direct query / schema refresh / metadata 查询继续放在 `tqsdk-session`
 - 如需在 wait facade 上直接落回这层 substrate，可通过 `api.session()` 访问底层 `SessionClient`
 - 其他消费形状应复用同一批 diff-backed 对象与底层 session，而不会接管 direct query

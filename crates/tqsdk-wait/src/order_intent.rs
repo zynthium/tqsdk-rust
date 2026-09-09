@@ -344,11 +344,22 @@ impl OrderTicket {
     pub fn status(&self, api: &TqApi) -> crate::error::Result<OrderTicketState> {
         let order = self.order.snapshot()?;
         let command_status = self.command_status(api)?;
+        let state = match order {
+            Some(order) => state_from_order(self.command_id, order),
+            None => state_from_command(self.command_id, command_status),
+        };
 
-        match order {
-            Some(order) => Ok(state_from_order(self.command_id, order)),
-            None => Ok(state_from_command(self.command_id, command_status)),
+        // The ledger is only a session-local idempotency aid. Once the
+        // authoritative runtime state says this order is terminal, retaining
+        // it can otherwise consume the bounded ledger indefinitely. Cleanup
+        // must not turn a valid terminal observation into an error.
+        if state.is_terminal() {
+            let _ = api
+                .session()
+                .forget_order_intent(self.order.account_id(), self.client_order_id());
         }
+
+        Ok(state)
     }
 
     pub async fn cancel_remaining(&self, api: &mut TqApi) -> crate::error::Result<()> {

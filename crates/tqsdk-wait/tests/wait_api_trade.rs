@@ -438,6 +438,13 @@ async fn wait_reconnect_safe_terminal_returns_rejected_command_without_order() {
         } => assert_eq!(actual_command_id, command_id),
         other => panic!("expected rejected command terminal state, got {other:?}"),
     }
+
+    assert!(
+        api.session()
+            .order_intent("sim", "strategy-a-open-001")
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

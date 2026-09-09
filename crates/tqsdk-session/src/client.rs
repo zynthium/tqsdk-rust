@@ -18,9 +18,9 @@ use tqsdk_core::internal::DefaultRouteConnector;
 use tqsdk_core::internal::{DynAuthProvider, SessionBootstrap};
 use tqsdk_core::internal::{RouteRequestExecutor, SessionRun, SessionRuntime};
 use tqsdk_core::{
-    AdapterRegistry, AuthContext, CommandId, MarketSessionTarget, OutboundDispatch, OutboundFrame,
-    RuntimeHandle, RuntimeReader, SessionConfig, SessionRouteConnector, SessionRouteEndpoint,
-    SessionTopologyResolver, TradeSessionTarget,
+    AccountId, AdapterRegistry, AuthContext, CommandId, MarketSessionTarget, OrderId,
+    OutboundDispatch, OutboundFrame, RuntimeHandle, RuntimeReader, SessionConfig,
+    SessionRouteConnector, SessionRouteEndpoint, SessionTopologyResolver, TradeSessionTarget,
 };
 #[cfg(any(test, feature = "live"))]
 use tqsdk_core::{AuthEvent, InternalEvent, ReplayEvent, SessionRoute, SessionTarget};
@@ -35,7 +35,9 @@ use crate::direct_query::{
 use crate::direct_query::{EdbDataAlign, EdbDataFill, SessionServiceQuery, SymbolRankingType};
 #[cfg(feature = "live")]
 use crate::http_executor::ReqwestHttpExecutor;
-use crate::order_intent::{OrderIntentRecord, OrderIntentRegistration};
+use crate::order_intent::{OrderIntentLifecycle, OrderIntentRecord, OrderIntentRegistration};
+
+const MAX_SESSION_ORDER_INTENTS: usize = 8_192;
 #[cfg(feature = "services")]
 use crate::services::{SessionServiceEndpoints, TradingCalendarHolidayCache};
 #[cfg(feature = "tq-auth")]
@@ -449,11 +451,31 @@ impl SessionClient {
         &self,
         record: OrderIntentRecord,
     ) -> crate::error::Result<OrderIntentRegistration> {
+        let key = record.key();
+        {
+            let mut order_intents = self.order_intents.lock().map_err(|_| {
+                crate::error::SessionFacadeError::InvalidState("order intent ledger lock poisoned")
+            })?;
+            if let Some(existing) = order_intents.get(&key) {
+                if !existing.request_matches(&record) {
+                    return Err(crate::error::SessionFacadeError::InvalidState(
+                        "client order intent already registered with different order fields",
+                    ));
+                }
+                return Ok(OrderIntentRegistration::Existing(existing.clone()));
+            }
+            if order_intents.len() < MAX_SESSION_ORDER_INTENTS {
+                order_intents.insert(key.clone(), record.clone());
+                return Ok(OrderIntentRegistration::Registered(record));
+            }
+        }
+
+        // A full ledger is rare. Do not hold its mutex while reading state.
+        self.prune_terminal_order_intents()?;
+
         let mut order_intents = self.order_intents.lock().map_err(|_| {
             crate::error::SessionFacadeError::InvalidState("order intent ledger lock poisoned")
         })?;
-        let key = record.key();
-
         if let Some(existing) = order_intents.get(&key) {
             if !existing.request_matches(&record) {
                 return Err(crate::error::SessionFacadeError::InvalidState(
@@ -462,9 +484,85 @@ impl SessionClient {
             }
             return Ok(OrderIntentRegistration::Existing(existing.clone()));
         }
+        if order_intents.len() >= MAX_SESSION_ORDER_INTENTS {
+            return Err(crate::error::SessionFacadeError::InvalidState(
+                "order intent ledger capacity reached",
+            ));
+        }
 
         order_intents.insert(key, record.clone());
         Ok(OrderIntentRegistration::Registered(record))
+    }
+
+    fn prune_terminal_order_intents(&self) -> crate::error::Result<()> {
+        let submitted = {
+            let order_intents = self.order_intents.lock().map_err(|_| {
+                crate::error::SessionFacadeError::InvalidState("order intent ledger lock poisoned")
+            })?;
+            order_intents
+                .values()
+                .filter(|record| record.lifecycle() == OrderIntentLifecycle::Submitted)
+                .map(|record| {
+                    (
+                        record.key(),
+                        AccountId::new(record.account_id().to_owned()),
+                        OrderId::new(record.order_id().to_owned()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        if submitted.is_empty() {
+            return Ok(());
+        }
+
+        let state = self.reader.read_trade_state();
+        let mut terminal_keys = Vec::new();
+        for (key, account_id, order_id) in submitted {
+            if state
+                .order(&account_id, &order_id)?
+                .is_some_and(|order| order.lifecycle.is_terminal())
+            {
+                terminal_keys.push(key);
+            }
+        }
+        drop(state);
+        if terminal_keys.is_empty() {
+            return Ok(());
+        }
+
+        let mut order_intents = self.order_intents.lock().map_err(|_| {
+            crate::error::SessionFacadeError::InvalidState("order intent ledger lock poisoned")
+        })?;
+        for key in terminal_keys {
+            if order_intents
+                .get(&key)
+                .is_some_and(|record| record.lifecycle() == OrderIntentLifecycle::Submitted)
+            {
+                order_intents.remove(&key);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn begin_order_intent_submission(
+        &self,
+        account_id: &str,
+        client_order_id: &str,
+    ) -> crate::error::Result<()> {
+        let mut order_intents = self.order_intents.lock().map_err(|_| {
+            crate::error::SessionFacadeError::InvalidState("order intent ledger lock poisoned")
+        })?;
+        let record = order_intents
+            .get_mut(&(account_id.to_owned(), client_order_id.to_owned()))
+            .ok_or(crate::error::SessionFacadeError::InvalidState(
+                "order intent missing before submission",
+            ))?;
+        if !record.begin_submission() {
+            return Err(crate::error::SessionFacadeError::InvalidState(
+                "order intent is not prepared for submission",
+            ));
+        }
+        Ok(())
     }
 
     pub fn update_order_intent_command(
@@ -476,10 +574,15 @@ impl SessionClient {
         let mut order_intents = self.order_intents.lock().map_err(|_| {
             crate::error::SessionFacadeError::InvalidState("order intent ledger lock poisoned")
         })?;
-        if let Some(record) =
-            order_intents.get_mut(&(account_id.to_owned(), client_order_id.to_owned()))
-        {
-            record.set_command_id(command_id);
+        let record = order_intents
+            .get_mut(&(account_id.to_owned(), client_order_id.to_owned()))
+            .ok_or(crate::error::SessionFacadeError::InvalidState(
+                "order intent missing after submission",
+            ))?;
+        if !record.mark_submitted(command_id) {
+            return Err(crate::error::SessionFacadeError::InvalidState(
+                "order intent is not submitting",
+            ));
         }
         Ok(())
     }

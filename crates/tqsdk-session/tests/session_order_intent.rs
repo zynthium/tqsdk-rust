@@ -1,6 +1,7 @@
 use tqsdk_core::{CommandId, RuntimeHandle, TradeDirection, TradeOffset};
 use tqsdk_session::{
-    OrderIntentRecord, OrderIntentRegistration, OrderIntentSpec, testing::ManualSession,
+    OrderIntentLifecycle, OrderIntentRecord, OrderIntentRegistration, OrderIntentSpec,
+    testing::ManualSession,
 };
 
 fn order_intent(client_order_id: &str, volume: i64, limit_price: f64) -> OrderIntentRecord {
@@ -36,6 +37,7 @@ fn session_order_intent_ledger_is_shared_across_client_clones() {
         OrderIntentRegistration::Registered(_) => panic!("expected existing order intent"),
     };
     assert_eq!(existing.command_id(), Some(CommandId::new(7)));
+    assert_eq!(existing.lifecycle(), OrderIntentLifecycle::Submitted);
     assert_eq!(
         clone
             .order_intent("sim", "strategy-a-open-001")
@@ -63,5 +65,46 @@ fn session_order_intent_ledger_rejects_mismatched_retry() {
         tqsdk_session::SessionFacadeError::InvalidState(
             "client order intent already registered with different order fields"
         )
+    );
+}
+
+#[test]
+fn session_order_intent_tracks_prepared_submitting_and_submitted() {
+    let manual = ManualSession::from_runtime(RuntimeHandle::new());
+    let client = manual.client();
+    client
+        .remember_order_intent(order_intent("strategy-a-open-002", 1, 618.0))
+        .unwrap();
+    assert_eq!(
+        client
+            .order_intent("sim", "strategy-a-open-002")
+            .unwrap()
+            .unwrap()
+            .lifecycle(),
+        OrderIntentLifecycle::Prepared
+    );
+
+    client
+        .begin_order_intent_submission("sim", "strategy-a-open-002")
+        .unwrap();
+    assert_eq!(
+        client
+            .order_intent("sim", "strategy-a-open-002")
+            .unwrap()
+            .unwrap()
+            .lifecycle(),
+        OrderIntentLifecycle::Submitting
+    );
+
+    client
+        .update_order_intent_command("sim", "strategy-a-open-002", CommandId::new(8))
+        .unwrap();
+    assert_eq!(
+        client
+            .order_intent("sim", "strategy-a-open-002")
+            .unwrap()
+            .unwrap()
+            .lifecycle(),
+        OrderIntentLifecycle::Submitted
     );
 }
