@@ -1,5 +1,11 @@
 # tqsdk-rs 分层内核架构
 
+统一历史容器 P1 尚未部署：工作区 daily/Minute 已接入 `TQHIST01`，Tick 仍使用 TQBN。
+Minute 为 monthly.v6，交易月路径不变；下文 KLOG-only 的 Kline 部分属于迁移输入，真实缓存切换尚未完成。
+当前接入和平台限制见 [格式过渡合同](history-cache-format.md)。
+TickXorV1 已按文件 magic 接入 Tick store；旧文件及新分区默认仍为 TQBN，不能用适配器接入代表迁移或三类默认切换完成。
+Tick 另有待用户确认的范围相关去重语义差异；默认切换及真实迁移暂不放行，见 [格式合同](history-cache-format.md)。
+
 历史获取的分段提交、私有暂存、有限收尾和持久化进度见 [Fill 中断与续填](history-fill-recovery.md)。
 
 Canonical Kline 的追加封装、恢复和显式离线迁移由 `tqsdk-data` 统一拥有；普通 reader/fill
@@ -137,7 +143,7 @@ helper 不是 facade、runtime 或 public API；它隔离 SDK 地址空间中的
     minute bounded window 保持不变。同一 chart 的分页保持 session；本地裁剪过 DIFF 状态的 lane
     不得回池，即使 terminal/cleanup 成功也销毁，避免后续 slice 丢失重叠数据。
     pool 饱和时 overflow 不等待且不回池；取消、协议/传输或 cleanup 失败也丢弃 lane。
-minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 final coverage；`KQ.m@...`
+minute cache 使用 v6 文件身份，只有远端 terminal 成功后才提交 final coverage；`KQ.m@...`
     使用 data 持久化的 calendar/session/physical-segment metadata sidecar 解析为 dated
     concrete-contract tick ranges，因而与具体合约共用物理 cache、coverage 和远端补缺请求。
     `RemoteOnMiss` 只在 sidecar 缺失或不覆盖窗口时刷新；CacheOnly 必须已有 sidecar 且完全离线。
@@ -283,8 +289,8 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
   - 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认 backend，也不提供兼容读取或迁移 store
   - shared futures universe selector parser / resolver，relay 和 facade backtest 复用同一套语义
   - history page/series/download/export foundation
-- `MinuteKlineCache` 是与 TQBN 并列的 canonical final-60s K 线 store：v5 格式按 logical
-  symbol × trading month 分区，row payload 仅在 zstd 更小时无损压缩；目录名保持
+- `MinuteKlineCache` 是与 TQBN 并列的 canonical final-60s K 线 store：v6 统一容器按 logical
+  symbol × trading month 分区，独立时间块仅在 zstd 更小时无损压缩；目录名保持
   `minute-kline-v3`。v4 只能经显式备份迁移，v3 保持 `LegacyUnsupported`；不存在 automatic
   retention/max-byte eviction 或后台清理
   - `DailyKlineCache` 是 native final-1d K 线 store：v1 格式为 `daily-kline-v1/<escaped-symbol>.tqdk`，

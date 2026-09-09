@@ -1,5 +1,10 @@
 # AI 工作流与架构守则
 
+统一历史容器 P1 正在工作区展开：daily/Minute 使用 `TQHIST01`，Tick 还未切换。
+实现状态、迁移和平台持久性限制见 [格式过渡合同](history-cache-format.md)。
+保持真实缓存与已安装 P0 程序不动，直到三类接入、迁移证明及部署验收完成；不得仅凭
+Kline 测试通过宣称 P1–P3 完成。日线/分钟旧 KLOG 现在都只属于显式迁移输入。
+
 Fill 私有 journal、terminal/retry 隔离和有限收尾须遵循 [中断与续填合同](history-fill-recovery.md)。
 暂存永不代替 canonical coverage；不要用接收 cursor 推断持久化进度。
 
@@ -90,6 +95,11 @@ git diff --check
 
 Rust、feature、public API、relay 与 release 检查按 [`validation.md`](validation.md) 的任务分类执行。public API、crate 拆分、feature 或 facade/runtime 消费方式变化时，相关 `crates/*/examples/api_contract_sXX_*.rs` 必须继续清晰且可编译。
 # History source DIFF 一致性
+
+统一历史容器的 TickXorV1 已按 magic 接入 Tick store，但默认新分区仍为 TQBN。
+适配器通过测试不等于 P1、真实缓存迁移或 P0–P3 全部完成；格式默认切换和旧代码收缩仍待验收。
+旧 Tick reader 的去重结果依赖请求范围，common 异常写入则按整日规范化；未获用户明确
+批准语义修正前，不得声称任意范围逐行等价，也不得据此切换默认或迁移真实 Tick。
 
 本地裁剪 server-backtest runtime 数据后，不得将该 session 回池供后续 slice 使用；服务端可能省略
 它认为客户端仍持有的重叠数据。分页裁剪须保留消费边界与预取行。修复代码不能自动修复已写入的

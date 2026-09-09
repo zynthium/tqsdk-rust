@@ -1,9 +1,20 @@
 # `tqsdk-data`
 
+TQBN 追加前会保护已有共享 data inode：Unix / Windows 多链接数据先写时复制，单链接保持直接追加；
+多链接 companion checkpoint 则拒绝写入，要求停机修复，不能通过替换锁文件拆分锁域。
+见 [共享 inode 合同](../../docs/architecture/history-cache-format.md#tqbn-共享-inode-写保护)。
+
 Fill 的日线分段、分钟 terminal 子窗口 journal、两阶段取消及 durability telemetry
 统一由本层拥有。见 [中断与续填](../../docs/architecture/history-fill-recovery.md)。
 
-Canonical minute/daily cache 必须使用共享 `TQKLOG01` 追加封装。
+工作区统一容器 P1 尚未部署：daily/Minute/Tick 已接入 `TQHIST01`；Minute 公开身份为
+`tqsdk.minute-kline.monthly.v6`，物理路径仍按交易月。旧 raw/KLOG 仅供显式离线迁移。
+真实缓存和已安装 P0 程序尚未切换；旧 daily KLOG 也仅接受显式离线迁移。
+Tick store 已按 magic 接入新容器读写、coverage/provisional、压实和诊断；新分区默认创建 common schema 4，
+既有 TQBN 文件继续兼容追加。离线 Tick 迁移及真实默认目录切换尚未完成。
+新容器 `Unverified` 行不能推导完整 coverage；不得据此提前迁移真实目录。
+Tick 规范化决策已批准：迁移与 common reader 按稳定交易日语义去重，不再保留随请求范围变化的旧异常结果。
+日线范围读取现在按独立块选取并固定已打开 FD，doctor 保持全量审计。
 旧 raw 仅由显式 `migrate_kline_cache` 工具接收，普通 fill 不再隐式转换；coverage 读取提交元数据，reader
 和诊断负责 payload 校验。顺序续填追加，重叠更新、snapshot 变化与定期压实使用原子替换。
 Snapshot clone 对 Kline 文件必须使用 copy/reflink。见
@@ -180,7 +191,7 @@ request/phase 单调合并二者，空页、过滤行与重复行不会推进 cu
 | --- | --- | --- |
 | Tick | CST trading-day TQBN v3 tick partition | 否 |
 | `15s` / 其他 `<60s` K | Tick partition | 否，按 session 临时聚合 |
-| `60s` K | final canonical-minute v5 `logical symbol × trading month` partition | 是 |
+| `60s` K | final canonical-minute v6 `logical symbol × trading month` partition | 是 |
 | `N × 60s`（`N > 1` 且 `<1d`） | canonical-minute partition | 否，按 closed minutes 在固定 CST `18:00` trading-day grid 临时聚合 |
 | `1d` K | final native-daily v1 `logical symbol` single file | 是，不按时间分区 |
 | `2d` 到 `28d` K | same native-daily file | 否，按 native 1d timestamp phase 临时聚合 |
@@ -247,7 +258,8 @@ runtime commit 清理。这样保留 cursor/revision 语义，同时避免默认
   `DataClient::run_configured_history_cache_maintenance()` 的容量/保留期策略；history
   reads/writes 不会自动清理 tick 或 K 线数据
 - `HistorySeriesCache` 是稳定 facade，底层 store adapter 是 crate 内部实现细节；
- `HistorySeriesCache::open(root_dir)` 使用 canonical TQBN daily v3 history cache format。Tick v3
+  `HistorySeriesCache::open(root_dir)` 使用 common history container；新建 Tick 分区为
+  `tqsdk.history-container.tick.v1` / schema 4，迁移期仍按 magic 读取 TQBN daily v2/v3。旧 Tick
  首 snapshot 完整持久化，后续 snapshot 只写变化字段与 id/time delta；每条接收的 snapshot 都保留，
  不按 tick 频率填充，也不删除无成交或重复盘口。v2 文件写入前须执行
  `tqsdk-cache migrate --apply --backup-dir DIR`。
@@ -307,11 +319,11 @@ runtime commit 清理。这样保留 cursor/revision 语义，同时避免默认
 - cache-backed facade backtest 的 durable K 线包括 `MinuteKlineCache` 的 final 60s series 和
   `DailyKlineCache` 的 native final 1d series。两者只接受官方 server-side backtest terminal 确认完成的
   range（合法的零行 range 也可以 final），不回退到 `DataClient` 历史下载路径。minute format id 是
-  `tqsdk.minute-kline.monthly.v5`，文件按 `logical symbol × trading month` 分区，路径仍为
-  `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk`。v5 的 row payload 仅在 zstd 更小时
-  无损压缩，保留所有 Kline row；旧 v4 只能显式迁移，普通 reader/fill 会 fail closed。daily format id 是
+  `tqsdk.minute-kline.monthly.v6`，文件按 `logical symbol × trading month` 分区，路径仍为
+  `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk`。独立时间块 仅在 zstd 更小时
+  无损压缩，保留所有 Kline row；旧 raw/KLOG 只能显式迁移，普通 reader/fill 会 fail closed。daily format id 是
   `tqsdk.daily-kline.single-file.v1`，路径为 `daily-kline-v1/<escaped-symbol>.tqdk`；它按 logical
-  symbol 单文件存储，不按时间分区；同快照单调续填使用 KLOG 追加，重叠更新或快照变更仍原子替换。`BacktestHistoryClient` 的 `<60s` K 由 tick rows 按 session
+  symbol 单文件存储，不按时间分区；同快照单调续填使用共同容器追加，重叠更新或快照变更仍原子替换。`BacktestHistoryClient` 的 `<60s` K 由 tick rows 按 session
   聚合，`N × 60s` K 由 closed canonical minutes 按固定 CST `18:00` trading-day grid 临时聚合，`2d` 至
   `28d` K 由 final native 1d rows 临时聚合。task 仅把结果安排为 replay event。1d row 目前只含 Kline
   OHLC、volume、open/close OI；结算价和涨跌停价未支持。facade 不读取/写入 native higher-period
@@ -539,7 +551,7 @@ owned rows，不联网、不读取额外 calendar，也不绑定 DolphinDB、Par
 - `resolve_futures_universe_symbols(...)`
 
 但它仍然只负责把下载结果收敛到调用方可接管的 `Vec`、写入调用方给定的
-`AsyncWrite`，或在 `get_*_data_series` 上复用 `HistorySeriesCache`；TQBN daily v3
+`AsyncWrite`，或在 `get_*_data_series` 上复用 `HistorySeriesCache`；common schema 4 / legacy TQBN magic-dispatch
 (`.tqbn`) 是该缓存的当前默认和 canonical 格式，旧 `.tqseries` 和旧单文件 `.tqbn`
 layout 不提供兼容读取或迁移 store；
 不负责 live session ownership、后台 downloader、GUI viewport 状态、旧 binary/mmap cache
@@ -611,8 +623,8 @@ materialization；[examples/api_contract_s28_option_greeks.rs](examples/api_cont
 S30 contract
 [examples/api_contract_s30_history_series_cache.rs](examples/api_contract_s30_history_series_cache.rs)
 覆盖看盘软件 / 交易终端的历史序列持久化缓存。该能力只在 builder 显式开启后
-影响 `get_kline_data_series` / `get_tick_data_series`；默认 `DataClient::from_session`
-仍保持无缓存行为。TQBN daily v3 (`.tqbn`) 是当前默认和 canonical 格式，使用
+影响 `get_kline_data_series` / `get_tick_data_series`；默认 `DataClient::from_session(...)` 仍保持无缓存行为。
+Tick 当前默认和 canonical 编码为 common schema 4；路径后缀仍为 `.tqbn` 并由 magic 分派，legacy TQBN v2/v3 仅作迁移期兼容。
 `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn` 和
 `series/<YYYYMMDD>/kline/<duration_ns>/<escaped-symbol>.tqbn` 日分区布局。旧 `.tqseries`
 和旧单文件 `.tqbn` layout 直接废弃为默认缓存格式，不提供兼容读取或迁移 store；旧 Python 兼容 binary/mmap cache

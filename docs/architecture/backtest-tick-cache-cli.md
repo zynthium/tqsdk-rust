@@ -10,7 +10,7 @@ backtest/warmup 与 `tqsdk-data` 的 cache API，适合 cron、CI 或人工检�
 路径，也不拥有 session、状态树、remote protocol client、live recording loop、store adapter、relay 或
 daemon。
 
-它不是新的 cache format 定义者：tick 的持久化合同属于 `BacktestTickCache` / TQBN daily v3，minute
+它不是新的 cache format 定义者：tick 的持久化合同属于 `BacktestTickCache` / common schema 4（兼容读取 TQBN v2/v3），minute
 与 daily 的持久化合同分别属于 `MinuteKlineCache` 与 `DailyKlineCache`。格式细节见
 [history-cache-format.md](history-cache-format.md)。
 
@@ -108,19 +108,23 @@ exclusive TQBN/file lock。
 
 同一合同也由 public
 `BacktestTickCache::repair_tick_locks(BacktestTickCacheLockRepairMode::{DryRun, Apply})` 提供。
-`DryRun` 可使用 `open_read_only(...)`；`Apply` 必须使用 writable cache。直接调用 API 的 owner 必须先持有
-`try_acquire_consistency_read_lock()`，而不能把该调用当作 fill、`enforce_limits(...)` 或 compaction 的替代。
+`DryRun` 可使用 `open_read_only(...)`；`Apply` 必须使用 writable cache。Apply 在内部取得根共享写门禁，
+与迁移根独占门禁互斥；不能把该调用当作 fill、`enforce_limits(...)` 或 compaction 的替代。
 
-## Tick v2 to v3 migration
+## Tick TQBN v2/v3 到 common schema 4 迁移
 
-`migrate` 默认只深度诊断并报告 legacy v2 计划，不创建 root、lock、backup 或数据文件。`--apply` 必须同时
-给出一个尚不存在的 `--backup-dir`；该目录必须位于 cache root 外且与 cache 同文件系统。CLI 取得 exclusive
-root stable-view gate 后再次深度诊断，对将被重写的每个 `.tqbn` 建立 hard-link backup，并实体复制现有
-`<file>.tqbn.lock` 与 `<partition>/.tqbn.lock`，之后才按 symbol compaction 重写为 v3 sparse TickDelta。
+`migrate` 默认只深度诊断并报告计划，不创建 root、lock、backup 或数据文件。结果中的容量字段是保守估算，
+不是磁盘上界；迁移中途遇到 `ENOSPC` 会停止，保留已完成分区和完整 backup，重启可继续。
 
-任一 backup、rewrite 或深度验证失败都会停止，保留 backup，绝不自动删除或回滚部分迁移。成功条件是所有
-Tick 文件可深度解码且 schema 均为 3；结果会报告旧/新字节数和 backup 路径。migration 不访问 remote、auth
-或 minute cache。
+`--apply` 必须同时给出一个尚不存在的 `--backup-dir`；该目录必须位于 cache root 外且与 cache 同文件系统。
+CLI 取得 exclusive root stable-view gate 后重新深度诊断，硬链接备份所有已识别 Tick 数据文件，并复制现有
+`<file>.tqbn.lock` 与 `<partition>/.tqbn.lock`。备份目录逐级 fsync 完成后，才按 symbol 生成 common schema 4
+候选、逐字段比对 rows/coverage/provisional、深度复检并原子发布。
+
+任一 backup、rewrite 或验证失败都会停止，保留 backup，绝不自动删除或回滚部分迁移。成功条件是所有 Tick
+文件可深度解码且 schema 均为 4。`legacy_binary_rollback_safe` 只有在迁移前不存在 common 文件时为 true；
+旧 binary 回滚必须恢复任何 common writer 启动前保留的整代数据。migration 不访问 remote、auth 或 minute cache。
+
 
 ## 数据来源与 finality
 

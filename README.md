@@ -1,5 +1,9 @@
 # tqsdk-rust
 
+历史缓存统一容器正在工作区展开，尚未部署：daily/Minute/Tick 已接入新容器，真实
+缓存迁移与冷数据重分区尚未完成。不要直接用过渡构建覆盖现有程序；见
+[格式与切换状态](docs/architecture/history-cache-format.md)。
+
 `tqsdk-cache fill` 支持日线分段续填、分钟私有暂存和首次中断最多 5 秒收尾；
 进度区分接收、持久化和暂存。见 [Fill 恢复合同](docs/architecture/history-fill-recovery.md)。
 
@@ -44,7 +48,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
 | [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、task-owned replay source、streaming local backtest execution、Python-compatible local backtest sim、kline default price tick、cash/equity drawdown summary、低延迟 trading desk profile |
 | [`tqsdk-hard-risk`](crates/tqsdk-hard-risk) | 可选 SQLite/WAL durable hard-risk authority：stable client-order identity、fail-closed admission、daily reservation、lease fencing、restart recovery 与 retained audit；不进入默认 SDK/desk hot path，也不宣称多节点 HA |
-| [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、`BacktestHistoryClient` 异步缓存查询、TQBN daily v3 (`.tqbn`) tick cache、canonical final-60s K cache、native final-1d K cache、tick companion-lock repair API 和共享 universe selector |
+| [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、`BacktestHistoryClient` 异步缓存查询、common schema 4 / legacy TQBN magic-dispatch tick cache、canonical final-60s K cache、native final-1d K cache、tick companion-lock repair API 和共享 universe selector |
 | [`tqsdk-cache`](crates/tqsdk-cache) | 可选 tick / canonical-minute / native-daily cache 运维与区间查询 CLI：统一逐合约 streaming fill progress/schema-v4 report、proof-pinned 历史 universe plan、默认文本摘要、按需 versioned JSON、lossless JSONL / token-aware LLM CSV、inventory/inspect/verify/doctor/purge，以及显式 `--history-root` 的 immutable snapshot clone/import、prewarm/query-smoke、publish/recover/rollback/scrub 和 lease-aware GC；不进入默认策略 hot path |
 | [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端，并可在独立 listener/runtime 上启用默认 wildcard CORS、即时观察已提交 fill 进度的只读 CacheOnly history sibling；未配置 relay 时 SDK 仍直连天勤 |
 
@@ -215,7 +219,7 @@ validation error；K-only `>=60s` 不会隐式补 tick。分钟高周期的盘�
 | --- | --- | --- |
 | Tick | 按 CST trading day 的 TQBN v3 tick 分区 | 原样读取 |
 | `15s` 和其他 `<60s` K | 同一 tick 分区 | 按官方 session 从 tick 聚合 |
-| `60s` K | `logical symbol × trading month` 的 final canonical-minute v5 分区 | 原样读取 |
+| `60s` K | `logical symbol × trading month` 的 final canonical-minute v6 分区 | 原样读取 |
 | `N × 60s`（`N > 1` 且 `<1d`） | 同一 60s 分区 | 从 closed 60s K 按固定 CST `18:00` trading-day grid 聚合；盘中 break 不重置 bucket |
 | `1d` K | `daily-kline-v1/<escaped-logical-symbol>.tqdk` 的 native final-1d file | 原样读取 |
 | `2d` 到 `28d` K | 同一 native 1d file | 从 complete final 1d rows 本地聚合；不落盘 |
@@ -373,14 +377,14 @@ date -> underlying 映射和 contiguous segment 压缩可用
 `query_trading_calendar(...)` / `query_trading_days(...)` /
 `tqsdk-data::DataClient::query_his_cont_underlyings(...)` /
 `query_his_cont_underlying_segments(...)`。
-历史序列和回测 tick cache 默认写按交易日分区的 TQBN daily v3 (`.tqbn`)；
-tick 路径形如 `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn`。默认 features 启用
-`tqbn-zstd`，hot append 的 TQBN records block 使用 zstd level 1，append-log compaction
-重写 records block 时使用 zstd level 3；两者都只在压缩后更小时写入压缩 block。
-Tick v3 首 snapshot 是完整 keyframe，后续 snapshot 只写变化字段和 id/time delta；不会按固定 tick
-频率填充，也不会删除无成交或重复盘口 snapshot。旧 v2 cache 需先执行
-`tqsdk-cache migrate --apply --backup-dir DIR`；新 writer 拒绝向 v2 Tick 文件混写。
-canonical-minute v5 保留全部 60s Kline row，并仅在 zstd 更小时压缩 row payload；零成交或重复分钟
+历史序列和回测 tick cache 的新建交易日分区默认写 common schema 4（format id
+`tqsdk.history-container.tick.v1`），路径仍为
+`series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn`，后缀表示逻辑分区，不再等同于编码。
+common Tick 使用无损 XOR/LEB128 block，并仅在 zstd 结果更小时压缩。迁移期 reader 仍按 magic
+读取 TQBN daily v2/v3；旧文件只能由
+`tqsdk-cache migrate --apply --backup-dir DIR` 在独占根锁、容量预检、逐文件候选校验和完整备份下转换，
+新 writer 不再创建或追加旧 TQBN Tick 文件。
+canonical-minute v6 保留全部 60s Kline row，并仅在 zstd 更小时压缩 row payload；零成交或重复分钟
 不会被删除或合成。旧 minute v4 cache 需先执行
 `tqsdk-cache migrate --kind minute --apply --backup-dir DIR`，并由该命令把原文件硬链接备份到
 cache root 外；v3 minute 文件仍按 fail-closed 处理。

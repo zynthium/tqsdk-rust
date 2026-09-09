@@ -1,5 +1,12 @@
 # History Snapshot Manifest v1
 
+工作区 P1 过渡（尚未部署）：native daily/Minute 已使用 `TQHIST01`，对应 manifest 必须
+声明 `history-container-v1`；Minute 身份为 `tqsdk.minute-kline.monthly.v6`。
+压缩块另要求 `tqbn-zstd`。validator 必须核对 common 容器 kind 与 role：`.tqdk`
+为 1d Kline，`.tqmk` 为 60s Kline；不得只核对 SHA-256 和 feature。
+有未提交尾部的 common 文件不得发布。旧 Kline KLOG 仅作为显式离线迁移输入；
+本节覆盖下文旧 KLOG-only 的 Kline 描述。完整切换见 [格式过渡合同](history-cache-format.md)。
+
 ## 目的
 
 本文固定 history snapshot root、manifest、lease、发布、恢复、回滚和 GC 合同。它不改变
@@ -46,9 +53,9 @@ advisory-lock 的部署。
   "created_at": "2026-08-29T12:00:00Z",
   "minimum_reader": "0.1.0",
   "cache_formats": [
-    {"family": "tick", "format_id": "tqsdk.tqbn.daily.v3", "schema_version": 3},
-    {"family": "minute", "format_id": "tqsdk.minute-kline.monthly.v5", "schema_version": 5},
-    {"family": "daily", "format_id": "tqsdk.daily-kline.single-file.v1", "schema_version": 1}
+    {"family": "daily", "format_id": "tqsdk.daily-kline.single-file.v1", "schema_version": 1},
+    {"family": "minute", "format_id": "tqsdk.minute-kline.monthly.v6", "schema_version": 6},
+    {"family": "tick", "format_id": "tqsdk.history-container.tick.v1", "schema_version": 4}
   ],
   "metadata_snapshot_hash": "sha256:...",
   "catalog": {
@@ -69,6 +76,8 @@ advisory-lock 的部署。
 
 实际 schema 可以增加 optional additive 字段，但 reader 遇到未知 required feature、未知 role 或不兼容
 format 必须 fail closed。
+新 manifest 只发布上例中的当前 identity；迁移期 reader 仍接受 minute monthly v5 和 Tick
+TQBN daily v3 的既有 immutable generation，避免发布切换与底层文件迁移互相锁死。
 
 ### Canonical identity
 

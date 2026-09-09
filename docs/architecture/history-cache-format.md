@@ -1,5 +1,91 @@
 # History Cache Format
 
+## P1 工作区过渡：统一容器（尚未部署）
+
+当前工作区的 native daily/Minute reader/writer 已接入 `TQHIST01`；Tick store 已按 magic
+接入 common Tick schema 4；既有 TQBN 按 magic 保持读写兼容，但只有已存在的 legacy 文件继续追加。Minute 公开身份为
+`tqsdk.minute-kline.monthly.v6`，交易月目录仍不变。
+默认真实缓存和已安装的 P0 程序尚未切换，
+不能把此阶段构建直接覆盖到现有运行环境。三类容器接入已完成；冷数据重分区、真实数据迁移和部署仍未完成。
+下文旧 Kline KLOG 描述是迁移输入合同，不再是本工作区的新写入格式。
+
+Minute 新 reader 固定 FD/index 后逐相交块解码，保留有界单块缓冲；空覆盖 extent 无需
+数据块。普通路径拒绝旧 KLOG/raw，显式迁移先备份，再对候选文件逐字段比较后发布。
+历史 v4 迁移入口仍为显式兼容工具；Snapshot feature probe 和 doctor 必须识别新容器。
+Timeline 的内存 snapshot 在 load 完成后已脱离路径，无需长期持有 FD；`.tqbn`/`.tqmk`/`.tqdk` 作为 family/layout hint 保留，
+真正的编码身份只由 magic/index 决定，避免为统一 suffix 引入一次无收益的全盘迁移。
+
+Tick 公共块 codec 已实现为 `TickXorV1`（payload magic `TX01`）：首行保存全部
+31 个 64-bit word，后续行用 31-bit 变化掩码和规范 unsigned LEB128 表示 XOR。
+价格不做定点量化，保留浮点位模式、全部五档盘口、整数极值和独立 epoch presence/value。
+每块最多 8,192 行，解码前校验行数/字节界限；内存预算按 Tick 对象而非 Kline 对象计费。
+相同时间戳允许，块内时间不得倒退；各块独立校验/压缩且无需前块解码状态。
+Tick codec 已通过按 magic 分派接入现有 store 的 reader、write/coverage/provisional、
+此为迁移的 expand 阶段：不会隐式转换旧文件，但新建 Tick 日分区已切换到 common schema 4。
+Tick 的 `Unverified` extent 只表示已提交行，不产生 final/provisional 完整覆盖；
+coverage overlay 保留现有行切片，边界处才解码块，provisional 不得降级 final。
+普通 reader 在短锁内固定 FD/index，释放锁后逐块读取；共享 inode 写入沿用 COW。
+时间与 ID 均严格递增的追加不扫描旧 payload；块索引保存 ID 范围及严格顺序见证，
+解码时逐块复核。批内/跨批/旧块非单调、时间重叠或达到压实阈值时，仍原子重建
+整分区；旧重放规则能递归传播，不能假设固定 20 分钟尾窗足够。
+common Tick 文件诊断报告 schema 4、可变行宽；旧 v3 迁移命令在规划阶段拒绝较新 schema。
+
+**已批准的语义修正：**旧 Tick reader 的重放规范化依赖请求范围；同 ID/同 payload 的
+两行相差 10ms 时，全日读取只保留后行，而仅覆盖前 5ms 的读取仍保留前行。
+当前 common 异常写入路径按整日规范化后永久替换，不能同时复现上述两个结果。
+用户已批准改为稳定的交易日级规范化：迁移等价 oracle 是旧数据整交易日读取后的
+canonical set，不再承诺复现旧版范围相关的窄查询异常。新建 Tick 日分区默认写入
+离线 Tick 迁移已有显式候选验证入口；真实目录切换、运行时旧格式收缩和冷包仍须按 migrate-verify-contract 顺序完成。
+离线 Tick 迁移、运行时旧格式收缩和冷包写入放大优化仍未完成。
+
+新容器使用双提交槽、独立压缩/校验块、物理 block 表和独立的逻辑 extent 表。
+extent 明确记录 coverage、metadata identity、finality 和有效行切片；零切片表示
+已确认空区间，不能按最后一行时间推断 coverage。新 Kline81 编码在九个 72-byte
+market fields 后写入 epoch presence byte 和 8-byte epoch，保留 `None`、
+`Some(i64::MIN)`、整数极值、NaN payload 和负零。
+
+daily 短查询只校验相交块；doctor 深度校验全部块。reader 在共享 companion 锁内
+固定已打开 FD、索引和提交长度，释放锁后不重新打开路径。写者在恢复/追加前核对
+canonical 路径与 FD 身份并拒绝 leaf symlink；此协议依赖合作式写者持有稳定 companion
+锁，不宣称抵御外部恶意进程任意替换目录。共享 data inode 在原地修改前分离。
+
+daily 离线迁移接收旧 raw/KLOG，先备份，在未发布候选文件上逐字段比较 rows 位值、
+epoch、coverage、symbol 和 snapshot，再原子替换；运行时不回退旧格式。
+snapshot manifest 必须声明 `history-container-v1`，有压缩块时还须声明 `tqbn-zstd`；
+未提交 suffix 不得发布。现阶段路径后缀仍是 `.tqdk`，统一后缀属于后续受控布局迁移。
+
+分配预算按索引声明的解码字节与 Rust 行对象计算，不按压缩文件长度估算。
+daily 暂以 64 blocks/extents 或 256 KiB retired index bytes 触发压实；这只是索引
+增长保护，最终块粒度、索引方案和阈值必须通过 P3 测量确定。
+
+Linux 候选文件在发布前同步文件，rename 后同步父目录。Windows 已有文件身份与
+多链接保护的类型检查，但 non-Unix 父目录同步仍为空操作；尚未证明 Windows 断电
+持久性、原生替换和旧 FD 行为，不能宣称与 Linux 等强的断电恢复保证。
+
+## TQBN 共享 inode 写保护
+
+TQBN 追加入口在验证 prefix/schema 后、恢复截断和写入之前，检查 data inode 的共享状态。
+Unix / Windows 多链接文件在已有 companion 和旧 data-inode 排他锁内复制到独占创建的临时文件，
+同步数据后原子替换并同步父目录；旧 reader 和保留硬链接继续观察原 inode。
+复制保留完整物理字节，因此原 companion checkpoint 对新文件仍有效；未提交 suffix
+仅在新 inode 上恢复。Unix / Windows 单链接追加不复制；其他平台无法证明私有性时明确拒绝修改。
+
+Companion checkpoint 若自身存在多个硬链接，追加和压实在修改数据前明确失败。
+不能原子替换该 lock inode 来绕过问题，否则既有等待者和新打开者可能进入不同锁域。
+这类布局必须停机修复。普通 purge 仅 unlink，不因此拒绝共享文件或增加复制；
+compaction 保留原有临时文件替换路径。Windows 通过已打开句柄查询链接数，查询失败即拒绝写入。
+新 snapshot 仍不得通过 hardlink 共享可变行情 inode；写保护不是允许重新启用该优化。
+
+验证：`cargo test -p tqsdk-data --lib hardlink_tests`。
+
+COW 发布前崩溃遗留的 `<symbol>.tqbn.cow-<pid>-<nanoseconds>-<sequence>`
+只作为私有临时产物处理。三个后缀字段必须均为合法非空十进制整数；snapshot 不复制也不创建
+占位文件，其他未知文件仍拒绝。源目录遗留文件不由 snapshot 自动删除。
+
+日线和分钟线的九个 market fields 现在由内部 `kline_codec` 统一编码，保留 little-endian
+整数和浮点原始位模式；现有 daily/minute envelope 的 epoch 位置不变。本次抽取不改变磁盘版本、
+后缀或分区，也不宣称统一容器迁移已完成。
+
 分钟 fill 私有 journal 位于 `.backtest-history-staging/minute-v1/`，不是 KLOG 分区，
 不改变正式缓存格式；terminal、重启验证、grace 和回滚见 [Fill 恢复](history-fill-recovery.md)。
 
@@ -42,7 +128,7 @@ manifest、CURRENT、lease、发布/恢复/GC 合同见 [history-snapshot-manife
 
 ## 文档定位
 
-本文档定义 `tqsdk-data` 历史序列缓存当前默认的 TQBN daily v3 (`.tqbn`) 格式。
+本文档定义 `tqsdk-data` 历史序列缓存当前的 common-container 格式，以及迁移期只读识别的 TQBN daily v2/v3 (`.tqbn`) 格式。
 它只约束本仓库 Rust cache 的默认持久化合同，不扩大 public API，也不承诺兼容旧 Python
 `DataSeries` binary/mmap cache、旧 `.tqseries` cache 或旧单文件 `.tqbn` layout。
 
@@ -56,11 +142,11 @@ manifest、CURRENT、lease、发布/恢复/GC 合同见 [history-snapshot-manife
 
 ## Current Decision
 
-TQBN daily v3 是 `tqsdk-rust` history cache 当前默认和 canonical 格式。
+`TQHIST01` common container 是 `tqsdk-rust` history cache 当前默认和 canonical 格式。
 
-TQBN daily v3 是一个 DBN-like 的内部二进制记录流格式，由 `tqsdk-data` 的
-crate-internal codec 和 store adapter 实现。每个交易日分区文件仍是 append-only TQBN
-record stream；store layout 按交易日拆分，避免扩展回填区间时重写单个大型 series 文件。
+TQBN daily v2/v3 是一个 DBN-like 的旧内部二进制记录流格式，由 `tqsdk-data` 的
+crate-internal codec 和 store adapter 在迁移期读写。新建 Tick 分区使用 common schema 4；
+旧 TQBN 文件可继续追加，或经显式、带备份且逐文件验证的迁移入口转换，但不再作为新增文件目标。
 旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认格式，不作为新增缓存文件目标，
 也不提供兼容读取或迁移 store。
 
@@ -120,7 +206,7 @@ forced refresh 只推进 pointer，而不重写历史 snapshot。reader 必须�
 覆盖，但新的 closed-day resolver 不读取它。report 只输出新 snapshot 的 source URL、fetch 时间、hash、
 支持年份和 holiday count，不输出完整 raw list。
 
-## Backtest Canonical-minute v5
+## Backtest Canonical-minute v6
 
 本地 facade 回测不再把任意周期的 K 线写入 TQBN history-series cache。它使用独立的
 `MinuteKlineCache` 与 `DailyKlineCache`。持久 K 线输入只接受官方 server-side backtest 确认 terminal
@@ -145,8 +231,8 @@ v5 文件身份如下：
 
 | 项 | 值 |
 | --- | --- |
-| format id | `tqsdk.minute-kline.monthly.v5` |
-| schema version | `5` |
+| format id | `tqsdk.minute-kline.monthly.v6` |
+| schema version | `6` |
 | file extension | `.tqmk` |
 | root layout | `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk` |
 | time basis | CST trading day，`18:00` 后归入下一交易日 |
@@ -173,11 +259,11 @@ CST trading month，并保留更宽的 active pointer；若 retained snapshot �
 `tqsdk-cache fill --kind minute --repair-stale` 时，才会在 active snapshot 覆盖窗口时删除其冲突的整月分区，
 再由该次 remote fill 补齐；这不改变普通 reader 的 fail-closed 合同。
 
-目录名继续保留 `minute-kline-v3`，但它承载的是 v5 文件身份。这是刻意的诊断兼容策略：
+目录名继续保留 `minute-kline-v3`，但新建文件身份是 monthly v6；路径版本不代替文件 magic/index 身份。
 旧 v4 文件不会被普通 reader/fill 静默读取、迁移或覆盖；读取/coverage 会 fail closed，`diagnose()`
 将其报告为 `LegacyUnsupported`。operator 如需升级，必须显式执行
 `tqsdk-cache migrate --kind minute --apply --backup-dir DIR`：该命令先深度校验全部 v4 input，
-将原 `.tqmk` 及其 `.tqmk.lock` 备份到 cache root 外的同一文件系统，再逐月原子重写为 v5 并 doctor
+将原 `.tqmk` 及其 `.tqmk.lock` 备份到 cache root 外的同一文件系统，再逐月原子重写为 v6 并用 doctor
 复检。v3 及其他版本仍不可迁移；如需移除必须显式 purge。
 
 `fast_inventory()` 是只读的 filesystem inventory：它不解码月文件，也不创建缺失 root。
@@ -229,12 +315,12 @@ open/close OI。结算价、涨跌停价目前不在 Kline 或 daily cache schem
 cache 文件。此 phase 与 official high-period chart 的实际一致性不由固定 CST 假设推断；tag CI 必须以外置、
 哈希验证的 official `tqsdk-python` golden packet 验证物理夜盘/假日、`KQ.m` roll、`KQ.i` 的 1d/2d/5d/28d。
 
-## TQBN daily v3 File Identity
+## Tick common schema 4 File Identity
 
 | 项 | 值 |
 | --- | --- |
-| format id | `tqsdk.tqbn.daily.v3` |
-| schema version | `3` |
+| format id | `tqsdk.history-container.tick.v1` |
+| schema version | `4` |
 | file extension | `.tqbn` |
 | root layout | `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn` 和 `series/<YYYYMMDD>/kline/<duration_ns>/<escaped-symbol>.tqbn` |
 
@@ -314,9 +400,11 @@ zigzag-varint delta、changed-field bitmask 与每个变化字段的值。depth�
 盘口也不删除。每个 block 最多 8192 行；若 delta payload 加上可选 zstd 后不小于既有固定 record payload，
 writer 回退固定 records。稀疏合约由 field-delta 获益，随机变化合约不会被更差编码强制放大。
 
-v2 只保留为受控迁移读取路径，不是持续兼容合同。新 writer 不会向 v2 文件追加 Tick rows，避免产生
-v2 prefix 与 v3 `TQTD` 混写；应先执行 `tqsdk-cache migrate --apply --backup-dir DIR`。旧 binary 不能读取
-v3 `TQTD`，所有长期访问同一 cache root 的进程必须同时升级。
+TQBN v2/v3 只保留为迁移期兼容路径，不是长期格式合同。新 writer 对既有 TQBN 文件继续安全追加，
+对不存在的分区创建 common schema 4；应尽快执行 `tqsdk-cache migrate --apply --backup-dir DIR` 收缩兼容面。
+旧 binary 不能读取 common schema 4。真实迁移前必须停止所有旧 reader/writer，先保留“任何 common writer 启动前”的完整
+generation，再部署能读取两种 magic 的新 binary，并在根独占锁内备份和转换。旧 binary 回滚必须同时恢复该整代数据，
+不能只替换可执行文件。
 
 ### Records Range Index
 

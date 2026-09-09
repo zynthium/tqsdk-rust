@@ -1,5 +1,55 @@
 # 验收标准与测试矩阵
 
+P1 Tick 公共块及过渡适配器（默认格式尚未切换）：
+`cargo test -p tqsdk-data --lib history_container --offline` 及相同命令追加
+`--no-default-features`，覆盖 31-word golden、8,192 行 XOR/重复时间戳、长度上下界、
+规范 varint、首行和 delta epoch、限额先于 I/O、追加/尾部恢复/旧 FD。
+此门禁不代表 Tick store、真实目录迁移或 P2/P3 已验收。
+另运行 `cargo test -p tqsdk-data --lib history_series_cache::tqbn::container --offline`
+及无默认特性版本，覆盖真实 store 分派、未确认行不计 coverage、区间切分、
+provisional 不降级 final、顺序追加跳过旧块、修订/旧 reader、空覆盖、断尾恢复、
+共享 inode、inventory 和非法 proof 不得发布。
+另覆盖 ID 重用/回退、旧块非单调、跨块且超过 20 分钟的重放传播链、已提交索引中的
+伪造 ID bounds/strict-order、schema 4 诊断和旧 v3 migration 拒绝较新版本。
+`legacy_replay_canonicalization_depends_on_the_requested_range` 是待决策见证：
+证明旧 reader 全日/窄范围的行集不同，不代表 common 已获准改变窄范围结果。
+默认切换和真实 Tick 迁移必须先取得该语义决策，不能只靠全日等价测试放行。
+
+统一历史容器 P1（日线/分钟接入）验证：
+
+```bash
+cargo test -p tqsdk-data --lib history_container
+cargo test -p tqsdk-data --lib minute_kline_cache
+cargo test -p tqsdk-data --test minute_kline_cache --test minute_kline_cache_ops
+cargo test -p tqsdk-data --lib daily
+cargo test -p tqsdk-data --lib common_container
+cargo test -p tqsdk-data --test daily_kline_cache
+cargo test -p tqsdk-data --test backtest_history_snapshot
+cargo test -p tqsdk-data --test kline_append_recovery
+cargo test -p tqsdk-data --test kline_cache_migration
+```
+
+须覆盖显式空 coverage、独立块跳读与 doctor 全量校验、epoch presence 极值、
+浮点位模式、解码分配预算、坏提交索引与 torn slot 区分、未提交尾部恢复、旧 FD
+在追加/替换后保持视图、stale writer 拒绝、symlink 写入拒绝、备份/迁移等价及幂等。
+新增 manifest feature 和 clean-tail 发布门禁必须有回归。Windows cross-check 仅证明
+Rust 类型正确，不替代原生运行、旧 FD/替换/断电持久性验收。
+
+TQBN 共享 inode 与 COW 崩溃遗留验证：
+
+```bash
+cargo test -p tqsdk-data --lib hardlink_tests
+cargo test -p tqsdk-data --lib snapshot_excludes_only_well_formed_tqbn_cow_orphans
+cargo test -p tqsdk-cache --test snapshot_cli clone_omits_crash_cow_orphans_without_placeholder
+cargo test -p tqsdk-data --lib kline_codec
+cargo test -p tqsdk-data --no-default-features --lib
+```
+
+覆盖 append/coverage/provisional/恢复前分离 data inode、shared checkpoint 拒绝、purge
+仅 unlink、压实检查位于锁内、失败仅清理自身临时文件、快照不复制 COW orphan 或创建占位。
+共用 Kline codec 的 golden bytes 必须保留 NaN payload、负零和整数极值。
+下载超时用例要求 `live` 与 `services`；无此组合时另行证明在启动 source 前明确拒绝。
+
 Fill 暂存/收尾/durability 变更执行 [恢复合同验证](history-fill-recovery.md#验证)，
 包含跨重启、retry 隔离、非终态拒绝、grace 与共享消费者隔离；禁止使用真实账号替代离线证明。
 
