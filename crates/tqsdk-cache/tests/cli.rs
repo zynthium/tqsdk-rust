@@ -249,58 +249,6 @@ fn repair_locks_apply_creates_missing_companion_lock() {
 }
 
 #[test]
-fn repair_locks_apply_reports_legacy_partition_locks_separately_from_files() {
-    let cache_dir = temp_dir("repair-locks-legacy-partition");
-    let cache = BacktestTickCache::open(&cache_dir).unwrap();
-    cache
-        .store_ticks(
-            "SHFE.rb2601",
-            1_000,
-            2_000,
-            [Tick {
-                id: 1,
-                datetime: 1_000,
-                ..Tick::default()
-            }],
-        )
-        .unwrap();
-    let path = cache.diagnose().unwrap().files.remove(0).path;
-    let lock_path = path.with_extension("tqbn.lock");
-    let partition_dir = path.parent().unwrap();
-    let legacy_lock_path = partition_dir.join(".tqbn.lock");
-    assert!(lock_path.is_file());
-    assert!(!legacy_lock_path.exists());
-
-    let output = run_json([
-        "--cache-dir",
-        cache_dir.to_str().unwrap(),
-        "--output-schema",
-        "v3",
-        "repair-locks",
-        "--apply",
-    ]);
-
-    assert!(output.status.success());
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let result = v3_result(&json, "repair-locks", "success", 0);
-    assert_eq!(result["legacy_partition_locks_created"], 1);
-    assert_eq!(result["created_files"], 0);
-    assert_eq!(result["legacy_partition_locks"][0]["status"], "created");
-    assert_eq!(
-        result["legacy_partition_locks"][0]["lock_path"],
-        fs::canonicalize(partition_dir)
-            .unwrap()
-            .join(".tqbn.lock")
-            .display()
-            .to_string()
-    );
-    assert_eq!(result["files"][0]["status"], "already_present");
-    assert!(legacy_lock_path.is_file());
-
-    let _ = fs::remove_dir_all(cache_dir);
-}
-
-#[test]
 fn repair_locks_dry_run_returns_nonzero_for_an_invalid_companion_lock() {
     let cache_dir = temp_dir("repair-locks-invalid-dry-run");
     let cache = BacktestTickCache::open(&cache_dir).unwrap();
@@ -932,7 +880,11 @@ fn daily_fill_shutdown_persists_report(signal: &str) {
         .read_to_string(&mut stdout)
         .unwrap();
 
-    assert_eq!(status.code(), Some(130), "stdout={stdout}");
+    assert_eq!(
+        status.code(),
+        Some(130),
+        "stdout={stdout} stderr={remaining_stderr}"
+    );
     assert_eq!(
         progress_lines
             .iter()
@@ -3788,7 +3740,7 @@ fn metadata_refresh_requires_auth_before_advancing_active_sidecar() {
 }
 
 #[test]
-fn tick_migration_dry_run_and_apply_convert_a_frozen_schema3_fixture() {
+fn tick_migration_reports_but_rejects_a_pre_schema4_fixture_without_mutation() {
     let parent = temp_dir("tick-migrate-schema3");
     let cache_dir = parent.join("cache");
     let backup_dir = parent.join("backup");
@@ -3802,24 +3754,11 @@ fn tick_migration_dry_run_and_apply_convert_a_frozen_schema3_fixture() {
         "tick",
         "migrate",
     ]);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(1));
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let result = v3_result(&json, "migrate", "success", 0);
+    let result = v3_result(&json, "migrate", "incomplete", 1);
     assert_eq!(result["legacy_files"], 1);
-    assert_eq!(result["pack_source_files"], 1);
-    assert_eq!(result["pending_month_packs"], 1);
     assert_eq!(result["target_schema_version"], 4);
-    assert_eq!(result["capacity_estimate_ok"], true);
-    assert!(
-        result["estimated_required_available_bytes"]
-            .as_u64()
-            .unwrap()
-            > old_bytes.len() as u64
-    );
 
     let output = run_json([
         "--cache-dir",
@@ -3831,22 +3770,18 @@ fn tick_migration_dry_run_and_apply_convert_a_frozen_schema3_fixture() {
         "--backup-dir",
         backup_dir.to_str().unwrap(),
     ]);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(1));
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let result = v3_result(&json, "migrate", "success", 0);
-    assert_eq!(result["completed"], true);
-    assert_eq!(result["legacy_files"], 1);
-    let pack = cache_dir.join("series/monthly/202601/tick/SHFE.test2601.tqbn");
-    assert!(!source.exists());
-    assert_eq!(&fs::read(pack).unwrap()[..8], b"TQHIST01");
-    assert_eq!(
-        fs::read(backup_dir.join(source.strip_prefix(&cache_dir).unwrap())).unwrap(),
-        old_bytes
+    let _ = v3_result(&json, "migrate", "error", 1);
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("frozen pre-v4 migrator")
     );
+    assert_eq!(fs::read(&source).unwrap(), old_bytes);
+    assert!(!backup_dir.exists());
+
     let _ = fs::remove_dir_all(parent);
 }
 

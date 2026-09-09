@@ -8,6 +8,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tqsdk::{BacktestRemoteFillCancellation, BacktestRemoteFillConfig, RemoteFillPlan, Tq};
@@ -2275,7 +2277,7 @@ async fn refresh_provider_membership(
     acquisition.validate_provider_daily_refresh_current(&current_before)?;
 
     let cancellation = BacktestHistoryFillCancellation::new();
-    let signal_task = spawn_shutdown_signal_handler(cancellation.clone(), CacheKind::Daily)?;
+    let signal_task = spawn_shutdown_signal_handler(cancellation.clone(), CacheKind::Daily).await?;
     let progress_session = FillProgressSession::new(
         args.progress,
         args.progress_max_bars,
@@ -2854,7 +2856,8 @@ async fn bootstrap_provider_history_and_fill(
         let reporter = progress_session.observer();
         reporter.planning("bootstrapping native daily history for provider roster");
         let cancellation = BacktestHistoryFillCancellation::new();
-        let signal_task = spawn_shutdown_signal_handler(cancellation.clone(), CacheKind::Daily)?;
+        let signal_task =
+            spawn_shutdown_signal_handler(cancellation.clone(), CacheKind::Daily).await?;
         let progress_callback = reporter.clone();
         // Keep every terminal outcome attributable to one symbol. Exact timeouts
         // remain bounded provider-unavailable audit facts for this acquisition.
@@ -3474,7 +3477,7 @@ async fn fill_historical_universe_plan(
         Some(context) => context,
         None => {
             let cancellation = BacktestHistoryFillCancellation::new();
-            let signal_task = spawn_shutdown_signal_handler(cancellation.clone(), kind)?;
+            let signal_task = spawn_shutdown_signal_handler(cancellation.clone(), kind).await?;
             (cancellation, signal_task)
         }
     };
@@ -3698,7 +3701,8 @@ async fn fill_daily(
         None
     } else {
         let cancellation = BacktestHistoryFillCancellation::new();
-        let signal_task = spawn_shutdown_signal_handler(cancellation.clone(), CacheKind::Daily)?;
+        let signal_task =
+            spawn_shutdown_signal_handler(cancellation.clone(), CacheKind::Daily).await?;
         Some((cancellation, signal_task))
     };
     if signal_context.is_some() {
@@ -4063,7 +4067,7 @@ async fn fill_minute(
         .unwrap_or_else(|| default_minute_fill_report_path(&canonical_cache_dir));
     let cancellation = BacktestRemoteFillCancellation::new();
     let signal_cancellation = cancellation.clone();
-    let signal_task = spawn_shutdown_signal_handler(signal_cancellation, CacheKind::Minute)?;
+    let signal_task = spawn_shutdown_signal_handler(signal_cancellation, CacheKind::Minute).await?;
     let progress_callback = reporter.clone();
     let telemetry_callback = reporter.clone();
     let mut builder = builder_with_market_environment_auth(market, false)?
@@ -4623,7 +4627,7 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
         .unwrap_or_else(|| default_fill_report_path(&canonical_cache_dir));
     let cancellation = BacktestRemoteFillCancellation::new();
     let signal_cancellation = cancellation.clone();
-    let signal_task = spawn_shutdown_signal_handler(signal_cancellation, CacheKind::Tick)?;
+    let signal_task = spawn_shutdown_signal_handler(signal_cancellation, CacheKind::Tick).await?;
     let (plan_tx, plan_rx) = mpsc::channel(1);
     let calendar_task = tokio::spawn(finish_calendar_after_plan(
         plan_rx,
@@ -6060,6 +6064,12 @@ fn migrate_tick(
             MigrationOutcomeDetails::default(),
         ));
     }
+    if plan.legacy_files != 0 {
+        return Err(CliError::Migration(format!(
+            "found {} pre-schema-4 Tick files; this build only seals current closed-month partitions. Use the frozen pre-v4 migrator before upgrading",
+            plan.legacy_files
+        )));
+    }
     if plan.problem_files != 0 {
         return Ok(migration_outcome(
             canonical_cache_dir,
@@ -6078,6 +6088,12 @@ fn migrate_tick(
     cache.validate_tick_migration_source(&lock)?;
     cleanup_tick_migration_cache_generation_candidates(&canonical_cache_dir)?;
     let plan = tick_migration_plan(&cache, &canonical_cache_dir)?;
+    if plan.legacy_files != 0 {
+        return Err(CliError::Migration(format!(
+            "found {} pre-schema-4 Tick files after acquiring the exclusive cache gate; use the frozen pre-v4 migrator",
+            plan.legacy_files
+        )));
+    }
     if plan.problem_files != 0 || (plan.legacy_files == 0 && plan.pack_source_files == 0) {
         return Ok(migration_outcome(
             canonical_cache_dir,
@@ -7139,39 +7155,51 @@ impl ShutdownCancellation for BacktestHistoryFillCancellation {
 }
 
 #[cfg(unix)]
-fn spawn_shutdown_signal_handler(
+async fn spawn_shutdown_signal_handler(
     cancellation: impl ShutdownCancellation + Send + Sync + 'static,
     kind: CacheKind,
 ) -> Result<tokio::task::JoinHandle<()>, CliError> {
-    let interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    let terminate = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-    {
-        Ok(terminate) => Some(terminate),
-        Err(error) => {
-            eprintln!("tqsdk-cache: SIGTERM handler unavailable ({error}); waiting for SIGINT");
-            None
+    let received = Arc::new(AtomicBool::new(false));
+    let force_exit = Arc::new(AtomicBool::new(false));
+    let mut registrations = Vec::with_capacity(9);
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        let register = || -> io::Result<[signal_hook::SigId; 3]> {
+            // Registration order matters: the first signal observes `false`, then
+            // arms immediate termination before returning from the signal handler.
+            Ok([
+                signal_hook::flag::register_conditional_shutdown(
+                    signal,
+                    130,
+                    Arc::clone(&force_exit),
+                )?,
+                signal_hook::flag::register(signal, Arc::clone(&received))?,
+                signal_hook::flag::register(signal, Arc::clone(&force_exit))?,
+            ])
+        };
+        match register() {
+            Ok(ids) => registrations.extend(ids),
+            Err(error) => {
+                // Already-installed actions deliberately remain process-wide. If
+                // initialization is partial, make them terminate instead of
+                // leaving a signal swallowed after this command returns an error.
+                force_exit.store(true, Ordering::SeqCst);
+                return Err(error.into());
+            }
         }
-    };
-    let hangup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
-        Ok(hangup) => Some(hangup),
-        Err(error) => {
-            eprintln!(
-                "tqsdk-cache: SIGHUP handler unavailable ({error}); waiting for SIGINT/SIGTERM"
-            );
-            None
-        }
-    };
+    }
     Ok(tokio::spawn(wait_for_shutdown_signal(
         cancellation,
         kind,
-        interrupt,
-        terminate,
-        hangup,
+        ShutdownSignalState {
+            received,
+            force_exit,
+            _registrations: registrations,
+        },
     )))
 }
 
 #[cfg(not(unix))]
-fn spawn_shutdown_signal_handler(
+async fn spawn_shutdown_signal_handler(
     cancellation: impl ShutdownCancellation + Send + Sync + 'static,
     kind: CacheKind,
 ) -> Result<tokio::task::JoinHandle<()>, CliError> {
@@ -7179,59 +7207,46 @@ fn spawn_shutdown_signal_handler(
 }
 
 #[cfg(unix)]
+struct ShutdownSignalState {
+    received: Arc<AtomicBool>,
+    force_exit: Arc<AtomicBool>,
+    _registrations: Vec<signal_hook::SigId>,
+}
+
+#[cfg(unix)]
+impl Drop for ShutdownSignalState {
+    fn drop(&mut self) {
+        // signal-hook intentionally does not restore the previous disposition
+        // when an action is unregistered. Keep the process-wide actions alive;
+        // after the graceful task ends, any later shutdown signal exits at once.
+        self.force_exit.store(true, Ordering::SeqCst);
+    }
+}
+
+#[cfg(unix)]
 async fn wait_for_shutdown_signal(
     cancellation: impl ShutdownCancellation + Send + Sync + 'static,
     kind: CacheKind,
-    mut interrupt: tokio::signal::unix::Signal,
-    mut terminate: Option<tokio::signal::unix::Signal>,
-    mut hangup: Option<tokio::signal::unix::Signal>,
+    signals: ShutdownSignalState,
 ) {
-    wait_for_one_shutdown_signal(&mut interrupt, terminate.as_mut(), hangup.as_mut()).await;
+    wait_for_one_shutdown_signal(signals.received.as_ref()).await;
     cancellation.request_stop();
     eprintln!(
         "tqsdk-cache: stopping new work; allowing up to 5 seconds for the current window to commit"
     );
-    tokio::select! {
-        _ = wait_for_one_shutdown_signal(&mut interrupt, terminate.as_mut(), hangup.as_mut()) => {},
-        _ = tokio::time::sleep(Duration::from_secs(5)) => {
-            cancellation.cancel();
-            eprintln!("{}", shutdown_cancellation_message(kind));
-            wait_for_one_shutdown_signal(&mut interrupt, terminate.as_mut(), hangup.as_mut()).await;
-        }
-    }
-    eprintln!("tqsdk-cache: second shutdown signal received; exiting immediately");
-    std::process::exit(130);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    cancellation.cancel();
+    eprintln!("{}", shutdown_cancellation_message(kind));
+    std::future::pending::<()>().await;
 }
 
 #[cfg(unix)]
-async fn wait_for_one_shutdown_signal(
-    interrupt: &mut tokio::signal::unix::Signal,
-    terminate: Option<&mut tokio::signal::unix::Signal>,
-    hangup: Option<&mut tokio::signal::unix::Signal>,
-) {
-    match (terminate, hangup) {
-        (Some(terminate), Some(hangup)) => {
-            tokio::select! {
-                _ = interrupt.recv() => {},
-                _ = terminate.recv() => {},
-                _ = hangup.recv() => {},
-            }
+async fn wait_for_one_shutdown_signal(signals: &AtomicBool) {
+    loop {
+        if signals.load(Ordering::SeqCst) {
+            return;
         }
-        (Some(terminate), None) => {
-            tokio::select! {
-                _ = interrupt.recv() => {},
-                _ = terminate.recv() => {},
-            }
-        }
-        (None, Some(hangup)) => {
-            tokio::select! {
-                _ = interrupt.recv() => {},
-                _ = hangup.recv() => {},
-            }
-        }
-        (None, None) => {
-            let _ = interrupt.recv().await;
-        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
