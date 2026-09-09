@@ -49,7 +49,7 @@ jobs:
         run: cargo check --examples
 
       - name: Test SDK crates
-        run: cargo test
+        run: cargo test --workspace
 
       - name: Test SDK crates all features
         run: cargo test --all-features
@@ -80,6 +80,63 @@ jobs:
       - name: SDK package metadata
         run: cargo package --no-verify
 
+  msrv:
+    name: MSRV (Rust 1.88)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install MSRV
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Check workspace at MSRV
+        run: cargo check --workspace --all-targets
+
+  cache-rust:
+    name: Cache crate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Check cache crate
+        run: cargo check -p tqsdk-cache --all-targets
+
+      - name: Test cache crate
+        run: cargo test -p tqsdk-cache
+
+      - name: Clippy cache crate
+        run: cargo clippy -p tqsdk-cache --all-targets --no-deps -- -D warnings
+
+  hard-risk-rust:
+    name: Durable hard-risk crate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Check durable hard-risk crate
+        run: cargo check -p tqsdk-hard-risk --all-targets
+
+      - name: Test durable hard-risk crate
+        run: cargo test -p tqsdk-hard-risk
+
+      - name: Clippy durable hard-risk crate
+        run: cargo clippy -p tqsdk-hard-risk --all-targets --no-deps -- -D warnings
+
   relay-rust:
     name: Relay Rust
     runs-on: ubuntu-latest
@@ -95,6 +152,9 @@ jobs:
 
       - name: Check relay no default features
         run: cargo check -p tqsdk-relay --no-default-features
+
+      - name: Check relay history-only feature
+        run: cargo check -p tqsdk-relay --no-default-features --features history
 
       - name: Test relay
         run: cargo test -p tqsdk-relay --tests
