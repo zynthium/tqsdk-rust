@@ -1,4 +1,5 @@
-use tqsdk_relay::{MarketCache, RelayTickRow};
+use tqsdk_core::Quote;
+use tqsdk_relay::{MarketCache, MarketCacheLimits, RelayTickRow};
 
 fn tick(id: i64, last_price: f64) -> RelayTickRow {
     RelayTickRow {
@@ -90,6 +91,46 @@ fn kline_capacity_returns_configured_capacity() {
     let cache = MarketCache::new(4, 32);
 
     assert_eq!(cache.kline_capacity(), 32);
+}
+
+#[test]
+fn bounded_cache_evicts_least_recently_used_symbol_before_exceeding_budget() {
+    let limits = MarketCacheLimits {
+        max_symbols: 1,
+        max_retained_bytes: 64 * 1024,
+    };
+    let mut cache = MarketCache::with_limits(2, 16, limits);
+
+    assert!(cache.push_tick("SHFE.au2602", tick(1, 610.0)).stored);
+    let report = cache.push_tick("DCE.m2609", tick(2, 3300.0));
+
+    assert!(report.stored);
+    assert_eq!(report.evicted_symbols, 1);
+    assert!(cache.ticks("SHFE.au2602").is_empty());
+    assert_eq!(cache.ticks("DCE.m2609"), vec![tick(2, 3300.0)]);
+    assert!(cache.retained_bytes() <= limits.max_retained_bytes);
+    assert_eq!(cache.cached_symbols(), 1);
+}
+
+#[test]
+fn cache_keeps_only_relay_quote_projection() {
+    let mut cache = MarketCache::with_limits(4, 16, MarketCacheLimits::default());
+    let quote = Quote {
+        datetime: "2026-09-08 09:30:00.000000".to_string(),
+        instrument_id: "SHFE.au2602".to_string(),
+        instrument_name: "黄金主力".to_string(),
+        last_price: 612.5,
+        volume: 42,
+        open_interest: 84,
+        ..Quote::default()
+    };
+
+    assert!(cache.push_quote("SHFE.au2602", quote).stored);
+    let cached = cache.quote("SHFE.au2602").unwrap();
+    assert_eq!(cached.instrument_id, "SHFE.au2602");
+    assert_eq!(cached.datetime, "2026-09-08 09:30:00.000000");
+    assert_eq!(cached.last_price, 612.5);
+    assert!(cached.instrument_name.is_empty());
 }
 
 #[test]

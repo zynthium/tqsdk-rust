@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use tqsdk_relay::{
     BootstrapConfig, DailyRefreshTime, FuturesUniverseRefreshSchedule, RelayConfig, RelayError,
-    RelayRuntimeConfig, UniverseExpression, UniverseMode, UniverseSpec, UpstreamInsListLimits,
-    next_daily_refresh_delay,
+    RelayResourceLimits, RelayRuntimeConfig, UniverseExpression, UniverseMode, UniverseSpec,
+    UpstreamInsListLimits, next_daily_refresh_delay,
 };
 
 #[test]
@@ -40,6 +40,34 @@ fn default_config_is_memory_only_and_local() {
     assert!(config.disk_cache_dir.is_none());
     assert!(config.best_effort_duration_tag);
     assert!(config.validate().is_ok());
+}
+
+#[test]
+fn runtime_resource_limits_are_env_configured_without_extending_relay_config() {
+    let runtime = RelayRuntimeConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_TICK_RING_CAPACITY" => Some("2".to_string()),
+        "TQSDK_RELAY_OUTBOUND_BYTE_CAPACITY" => Some("4096".to_string()),
+        "TQSDK_RELAY_MARKET_CACHE_MAX_SYMBOLS" => Some("4".to_string()),
+        "TQSDK_RELAY_MARKET_CACHE_MAX_BYTES" => Some("65536".to_string()),
+        _ => None,
+    })
+    .unwrap();
+
+    assert_eq!(runtime.relay_config().tick_ring_capacity, 2);
+    assert_eq!(runtime.resource_limits().outbound_byte_capacity, 4096);
+    assert_eq!(runtime.resource_limits().market_cache.max_symbols, 4);
+    assert_eq!(
+        runtime.resource_limits().market_cache.max_retained_bytes,
+        65_536
+    );
+
+    let err = RelayRuntimeConfig::new(RelayConfig::default())
+        .with_resource_limits(RelayResourceLimits {
+            outbound_byte_capacity: 0,
+            ..RelayResourceLimits::default()
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("outbound_byte_capacity"));
 }
 
 #[test]

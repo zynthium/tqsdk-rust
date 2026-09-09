@@ -34,6 +34,7 @@ pub(super) struct HistoryObservabilitySnapshot {
     pub compression_active: usize,
     pub compression_success_total: u64,
     pub compression_fallback_total: u64,
+    pub compression_cpu_shed_total: u64,
     pub compression_failure_total: u64,
     pub reload_attempt_total: u64,
     pub reload_success_total: u64,
@@ -88,6 +89,7 @@ impl HistoryObservability {
                     compression_active: 0,
                     compression_success_total: 0,
                     compression_fallback_total: 0,
+                    compression_cpu_shed_total: 0,
                     compression_failure_total: 0,
                     reload_attempt_total: 0,
                     reload_success_total: 0,
@@ -198,6 +200,10 @@ impl HistoryObservability {
 
     pub(super) fn compression_fallback(&self) {
         self.with_state(|s| s.compression_fallback_total += 1);
+    }
+
+    pub(super) fn compression_cpu_shed(&self) {
+        self.with_state(|s| s.compression_cpu_shed_total += 1);
     }
 
     pub(super) fn begin_request(&self, request_id: String) -> RequestAudit {

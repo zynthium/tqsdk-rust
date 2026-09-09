@@ -287,19 +287,23 @@ ensure_chart(duration_ns = 0, view_width = N)
 
 ## 对 tqsdk-relay 的含义
 
-当前 `tqsdk-relay` 上游会同时发送：
+`tqsdk-relay` 的基础 universe 上游只发送 quote bootstrap：
 
 ```text
 subscribe_quote(ins_list)
-set_chart(duration = 0, view_width = upstream_tick_view_width)
 peek_message
 ```
 
-因此 relay 的上游启动存在 tick chart backfilling 阶段。把
-`TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1` 只能把 tick 历史窗口调到最小，不能完全禁用
-tick chart。
+下游 chart 或基础 universe 外的 quote interest 才会按当前 interest 的 exact desired-set
+创建 `set_chart(duration = 0, view_width = upstream_tick_view_width)`。基础 universe 内的
+quote-only interest 不会无意义地升级为 tick chart。interest 缩小、chart 删除或 client 断开时，
+relay 会用同一 upstream `chart_id` 发送 `set_chart(ins_list = "")` 删除不再需要的 tick chart；
+本地 sent-state 只在所有相关写入成功后推进，失败重试会重新计算同一 desired-set。
 
-如果未来增加 quote-only relay 模式，应同步调整这些语义：
+因此 `TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1` 只能把实际需要的 tick chart 历史窗口调到最小，
+不能把已请求 tick/K 线的路径变成 quote-only。
+
+如果未来让 relay 对所有 interest 强制采用 quote-only 模式，应同步调整这些语义：
 
 - 上游只发送 `subscribe_quote`，不发送 `set_chart`。
 - `/health` 和 `/metrics` 的 market-data readiness 可以由 quote event 推进。

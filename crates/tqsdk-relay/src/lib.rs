@@ -25,6 +25,7 @@ pub mod protocol;
 pub mod pump;
 #[cfg(feature = "server")]
 pub mod runtime;
+#[cfg(feature = "server")]
 pub mod server;
 mod symbol_identity;
 pub mod symbol_metrics;
@@ -33,10 +34,10 @@ pub mod universe_expression;
 pub mod upstream;
 
 pub use bootstrap::{BootstrapQueue, BootstrapRequest};
-pub use cache::MarketCache;
+pub use cache::{MarketCache, MarketCacheLimits, MarketCacheWriteReport};
 pub use config::{
     BootstrapConfig, DailyRefreshTime, FuturesUniverseRefreshSchedule, RelayConfig,
-    RelayRuntimeConfig, UpstreamInsListLimits, next_daily_refresh_delay,
+    RelayResourceLimits, RelayRuntimeConfig, UpstreamInsListLimits, next_daily_refresh_delay,
 };
 pub use dashboard_read_model::{
     DashboardSnapshot, DashboardSnapshotInputs, DashboardSymbolMetricsSnapshot, DashboardSymbolRow,
@@ -68,7 +69,8 @@ pub use runtime::{
     spawn_configured_upstream_pump_with_runtime_config,
     spawn_configured_upstream_pump_with_runtime_config_and_retry_interval,
 };
-pub use server::RelayServer;
+#[cfg(feature = "server")]
+pub use server::{RelayServer, RelayServerLimits};
 pub use symbol_metrics::{
     SymbolCoverage, SymbolFlow, SymbolIntegrity, SymbolMetricsContext, SymbolMetricsQuery,
     SymbolMetricsSnapshot, SymbolMetricsSummary, SymbolProblemSeverity, SymbolSession, SymbolSort,

@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,7 +10,7 @@ use serde_json::{Value, json};
 use tqsdk_core::{Quote, TradingStatus};
 
 use crate::bootstrap::{BootstrapQueue, BootstrapRequest};
-use crate::cache::MarketCache;
+use crate::cache::{MarketCache, MarketCacheLimits, MarketCacheWriteReport};
 use crate::dashboard_read_model::{
     DashboardSnapshot, DashboardSnapshotInputs, symbol_metrics_context_for_stage,
 };
@@ -86,22 +87,39 @@ impl RelayEventLedger {
     }
 }
 
+/// Immutable market payload routed to one downstream client.
+///
+/// A quote update may target many clients. The engine shares one immutable
+/// JSON value here; the server serializes it once and shares the encoded
+/// WebSocket frame across recipients.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DownstreamFrame {
     pub client_id: ClientId,
-    pub payload: Value,
+    pub payload: Arc<Value>,
+}
+
+impl DownstreamFrame {
+    #[must_use]
+    pub fn new(client_id: ClientId, payload: Value) -> Self {
+        Self::shared(client_id, Arc::new(payload))
+    }
+
+    #[must_use]
+    pub fn shared(client_id: ClientId, payload: Arc<Value>) -> Self {
+        Self { client_id, payload }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct KlineSourceKey {
-    source: SourceKey,
+    duration_ns: i64,
     symbol: String,
 }
 
 impl KlineSourceKey {
-    fn new(source: SourceKey, symbol: impl Into<String>) -> Self {
+    fn new(source: &SourceKey, symbol: impl Into<String>) -> Self {
         Self {
-            source,
+            duration_ns: source.duration_ns,
             symbol: symbol.into(),
         }
     }
@@ -113,7 +131,7 @@ pub struct RelayEngine {
     interests: InterestRegistry,
     bootstrap: BootstrapQueue,
     klines: HashMap<KlineSourceKey, KlineSynthesis>,
-    completed_kline_ids: BTreeMap<KlineSourceKey, BTreeMap<i64, i64>>,
+    completed_klines: BTreeMap<KlineSourceKey, VecDeque<RelayKlineRow>>,
     symbol_metrics: SymbolTelemetryStore,
     upstream_status: RelaySourceStatus,
     upstream_stage: RelaySourceStage,
@@ -127,7 +145,10 @@ pub struct RelayEngine {
     last_upstream_peek_delay_ms: Option<u64>,
     last_upstream_decode_ms: Option<u64>,
     ticks_ingested: u64,
+    cache_evicted_symbols: u64,
+    cache_admission_drops: u64,
     upstream_symbols: usize,
+    upstream_base_symbols: BTreeSet<String>,
     upstream_subscribed_symbols: BTreeSet<String>,
     upstream_tick_chart_symbols: BTreeSet<String>,
     pending_upstream_subscription_symbols: BTreeSet<String>,
@@ -153,7 +174,7 @@ impl RelayEngine {
             interests: InterestRegistry::default(),
             bootstrap: BootstrapQueue::new(4, Duration::from_millis(250)),
             klines: HashMap::new(),
-            completed_kline_ids: BTreeMap::new(),
+            completed_klines: BTreeMap::new(),
             symbol_metrics: SymbolTelemetryStore::default(),
             upstream_status: RelaySourceStatus::Connecting,
             upstream_stage: RelaySourceStage::Connecting,
@@ -167,7 +188,10 @@ impl RelayEngine {
             last_upstream_peek_delay_ms: None,
             last_upstream_decode_ms: None,
             ticks_ingested: 0,
+            cache_evicted_symbols: 0,
+            cache_admission_drops: 0,
             upstream_symbols: 0,
+            upstream_base_symbols: BTreeSet::new(),
             upstream_subscribed_symbols: BTreeSet::new(),
             upstream_tick_chart_symbols: BTreeSet::new(),
             pending_upstream_subscription_symbols: BTreeSet::new(),
@@ -184,6 +208,18 @@ impl RelayEngine {
             last_upstream_invalid_tick_row_error: None,
             event_ledger: RelayEventLedger::default(),
         }
+    }
+
+    /// Builds the memory-only engine with explicit cache admission limits.
+    #[must_use]
+    pub fn new_memory_only_with_cache_limits(
+        tick_capacity: usize,
+        kline_capacity: usize,
+        cache_limits: MarketCacheLimits,
+    ) -> Self {
+        let mut engine = Self::new_memory_only(tick_capacity, kline_capacity);
+        engine.cache = MarketCache::with_limits(tick_capacity, kline_capacity, cache_limits);
+        engine
     }
 
     pub fn handle_command(
@@ -203,10 +239,11 @@ impl RelayEngine {
                     self.interests.remove_chart(client_id, &command.chart_id);
                     self.retain_bootstrap_with_current_chart_interests();
                     self.prune_pending_upstream_subscription_symbols();
-                    return Ok(vec![DownstreamFrame {
+                    self.prune_inactive_kline_state();
+                    return Ok(vec![DownstreamFrame::new(
                         client_id,
-                        payload: delete_chart_payload(&command.chart_id),
-                    }]);
+                        delete_chart_payload(&command.chart_id),
+                    )]);
                 }
                 let replay_subscription = ChartSubscription::new(
                     client_id,
@@ -214,6 +251,7 @@ impl RelayEngine {
                     command.symbols.clone(),
                 );
                 let source = self.interests.set_chart(client_id, command);
+                self.prune_inactive_kline_state();
                 self.bootstrap.enqueue(BootstrapRequest {
                     source: source.clone(),
                     start_id: i64::MIN,
@@ -255,7 +293,8 @@ impl RelayEngine {
         self.record_data_activity_at(receive_unix_millis / 1_000);
         self.symbol_metrics
             .record_tick_at(symbol, &row, receive_unix_millis);
-        self.cache.push_tick(symbol, row.clone());
+        let cache_report = self.cache.push_tick(symbol, row.clone());
+        self.record_cache_write(cache_report);
         let mut frames = self.quote_frames(symbol);
         frames.extend(self.kline_frames(symbol, row)?);
         Ok(frames)
@@ -282,9 +321,11 @@ impl RelayEngine {
             .record_quote_at(symbol, &quote, receive_unix_millis);
         let synthetic_tick = quote_to_synthetic_tick(&quote);
         if let Some(row) = synthetic_tick.clone() {
-            self.cache.push_tick(symbol, row.clone());
+            let tick_cache_report = self.cache.push_tick(symbol, row.clone());
+            self.record_cache_write(tick_cache_report);
         }
-        self.cache.push_quote(symbol, quote);
+        let quote_cache_report = self.cache.push_quote(symbol, quote);
+        self.record_cache_write(quote_cache_report);
         let mut frames = self.quote_frames(symbol);
         if let Some(row) = synthetic_tick {
             frames.extend(self.kline_frames(symbol, row)?);
@@ -335,10 +376,20 @@ impl RelayEngine {
         Ok(Vec::new())
     }
 
+    fn record_cache_write(&mut self, report: MarketCacheWriteReport) {
+        self.cache_evicted_symbols = self
+            .cache_evicted_symbols
+            .saturating_add(u64::try_from(report.evicted_symbols).unwrap_or(u64::MAX));
+        if !report.stored {
+            self.cache_admission_drops = self.cache_admission_drops.saturating_add(1);
+        }
+    }
+
     pub fn remove_client(&mut self, client_id: ClientId) {
         self.interests.remove_client(client_id);
         self.retain_bootstrap_with_current_chart_interests();
         self.prune_pending_upstream_subscription_symbols();
+        self.prune_inactive_kline_state();
     }
 
     fn retain_bootstrap_with_current_chart_interests(&mut self) {
@@ -495,7 +546,8 @@ impl RelayEngine {
             max_chars,
             unix_secs,
         );
-        self.upstream_subscribed_symbols = symbols.iter().cloned().collect();
+        self.upstream_base_symbols = symbols.iter().cloned().collect();
+        self.upstream_subscribed_symbols = self.upstream_base_symbols.clone();
         self.upstream_tick_chart_symbols.clear();
         self.symbol_metrics
             .record_universe(symbols, unix_secs.saturating_mul(1_000));
@@ -517,10 +569,11 @@ impl RelayEngine {
             max_chars,
             unix_secs,
         );
-        self.upstream_subscribed_symbols = contracts
+        self.upstream_base_symbols = contracts
             .iter()
             .map(|contract| contract.symbol.clone())
             .collect();
+        self.upstream_subscribed_symbols = self.upstream_base_symbols.clone();
         self.upstream_tick_chart_symbols.clear();
         self.symbol_metrics.record_universe(
             contracts.iter().map(|contract| contract.symbol.as_str()),
@@ -537,6 +590,10 @@ impl RelayEngine {
         self.queue_missing_upstream_symbols_for_current_interests();
     }
 
+    /// Records the exact dynamic tick-chart set confirmed after upstream writes.
+    ///
+    /// The historical method name is retained for callers; `symbols` replaces
+    /// the prior dynamic set rather than accumulating forever.
     pub fn record_dynamic_upstream_subscription_sent<I, S>(
         &mut self,
         symbols: I,
@@ -546,27 +603,24 @@ impl RelayEngine {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let mut changed = false;
-        for symbol in symbols {
-            let symbol = symbol.as_ref().trim();
-            if symbol.is_empty() {
-                continue;
-            }
-            changed |= self.upstream_subscribed_symbols.insert(symbol.to_string());
-            self.upstream_tick_chart_symbols.insert(symbol.to_string());
-            self.pending_upstream_subscription_symbols.remove(symbol);
-        }
+        self.upstream_tick_chart_symbols = symbols
+            .into_iter()
+            .map(|symbol| symbol.as_ref().trim().to_string())
+            .filter(|symbol| !symbol.is_empty())
+            .collect();
+        self.upstream_subscribed_symbols = self.upstream_base_symbols.clone();
+        self.upstream_subscribed_symbols
+            .extend(self.upstream_tick_chart_symbols.iter().cloned());
         self.upstream_symbols = self.upstream_subscribed_symbols.len();
+        self.pending_upstream_subscription_symbols.clear();
         self.upstream_ins_list_chars = self.upstream_ins_list_chars.max(upstream_ins_list_chars);
         self.upstream_ins_list_over_warn = self
             .upstream_ins_list_warn_chars
             .is_some_and(|warn_chars| self.upstream_ins_list_chars > warn_chars);
-        if changed {
-            self.symbol_metrics.record_universe(
-                self.upstream_subscribed_symbols.iter().map(String::as_str),
-                unix_secs.saturating_mul(1_000),
-            );
-        }
+        self.symbol_metrics.record_universe(
+            self.upstream_subscribed_symbols.iter().map(String::as_str),
+            unix_secs.saturating_mul(1_000),
+        );
     }
 
     pub fn retain_missing_upstream_subscription_symbols<I, S>(&self, symbols: I) -> Vec<String>
@@ -737,6 +791,22 @@ impl RelayEngine {
         &self.interests
     }
 
+    /// Returns the exact upstream tick-chart symbols required by current
+    /// downstream interests. Symbols already covered by the configured
+    /// quote-only universe do not need a tick chart unless a client explicitly
+    /// owns a chart for them.
+    #[must_use]
+    pub fn desired_upstream_tick_chart_symbols(&self) -> BTreeSet<String> {
+        let mut desired = self.interests.chart_symbols();
+        desired.extend(
+            self.interests
+                .subscribed_symbols()
+                .into_iter()
+                .filter(|symbol| !self.upstream_base_symbols.contains(symbol)),
+        );
+        desired
+    }
+
     #[must_use]
     pub fn bootstrap_pending_len(&self) -> usize {
         self.bootstrap.len()
@@ -827,6 +897,12 @@ impl RelayEngine {
             quote_subscriptions: self.interests.total_quote_subscriptions(),
             chart_subscriptions: self.interests.total_chart_subscriptions(),
             ticks_ingested: self.ticks_ingested,
+            market_cache_symbols: self.cache.cached_symbols(),
+            market_cache_retained_bytes: self.cache.retained_bytes(),
+            market_cache_max_symbols: self.cache.limits().max_symbols,
+            market_cache_max_retained_bytes: self.cache.limits().max_retained_bytes,
+            market_cache_evicted_symbols: self.cache_evicted_symbols,
+            market_cache_admission_drops: self.cache_admission_drops,
             bootstrap_pending: self.bootstrap.len(),
             bootstrap_inflight: self.bootstrap.inflight(),
             upstream_stage: self.upstream_stage,
@@ -924,18 +1000,21 @@ impl RelayEngine {
     }
 
     fn quote_frames(&self, symbol: &str) -> Vec<DownstreamFrame> {
-        let Some(quote) = self.cache.quote(symbol) else {
+        let Some(clients) = self
+            .interests
+            .quote_clients_ref(symbol)
+            .filter(|clients| !clients.is_empty())
+        else {
             return Vec::new();
         };
-        let payload = quote_payload(symbol, quote);
-
-        self.interests
-            .quote_clients(symbol)
-            .into_iter()
-            .map(|client_id| DownstreamFrame {
-                client_id,
-                payload: payload.clone(),
-            })
+        let Some(quote) = self.cache.quote_ref(symbol) else {
+            return Vec::new();
+        };
+        let payload = Arc::new(quote_payload(symbol, quote));
+        clients
+            .iter()
+            .copied()
+            .map(|client_id| DownstreamFrame::shared(client_id, Arc::clone(&payload)))
             .collect()
     }
 
@@ -947,10 +1026,9 @@ impl RelayEngine {
         symbols
             .iter()
             .filter_map(|symbol| {
-                self.cache.quote(symbol).map(|quote| DownstreamFrame {
-                    client_id,
-                    payload: quote_payload(symbol, quote),
-                })
+                self.cache
+                    .quote_ref(symbol)
+                    .map(|quote| DownstreamFrame::new(client_id, quote_payload(symbol, quote)))
             })
             .collect()
     }
@@ -960,49 +1038,75 @@ impl RelayEngine {
         symbol: &str,
         row: RelayTickRow,
     ) -> RelayResult<Vec<DownstreamFrame>> {
-        let sources = self.interests.sources_for_symbol(symbol);
-        let mut frames = Vec::new();
-        for source in sources {
-            if source.duration_ns <= 0 {
-                continue;
+        let mut sources_by_duration = BTreeMap::<i64, Vec<&SourceKey>>::new();
+        for source in self
+            .interests
+            .sources_for_symbol_ref(symbol)
+            .into_iter()
+            .flatten()
+        {
+            if source.duration_ns > 0 {
+                sources_by_duration
+                    .entry(source.duration_ns)
+                    .or_default()
+                    .push(source);
             }
-            let key = KlineSourceKey::new(source.clone(), symbol.to_string());
+        }
+
+        let mut frames = Vec::new();
+        for sources in sources_by_duration.into_values() {
+            let source = sources
+                .first()
+                .expect("non-empty duration group from source insertion");
+            let key = KlineSourceKey::new(source, symbol);
             let completed_rows = {
                 let synthesizer = self
                     .klines
                     .entry(key.clone())
                     .or_insert_with(|| KlineSynthesis::new(symbol.to_string(), source.duration_ns));
-                synthesizer.push_tick(row.clone())?
+                synthesizer.push_tick_ref(&row)?
             };
+
             for completed in completed_rows {
-                self.record_completed_kline_id(key.clone(), &completed);
-                let kline_payload =
+                let kline_capacity = self.cache.kline_capacity();
+                let rows = self.completed_klines.entry(key.clone()).or_default();
+                if !rows.back().is_some_and(|last| last.id == completed.id) {
+                    rows.push_back(completed.clone());
+                    while rows.len() > kline_capacity {
+                        let _ = rows.pop_front();
+                    }
+                }
+                let kline_payload = Arc::new(
                     RelayMarketFrame::rtn_data(vec![RelayMarketFrame::kline_update(
                         symbol,
                         source.duration_ns,
                         completed.clone(),
                     )])
-                    .into_value();
-                for subscription in self.interests.chart_subscriptions(&source) {
-                    frames.push(DownstreamFrame {
-                        client_id: subscription.client_id,
-                        payload: kline_payload.clone(),
-                    });
-                    frames.extend(self.binding_frames_for_completed(
-                        &source,
-                        &subscription,
-                        symbol,
-                        &completed,
-                    ));
-                    if subscription
-                        .symbols
-                        .first()
-                        .is_some_and(|primary| primary == symbol)
-                    {
-                        frames.push(DownstreamFrame {
-                            client_id: subscription.client_id,
-                            payload: chart_payload(&subscription, &source, completed.id),
-                        });
+                    .into_value(),
+                );
+
+                for source in &sources {
+                    for subscription in self.interests.chart_subscriptions(source) {
+                        frames.push(DownstreamFrame::shared(
+                            subscription.client_id,
+                            Arc::clone(&kline_payload),
+                        ));
+                        frames.extend(self.binding_frames_for_completed(
+                            source,
+                            &subscription,
+                            symbol,
+                            &completed,
+                        ));
+                        if subscription
+                            .symbols
+                            .first()
+                            .is_some_and(|primary| primary == symbol)
+                        {
+                            frames.push(DownstreamFrame::new(
+                                subscription.client_id,
+                                chart_payload(&subscription, source, completed.id),
+                            ));
+                        }
                     }
                 }
             }
@@ -1020,75 +1124,92 @@ impl RelayEngine {
         }
 
         let mut frames = Vec::new();
-        let mut replayed_rows = Vec::new();
         for symbol in &source.symbols {
-            let key = KlineSourceKey::new(source.clone(), symbol.clone());
-            if self.klines.contains_key(&key) {
-                continue;
-            }
-            let ticks = self.cache.ticks(symbol);
-            if ticks.is_empty() {
-                continue;
-            }
-            let mut synthesis = KlineSynthesis::new(symbol.clone(), source.duration_ns);
-            let mut completed_rows = Vec::new();
-            for tick in ticks {
-                completed_rows.extend(synthesis.push_tick(tick)?);
-            }
-            for completed in &completed_rows {
-                self.record_completed_kline_id(key.clone(), completed);
-            }
-            self.klines.insert(key, synthesis);
-            replayed_rows.extend(
-                completed_rows
-                    .into_iter()
-                    .map(|completed| (symbol.clone(), completed)),
-            );
-        }
+            let key = KlineSourceKey::new(source, symbol);
+            if !self.klines.contains_key(&key) {
+                let Some(ticks) = self.cache.tick_ring(symbol) else {
+                    continue;
+                };
+                if ticks.is_empty() {
+                    continue;
+                }
 
-        for (symbol, completed) in &replayed_rows {
-            frames.push(DownstreamFrame {
-                client_id: subscription.client_id,
-                payload: RelayMarketFrame::rtn_data(vec![RelayMarketFrame::kline_update(
-                    symbol,
-                    source.duration_ns,
-                    completed.clone(),
-                )])
-                .into_value(),
-            });
-        }
-        for (symbol, completed) in &replayed_rows {
-            frames.extend(self.binding_frames_for_completed(
-                source,
-                subscription,
-                symbol,
-                completed,
-            ));
-            if subscription
-                .symbols
-                .first()
-                .is_some_and(|primary| primary == symbol)
-            {
-                frames.push(DownstreamFrame {
-                    client_id: subscription.client_id,
-                    payload: chart_payload(subscription, source, completed.id),
-                });
+                let mut synthesis = KlineSynthesis::new(symbol.clone(), source.duration_ns);
+                let mut completed_rows = Vec::new();
+                for tick in ticks {
+                    completed_rows.extend(synthesis.push_tick_ref(tick)?);
+                }
+                for completed in &completed_rows {
+                    self.record_completed_kline(&key, completed);
+                }
+                self.klines.insert(key.clone(), synthesis);
+            }
+
+            if let Some(completed_rows) = self.completed_klines.get(&key) {
+                for completed in completed_rows {
+                    frames.push(DownstreamFrame::new(
+                        subscription.client_id,
+                        RelayMarketFrame::rtn_data(vec![RelayMarketFrame::kline_update(
+                            symbol,
+                            source.duration_ns,
+                            completed.clone(),
+                        )])
+                        .into_value(),
+                    ));
+                    frames.extend(self.binding_frames_for_completed(
+                        source,
+                        subscription,
+                        symbol,
+                        completed,
+                    ));
+                    if subscription
+                        .symbols
+                        .first()
+                        .is_some_and(|primary| primary == symbol)
+                    {
+                        frames.push(DownstreamFrame::new(
+                            subscription.client_id,
+                            chart_payload(subscription, source, completed.id),
+                        ));
+                    }
+                }
             }
         }
         Ok(frames)
     }
 
-    fn record_completed_kline_id(&mut self, key: KlineSourceKey, row: &RelayKlineRow) {
-        self.completed_kline_ids
-            .entry(key)
-            .or_default()
-            .insert(row.datetime, row.id);
+    fn record_completed_kline(&mut self, key: &KlineSourceKey, row: &RelayKlineRow) {
+        let kline_capacity = self.cache.kline_capacity();
+        let rows = self.completed_klines.entry(key.clone()).or_default();
+        if rows.back().is_some_and(|last| last.id == row.id) {
+            return;
+        }
+        rows.push_back(row.clone());
+        while rows.len() > kline_capacity {
+            let _ = rows.pop_front();
+        }
     }
 
     fn completed_kline_id(&self, source: &SourceKey, symbol: &str, datetime: i64) -> Option<i64> {
-        self.completed_kline_ids
-            .get(&KlineSourceKey::new(source.clone(), symbol.to_string()))
-            .and_then(|rows| rows.get(&datetime).copied())
+        self.completed_klines
+            .get(&KlineSourceKey::new(source, symbol))
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|row| row.datetime == datetime)
+                    .map(|row| row.id)
+            })
+    }
+
+    fn prune_inactive_kline_state(&mut self) {
+        let mut active_keys = BTreeSet::new();
+        for source in self.interests.active_chart_sources() {
+            for symbol in &source.symbols {
+                active_keys.insert(KlineSourceKey::new(&source, symbol));
+            }
+        }
+        self.klines.retain(|key, _| active_keys.contains(key));
+        self.completed_klines
+            .retain(|key, _| active_keys.contains(key));
     }
 
     fn binding_frames_for_completed(
@@ -1111,16 +1232,16 @@ impl RelayEngine {
                 if let Some(secondary_id) =
                     self.completed_kline_id(source, secondary_symbol, completed.datetime)
                 {
-                    frames.push(DownstreamFrame {
-                        client_id: subscription.client_id,
-                        payload: binding_payload(
+                    frames.push(DownstreamFrame::new(
+                        subscription.client_id,
+                        binding_payload(
                             primary_symbol,
                             source.duration_ns,
                             secondary_symbol,
                             completed.id,
                             secondary_id,
                         ),
-                    });
+                    ));
                 }
             }
             return frames;
@@ -1137,16 +1258,16 @@ impl RelayEngine {
         if let Some(primary_id) =
             self.completed_kline_id(source, primary_symbol, completed.datetime)
         {
-            frames.push(DownstreamFrame {
-                client_id: subscription.client_id,
-                payload: binding_payload(
+            frames.push(DownstreamFrame::new(
+                subscription.client_id,
+                binding_payload(
                     primary_symbol,
                     source.duration_ns,
                     completed_symbol,
                     primary_id,
                     completed.id,
                 ),
-            });
+            ));
         }
         frames
     }
@@ -1229,12 +1350,12 @@ fn binding_payload(
     })
 }
 
-fn quote_payload(symbol: &str, quote: Quote) -> Value {
+fn quote_payload(symbol: &str, quote: &Quote) -> Value {
     RelayMarketFrame::rtn_data(vec![RelayMarketFrame::RtnData(vec![json!({
         "quotes": {
             symbol: {
-                "instrument_id": quote.instrument_id,
-                "datetime": quote.datetime,
+                "instrument_id": quote.instrument_id.as_str(),
+                "datetime": quote.datetime.as_str(),
                 "last_price": quote.last_price,
                 "volume": quote.volume,
                 "open_interest": quote.open_interest
@@ -1296,4 +1417,99 @@ fn current_unix_millis() -> u64 {
         .map_or(0, |duration| {
             u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::SetChartCommand;
+
+    fn chart(symbol: &str) -> DownstreamCommand {
+        chart_with_view_width(symbol, 16)
+    }
+
+    fn chart_with_view_width(symbol: &str, view_width: usize) -> DownstreamCommand {
+        DownstreamCommand::SetChart(SetChartCommand {
+            chart_id: "chart".to_string(),
+            symbols: vec![symbol.to_string()],
+            duration_ns: 60,
+            view_width,
+            left_kline_id: None,
+            focus_datetime_ns: None,
+            focus_position: None,
+        })
+    }
+
+    fn tick(id: i64, datetime: i64) -> RelayTickRow {
+        RelayTickRow {
+            id,
+            datetime,
+            last_price: 600.0 + id as f64,
+            volume: id * 10,
+            open_interest: id * 100,
+        }
+    }
+
+    #[test]
+    fn completed_klines_are_capacity_bounded() {
+        let client = ClientId::new(1);
+        let mut engine = RelayEngine::new_memory_only(16, 2);
+        engine.handle_command(client, chart("SHFE.au2602")).unwrap();
+
+        for id in 0..=3 {
+            engine
+                .ingest_tick_at_for_test("SHFE.au2602", tick(id, id * 60), 0)
+                .unwrap();
+        }
+
+        let rows = engine.completed_klines.values().next().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| row.datetime == 60));
+        assert!(rows.iter().any(|row| row.datetime == 120));
+    }
+
+    #[test]
+    fn removing_last_chart_client_reclaims_kline_state() {
+        let client = ClientId::new(1);
+        let mut engine = RelayEngine::new_memory_only(16, 4);
+        engine.handle_command(client, chart("SHFE.au2602")).unwrap();
+        engine
+            .ingest_tick_at_for_test("SHFE.au2602", tick(0, 0), 0)
+            .unwrap();
+        engine
+            .ingest_tick_at_for_test("SHFE.au2602", tick(1, 60), 0)
+            .unwrap();
+        assert!(!engine.klines.is_empty());
+        assert!(!engine.completed_klines.is_empty());
+
+        engine.remove_client(client);
+
+        assert!(engine.klines.is_empty());
+        assert!(engine.completed_klines.is_empty());
+    }
+
+    #[test]
+    fn matching_symbol_and_duration_share_synthesis_across_view_widths() {
+        let mut engine = RelayEngine::new_memory_only(16, 4);
+        engine
+            .handle_command(ClientId::new(1), chart_with_view_width("SHFE.au2602", 16))
+            .unwrap();
+        engine
+            .ingest_tick_at_for_test("SHFE.au2602", tick(0, 0), 0)
+            .unwrap();
+        engine
+            .ingest_tick_at_for_test("SHFE.au2602", tick(1, 60), 0)
+            .unwrap();
+
+        let replay = engine
+            .handle_command(ClientId::new(2), chart_with_view_width("SHFE.au2602", 256))
+            .unwrap();
+
+        assert_eq!(engine.klines.len(), 1);
+        assert!(
+            replay
+                .iter()
+                .any(|frame| { frame.payload["data"][0].get("klines").is_some() })
+        );
+    }
 }

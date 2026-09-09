@@ -165,7 +165,7 @@ relay 增量消费 run chunks，但在 terminal success 前不发送 body。term
 失败时丢弃所有 buffered rows 并发送一个完整错误响应。不得把 partial rows 与错误混合。
 
 默认限制为 active 8、queue 100 ms、total timeout 10 s、Kline 10,000 rows、Tick 50,000 rows、
-uncompressed 32 MiB、daemon-global buffer 512 MiB。
+uncompressed 32 MiB、daemon-global buffer 512 MiB，以及 4 个 shared history CPU-work permit。
 
 若请求起点晚于 relay 捕获的服务器时间超过 5 秒，整个区间尚未发生。listener 必须在进入
 admission queue、读取 live cache 或 pinned snapshot 之前直接返回
@@ -235,7 +235,8 @@ maintenance 持锁期间返回 503，而不是跨维护窗口混读。
 - 有压缩协商的响应始终带 `Vary: Accept-Encoding`；
 - 只有 client 明确接受 gzip、body 至少 64 KiB、两个专用 worker 有空位且 CPU affinity gate 成功时，
   才使用 gzip level 1；
-- compression queue 满时使用 identity，不等待另一个隐藏队列；
+- compression queue 满时使用 identity，不等待另一个隐藏队列；共享 CPU-work permit 耗尽时也立即
+  使用 identity，并记录 `compression_cpu_shed_total`；
 - gzip 时间属于同一个 10 秒 total timeout。
 
 `source_mode` 明确为 `live-cache` 或 `published`。为兼容旧客户端，`snapshot_id` 保留：live-cache

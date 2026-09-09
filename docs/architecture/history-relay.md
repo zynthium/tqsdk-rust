@@ -126,6 +126,7 @@ history 的默认硬边界：
 | Tick rows | 50,000 |
 | uncompressed response | 32 MiB |
 | daemon-global history buffers | 512 MiB |
+| shared history CPU work permits | 4 |
 | gzip workers | 2 |
 | gzip threshold | 64 KiB |
 | gzip level | 1 |
@@ -134,7 +135,10 @@ history 的默认硬边界：
 compression buffers；它不是整个进程 RSS 上限。data 只提供
 `BacktestHistorySnapshotResourceBudget` / opaque reservation seam；relay 负责配置总额，并通过
 `BacktestHistorySnapshotQueryResources` 把同一 budget 与 per-request active pin 带入 coordinator、
-shared scan 和 blocking reader。per-run/per-symbol semaphore 只能作为其下级限制。
+shared scan 和 blocking reader。per-run/per-symbol semaphore 只能作为其下级限制。另有四个 relay-owned
+共享 CPU-work permit，同时约束 snapshot reload、data blocking scan 与 gzip；reload/scan 等待 permit
+时可取消，gzip 不排队等待而是立即返回 identity，并递增 `compression_cpu_shed_total`。这不是整个进程
+或其他 subsystem 的 CPU governor。
 
 relay 增量消费 `BacktestHistoryRun::next()`，但必须先缓存在有界私有内存中，只有 terminal report
 证明 coverage、finality、metadata hash 和 snapshot identity 全部一致后才发送完整 body。任何失败都

@@ -68,6 +68,7 @@ async fn relay_accepts_websocket_market_command_and_updates_engine() {
         json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"}).to_string(),
     )
     .await;
+    wait_for_quote_subscriptions(&engine, 1).await;
     stream.shutdown().await.unwrap();
     server_task.await.unwrap();
 
@@ -77,7 +78,7 @@ async fn relay_accepts_websocket_market_command_and_updates_engine() {
             .unwrap()
             .metrics_snapshot()
             .quote_subscriptions,
-        1
+        0
     );
 }
 
@@ -102,6 +103,7 @@ async fn relay_answers_downstream_ping_and_keeps_client_connected() {
         json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"}).to_string(),
     )
     .await;
+    wait_for_quote_subscriptions(&engine, 1).await;
     stream.shutdown().await.unwrap();
     server_task.await.unwrap();
 
@@ -111,7 +113,7 @@ async fn relay_answers_downstream_ping_and_keeps_client_connected() {
             .unwrap()
             .metrics_snapshot()
             .quote_subscriptions,
-        1
+        0
     );
 }
 
@@ -562,6 +564,168 @@ fn tick(id: i64, datetime: i64, price: f64) -> RelayTickRow {
         volume: id * 10,
         open_interest: 1000 + id,
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn relay_configured_upstream_reconciles_removed_downstream_chart() {
+    use websocket_support::TestWebSocketServer;
+
+    let (added_tx, added_rx) = std::sync::mpsc::channel();
+    let (remove_tx, remove_rx) = std::sync::mpsc::channel();
+    let (removed_tx, removed_rx) = std::sync::mpsc::channel();
+    let upstream = TestWebSocketServer::spawn(move |mut socket| {
+        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
+        expect_subscribe_quote(&mut socket, "DCE.m2609,SHFE.au2602");
+        expect_peek_message(&mut socket);
+        expect_set_chart(&mut socket, "DCE.m2609");
+        expect_peek_message(&mut socket);
+        added_tx.send(()).unwrap();
+
+        remove_rx.recv().unwrap();
+        expect_subscribe_quote(&mut socket, "SHFE.au2602");
+        expect_peek_message(&mut socket);
+        let deletion = recv_text_json(&mut socket, "set_chart deletion");
+        assert_eq!(deletion["aid"], "set_chart");
+        assert!(
+            deletion["chart_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
+        assert_eq!(deletion["ins_list"], "");
+        expect_peek_message(&mut socket);
+        removed_tx.send(()).unwrap();
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+    let server = RelayServer::new(engine.clone());
+    let config = RelayConfig {
+        upstream_market_url: upstream.url("/market"),
+        futures_universe_expression: Some(
+            tqsdk_relay::UniverseExpression::parse("symbol:SHFE.au2602").unwrap(),
+        ),
+        ..RelayConfig::default()
+    };
+    let _upstream_shutdown = spawn_configured_upstream_pump(&config, server.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move { server.serve_once(listener).await.unwrap() });
+    let mut stream = connect_ws(addr).await;
+
+    send_masked_text(
+        &mut stream,
+        json!({
+            "aid": "set_chart",
+            "chart_id": "client-dce",
+            "ins_list": "DCE.m2609",
+            "duration": 0,
+            "view_width": 1,
+        })
+        .to_string(),
+    )
+    .await;
+    wait_for_dynamic_subscription(added_rx).await;
+
+    remove_tx.send(()).unwrap();
+    send_masked_text(
+        &mut stream,
+        json!({
+            "aid": "set_chart",
+            "chart_id": "client-dce",
+            "ins_list": "",
+            "duration": 0,
+            "view_width": 1,
+        })
+        .to_string(),
+    )
+    .await;
+    wait_for_dynamic_subscription(removed_rx).await;
+    assert_eq!(
+        engine.lock().unwrap().metrics_snapshot().upstream_symbols,
+        1
+    );
+
+    stream.shutdown().await.unwrap();
+    server_task.await.unwrap();
+    upstream.join();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn relay_configured_upstream_reconciles_client_disconnect() {
+    use websocket_support::TestWebSocketServer;
+
+    let (added_tx, added_rx) = std::sync::mpsc::channel();
+    let (removed_tx, removed_rx) = std::sync::mpsc::channel();
+    let upstream = TestWebSocketServer::spawn(move |mut socket| {
+        expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
+        expect_subscribe_quote(&mut socket, "DCE.m2609,SHFE.au2602");
+        expect_peek_message(&mut socket);
+        expect_set_chart(&mut socket, "DCE.m2609");
+        expect_peek_message(&mut socket);
+        added_tx.send(()).unwrap();
+
+        expect_subscribe_quote(&mut socket, "SHFE.au2602");
+        expect_peek_message(&mut socket);
+        let deletion = recv_text_json(&mut socket, "set_chart deletion after disconnect");
+        assert_eq!(deletion["aid"], "set_chart");
+        assert!(
+            deletion["chart_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
+        assert_eq!(deletion["ins_list"], "");
+        expect_peek_message(&mut socket);
+        removed_tx.send(()).unwrap();
+        socket.send_close().unwrap();
+    })
+    .unwrap();
+
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+    let server = RelayServer::new(engine.clone());
+    let config = RelayConfig {
+        upstream_market_url: upstream.url("/market"),
+        futures_universe_expression: Some(
+            tqsdk_relay::UniverseExpression::parse("symbol:SHFE.au2602").unwrap(),
+        ),
+        ..RelayConfig::default()
+    };
+    let _upstream_shutdown = spawn_configured_upstream_pump(&config, server.clone())
+        .await
+        .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        server.serve_once(listener).await.unwrap();
+    });
+
+    let mut stream = connect_ws(addr).await;
+    send_masked_text(
+        &mut stream,
+        json!({
+            "aid": "set_chart",
+            "chart_id": "client-dce",
+            "ins_list": "DCE.m2609",
+            "duration": 0,
+            "view_width": 1,
+        })
+        .to_string(),
+    )
+    .await;
+    wait_for_dynamic_subscription(added_rx).await;
+
+    stream.shutdown().await.unwrap();
+    server_task.await.unwrap();
+    wait_for_dynamic_subscription(removed_rx).await;
+    assert_eq!(
+        engine.lock().unwrap().metrics_snapshot().upstream_symbols,
+        1
+    );
+    upstream.join();
 }
 
 async fn wait_for_quote_subscriptions(engine: &Arc<Mutex<RelayEngine>>, expected: usize) {

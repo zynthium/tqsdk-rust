@@ -591,7 +591,12 @@ pub struct WebSocketUpstreamTickSource {
     buffered: VecDeque<UpstreamMarketEvent>,
     tick_row_cache: TickRowCache,
     quote_cache: QuoteCache,
+    /// Quote-only upstream interest configured at connection time.
     quote_symbols: BTreeSet<String>,
+    /// Exact quote set successfully sent upstream, including active tick charts.
+    subscribed_quote_symbols: BTreeSet<String>,
+    /// Exact tick-chart set successfully sent upstream, keyed by upstream chart id.
+    tick_charts: BTreeMap<String, UpstreamTickChart>,
     closed: bool,
     invalid_tick_rows: u64,
     invalid_tick_rows_by_symbol: BTreeMap<String, u64>,
@@ -612,6 +617,8 @@ impl WebSocketUpstreamTickSource {
             tick_row_cache: TickRowCache::default(),
             quote_cache: QuoteCache::default(),
             quote_symbols: BTreeSet::new(),
+            subscribed_quote_symbols: BTreeSet::new(),
+            tick_charts: BTreeMap::new(),
             closed: false,
             invalid_tick_rows: 0,
             invalid_tick_rows_by_symbol: BTreeMap::new(),
@@ -667,10 +674,9 @@ impl WebSocketUpstreamTickSource {
                 "upstream quote subscriptions require at least one symbol",
             ));
         }
-        self.quote_symbols.extend(symbols.iter().cloned());
-        self.send_quote_subscription().await?;
-        self.record_subscription_sent();
-        Ok(())
+        self.quote_symbols.extend(symbols);
+        let charts = self.tick_charts.values().cloned().collect::<Vec<_>>();
+        self.reconcile_tick_charts(&charts).await
     }
 
     pub async fn subscribe_tick_charts(&mut self, charts: &[UpstreamTickChart]) -> RelayResult<()> {
@@ -679,33 +685,110 @@ impl WebSocketUpstreamTickSource {
                 "upstream tick charts require at least one chart",
             ));
         }
+        let mut desired = self.tick_charts.clone();
         for chart in charts {
-            self.quote_symbols.extend(chart.symbols().iter().cloned());
+            desired.insert(chart.chart_id().to_owned(), chart.clone());
         }
-        self.send_quote_subscription().await?;
+        let desired = desired.into_values().collect::<Vec<_>>();
+        self.reconcile_tick_charts(&desired).await
+    }
+
+    /// Reconciles upstream tick charts to the supplied exact desired set.
+    ///
+    /// Sent-state advances only after every request succeeds. A retry after a
+    /// partial transport failure therefore replays idempotent full quote and
+    /// `set_chart` requests instead of treating a partial update as confirmed.
+    pub(crate) async fn reconcile_tick_charts(
+        &mut self,
+        charts: &[UpstreamTickChart],
+    ) -> RelayResult<()> {
+        let mut desired_charts = BTreeMap::new();
         for chart in charts {
-            self.send_json(serde_json::json!({
-                "aid": "set_chart",
-                "chart_id": chart.chart_id(),
-                "ins_list": chart.ins_list(),
-                "duration": chart.duration_ns(),
-                "view_width": chart.view_width(),
-            }))
-            .await?;
-            self.send_peek_message().await?;
+            if let Some(previous) =
+                desired_charts.insert(chart.chart_id().to_owned(), chart.clone())
+                && previous != *chart
+            {
+                return Err(RelayError::invalid_config(format!(
+                    "upstream tick chart_id {} has conflicting definitions",
+                    chart.chart_id()
+                )));
+            }
         }
+
+        let mut desired_quote_symbols = self.quote_symbols.clone();
+        for chart in desired_charts.values() {
+            desired_quote_symbols.extend(chart.symbols().iter().cloned());
+        }
+        let quote_changed = desired_quote_symbols != self.subscribed_quote_symbols;
+        let stale_charts = self
+            .tick_charts
+            .iter()
+            .filter(|(chart_id, _)| !desired_charts.contains_key(*chart_id))
+            .map(|(_, chart)| chart.clone())
+            .collect::<Vec<_>>();
+        let changed_charts = desired_charts
+            .iter()
+            .filter(|(chart_id, chart)| self.tick_charts.get(*chart_id) != Some(*chart))
+            .map(|(_, chart)| chart.clone())
+            .collect::<Vec<_>>();
+        // Preserve the established upstream sequencing: a new or replacement
+        // chart is preceded by the complete quote subscription, even when that
+        // quote set is unchanged. This also keeps peers that gate `set_chart`
+        // handling on the preceding quote request compatible.
+        let should_send_quote = quote_changed || !changed_charts.is_empty();
+
+        if !should_send_quote && stale_charts.is_empty() && changed_charts.is_empty() {
+            return Ok(());
+        }
+
+        if should_send_quote {
+            self.send_quote_subscription(&desired_quote_symbols).await?;
+        }
+        for chart in stale_charts {
+            self.send_tick_chart_deletion(&chart).await?;
+        }
+        for chart in changed_charts {
+            self.send_tick_chart_subscription(&chart).await?;
+        }
+
+        self.subscribed_quote_symbols = desired_quote_symbols;
+        self.tick_charts = desired_charts;
         self.record_subscription_sent();
         Ok(())
     }
 
-    async fn send_quote_subscription(&mut self) -> RelayResult<()> {
+    async fn send_quote_subscription(&mut self, symbols: &BTreeSet<String>) -> RelayResult<()> {
         self.send_json(serde_json::json!({
             "aid": "subscribe_quote",
-            "ins_list": join_symbols(&self.quote_symbols),
+            "ins_list": join_symbols(symbols),
         }))
         .await?;
         self.send_peek_message().await?;
         Ok(())
+    }
+
+    async fn send_tick_chart_subscription(&mut self, chart: &UpstreamTickChart) -> RelayResult<()> {
+        self.send_json(serde_json::json!({
+            "aid": "set_chart",
+            "chart_id": chart.chart_id(),
+            "ins_list": chart.ins_list(),
+            "duration": chart.duration_ns(),
+            "view_width": chart.view_width(),
+        }))
+        .await?;
+        self.send_peek_message().await
+    }
+
+    async fn send_tick_chart_deletion(&mut self, chart: &UpstreamTickChart) -> RelayResult<()> {
+        self.send_json(serde_json::json!({
+            "aid": "set_chart",
+            "chart_id": chart.chart_id(),
+            "ins_list": "",
+            "duration": chart.duration_ns(),
+            "view_width": chart.view_width(),
+        }))
+        .await?;
+        self.send_peek_message().await
     }
 
     async fn send_peek_message(&mut self) -> RelayResult<()> {

@@ -59,6 +59,7 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 struct HistoryState {
     snapshots: Arc<SnapshotSlot>,
     active: Arc<Semaphore>,
+    cpu_permits: Arc<Semaphore>,
     buffers: Arc<ByteBudget>,
     scan_budget: Arc<SnapshotScanBudget>,
     compression: Option<Arc<CompressionPool>>,
@@ -66,10 +67,25 @@ struct HistoryState {
 }
 
 impl HistoryState {
+    #[cfg(test)]
     fn new(
         snapshots: Arc<SnapshotSlot>,
         compression: Option<Arc<CompressionPool>>,
         observability: Arc<HistoryObservability>,
+    ) -> Self {
+        Self::with_cpu_permits(
+            snapshots,
+            compression,
+            observability,
+            Arc::new(Semaphore::new(super::MAX_HISTORY_CPU_WORKERS)),
+        )
+    }
+
+    fn with_cpu_permits(
+        snapshots: Arc<SnapshotSlot>,
+        compression: Option<Arc<CompressionPool>>,
+        observability: Arc<HistoryObservability>,
+        cpu_permits: Arc<Semaphore>,
     ) -> Self {
         let buffers = Arc::new(ByteBudget::monitored(
             GLOBAL_BUFFER_BYTES,
@@ -78,6 +94,7 @@ impl HistoryState {
         Self {
             snapshots,
             active: Arc::new(Semaphore::new(MAX_ACTIVE_REQUESTS)),
+            cpu_permits,
             scan_budget: Arc::new(SnapshotScanBudget {
                 buffers: buffers.clone(),
             }),
@@ -93,13 +110,15 @@ pub(super) async fn serve_until(
     identity_header: String,
     snapshots: Arc<SnapshotSlot>,
     compression: Option<Arc<CompressionPool>>,
+    cpu_permits: Arc<Semaphore>,
     observability: Arc<HistoryObservability>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> RelayResult<()> {
-    let state = Arc::new(HistoryState::new(
+    let state = Arc::new(HistoryState::with_cpu_permits(
         snapshots.clone(),
         compression,
         observability,
+        cpu_permits,
     ));
     let (reload_shutdown, reload_receiver) = oneshot::channel();
     let reload_task = tokio::spawn(snapshots.reload_loop(reload_receiver));
@@ -692,7 +711,8 @@ async fn context_response(
         }
     };
     let resources =
-        BacktestHistorySnapshotQueryResources::new(state.scan_budget.clone(), admission.clone());
+        BacktestHistorySnapshotQueryResources::new(state.scan_budget.clone(), admission.clone())
+            .with_blocking_worker_permits(Arc::clone(&state.cpu_permits));
     let result = match snapshot
         .query_context(data.context.clone(), resources)
         .await
@@ -846,7 +866,8 @@ async fn query_response(
         }
     };
     let resources =
-        BacktestHistorySnapshotQueryResources::new(state.scan_budget.clone(), admission.clone());
+        BacktestHistorySnapshotQueryResources::new(state.scan_budget.clone(), admission.clone())
+            .with_blocking_worker_permits(Arc::clone(&state.cpu_permits));
     let mut run = match snapshot
         .query_with_resources(data.request.clone(), resources)
         .await
@@ -1837,58 +1858,59 @@ async fn prepare_response(
         .map_err(|error| RelayError::Internal(format!("history JSON encode failed: {error}")))?;
     debug_assert_eq!(body.len(), body_len);
     let mut content_encoding_gzip = false;
-    if response.status == 200 && body.len() >= GZIP_MIN_BYTES && gzip.accepts {
-        if let Some(compression) = &state.compression {
-            match compression.try_compress(
-                body,
-                body_permit,
-                response.admission.clone(),
-                &state.buffers,
-            ) {
-                Ok(receiver) => match receiver.await {
-                    Ok(CompressionResult::Gzip {
-                        body: compressed,
-                        permit,
-                    }) => {
-                        body = compressed;
-                        body_permit = permit;
-                        content_encoding_gzip = true;
-                    }
-                    Ok(CompressionResult::Identity {
-                        body: identity,
-                        permit,
-                    }) => {
-                        body = identity;
-                        body_permit = permit;
-                    }
-                    Err(_) => {
-                        let fallback = error_response(
-                            500,
-                            "history_internal",
-                            "history gzip worker stopped before completing response",
-                            response.request_id.clone(),
-                            json!({}),
-                        );
-                        let fallback_body =
-                            serde_json::to_vec(&fallback.body).map_err(|error| {
-                                RelayError::Internal(format!("history JSON encode failed: {error}"))
-                            })?;
-                        return Ok(PreparedResponse::unbudgeted(
-                            500,
-                            fallback.error_code,
-                            fallback_body,
-                            None,
-                            false,
-                            gzip.vary,
-                            response.admission,
-                        ));
-                    }
-                },
-                Err((identity, permit)) => {
-                    state.observability.compression_fallback();
+    if response.status == 200
+        && body.len() >= GZIP_MIN_BYTES
+        && gzip.accepts
+        && let Some(compression) = &state.compression
+    {
+        match compression.try_compress(
+            body,
+            body_permit,
+            response.admission.clone(),
+            &state.buffers,
+        ) {
+            Ok(receiver) => match receiver.await {
+                Ok(CompressionResult::Gzip {
+                    body: compressed,
+                    permit,
+                }) => {
+                    body = compressed;
+                    body_permit = permit;
+                    content_encoding_gzip = true;
+                }
+                Ok(CompressionResult::Identity {
+                    body: identity,
+                    permit,
+                }) => {
                     body = identity;
                     body_permit = permit;
                 }
+                Err(_) => {
+                    let fallback = error_response(
+                        500,
+                        "history_internal",
+                        "history gzip worker stopped before completing response",
+                        response.request_id.clone(),
+                        json!({}),
+                    );
+                    let fallback_body = serde_json::to_vec(&fallback.body).map_err(|error| {
+                        RelayError::Internal(format!("history JSON encode failed: {error}"))
+                    })?;
+                    return Ok(PreparedResponse::unbudgeted(
+                        500,
+                        fallback.error_code,
+                        fallback_body,
+                        None,
+                        false,
+                        gzip.vary,
+                        response.admission,
+                    ));
+                }
+            },
+            Err((identity, permit)) => {
+                state.observability.compression_fallback();
+                body = identity;
+                body_permit = permit;
             }
         }
     }
@@ -2107,6 +2129,7 @@ pub(super) struct CompressionPool {
     next: AtomicUsize,
     stopping: std::sync::atomic::AtomicBool,
     threads: Mutex<Vec<JoinHandle<()>>>,
+    cpu_permits: Arc<Semaphore>,
     observability: Mutex<Option<Arc<HistoryObservability>>>,
     #[cfg(test)]
     _parked_receivers: Mutex<Vec<mpsc::Receiver<CompressionJob>>>,
@@ -2128,13 +2151,24 @@ impl CompressionPool {
             .expect("history compression observability lock poisoned") = Some(observability);
     }
 
-    pub(super) fn spawn(affinity: HistoryAffinity) -> RelayResult<Arc<Self>> {
-        Self::spawn_inner(Some(affinity))
+    pub(super) fn spawn(
+        affinity: HistoryAffinity,
+        cpu_permits: Arc<Semaphore>,
+    ) -> RelayResult<Arc<Self>> {
+        Self::spawn_inner(Some(affinity), cpu_permits)
     }
 
     #[cfg(test)]
     fn spawn_for_test() -> RelayResult<Arc<Self>> {
-        Self::spawn_inner(None)
+        Self::spawn_inner(
+            None,
+            Arc::new(Semaphore::new(super::MAX_HISTORY_CPU_WORKERS)),
+        )
+    }
+
+    #[cfg(test)]
+    fn spawn_for_test_with_cpu_permits(cpu_permits: Arc<Semaphore>) -> RelayResult<Arc<Self>> {
+        Self::spawn_inner(None, cpu_permits)
     }
 
     #[cfg(test)]
@@ -2151,12 +2185,16 @@ impl CompressionPool {
             next: AtomicUsize::new(0),
             stopping: std::sync::atomic::AtomicBool::new(false),
             threads: Mutex::new(Vec::new()),
+            cpu_permits: Arc::new(Semaphore::new(super::MAX_HISTORY_CPU_WORKERS)),
             observability: Mutex::new(None),
             _parked_receivers: Mutex::new(parked_receivers),
         })
     }
 
-    fn spawn_inner(affinity: Option<HistoryAffinity>) -> RelayResult<Arc<Self>> {
+    fn spawn_inner(
+        affinity: Option<HistoryAffinity>,
+        cpu_permits: Arc<Semaphore>,
+    ) -> RelayResult<Arc<Self>> {
         let mut queues = Vec::with_capacity(GZIP_WORKERS);
         let mut receivers = Vec::with_capacity(GZIP_WORKERS);
         for _ in 0..GZIP_WORKERS {
@@ -2169,6 +2207,7 @@ impl CompressionPool {
             next: AtomicUsize::new(0),
             stopping: std::sync::atomic::AtomicBool::new(false),
             threads: Mutex::new(Vec::with_capacity(GZIP_WORKERS)),
+            cpu_permits,
             observability: Mutex::new(None),
             #[cfg(test)]
             _parked_receivers: Mutex::new(Vec::new()),
@@ -2330,13 +2369,13 @@ fn compression_worker(
     loop {
         match receiver.recv() {
             Ok(job) if pool.stopping.load(Ordering::Acquire) => drop(job),
-            Ok(job) => compress_job(job),
+            Ok(job) => compress_job(job, Arc::clone(&pool.cpu_permits)),
             Err(_) => return,
         }
     }
 }
 
-fn compress_job(job: CompressionJob) {
+fn compress_job(job: CompressionJob, cpu_permits: Arc<Semaphore>) {
     let CompressionJob {
         body,
         identity_permit,
@@ -2348,6 +2387,20 @@ fn compress_job(job: CompressionJob) {
         #[cfg(test)]
         before_compress,
     } = job;
+    let cpu_permit = match cpu_permits.try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            drop(queued_gauge);
+            if let Some(observability) = &observability {
+                observability.compression_cpu_shed();
+            }
+            let _ = complete.send(CompressionResult::Identity {
+                body,
+                permit: identity_permit,
+            });
+            return;
+        }
+    };
     drop(queued_gauge);
     let _active_gauge = observability
         .as_ref()
@@ -2378,6 +2431,7 @@ fn compress_job(job: CompressionJob) {
         }
     }
     let _ = complete.send(result);
+    drop(cpu_permit);
 }
 
 struct BoundedBytes {
@@ -2770,7 +2824,8 @@ mod tests {
             complete,
             before_compress: Some((started_tx, release_rx)),
         };
-        let worker = thread::spawn(move || compress_job(job));
+        let cpu_permits = Arc::new(Semaphore::new(1));
+        let worker = thread::spawn(move || compress_job(job, cpu_permits));
         started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         drop(receiver);
         assert!(active.clone().try_acquire_owned().is_err());
@@ -2779,6 +2834,39 @@ mod tests {
         worker.join().unwrap();
         assert!(active.clone().try_acquire_owned().is_ok());
         assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_compression_cpu_budget_returns_identity_and_records_shed() {
+        let cpu_permits = Arc::new(Semaphore::new(1));
+        let _held_cpu = cpu_permits.clone().try_acquire_owned().unwrap();
+        let pool =
+            CompressionPool::spawn_for_test_with_cpu_permits(Arc::clone(&cpu_permits)).unwrap();
+        let observability = Arc::new(HistoryObservability::enabled(true));
+        pool.attach_observability(Arc::clone(&observability));
+        let budget = Arc::new(ByteBudget::new(2 * 1024 * 1024));
+        let body = vec![7; GZIP_MIN_BYTES];
+        let identity_permit = budget.try_reserve(body.len()).unwrap();
+        let receiver = match pool.try_compress(body.clone(), identity_permit, None, &budget) {
+            Ok(receiver) => receiver,
+            Err(_) => panic!("the compression queue must accept one job"),
+        };
+
+        match receiver.await.unwrap() {
+            CompressionResult::Identity {
+                body: actual,
+                permit,
+            } => {
+                assert_eq!(actual, body);
+                drop(permit);
+            }
+            CompressionResult::Gzip { .. } => panic!("an exhausted CPU budget must not gzip"),
+        }
+
+        assert_eq!(observability.snapshot().compression_cpu_shed_total, 1);
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+        drop(_held_cpu);
+        pool.shutdown().unwrap();
     }
 
     #[tokio::test]

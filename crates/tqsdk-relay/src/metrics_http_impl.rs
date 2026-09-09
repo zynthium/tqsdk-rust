@@ -390,12 +390,12 @@ fn request_accepts_gzip(request: &str) -> bool {
         if line.eq_ignore_ascii_case("") {
             break;
         }
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("Accept-Encoding") {
-                return value
-                    .split(',')
-                    .any(|s| s.trim().eq_ignore_ascii_case("gzip"));
-            }
+        if let Some((name, value)) = line.split_once(':')
+            && name.trim().eq_ignore_ascii_case("Accept-Encoding")
+        {
+            return value
+                .split(',')
+                .any(|s| s.trim().eq_ignore_ascii_case("gzip"));
         }
     }
     false

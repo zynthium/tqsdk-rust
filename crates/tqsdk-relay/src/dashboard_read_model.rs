@@ -241,16 +241,15 @@ impl DashboardTimelineHistoryCache {
     pub(crate) fn push(&mut self, sample: DashboardTimelineHistorySample) {
         let sampled_at = sample.sampled_at_unix_millis;
         self.prune(sampled_at);
-        if let Some(last) = self.samples.back_mut() {
-            if sampled_at
+        if let Some(last) = self.samples.back_mut()
+            && sampled_at
                 < last
                     .sampled_at_unix_millis
                     .saturating_add(DASHBOARD_TIMELINE_HISTORY_MIN_SAMPLE_INTERVAL_MILLIS)
-            {
-                *last = sample;
-                self.prune(sampled_at);
-                return;
-            }
+        {
+            *last = sample;
+            self.prune(sampled_at);
+            return;
         }
         self.samples.push_back(sample);
         self.prune(sampled_at);

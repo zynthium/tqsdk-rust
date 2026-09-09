@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, Semaphore, oneshot};
 use tqsdk_data::{
     BacktestHistoryContextRequest, BacktestHistoryContextResult, BacktestHistoryInspection,
     BacktestHistoryLiveCache, BacktestHistoryRequest, BacktestHistoryRequestReport,
@@ -81,10 +81,8 @@ impl PinnedSnapshot {
             .unhealthy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok();
-        if won {
-            if let Some(observability) = &self.observability {
-                observability.note_corrupt(self.snapshot_id());
-            }
+        if won && let Some(observability) = &self.observability {
+            observability.note_corrupt(self.snapshot_id());
         }
         won
     }
@@ -170,6 +168,7 @@ pub(super) struct SnapshotSlot {
     snapshot: RwLock<Option<PinnedSnapshot>>,
     observability: RwLock<Option<Arc<HistoryObservability>>>,
     reload_gate: Mutex<()>,
+    cpu_permits: Arc<Semaphore>,
     #[cfg(test)]
     test_worker_binder: Option<SnapshotWorkerBinder>,
 }
@@ -202,9 +201,15 @@ impl SnapshotSlot {
             snapshot: RwLock::new(None),
             observability: RwLock::new(None),
             reload_gate: Mutex::new(()),
+            cpu_permits: Arc::new(Semaphore::new(1)),
             #[cfg(test)]
             test_worker_binder: None,
         }
+    }
+
+    pub(super) fn with_cpu_permits(mut self, cpu_permits: Arc<Semaphore>) -> Self {
+        self.cpu_permits = cpu_permits;
+        self
     }
 
     #[cfg(test)]
@@ -248,9 +253,16 @@ impl SnapshotSlot {
         let _reload_guard = self.reload_gate.lock().await;
         let source = self.source.clone();
         let affinity = self.affinity.clone();
+        let cpu_permit = self
+            .cpu_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| RelayError::Internal("history CPU budget closed".to_string()))?;
         #[cfg(test)]
         let test_worker_binder = self.test_worker_binder.clone();
         let opened = tokio::task::spawn_blocking(move || {
+            let _cpu_permit = cpu_permit;
             #[cfg(test)]
             if let Some(binder) = test_worker_binder {
                 binder().map_err(SnapshotWorkerError::Affinity)?;
@@ -415,6 +427,26 @@ mod tests {
         assert!(slot.reload().await.is_err());
         assert!(slot.current().is_none());
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reload_waits_for_shared_cpu_work_permit() {
+        let root = temp_root("cpu-work-permit");
+        std::fs::create_dir_all(&root).unwrap();
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let held = permits.clone().try_acquire_owned().unwrap();
+        let slot = SnapshotSlot::new(root.clone()).with_cpu_permits(Arc::clone(&permits));
+        let reload = slot.reload();
+        tokio::pin!(reload);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut reload)
+                .await
+                .is_err()
+        );
+        drop(held);
+        assert!(reload.await.is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 

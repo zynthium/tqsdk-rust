@@ -162,12 +162,26 @@ impl InterestRegistry {
             .unwrap_or_default()
     }
 
+    /// Borrows interested quote clients for relay hot fan-out without
+    /// allocating an intermediate client vector.
+    #[must_use]
+    pub(crate) fn quote_clients_ref(&self, symbol: &str) -> Option<&BTreeSet<ClientId>> {
+        self.quote_clients_by_symbol.get(symbol)
+    }
+
     #[must_use]
     pub fn sources_for_symbol(&self, symbol: &str) -> Vec<SourceKey> {
         self.sources_by_symbol
             .get(symbol)
             .map(|sources| sources.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Borrows source identities for relay kline fan-out without cloning each
+    /// `SourceKey` on every tick.
+    #[must_use]
+    pub(crate) fn sources_for_symbol_ref(&self, symbol: &str) -> Option<&BTreeSet<SourceKey>> {
+        self.sources_by_symbol.get(symbol)
     }
 
     #[must_use]
@@ -284,6 +298,11 @@ impl InterestRegistry {
             symbols.extend(source.symbols.iter().cloned());
         }
         symbols
+    }
+
+    #[must_use]
+    pub(crate) fn active_chart_sources(&self) -> BTreeSet<SourceKey> {
+        self.chart_mappings.values().cloned().collect()
     }
 
     fn add_chart_index(&mut self, client_id: ClientId, chart_id: &str, source: &SourceKey) {

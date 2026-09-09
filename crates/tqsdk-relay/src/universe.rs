@@ -500,6 +500,7 @@ where
         .collect())
 }
 
+#[cfg(any(feature = "metadata", test))]
 pub(crate) async fn resolve_futures_universe_v2<R>(
     input: &tqsdk_data::ExpandedUniverseInput,
     resolver: &mut R,

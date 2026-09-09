@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use tokio::sync::oneshot;
+use tokio::sync::{Semaphore, oneshot};
 use tqsdk_relay::{RelayError, RelayResult};
 
 use self::affinity::{CpuAffinityConfig, HistoryAffinity};
@@ -29,6 +29,9 @@ const ENV_HISTORY_ROOT: &str = "TQSDK_RELAY_HISTORY_ROOT";
 const ENV_HISTORY_CACHE_DIR: &str = "TQSDK_RELAY_HISTORY_CACHE_DIR";
 const ENV_HISTORY_IDENTITY_HEADER: &str = "TQSDK_RELAY_HISTORY_IDENTITY_HEADER";
 const DEFAULT_RUNTIME_THREADS: usize = 2;
+/// Upper bound shared by history snapshot open, blocking cache scans, and
+/// gzip jobs. Individual pools may be smaller, but cannot bypass this cap.
+pub(super) const MAX_HISTORY_CPU_WORKERS: usize = 4;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Configuration for the standalone history listener.
@@ -194,6 +197,13 @@ pub(crate) struct HistoryServiceHandle {
     observability: Arc<observability::HistoryObservability>,
 }
 
+struct HistoryListenerResources {
+    affinity: Option<HistoryAffinity>,
+    compression: Option<Arc<http::CompressionPool>>,
+    cpu_permits: Arc<Semaphore>,
+    observability: Arc<observability::HistoryObservability>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct MetricsOverlay {
     observability: Arc<observability::HistoryObservability>,
@@ -261,9 +271,10 @@ pub(crate) fn spawn(config: HistoryConfig) -> RelayResult<HistoryServiceHandle> 
         RelayError::Transport(format!("history listener setup failed: {error}"))
     })?;
     let affinity = config.history_affinity();
+    let cpu_permits = Arc::new(Semaphore::new(MAX_HISTORY_CPU_WORKERS));
     let compression = affinity
         .clone()
-        .map(http::CompressionPool::spawn)
+        .map(|affinity| http::CompressionPool::spawn(affinity, Arc::clone(&cpu_permits)))
         .transpose()?;
     let observability = Arc::new(observability::HistoryObservability::enabled(
         compression.is_some(),
@@ -278,15 +289,13 @@ pub(crate) fn spawn(config: HistoryConfig) -> RelayResult<HistoryServiceHandle> 
     let (startup_tx, startup_rx) = mpsc::sync_channel(1);
     let thread_name = format!("tqsdk-history-{}", config.listen.port());
     let thread = match thread::Builder::new().name(thread_name).spawn(move || {
-        run_listener_thread(
-            listener,
-            config,
+        let resources = HistoryListenerResources {
             affinity,
-            listener_compression,
-            listener_observability,
-            shutdown_rx,
-            startup_tx,
-        )
+            compression: listener_compression,
+            cpu_permits,
+            observability: listener_observability,
+        };
+        run_listener_thread(listener, config, resources, shutdown_rx, startup_tx)
     }) {
         Ok(thread) => thread,
         Err(error) => {
@@ -331,17 +340,21 @@ pub(crate) fn spawn(config: HistoryConfig) -> RelayResult<HistoryServiceHandle> 
 fn run_listener_thread(
     listener: TcpListener,
     config: HistoryConfig,
-    affinity: Option<HistoryAffinity>,
-    compression: Option<Arc<http::CompressionPool>>,
-    observability: Arc<observability::HistoryObservability>,
+    resources: HistoryListenerResources,
     shutdown: oneshot::Receiver<()>,
     startup: mpsc::SyncSender<Result<(), String>>,
 ) {
-    if let Some(affinity) = &affinity {
-        if let Err(error) = affinity.bind_current() {
-            let _ = startup.send(Err(error.to_string()));
-            return;
-        }
+    let HistoryListenerResources {
+        affinity,
+        compression,
+        cpu_permits,
+        observability,
+    } = resources;
+    if let Some(affinity) = &affinity
+        && let Err(error) = affinity.bind_current()
+    {
+        let _ = startup.send(Err(error.to_string()));
+        return;
     }
     let worker_affinity = affinity.clone();
     let expected_workers = config.runtime_threads;
@@ -401,10 +414,10 @@ fn run_listener_thread(
                 return;
             }
         };
-        let snapshots = Arc::new(snapshot::SnapshotSlot::from_source_with_affinity(
-            config.source,
-            affinity,
-        ));
+        let snapshots = Arc::new(
+            snapshot::SnapshotSlot::from_source_with_affinity(config.source, affinity)
+                .with_cpu_permits(Arc::clone(&cpu_permits)),
+        );
         snapshots.attach_observability(runtime_observability.clone());
         runtime_observability.listener_started();
         if startup.send(Ok(())).is_err() {
@@ -421,6 +434,7 @@ fn run_listener_thread(
             config.identity_header,
             snapshots,
             compression,
+            cpu_permits,
             runtime_observability.clone(),
             shutdown,
         )

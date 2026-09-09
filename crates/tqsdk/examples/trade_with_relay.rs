@@ -33,15 +33,13 @@ async fn main() -> tqsdk::Result<()> {
 
     // 事件循环
     while tq.next().await? {
-        if !initial_printed {
-            if let Ok(acc) = account.load() {
-                println!("Initial Account Balance: {}", acc.balance);
-                initial_printed = true;
+        if !initial_printed && let Ok(acc) = account.load() {
+            println!("Initial Account Balance: {}", acc.balance);
+            initial_printed = true;
 
-                // If it's the weekend or off-hours, we might not get quotes
-                println!("Waiting for the first quote of {}...", symbol);
-                println!("(Note: If the market is currently closed, no live quotes will arrive.)");
-            }
+            // If it's the weekend or off-hours, we might not get quotes
+            println!("Waiting for the first quote of {}...", symbol);
+            println!("(Note: If the market is currently closed, no live quotes will arrive.)");
         }
 
         // 获取最新行情快照

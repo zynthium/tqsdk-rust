@@ -27,6 +27,7 @@ async fn main() {
 async fn run() -> Result<(), RelayError> {
     let runtime_config = RelayRuntimeConfig::from_env()?;
     let config = runtime_config.relay_config();
+    let resource_limits = runtime_config.resource_limits();
     #[cfg(feature = "history")]
     let history_config = history::HistoryConfig::from_env()?;
     #[cfg(feature = "history")]
@@ -62,9 +63,10 @@ async fn run() -> Result<(), RelayError> {
         return Ok(());
     }
 
-    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only_with_cache_limits(
         config.tick_ring_capacity,
         config.kline_ring_capacity,
+        resource_limits.market_cache,
     )));
     let startup_charts = Vec::new();
     eprintln!(
@@ -72,8 +74,11 @@ async fn run() -> Result<(), RelayError> {
         RelayStartupReport::from_runtime_config_and_charts(&runtime_config, &startup_charts)
             .log_line()
     );
-    let server =
-        RelayServer::with_outbound_capacity(engine.clone(), config.outbound_channel_capacity);
+    let server = RelayServer::with_outbound_budget(
+        engine.clone(),
+        config.outbound_channel_capacity,
+        resource_limits.outbound_byte_capacity,
+    );
     let listener = TcpListener::bind(&config.downstream_listen)
         .await
         .map_err(|err| RelayError::Transport(format!("downstream bind failed: {err}")))?;

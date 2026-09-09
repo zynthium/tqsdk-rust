@@ -4,6 +4,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::cache::MarketCacheLimits;
 use crate::error::{RelayError, RelayResult};
 use crate::universe_expression::{
     SnapshotUniverseDispatch, UniverseExpression, UniverseSpec, parse_snapshot_universe_compatible,
@@ -26,6 +27,9 @@ const ENV_UPSTREAM_TICK_VIEW_WIDTH: &str = "TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH
 const ENV_TICK_RING_CAPACITY: &str = "TQSDK_RELAY_TICK_RING_CAPACITY";
 const ENV_KLINE_RING_CAPACITY: &str = "TQSDK_RELAY_KLINE_RING_CAPACITY";
 const ENV_OUTBOUND_CHANNEL_CAPACITY: &str = "TQSDK_RELAY_OUTBOUND_CHANNEL_CAPACITY";
+const ENV_OUTBOUND_BYTE_CAPACITY: &str = "TQSDK_RELAY_OUTBOUND_BYTE_CAPACITY";
+const ENV_MARKET_CACHE_MAX_SYMBOLS: &str = "TQSDK_RELAY_MARKET_CACHE_MAX_SYMBOLS";
+const ENV_MARKET_CACHE_MAX_BYTES: &str = "TQSDK_RELAY_MARKET_CACHE_MAX_BYTES";
 const ENV_DRY_RUN: &str = "TQSDK_RELAY_DRY_RUN";
 const ENV_AUTH_USER: &str = "TQ_AUTH_USER";
 const ENV_AUTH_PASS: &str = "TQ_AUTH_PASS";
@@ -445,6 +449,52 @@ impl RelayConfig {
     }
 }
 
+/// Additive process-level resource boundaries.
+///
+/// This lives beside [`RelayConfig`] so new limits do not break callers that
+/// still use exhaustive `RelayConfig` literals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelayResourceLimits {
+    pub outbound_byte_capacity: usize,
+    pub market_cache: MarketCacheLimits,
+}
+
+impl Default for RelayResourceLimits {
+    fn default() -> Self {
+        Self::defaults()
+    }
+}
+
+impl RelayResourceLimits {
+    #[must_use]
+    pub const fn defaults() -> Self {
+        Self {
+            outbound_byte_capacity: 8 * 1024 * 1024,
+            market_cache: MarketCacheLimits::defaults(),
+        }
+    }
+
+    fn validate(self, tick_capacity: usize) -> RelayResult<()> {
+        if self.outbound_byte_capacity == 0 {
+            return Err(RelayError::invalid_config(
+                "outbound_byte_capacity must be greater than zero",
+            ));
+        }
+        if self.market_cache.max_symbols == 0 {
+            return Err(RelayError::invalid_config(
+                "market_cache.max_symbols must be greater than zero",
+            ));
+        }
+        let minimum = MarketCacheLimits::minimum_retained_bytes(tick_capacity);
+        if self.market_cache.max_retained_bytes < minimum {
+            return Err(RelayError::invalid_config(format!(
+                "market_cache.max_retained_bytes must fit one tick ring ({minimum} bytes)"
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Additive process-level configuration for Universe V2 sources.
 ///
 /// [`RelayConfig`] keeps its original exhaustive public field set for downstream source
@@ -452,6 +502,7 @@ impl RelayConfig {
 #[derive(Clone, PartialEq, Eq)]
 pub struct RelayRuntimeConfig {
     relay: RelayConfig,
+    resource_limits: RelayResourceLimits,
     futures_universe_spec: Option<UniverseSpec>,
     futures_universe_symbol_files: Vec<PathBuf>,
 }
@@ -461,6 +512,7 @@ impl fmt::Debug for RelayRuntimeConfig {
         formatter
             .debug_struct("RelayRuntimeConfig")
             .field("relay", &self.relay)
+            .field("resource_limits", &self.resource_limits)
             .field("futures_universe_spec", &self.futures_universe_spec)
             .field(
                 "futures_universe_symbol_files",
@@ -487,6 +539,7 @@ impl RelayRuntimeConfig {
     pub const fn new(relay: RelayConfig) -> Self {
         Self {
             relay,
+            resource_limits: RelayResourceLimits::defaults(),
             futures_universe_spec: None,
             futures_universe_symbol_files: Vec::new(),
         }
@@ -499,6 +552,9 @@ impl RelayRuntimeConfig {
     pub fn from_env_vars(mut get: impl FnMut(&str) -> Option<String>) -> RelayResult<Self> {
         let universe = get(ENV_FUTURES_UNIVERSE);
         let universe_files = get(ENV_FUTURES_UNIVERSE_FILES);
+        let outbound_byte_capacity = get(ENV_OUTBOUND_BYTE_CAPACITY);
+        let market_cache_max_symbols = get(ENV_MARKET_CACHE_MAX_SYMBOLS);
+        let market_cache_max_bytes = get(ENV_MARKET_CACHE_MAX_BYTES);
         let relay = RelayConfig::from_env_vars(|key| {
             if matches!(key, ENV_FUTURES_UNIVERSE | ENV_FUTURES_UNIVERSE_FILES) {
                 None
@@ -507,6 +563,18 @@ impl RelayRuntimeConfig {
             }
         })?;
         let mut config = Self::new(relay);
+        if let Some(value) = outbound_byte_capacity {
+            config.resource_limits.outbound_byte_capacity =
+                parse_positive_usize_env(ENV_OUTBOUND_BYTE_CAPACITY, &value)?;
+        }
+        if let Some(value) = market_cache_max_symbols {
+            config.resource_limits.market_cache.max_symbols =
+                parse_positive_usize_env(ENV_MARKET_CACHE_MAX_SYMBOLS, &value)?;
+        }
+        if let Some(value) = market_cache_max_bytes {
+            config.resource_limits.market_cache.max_retained_bytes =
+                parse_positive_usize_env(ENV_MARKET_CACHE_MAX_BYTES, &value)?;
+        }
         if let Some(universe) = universe {
             config.set_futures_universe(&universe)?;
         }
@@ -520,6 +588,20 @@ impl RelayRuntimeConfig {
     #[must_use]
     pub const fn relay_config(&self) -> &RelayConfig {
         &self.relay
+    }
+
+    #[must_use]
+    pub const fn resource_limits(&self) -> RelayResourceLimits {
+        self.resource_limits
+    }
+
+    pub fn with_resource_limits(
+        mut self,
+        resource_limits: RelayResourceLimits,
+    ) -> RelayResult<Self> {
+        resource_limits.validate(self.relay.tick_ring_capacity)?;
+        self.resource_limits = resource_limits;
+        Ok(self)
     }
 
     #[must_use]
@@ -584,6 +666,8 @@ impl RelayRuntimeConfig {
 
     pub fn validate(&self) -> RelayResult<()> {
         self.relay.validate()?;
+        self.resource_limits
+            .validate(self.relay.tick_ring_capacity)?;
         if self
             .futures_universe_spec
             .as_ref()

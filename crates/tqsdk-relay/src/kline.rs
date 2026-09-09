@@ -42,6 +42,14 @@ impl KlineSynthesis {
     }
 
     pub fn push_tick(&mut self, tick: RelayTickRow) -> RelayResult<Vec<RelayKlineRow>> {
+        self.push_tick_ref(&tick)
+    }
+
+    /// Applies a borrowed tick for internal cache replay and fan-out paths.
+    ///
+    /// Keeping the public owned-input method above preserves the existing API,
+    /// while callers that already own a tick ring can avoid cloning every row.
+    pub(crate) fn push_tick_ref(&mut self, tick: &RelayTickRow) -> RelayResult<Vec<RelayKlineRow>> {
         let start = window_start(tick.datetime, self.duration_ns);
         let mut completed = Vec::new();
 
@@ -59,15 +67,15 @@ impl KlineSynthesis {
 
         match self.current.take() {
             None => {
-                self.current = Some(self.new_bar(start, &tick));
+                self.current = Some(self.new_bar(start, tick));
             }
             Some(mut current) if current.row.datetime == start => {
-                merge_tick(&mut current, &tick);
+                merge_tick(&mut current, tick);
                 self.current = Some(current);
             }
             Some(current) => {
                 completed.push(finalize(current));
-                self.current = Some(self.new_bar(start, &tick));
+                self.current = Some(self.new_bar(start, tick));
             }
         }
 

@@ -453,32 +453,25 @@ async fn subscribe_dynamic_upstream_symbols(
     config: &RelayConfig,
     server: &RelayServer,
     source: &mut WebSocketUpstreamTickSource,
-    symbols: Vec<String>,
+    _signals: Vec<String>,
 ) -> RelayResult<()> {
-    let missing_symbols = retain_missing_upstream_symbols(server, symbols)?;
-    if missing_symbols.is_empty() {
-        return Ok(());
-    }
-    let charts =
-        config.upstream_tick_charts_for_symbols(missing_symbols.iter().map(String::as_str))?;
-    if charts.is_empty() {
-        return Ok(());
-    }
-    source.subscribe_tick_charts(&charts).await?;
+    let symbols = desired_upstream_subscription_symbols(server)?;
+    let charts = config.upstream_tick_charts_for_symbols(symbols.iter().map(String::as_str))?;
+    source.reconcile_tick_charts(&charts).await?;
     record_upstream_progress(server, source.take_progress());
-    record_dynamic_upstream_subscription_success(server, &charts);
+    record_dynamic_upstream_subscription_reconciled(server, &charts);
     Ok(())
 }
 
-fn retain_missing_upstream_symbols(
-    server: &RelayServer,
-    symbols: Vec<String>,
-) -> RelayResult<Vec<String>> {
+fn desired_upstream_subscription_symbols(server: &RelayServer) -> RelayResult<Vec<String>> {
     let engine = server.engine();
     let engine = engine
         .lock()
         .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
-    Ok(engine.retain_missing_upstream_subscription_symbols(symbols))
+    Ok(engine
+        .desired_upstream_tick_chart_symbols()
+        .into_iter()
+        .collect())
 }
 
 fn record_upstream_progress(
@@ -539,7 +532,7 @@ fn record_universe_refresh_success(
     }
 }
 
-fn record_dynamic_upstream_subscription_success(
+fn record_dynamic_upstream_subscription_reconciled(
     server: &RelayServer,
     charts: &[UpstreamTickChart],
 ) {

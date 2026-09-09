@@ -1,9 +1,9 @@
 use chrono::{FixedOffset, TimeZone};
 use tqsdk_core::TradingTime;
 use tqsdk_relay::{
-    ClientId, DecodeHealth, DownstreamCommand, FlowIdleHealth, FuturesContract, RelayConfig,
-    RelayEngine, RelayEventKind, RelaySourceStage, RelaySourceStatus, RelayStartupReport,
-    RelayTickRow, SetChartCommand, UniverseExpression, UpstreamSourceProgress,
+    ClientId, DecodeHealth, DownstreamCommand, FlowIdleHealth, FuturesContract, MarketCacheLimits,
+    RelayConfig, RelayEngine, RelayEventKind, RelaySourceStage, RelaySourceStatus,
+    RelayStartupReport, RelayTickRow, SetChartCommand, UniverseExpression, UpstreamSourceProgress,
 };
 
 fn tick(id: i64) -> RelayTickRow {
@@ -154,6 +154,29 @@ fn metrics_expose_upstream_peek_and_decode_timing() {
     let metrics = engine.metrics_snapshot_at(1_700_000_003);
     assert_eq!(metrics.last_upstream_peek_delay_ms, Some(1));
     assert_eq!(metrics.last_upstream_decode_ms, Some(7));
+}
+
+#[test]
+fn metrics_expose_market_cache_capacity_and_evictions() {
+    let limits = MarketCacheLimits {
+        max_symbols: 1,
+        max_retained_bytes: 1_000_000,
+    };
+    let mut engine = RelayEngine::new_memory_only_with_cache_limits(1, 1, limits);
+
+    engine.ingest_tick("SHFE.au2602", tick(1)).unwrap();
+    engine.ingest_tick("DCE.m2609", tick(2)).unwrap();
+
+    let metrics = engine.metrics_snapshot();
+    assert_eq!(metrics.market_cache_symbols, 1);
+    assert_eq!(metrics.market_cache_max_symbols, 1);
+    assert_eq!(
+        metrics.market_cache_max_retained_bytes,
+        limits.max_retained_bytes
+    );
+    assert!(metrics.market_cache_retained_bytes <= limits.max_retained_bytes);
+    assert_eq!(metrics.market_cache_evicted_symbols, 1);
+    assert_eq!(metrics.market_cache_admission_drops, 0);
 }
 
 #[test]

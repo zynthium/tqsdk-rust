@@ -35,11 +35,14 @@ relay 不改变 SDK 运行时模型：
 | 范围 | 状态 |
 | --- | --- |
 | 下游 websocket 服务 | 在本地地址接受 SDK 行情 websocket 连接。 |
+| 下游 WebSocket 资源边界 | 使用有状态的标准 WebSocket codec 处理 fragmentation/control/64-bit payload；握手、header、frame/message、连接数和写入均有显式上限/超时。 |
 | 下游命令子集 | 处理 `subscribe_quote`、`set_chart` 和 `peek_message`。未知行情命令会明确失败。 |
 | 上游数据源 | 动态发现当前活跃期货合约，打开一个天勤行情 websocket，启动时发送累计 `subscribe_quote` 作为首样本 bootstrap；quote update 会转成本地合成 tick 驱动 K 线，下游 chart 或未覆盖合约需要真实 tick chart 时再动态发送 duration 为 `0` 的 `set_chart`。 |
 | 合约集合刷新 | 使用 `TQSDK_RELAY_FUTURES_UNIVERSE` 组合全部活跃、指定产品、主力、加权指数、主连、每品种活跃度前 N、静态符号文件和排除规则；动态发现模式下按本地每日固定时间重建上游 quote bootstrap 集合，默认 `08:30:00`。 |
 | 订阅长度防线 | 在连接上游前统计累计 quote 订阅和动态 tick chart 命令里的最大 `ins_list` 长度；超过 hard limit 会拒绝订阅，超过 warn threshold 会体现在 metrics 中。 |
 | quote 分发 | 接收上游 quote，或将最新 tick 投影成 quote frame，并发送给已订阅的下游客户端。 |
+| fan-out / 慢客户端 | 同一 payload 只编码一次，多个 client 共享 immutable frame buffer。每 client mailbox 同时受 frame 数和 encoded bytes 硬上限约束；quote 按 symbol latest-wins 合并，chart / binding 等可靠状态帧满时断开该 client，绝不静默覆盖。relay 当前不转 order / trade 事件。 |
+| 动态订阅 | server 侧 pending signal 是 bounded + coalescing；每次信号按当前 interest exact desired-set 收敛，快速新增不会积累无界 `Vec<String>`，chart/client 移除会向上游发送 `set_chart(ins_list: "")` 回收无用 tick chart。 |
 | 固定周期 K 线合成 | 从上游 tick 或 quote update 派生的本地 tick 合成正周期 K 线，并向图表订阅者发送已完成的 K 线；新订阅会先用内存 tick ring 回放已完成 K 线。 |
 | 缓存 | 保留内存 tick ring 和 quote 快照。当前二进制程序尚未启用磁盘持久化。 |
 | bootstrap 队列 | 在 relay 内部合并并限流 chart bootstrap 请求。远端 K 线回填和 oracle 对比尚未实现。 |
@@ -243,7 +246,7 @@ Linux Docker Compose 部署模板位于
 [`deploy/docker/`](../../deploy/docker/README.md)。模板默认把正在填充的 cache root 只读 bind mount 给
 relay；publisher profile 仅作为旧 snapshot 流程的回滚兼容工具。
 
-关闭默认 feature 时不编译 history multi-thread runtime；reader-only 构建可用：
+关闭默认 feature 时不编译 downstream WebSocket server/binary，也不编译 history multi-thread runtime；reader-only 构建可用：
 
 ```bash
 cargo check -p tqsdk-relay --no-default-features --features history
@@ -267,6 +270,9 @@ cargo check -p tqsdk-relay --no-default-features --features history
 | `TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH` | `10000` | 发给每个动态上游 tick chart 的 `view_width`。调小可减少 chart 补订时的 backfilling 历史窗口；必须大于 `0`。若希望近似只要最新 tick，可先设为 `1`。 |
 | `TQSDK_RELAY_TICK_RING_CAPACITY` | `200000` | 每个合约保留的内存 tick ring 行数；必须大于 `0`。全品种持久运行建议调低到 `10000` / `20000` 级别。 |
 | `TQSDK_RELAY_KLINE_RING_CAPACITY` | `10000` | relay 内部 K 线 ring 容量配置；必须大于 `0`。当前二进制主要用于保留配置边界，K 线合成热状态仍按订阅 source 保存当前 bar。 |
+| `TQSDK_RELAY_MARKET_CACHE_MAX_SYMBOLS` | `512` | relay 内存缓存可保留的最大 symbol 数；超过时 LRU 淘汰最久未更新 symbol。必须大于 `0`。 |
+| `TQSDK_RELAY_MARKET_CACHE_MAX_BYTES` | `536870912` | tick ring、缓存 key、quote projection 和 map metadata 的硬 reservation 上限。至少要容纳一个 tick ring；超过时 LRU 淘汰，不能无限增长。 |
+| `TQSDK_RELAY_OUTBOUND_BYTE_CAPACITY` | `8388608` | 每个下游 client outbound mailbox 的 encoded frame bytes 硬上限；quote 可按 symbol 合并，可靠 chart/binding 帧满时断开慢 client。必须大于 `0`。 |
 | `TQSDK_RELAY_UPSTREAM_MARKET_URL` | `wss://openmd.shinnytech.com/t/md/front/mobile` | 上游天勤行情 websocket URL。 |
 | `TQSDK_RELAY_DOWNSTREAM_LISTEN` | `127.0.0.1:7788` | 下游 SDK websocket 监听地址。 |
 | `TQSDK_RELAY_METRICS_LISTEN` | `127.0.0.1:7789` | HTTP health / metrics 监听地址。 |
@@ -332,10 +338,13 @@ quote 覆盖。relay 不在启动或动态补订时主动发送 `subscribe_tradi
 `last_upstream_peek_delay_ms` 进度，不增加上游 frame / event 计数。
 
 relay 启动后，如果下游 `subscribe_quote` 或 `set_chart` 请求了当前上游尚未覆盖的
-合约，relay 会在现有上游 websocket 上立即刷新累计 `subscribe_quote`，并为需要 tick
-数据的缺失合约补发对应的 `set_chart`。
-补订成功后，该合约会加入当前上游观测集合，`upstream_symbols` 和 `/symbol-metrics`
-的覆盖判断会按补订后的集合计算。
+合约，relay 会在现有上游 websocket 上按当前 interest 的 exact desired-set 刷新累计
+`subscribe_quote`，并为需要 tick 数据的缺失合约补发对应的 `set_chart`。chart 替换、
+删除或 client 断开也会触发相同 reconciliation；不再需要的 upstream chart 用
+`set_chart(ins_list: "")` 删除。只有全部写入成功才推进本地 sent-state，失败后的重试会
+按同一 desired-set 重新收敛，不能把部分远端写入误记为已确认。
+补订成功后，当前上游观测集合、`upstream_symbols` 和 `/symbol-metrics` 覆盖判断都会
+按基础 universe 加当前动态 interest 重新计算。
 
 发送前 relay 会计算累计 quote 订阅和动态 tick chart 命令里的最大 `ins_list` 长度。超过
 `TQSDK_RELAY_UPSTREAM_INS_LIST_MAX_CHARS` 时不会连接上游；超过 warn threshold 时连接
@@ -622,7 +631,10 @@ least 64 KiB; the bounded pool uses non-blocking try admission and returns ident
 full. Negotiated responses carry `Vary: Accept-Encoding`; identity and gzip have separate
 strong ETags, with 304 matching the selected representation. The 10-second deadline
 includes compression, and the 512 MiB history budget includes scan, JSON, and compression
-buffers. These limits are safety bounds, not a throughput or p99 SLO. The current delivery is accepted
+buffers. Four process-local history CPU-work permits are shared by snapshot reload, data
+`spawn_blocking` scans, and gzip: reload/scans wait cancellably, while gzip uses identity
+immediately when no permit is available and increments `compression_cpu_shed_total`. These
+limits are safety bounds, not a throughput or p99 SLO. The current delivery is accepted
 for low-concurrency use behind a controlled gateway quota; the ignored isolation gate remains a
 non-blocking capacity characterization. The current production host did not meet its p99 target on
 2026-08-29; this is not a passed performance gate. Re-run it for any high-concurrency or explicit
