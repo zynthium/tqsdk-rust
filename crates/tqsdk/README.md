@@ -1,5 +1,9 @@
 # tqsdk
 
+`BacktestRemoteFillCancellation::request_stop()` 停止新窗口并允许当前窗口收尾；调用者须限定等待，
+超时用 `cancel()`。进度的 `durability()` 区分正式提交和私有暂存；实现复用 data 层。
+见 [Fill 恢复合同](../../docs/architecture/history-fill-recovery.md)。
+
 `tqsdk` 是 `tqsdk-rust` 的默认用户入口。它不物理合并内部 crate，也不改变
 runtime contract；它只提供一个更容易开始的 facade：
 

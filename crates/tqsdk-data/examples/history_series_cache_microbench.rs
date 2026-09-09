@@ -10,7 +10,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tqsdk_core::Tick;
 use tqsdk_data::{
-    BacktestTickCache, HistorySeriesCache, LiveTickCacheWriter, TickDataSeriesRequest,
+    BacktestTickCache, HistorySeriesCache, HistorySeriesReadTelemetry, LiveTickCacheWriter,
+    TickDataSeriesRequest,
 };
 
 const SYMBOL: &str = "SHFE.rb2601";
@@ -24,6 +25,8 @@ const INPUT_CACHE_DIR_ENV: &str = "TQSDK_HISTORY_CACHE_BENCH_INPUT_CACHE_DIR";
 const INPUT_SYMBOL_ENV: &str = "TQSDK_HISTORY_CACHE_BENCH_INPUT_SYMBOL";
 const INPUT_START_NS_ENV: &str = "TQSDK_HISTORY_CACHE_BENCH_INPUT_START_NS";
 const INPUT_END_NS_ENV: &str = "TQSDK_HISTORY_CACHE_BENCH_INPUT_END_NS";
+const INPUT_STREAM_ONLY_ENV: &str = "TQSDK_HISTORY_CACHE_BENCH_STREAM_ONLY";
+const STREAMING_LATENCY_SAMPLE_CAP: usize = 16_384;
 type CacheTickSource = (PathBuf, String, i64, i64);
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -50,6 +53,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let keep = env_bool("TQSDK_HISTORY_CACHE_BENCH_KEEP");
     let cache_source = cache_tick_source_from_env()?;
+    if env_bool(INPUT_STREAM_ONLY_ENV) {
+        return run_input_cache_streaming_only(cache_source.as_ref());
+    }
     let input_ticks = match cache_source.as_ref() {
         Some((root, symbol, start_ns, end_ns)) => {
             load_cache_ticks(root, symbol, *start_ns, *end_ns)?
@@ -84,6 +90,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     print_result(&write_read.coverage);
     print_result(&write_read.read);
     print_result(&write_read.read_slice);
+    print_streaming_read("stream_tick_reader_total", &write_read.streaming_read);
+    print_streaming_read("stream_tick_reader_1pct", &write_read.streaming_read_slice);
     for result in &write_read.compression {
         print_compression(result);
     }
@@ -127,6 +135,43 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn run_input_cache_streaming_only(
+    cache_source: Option<&CacheTickSource>,
+) -> Result<(), Box<dyn Error>> {
+    let Some((cache_dir, symbol, start_ns, end_ns)) = cache_source else {
+        return Err(format!(
+            "{INPUT_STREAM_ONLY_ENV} requires {INPUT_CACHE_DIR_ENV}, {INPUT_SYMBOL_ENV}, \
+             {INPUT_START_NS_ENV}, and {INPUT_END_NS_ENV}"
+        )
+        .into());
+    };
+
+    let cache = HistorySeriesCache::open_read_only(cache_dir);
+    println!("tqsdk-data history series cache microbench");
+    println!("profile: run with --release for useful numbers");
+    println!("format: {}", cache.format_id());
+    println!(
+        "streaming-only input: cache {} {} [{start_ns}, {end_ns})",
+        cache_dir.display(),
+        symbol,
+    );
+    println!(
+        "{:<30} {:>12} {:>12} {:>14} {:>14}",
+        "case", "items", "ms", "rows/s", "bytes"
+    );
+
+    let streaming = run_streaming_read_for_symbol(&cache, symbol, *start_ns, *end_ns)?;
+    print_streaming_read("stream_tick_reader_total", &streaming);
+    if streaming.telemetry.materialized_rows != 0 {
+        return Err(format!(
+            "streaming-only reader materialized {} rows",
+            streaming.telemetry.materialized_rows
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn run_write_read_zstd(root: PathBuf, ticks: &[Tick]) -> Result<WriteReadReport, Box<dyn Error>> {
     if ticks.is_empty() {
         return Err("write/read benchmark input contains no ticks".into());
@@ -157,6 +202,8 @@ fn run_write_read_zstd(root: PathBuf, ticks: &[Tick]) -> Result<WriteReadReport,
     black_box(series.rows());
     let read = BenchResult::new("read_ticks", series.len(), read_elapsed, bytes);
 
+    let streaming_read = run_streaming_read(&cache, start_ns, end_ns)?;
+
     let slice_rows = (ticks.len() / 100).max(1);
     let slice_start = (ticks.len() - slice_rows) / 2;
     let slice = &ticks[slice_start..slice_start + slice_rows];
@@ -176,6 +223,7 @@ fn run_write_read_zstd(root: PathBuf, ticks: &[Tick]) -> Result<WriteReadReport,
         read_slice_elapsed,
         bytes,
     );
+    let streaming_read_slice = run_streaming_read(&cache, slice_start_ns, slice_end_ns)?;
 
     let mut compression = Vec::new();
     for level in [1_u8, 3_u8] {
@@ -189,8 +237,77 @@ fn run_write_read_zstd(root: PathBuf, ticks: &[Tick]) -> Result<WriteReadReport,
         coverage,
         read,
         read_slice,
+        streaming_read,
+        streaming_read_slice,
         compression,
     })
+}
+
+fn run_streaming_read(
+    cache: &HistorySeriesCache,
+    start_ns: i64,
+    end_ns: i64,
+) -> Result<StreamingReadResult, Box<dyn Error>> {
+    run_streaming_read_for_symbol(cache, SYMBOL, start_ns, end_ns)
+}
+
+fn run_streaming_read_for_symbol(
+    cache: &HistorySeriesCache,
+    symbol: &str,
+    start_ns: i64,
+    end_ns: i64,
+) -> Result<StreamingReadResult, Box<dyn Error>> {
+    let started = Instant::now();
+    let mut reader =
+        cache.open_tick_data_series_reader(TickDataSeriesRequest::new(symbol, start_ns, end_ns))?;
+    let mut latencies = Vec::with_capacity(STREAMING_LATENCY_SAMPLE_CAP);
+    let mut rows = 0_usize;
+    loop {
+        let row_started = Instant::now();
+        let Some(row) = reader.next_tick()? else {
+            break;
+        };
+        record_streaming_latency_sample(
+            &mut latencies,
+            rows.saturating_add(1),
+            row_started.elapsed(),
+        );
+        rows = rows.saturating_add(1);
+        black_box(row);
+    }
+
+    Ok(StreamingReadResult {
+        rows,
+        elapsed: started.elapsed(),
+        latencies,
+        telemetry: reader.read_telemetry(),
+    })
+}
+
+/// Bounds benchmark instrumentation so reader RSS does not grow with stream length.
+fn record_streaming_latency_sample(
+    samples: &mut Vec<Duration>,
+    observed_rows: usize,
+    latency: Duration,
+) {
+    if samples.len() < STREAMING_LATENCY_SAMPLE_CAP {
+        samples.push(latency);
+        return;
+    }
+
+    let sample_index = reservoir_sample_index(observed_rows);
+    if sample_index < STREAMING_LATENCY_SAMPLE_CAP {
+        samples[sample_index] = latency;
+    }
+}
+
+fn reservoir_sample_index(observed_rows: usize) -> usize {
+    let mut value = observed_rows as u64;
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^= value >> 31;
+    (value % observed_rows as u64) as usize
 }
 
 fn run_live_tick_writer(
@@ -511,7 +628,42 @@ struct WriteReadReport {
     coverage: BenchResult,
     read: BenchResult,
     read_slice: BenchResult,
+    streaming_read: StreamingReadResult,
+    streaming_read_slice: StreamingReadResult,
     compression: Vec<CompressionResult>,
+}
+
+struct StreamingReadResult {
+    rows: usize,
+    elapsed: Duration,
+    latencies: Vec<Duration>,
+    telemetry: HistorySeriesReadTelemetry,
+}
+
+impl StreamingReadResult {
+    fn events_per_second(&self) -> f64 {
+        let seconds = self.elapsed.as_secs_f64();
+        if seconds == 0.0 {
+            return 0.0;
+        }
+
+        self.rows as f64 / seconds
+    }
+
+    fn percentile_ns(&self, percentile: f64) -> f64 {
+        if self.latencies.is_empty() {
+            return 0.0;
+        }
+
+        let mut samples = self
+            .latencies
+            .iter()
+            .map(Duration::as_nanos)
+            .collect::<Vec<_>>();
+        samples.sort_unstable();
+        let index = ((samples.len() - 1) as f64 * percentile).ceil() as usize;
+        samples[index] as f64
+    }
 }
 
 struct CompactionReport {
@@ -584,6 +736,43 @@ impl CompressionResult {
     }
 }
 
+fn print_streaming_read(name: &str, result: &StreamingReadResult) {
+    println!(
+        "{:<30} {:>12} {:>12.2} {:>14.1} {:>14}",
+        name,
+        result.rows,
+        result.elapsed.as_secs_f64() * 1_000.0,
+        result.events_per_second(),
+        "rows/s",
+    );
+    println!(
+        "  p50_ns={:.1} p95_ns={:.1} p99_ns={:.1} p999_ns={:.1}",
+        result.percentile_ns(0.50),
+        result.percentile_ns(0.95),
+        result.percentile_ns(0.99),
+        result.percentile_ns(0.999),
+    );
+    println!(
+        "  tqbn bytes_read={} bytes_decompressed={} io_read_ns={} decode_ns={} blocks_skipped={} blocks_decoded={} materialized_rows={}",
+        result.telemetry.bytes_read,
+        result.telemetry.bytes_decompressed,
+        result.telemetry.io_read_ns,
+        result.telemetry.decode_ns,
+        result.telemetry.blocks_skipped,
+        result.telemetry.blocks_decoded,
+        result.telemetry.materialized_rows,
+    );
+    println!(
+        "{name}_rows={} {name}_bytes_read={} {name}_bytes_decompressed={} {name}_blocks_skipped={} {name}_blocks_decoded={} {name}_materialized_rows={}",
+        result.rows,
+        result.telemetry.bytes_read,
+        result.telemetry.bytes_decompressed,
+        result.telemetry.blocks_skipped,
+        result.telemetry.blocks_decoded,
+        result.telemetry.materialized_rows,
+    );
+}
+
 fn print_result(result: &BenchResult) {
     println!(
         "{:<30} {:>12} {:>12.2} {:>14.1} {:>14}",
@@ -621,8 +810,13 @@ fn format_bytes_delta(before: u64, after: u64) -> String {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::Duration;
 
-    use super::parse_cache_tick_source;
+    use super::{
+        STREAMING_LATENCY_SAMPLE_CAP, StreamingReadResult, parse_cache_tick_source,
+        record_streaming_latency_sample,
+    };
+    use tqsdk_data::HistorySeriesReadTelemetry;
 
     #[test]
     fn cache_tick_source_requires_all_config_values() {
@@ -654,5 +848,34 @@ mod tests {
                 200
             ))
         );
+    }
+
+    #[test]
+    fn streaming_latency_samples_are_bounded() {
+        let mut samples = Vec::new();
+        for row in 1..=STREAMING_LATENCY_SAMPLE_CAP.saturating_mul(2) {
+            record_streaming_latency_sample(&mut samples, row, Duration::from_nanos(row as u64));
+        }
+        assert_eq!(samples.len(), STREAMING_LATENCY_SAMPLE_CAP);
+    }
+
+    #[test]
+    fn streaming_read_result_reports_tail_latency_and_throughput() {
+        let result = StreamingReadResult {
+            rows: 5,
+            elapsed: Duration::from_secs(2),
+            latencies: vec![
+                Duration::from_nanos(1),
+                Duration::from_nanos(2),
+                Duration::from_nanos(3),
+                Duration::from_nanos(4),
+                Duration::from_nanos(5),
+            ],
+            telemetry: HistorySeriesReadTelemetry::default(),
+        };
+
+        assert_eq!(result.percentile_ns(0.50), 3.0);
+        assert_eq!(result.percentile_ns(0.999), 5.0);
+        assert_eq!(result.events_per_second(), 2.5);
     }
 }

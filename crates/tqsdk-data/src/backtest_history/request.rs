@@ -312,6 +312,7 @@ impl BacktestHistoryClientBuilder {
         validate_nonzero("collect_limit_bytes", self.collect_limit_bytes)?;
         Ok(BacktestHistoryClient::from_config(
             BacktestHistoryClientConfig {
+                fill_durability: None,
                 cache_dir: self.cache_dir,
                 policy: self.policy,
                 logical_concurrency: self.logical_concurrency,
@@ -348,6 +349,8 @@ pub(crate) fn default_blocking_workers() -> usize {
 #[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct BacktestHistoryClientConfig {
+    pub(crate) fill_durability:
+        Option<Arc<dyn Fn(super::report::BacktestHistoryDurabilityEvent) + Send + Sync>>,
     pub(crate) cache_dir: PathBuf,
     pub(crate) policy: BacktestHistoryPolicy,
     pub(crate) logical_concurrency: usize,

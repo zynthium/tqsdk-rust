@@ -1,5 +1,16 @@
 # `tqsdk-cache`
 
+首次 Ctrl+C/SIGTERM/SIGHUP 停止新任务，给当前窗口最多 5 秒收尾；再次信号立即退出。
+日线按 32 天片段续填，分钟线独立暂存 terminal 子窗口，重启重拉必要重叠后继续。
+TTY/plain/JSONL 区分 received_rows、committed_rows、staged_rows。
+暂存不是完整覆盖；见 [中断与续填合同](../../docs/architecture/history-fill-recovery.md)。
+
+分钟／日线 fill 只接收 KLOG，追加新增 closed range，不重复解码旧 rows。
+旧 raw 须先运行 [显式离线迁移](../../docs/architecture/kline-cache-migration.md)，备份保存在 cache root 外。
+使用此版本填充前须同步升级所有 cache reader。`inspect` 检查提交索引；`verify` 和 `doctor`
+验证 payload 完整性。即使 coverage 已完整，重跑 fill 也会恢复未提交尾部。
+日线每片段最多 32 天。见[格式与回滚详情](../../docs/architecture/history-cache-format.md)。
+
 `timeline` audit/`--apply` 及 fill 后 Timeline 重建可与普通 Tick fill 共存：
 root shared + 目标指数分钟月分区 shared pin + 产品发布 exclusive。
 相同分钟分区写入或 root-exclusive 维护仍互斥，busy 返回可重试错误。
@@ -564,8 +575,9 @@ prefix，之后从 opened-file snapshot 读取；首次初始化用 sync + atomi
 fill 恢复，无 checkpoint 的旧文件严格全量校验。该协议不保证新旧 binary 进程长期混跑。
 
 query 的 shared gate 在 `collect_all()` 和 terminal/coverage 验证完成后释放；JSONL/LLM payload 渲染与
-stdout/文件发布不持锁。第一次 Ctrl-C/SIGTERM/SIGHUP 请求协作取消：停止新任务，tick flush 已接受短尾但不
-提交未完成 coverage，minute 不提交未 terminal buffer，收敛后返回 130。第二次信号立即退出 130。
+stdout/文件发布不持锁。第一次 Ctrl-C/SIGTERM/SIGHUP 停止新任务，给当前窗口最多 5 秒收尾，
+随后协作取消：tick flush 已接受短尾但不提交未完成 coverage；minute 保存私有暂存，
+不提交未 terminal buffer。未完成任务收敛后返回 130；第二次信号立即退出 130。
 
 ### 原始节假日日历
 

@@ -25,13 +25,13 @@ pub(super) fn normalize(raw: RawUniverseSpec) -> Result<UniverseSpec, UniverseSp
         if targets.contains(&UniverseTarget::All) && targets.len() > 1 {
             return Err(UniverseSpecError::MixedAll { view: *view });
         }
-        if let Some(excluded_targets) = excludes.get(view) {
-            if let Some(target) = targets.intersection(excluded_targets).next() {
-                return Err(UniverseSpecError::ContradictorySelector {
-                    view: *view,
-                    target: target.clone(),
-                });
-            }
+        if let Some(excluded_targets) = excludes.get(view)
+            && let Some(target) = targets.intersection(excluded_targets).next()
+        {
+            return Err(UniverseSpecError::ContradictorySelector {
+                view: *view,
+                target: target.clone(),
+            });
         }
     }
 

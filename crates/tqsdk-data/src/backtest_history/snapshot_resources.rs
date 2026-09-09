@@ -3,6 +3,8 @@ use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::Semaphore;
+
 use crate::DataError;
 
 /// Daemon-owned budget for immutable snapshot source scans.
@@ -95,6 +97,7 @@ impl BacktestHistoryRunReservations {
 pub struct BacktestHistorySnapshotQueryResources {
     budget: Arc<dyn BacktestHistorySnapshotResourceBudget>,
     _active_pin: Arc<dyn Send + Sync + 'static>,
+    blocking_worker_permits: Option<Arc<Semaphore>>,
     #[cfg(test)]
     daily_reader_open_probe: Option<Arc<AtomicUsize>>,
 }
@@ -117,9 +120,25 @@ impl BacktestHistorySnapshotQueryResources {
         Self {
             budget,
             _active_pin: Arc::new(active_pin),
+            blocking_worker_permits: None,
             #[cfg(test)]
             daily_reader_open_probe: None,
         }
+    }
+
+    /// Attaches one daemon-owned blocking-worker budget shared by every query
+    /// given a clone of these resources.
+    ///
+    /// The semaphore is an admission limit for blocking cache reads; it does
+    /// not replace the per-run/per-symbol limit configured on the client.
+    #[must_use]
+    pub fn with_blocking_worker_permits(mut self, permits: Arc<Semaphore>) -> Self {
+        self.blocking_worker_permits = Some(permits);
+        self
+    }
+
+    pub(crate) fn blocking_worker_permits(&self) -> Option<Arc<Semaphore>> {
+        self.blocking_worker_permits.clone()
     }
 
     #[cfg(test)]
@@ -218,5 +237,21 @@ mod tests {
         drop(reservation);
         assert_eq!(*used.lock().unwrap(), 0);
         assert!(right.try_reserve_for_scan(8).is_ok());
+    }
+
+    #[test]
+    fn query_resources_preserve_opt_in_shared_worker_budget() {
+        let workers = Arc::new(Semaphore::new(1));
+        let budget: Arc<dyn BacktestHistorySnapshotResourceBudget> = Arc::new(TestBudget {
+            capacity: 1,
+            used: Arc::new(Mutex::new(0)),
+        });
+        let resources = BacktestHistorySnapshotQueryResources::new(budget, ())
+            .with_blocking_worker_permits(Arc::clone(&workers));
+
+        assert!(Arc::ptr_eq(
+            &resources.blocking_worker_permits().unwrap(),
+            &workers
+        ));
     }
 }

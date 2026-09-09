@@ -131,6 +131,16 @@ fn kline(id: i64, datetime: i64, close: f64) -> Kline {
 
 fn rewrite_current_month_as_v4(path: &std::path::Path) {
     let mut bytes = std::fs::read(path).unwrap();
+    if bytes.starts_with(b"TQKLOG01") {
+        let offset = u64::from_le_bytes(bytes[64..72].try_into().unwrap()) as usize;
+        let len = u64::from_le_bytes(bytes[72..80].try_into().unwrap()) as usize;
+        let index: serde_json::Value =
+            serde_json::from_slice(&bytes[offset..offset + len]).unwrap();
+        let segment = &index["segments"][0];
+        let offset = segment["offset"].as_u64().unwrap() as usize;
+        let len = segment["len"].as_u64().unwrap() as usize;
+        bytes = bytes[offset..offset + len].to_vec();
+    }
     let metadata_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     let coverage_count = u64::from_le_bytes(bytes[12..20].try_into().unwrap()) as usize;
     let row_count = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;

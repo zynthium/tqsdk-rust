@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, IsTerminal, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -54,7 +53,7 @@ pub(crate) struct FillProgressSession {
 }
 
 enum JsonlEvent {
-    Render,
+    Render(Value),
     Record(Value),
     Finish,
 }
@@ -62,12 +61,10 @@ enum JsonlEvent {
 #[derive(Clone)]
 struct JsonlSender {
     tx: mpsc::SyncSender<JsonlEvent>,
-    render_queued: Arc<AtomicBool>,
 }
 
 struct JsonlWriter {
     tx: mpsc::SyncSender<JsonlEvent>,
-    render_queued: Arc<AtomicBool>,
     worker: thread::JoinHandle<io::Result<()>>,
 }
 
@@ -97,22 +94,14 @@ impl FillProgressSession {
         };
         let jsonl_writer = matches!(mode, ResolvedProgressMode::Jsonl).then(|| {
             let (tx, rx) = mpsc::sync_channel(JSONL_QUEUE_CAPACITY);
-            let render_queued = Arc::new(AtomicBool::new(false));
-            let worker_state = Arc::clone(&shared);
-            let worker_queued = Arc::clone(&render_queued);
-            let worker = thread::spawn(move || render_jsonl(rx, worker_state, worker_queued));
-            JsonlWriter {
-                tx,
-                render_queued,
-                worker,
-            }
+            let worker = thread::spawn(move || render_jsonl(rx));
+            JsonlWriter { tx, worker }
         });
         Self {
             progress: FillProgress {
                 shared: Some(shared),
                 jsonl_tx: jsonl_writer.as_ref().map(|writer| JsonlSender {
                     tx: writer.tx.clone(),
-                    render_queued: Arc::clone(&writer.render_queued),
                 }),
             },
             renderer,
@@ -200,6 +189,16 @@ impl FillProgress {
         self.with_state(|state| state.apply_history_progress(event));
     }
 
+    pub(crate) fn observe_durability(&self, event: &tqsdk_data::BacktestHistoryDurabilityEvent) {
+        self.with_state(|state| {
+            state
+                .symbols
+                .entry(event.symbol.clone())
+                .or_default()
+                .observe_durability(&event.progress)
+        });
+    }
+
     pub(crate) fn observe_telemetry(&self, event: &BacktestRemoteFillTelemetry) {
         self.with_state(|state| state.apply_telemetry(event));
     }
@@ -225,8 +224,9 @@ impl FillProgress {
         }
         state.finished = Some(ProgressCompletion { status, summary });
         state.revision = state.revision.saturating_add(1);
-        if let Some(sender) = &self.jsonl_tx {
-            let record = state.jsonl_record();
+        let terminal_record = self.jsonl_tx.as_ref().map(|_| state.jsonl_record());
+        drop(state);
+        if let (Some(sender), Some(record)) = (&self.jsonl_tx, terminal_record) {
             sender.tx.send(JsonlEvent::Record(record)).map_err(|_| {
                 io::Error::new(io::ErrorKind::BrokenPipe, "JSONL progress writer stopped")
             })?;
@@ -253,21 +253,17 @@ impl FillProgress {
         }
         update(&mut state);
         state.revision = state.revision.saturating_add(1);
-        if matches!(state.mode, ResolvedProgressMode::Jsonl)
-            && let Some(sender) = &self.jsonl_tx
-        {
-            send_jsonl_render(sender);
+        let record =
+            matches!(state.mode, ResolvedProgressMode::Jsonl).then(|| state.jsonl_record());
+        drop(state);
+        if let (Some(sender), Some(record)) = (&self.jsonl_tx, record) {
+            send_jsonl_render(sender, record);
         }
     }
 }
 
-fn send_jsonl_render(sender: &JsonlSender) {
-    if sender.render_queued.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    if sender.tx.try_send(JsonlEvent::Render).is_err() {
-        sender.render_queued.store(false, Ordering::Release);
-    }
+fn send_jsonl_render(sender: &JsonlSender, record: Value) {
+    let _ = sender.tx.try_send(JsonlEvent::Render(record));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,6 +348,7 @@ struct InspectionProgress {
 
 #[derive(Clone, Default)]
 struct SymbolProgress {
+    durability: BTreeMap<(i64, i64), tqsdk_data::BacktestHistoryDurabilityProgress>,
     requested_ranges: Vec<(i64, i64)>,
     missing_ranges: Vec<(i64, i64)>,
     planned_days: BTreeSet<NaiveDate>,
@@ -382,6 +379,16 @@ struct HistoryDayCounts {
 }
 
 impl SymbolProgress {
+    fn observe_durability(&mut self, progress: &tqsdk_data::BacktestHistoryDurabilityProgress) {
+        if self
+            .durability
+            .get(&progress.range)
+            .is_some_and(|old| old.redownload_range.is_none())
+        {
+            return;
+        }
+        self.durability.insert(progress.range, progress.clone());
+    }
     fn day_counts(&self, history_fill: bool) -> (usize, usize, usize, usize) {
         if history_fill {
             let counts = self.history_day_counts.unwrap_or_default();
@@ -732,6 +739,9 @@ impl ProgressState {
         };
         let event_sequence = self.revision;
         let entry = self.symbols.entry(symbol.to_string()).or_default();
+        if let Some(durability) = event.durability() {
+            entry.observe_durability(durability);
+        }
         entry.phase = Some(event.phase());
         entry.last_event_sequence = event_sequence;
         let terminal = matches!(
@@ -952,6 +962,29 @@ impl ProgressState {
         })
     }
 
+    fn durability_summary(&self) -> String {
+        if self
+            .symbols
+            .values()
+            .all(|symbol| symbol.durability.is_empty())
+        {
+            return "received_rows=n/a committed_rows=n/a staged_rows=n/a".into();
+        }
+        let windows = self
+            .symbols
+            .values()
+            .flat_map(|symbol| symbol.durability.values());
+        let (received, committed, staged) =
+            windows.fold((0usize, 0usize, 0usize), |(r, c, s), d| {
+                (
+                    r.saturating_add(d.received_rows),
+                    c.saturating_add(d.committed_rows),
+                    s.saturating_add(d.staged_rows),
+                )
+            });
+        format!("received_rows={received} committed_rows={committed} staged_rows={staged}")
+    }
+
     fn jsonl_record(&self) -> Value {
         let (covered, planned, received, missing, rows) = self.coverage_counts();
         let display_rows = self.display_rows(rows);
@@ -998,6 +1031,14 @@ impl ProgressState {
                 "missing_days": missing,
                 "rows": display_rows,
                 "rows_known": display_rows.is_some(),
+            },
+            "durability": {
+                "scope": "observed_fill_windows_only",
+                "known": self.symbols.values().any(|s| !s.durability.is_empty()),
+                "received_rows": self.symbols.values().any(|s| !s.durability.is_empty()).then(|| self.symbols.values().flat_map(|s| s.durability.values()).map(|d| d.received_rows).sum::<usize>()),
+                "committed_rows": self.symbols.values().any(|s| !s.durability.is_empty()).then(|| self.symbols.values().flat_map(|s| s.durability.values()).map(|d| d.committed_rows).sum::<usize>()),
+                "staged_rows": self.symbols.values().any(|s| !s.durability.is_empty()).then(|| self.symbols.values().flat_map(|s| s.durability.values()).map(|d| d.staged_rows).sum::<usize>()),
+                "windows": self.symbols.iter().flat_map(|(symbol, state)| state.durability.values().map(move |window| json!({"symbol": symbol, "progress": window}))).collect::<Vec<_>>(),
             },
             "calendar": {
                 "source": self
@@ -1047,26 +1088,41 @@ impl ProgressState {
     }
 }
 
-fn render_jsonl(
-    rx: mpsc::Receiver<JsonlEvent>,
-    shared: Arc<Mutex<ProgressState>>,
-    render_queued: Arc<AtomicBool>,
-) -> io::Result<()> {
+fn render_jsonl(rx: mpsc::Receiver<JsonlEvent>) -> io::Result<()> {
+    let mut last_written_sequence = None;
     while let Ok(event) = rx.recv() {
         match event {
-            JsonlEvent::Render => {
-                render_queued.store(false, Ordering::Release);
-                let snapshot = shared
-                    .lock()
-                    .map_err(|_| io::Error::other("progress state lock poisoned"))?
-                    .clone();
-                write_jsonl_progress(&snapshot.jsonl_record())?;
+            JsonlEvent::Render(record) | JsonlEvent::Record(record) => {
+                write_jsonl_record(&record, &mut last_written_sequence)?;
             }
-            JsonlEvent::Record(record) => write_jsonl_progress(&record)?,
             JsonlEvent::Finish => return Ok(()),
         }
     }
     Ok(())
+}
+
+/// Writes a JSONL progress record once for each monotonically increasing state revision.
+///
+/// [`JsonlEvent::Render`] carries an immutable state snapshot captured under the progress
+/// lock. A terminal record can race a pending snapshot with the same revision, so suppress
+/// duplicate or stale snapshots to keep the public `sequence` field strictly increasing.
+fn write_jsonl_record(record: &Value, last_written_sequence: &mut Option<u64>) -> io::Result<()> {
+    if !jsonl_record_should_write(record, *last_written_sequence) {
+        return Ok(());
+    }
+
+    write_jsonl_progress(record)?;
+    if let Some(sequence) = record.get("sequence").and_then(Value::as_u64) {
+        *last_written_sequence = Some(sequence);
+    }
+    Ok(())
+}
+
+fn jsonl_record_should_write(record: &Value, last_written_sequence: Option<u64>) -> bool {
+    record
+        .get("sequence")
+        .and_then(Value::as_u64)
+        .is_none_or(|sequence| last_written_sequence.is_none_or(|last| sequence > last))
 }
 
 fn write_jsonl_progress(record: &Value) -> io::Result<()> {
@@ -1299,7 +1355,8 @@ fn render_plain(shared: Arc<Mutex<ProgressState>>) {
                 eprintln!("tqsdk-cache: phase=planning message={}", snapshot.planning);
             } else {
                 eprintln!(
-                    "tqsdk-cache: phase=fill status={} batches={}/{} coverage_days={}/{} received_days={}/{} rows={} recent_rows_per_sec={} calendar={}{}",
+                    "tqsdk-cache: phase=fill durability=[{}] status={} batches={}/{} coverage_days={}/{} received_days={}/{} rows={} recent_rows_per_sec={} calendar={}{}",
+                    snapshot.durability_summary(),
                     if snapshot.failed { "failed" } else { "running" },
                     snapshot.completed_batches.len(),
                     snapshot.total_batches,
@@ -1466,13 +1523,14 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
                     global.set_length(snapshot.total_batches as u64);
                     global.set_position(snapshot.completed_batches.len() as u64);
                     global.set_message(format!(
-                    "{} | 覆盖 {covered}/{planned} | 本轮接收 {received}/{missing} | {rows} rows | recent {rate}/s{}",
+                    "{} | 覆盖 {covered}/{planned} | 本轮接收 {received}/{missing} | {rows} rows | recent {rate}/s{} | {}",
                         if snapshot.failed { "failed" } else { "running" },
                         if additional_active == 0 {
                             String::new()
                         } else {
-                            format!(" | +{additional_active} active")
-                        }
+                        format!(" | +{additional_active} active")
+                    },
+                    snapshot.durability_summary()
                     ));
                 }
                 for (symbol, bar) in &symbol_bars {
@@ -1625,6 +1683,30 @@ mod tests {
         BacktestHistoryFillFamily, BacktestHistoryFillProgress, BacktestHistoryPhase,
         BacktestHistoryTelemetryEvent, backtest_tick_trading_day_range,
     };
+
+    #[test]
+    fn durability_distinguishes_staging_and_commit_and_ignores_stale_progress() {
+        let mut symbol = SymbolProgress::default();
+        let mut pending = tqsdk_data::BacktestHistoryDurabilityProgress {
+            range: (1, 100),
+            received_rows: 10,
+            committed_rows: 0,
+            final_coverage: false,
+            staged_rows: 8,
+            redownload_range: Some((50, 100)),
+        };
+        symbol.observe_durability(&pending);
+        assert_eq!(symbol.durability[&(1, 100)].committed_rows, 0);
+        assert_eq!(symbol.durability[&(1, 100)].staged_rows, 8);
+        let stale = pending.clone();
+        pending.committed_rows = 10;
+        pending.staged_rows = 0;
+        pending.final_coverage = true;
+        pending.redownload_range = None;
+        symbol.observe_durability(&pending);
+        symbol.observe_durability(&stale);
+        assert_eq!(symbol.durability[&(1, 100)], pending);
+    }
 
     #[test]
     fn recent_rows_rate_drops_after_a_stall_and_recovers_from_new_rows() {
@@ -2266,44 +2348,67 @@ mod tests {
     }
 
     #[test]
-    fn jsonl_queue_coalesces_intermediate_renders_but_preserves_terminal_record() {
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let sender = super::JsonlSender {
-            tx: tx.clone(),
-            render_queued: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        };
-        super::send_jsonl_render(&sender);
-        super::send_jsonl_render(&sender);
-        assert!(matches!(
-            rx.recv().expect("first event"),
-            super::JsonlEvent::Render
-        ));
-        assert!(matches!(
-            rx.try_recv(),
-            Err(std::sync::mpsc::TryRecvError::Empty)
-        ));
+    fn jsonl_queue_preserves_ordered_phase_snapshots_and_terminal_record() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(3);
+        let sender = super::JsonlSender { tx: tx.clone() };
+        super::send_jsonl_render(
+            &sender,
+            serde_json::json!({
+                "sequence": 1,
+                "event": "planning"
+            }),
+        );
+        super::send_jsonl_render(
+            &sender,
+            serde_json::json!({
+                "sequence": 2,
+                "event": "inspection"
+            }),
+        );
+        tx.send(super::JsonlEvent::Record(serde_json::json!({
+            "sequence": 3,
+            "event": "complete"
+        })))
+        .expect("terminal record queues");
 
-        sender
-            .render_queued
-            .store(false, std::sync::atomic::Ordering::Release);
-        super::send_jsonl_render(&sender);
-        let terminal_tx = tx.clone();
-        let terminal_sender = std::thread::spawn(move || {
-            terminal_tx
-                .send(super::JsonlEvent::Record(serde_json::json!({
-                    "revision": 4,
-                    "event": "complete"
-                })))
-                .expect("terminal record queues");
-        });
-        assert!(matches!(
-            rx.recv().expect("intermediate event"),
-            super::JsonlEvent::Render
-        ));
+        let super::JsonlEvent::Render(planning) = rx.recv().expect("planning event") else {
+            panic!("expected planning render");
+        };
+        assert_eq!(planning["event"], "planning");
+        let super::JsonlEvent::Render(inspection) = rx.recv().expect("inspection event") else {
+            panic!("expected inspection render");
+        };
+        assert_eq!(inspection["event"], "inspection");
         let super::JsonlEvent::Record(terminal) = rx.recv().expect("terminal record") else {
-            panic!("expected a record");
+            panic!("expected terminal record");
         };
         assert_eq!(terminal["event"], "complete");
-        terminal_sender.join().expect("terminal sender joins");
+    }
+
+    #[test]
+    fn jsonl_writer_skips_duplicate_or_stale_progress_sequences() {
+        let mut last_written_sequence = None;
+
+        assert!(super::jsonl_record_should_write(
+            &serde_json::json!({ "sequence": 1 }),
+            last_written_sequence
+        ));
+        last_written_sequence = Some(1);
+        assert!(!super::jsonl_record_should_write(
+            &serde_json::json!({ "sequence": 1 }),
+            last_written_sequence
+        ));
+        assert!(!super::jsonl_record_should_write(
+            &serde_json::json!({ "sequence": 0 }),
+            last_written_sequence
+        ));
+        assert!(super::jsonl_record_should_write(
+            &serde_json::json!({ "sequence": 2 }),
+            last_written_sequence
+        ));
+        assert!(super::jsonl_record_should_write(
+            &serde_json::json!({ "event": "complete" }),
+            last_written_sequence
+        ));
     }
 }

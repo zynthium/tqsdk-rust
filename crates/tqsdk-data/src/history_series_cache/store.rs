@@ -5,7 +5,7 @@ use tqsdk_core::{Kline, Tick};
 use crate::{DataError, Result};
 
 use super::{
-    HistorySeriesCacheMaintenanceReport, HistorySeriesCacheScanReport,
+    HistorySeriesCacheMaintenanceReport, HistorySeriesCacheScanReport, HistorySeriesReadTelemetry,
     HistorySeriesTickLegacyPartitionLockInspection, HistorySeriesTickLegacyPartitionLockRepair,
     HistorySeriesTickLockInspection, HistorySeriesTickLockRepair,
 };
@@ -129,6 +129,10 @@ pub(crate) enum HistorySeriesRow {
 
 pub(crate) trait HistorySeriesReader: Send {
     fn next_row(&mut self) -> Result<Option<HistorySeriesRow>>;
+
+    fn read_telemetry(&self) -> HistorySeriesReadTelemetry {
+        HistorySeriesReadTelemetry::default()
+    }
 }
 
 pub(crate) trait HistorySeriesStore: Send + Sync {

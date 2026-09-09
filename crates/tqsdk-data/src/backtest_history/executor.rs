@@ -1,12 +1,11 @@
 //! Async request scheduler and cache-reader execution for backtest history.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use tqsdk_core::{Kline, Tick};
 
@@ -30,14 +29,14 @@ use super::planner::{
 use super::report::{
     BacktestHistoryBatchReport, BacktestHistoryChunk, BacktestHistoryEvent,
     BacktestHistoryFailureReason, BacktestHistoryFinality, BacktestHistoryRows,
-    BacktestHistoryTelemetryEvent,
+    BacktestHistorySharedScanMetrics, BacktestHistoryTelemetryEvent,
 };
 use super::request::{
     BacktestHistoryClientConfig, BacktestHistoryPolicy, ValidatedBacktestHistoryRequest,
 };
 use super::store_worker::{
-    DailyScanSpec, MinuteScanSpec, StoreRows, StoreScanFailure, StoreScanMessage, StoreScanSpec,
-    SymbolBufferBudget, TickScanSpec, spawn_scan,
+    DailyScanSpec, MinuteScanSpec, ScanCancellation, StoreChunk, StoreRows, StoreScanFailure,
+    StoreScanMessage, StoreScanSpec, SymbolBufferBudget, TickScanSpec, spawn_scan,
 };
 use super::telemetry::TelemetryHub;
 use super::{
@@ -46,7 +45,6 @@ use super::{
 };
 
 const MAX_SOURCE_CHUNK_BYTES: usize = 1024 * 1024;
-const REQUEST_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BacktestHistoryExecutionMode {
@@ -59,6 +57,7 @@ pub(crate) struct BacktestHistoryExecutionState {
     failure_reasons: super::BacktestHistoryFailureReasons,
     resources: Option<super::BacktestHistorySnapshotQueryResources>,
     event_reservations: BacktestHistoryRunReservations,
+    shared_scan_metrics: Arc<SharedScanMetrics>,
     prepared_plans: BTreeMap<BacktestHistoryRequestId, PlannedBacktestHistoryRequest>,
 }
 
@@ -68,12 +67,14 @@ impl BacktestHistoryExecutionState {
         failure_reasons: super::BacktestHistoryFailureReasons,
         resources: Option<super::BacktestHistorySnapshotQueryResources>,
         event_reservations: BacktestHistoryRunReservations,
+        shared_scan_metrics: Arc<SharedScanMetrics>,
     ) -> Self {
         Self {
             lifecycle_pin,
             failure_reasons,
             resources,
             event_reservations,
+            shared_scan_metrics,
             prepared_plans: BTreeMap::new(),
         }
     }
@@ -100,7 +101,7 @@ struct BaseScanSpec {
     minute_snapshot: crate::MinuteKlineCacheSnapshot,
     provisional_as_of_ns: Option<i64>,
     chunk_bytes: usize,
-    cancellation: Arc<AtomicBool>,
+    cancellation: Arc<ScanCancellation>,
     blocking_permits: Arc<Semaphore>,
     buffer_budget: SymbolBufferBudget,
     lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
@@ -113,36 +114,350 @@ struct SharedScanRegistry {
     budgets: Arc<Mutex<Vec<(String, SymbolBufferBudget)>>>,
     lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
     resources: Option<super::BacktestHistorySnapshotQueryResources>,
+    metrics: Arc<SharedScanMetrics>,
+}
+
+/// Lock-free run-local counters.  They intentionally do not use the shared
+/// scan or row-delivery locks, so observing a fallback cannot prolong a scan
+/// critical section.
+#[derive(Default)]
+pub(crate) struct SharedScanMetrics {
+    eligible_requests: AtomicU64,
+    shared_scan_hits: AtomicU64,
+    late_join_attempts: AtomicU64,
+    late_join_hits: AtomicU64,
+    duplicate_physical_scans: AtomicU64,
+    duplicate_physical_scan_bytes: AtomicU64,
+}
+
+impl SharedScanMetrics {
+    pub(crate) fn snapshot(&self) -> BacktestHistorySharedScanMetrics {
+        BacktestHistorySharedScanMetrics {
+            eligible_requests: self.eligible_requests.load(Ordering::Relaxed),
+            shared_scan_hits: self.shared_scan_hits.load(Ordering::Relaxed),
+            late_join_attempts: self.late_join_attempts.load(Ordering::Relaxed),
+            late_join_hits: self.late_join_hits.load(Ordering::Relaxed),
+            duplicate_physical_scans: self.duplicate_physical_scans.load(Ordering::Relaxed),
+            duplicate_physical_scan_bytes: self
+                .duplicate_physical_scan_bytes
+                .load(Ordering::Relaxed),
+        }
+    }
+
+    fn record_collecting_hit(&self) {
+        self.eligible_requests.fetch_add(1, Ordering::Relaxed);
+        self.shared_scan_hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_late_join(&self, accepted: bool) {
+        self.eligible_requests.fetch_add(1, Ordering::Relaxed);
+        self.late_join_attempts.fetch_add(1, Ordering::Relaxed);
+        if accepted {
+            self.shared_scan_hits.fetch_add(1, Ordering::Relaxed);
+            self.late_join_hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.duplicate_physical_scans
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn record_duplicate_physical_scan_bytes(&self, bytes: u64) {
+        self.duplicate_physical_scan_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone)]
 struct SharedScanEntry {
     key: BaseScanKey,
     state: Arc<Mutex<SharedScanState>>,
+    cancellation: Arc<ScanCancellation>,
+    activity: Arc<SharedScanActivity>,
     resources: Option<super::BacktestHistorySnapshotQueryResources>,
 }
 
 enum SharedScanState {
     Collecting(Vec<SharedScanSubscription>),
-    Started,
+    Started(SharedScanLiveState),
     Finished,
+}
+
+/// Active shared-scan state guarded by one mutex. A late subscriber either
+/// receives its complete replay prefix before being registered for live
+/// messages, or falls back to an independent scan.
+struct SharedScanLiveState {
+    subscribers: Vec<SharedScanSubscription>,
+    planned_ranges: Vec<(i64, i64)>,
+    replay: VecDeque<SharedReplayChunk>,
+    emitted_through_ns: Option<i64>,
+}
+
+/// Bounded replay metadata. The weak reference must not extend a source
+/// chunk's byte permit lifetime.
+struct SharedReplayChunk {
+    range: (i64, i64),
+    chunk: Weak<StoreChunk>,
+}
+
+/// Tracks live receivers independently from the runner's sender list. A
+/// receiver can be dropped while the source is idle, so its drop must wake the
+/// runner instead of waiting for a future chunk to discover a closed channel.
+struct SharedScanActivity {
+    subscribers: AtomicUsize,
+    changed: watch::Sender<usize>,
+}
+
+struct SharedSubscriptionLease {
+    activity: Arc<SharedScanActivity>,
 }
 
 struct SharedScanSubscription {
     range: (i64, i64),
     sender: mpsc::Sender<StoreScanMessage>,
+    lagged: Arc<AtomicBool>,
+}
+
+const SHARED_SCAN_SUBSCRIBER_BUFFER: usize = 2;
+const SHARED_SCAN_REPLAY_WINDOW: usize = SHARED_SCAN_SUBSCRIBER_BUFFER;
+
+impl SharedScanActivity {
+    fn new() -> Arc<Self> {
+        let (changed, _receiver) = watch::channel(0_usize);
+        Arc::new(Self {
+            subscribers: AtomicUsize::new(0),
+            changed,
+        })
+    }
+
+    fn subscribe(self: &Arc<Self>) -> SharedSubscriptionLease {
+        let subscribers = self.subscribers.fetch_add(1, Ordering::AcqRel) + 1;
+        self.changed.send_replace(subscribers);
+        SharedSubscriptionLease {
+            activity: Arc::clone(self),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.subscribers.load(Ordering::Acquire) == 0
+    }
+
+    async fn wait_until_empty(&self) {
+        let mut changed = self.changed.subscribe();
+        loop {
+            if self.is_empty() {
+                return;
+            }
+            if changed.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+impl Drop for SharedSubscriptionLease {
+    fn drop(&mut self) {
+        let previous = self.activity.subscribers.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "shared scan subscription count underflow");
+        self.activity
+            .changed
+            .send_replace(previous.saturating_sub(1));
+    }
+}
+
+/// Bounded source stream with an explicit shared-scan lag outcome.
+///
+/// A full shared-scan subscriber is disconnected rather than holding the
+/// physical scan hostage. Its remaining buffered messages are still read,
+/// then `recv` emits one terminal failure so callers never mistake loss for a
+/// complete source stream.
+struct SourceStream {
+    receiver: mpsc::Receiver<StoreScanMessage>,
+    lagged: Arc<AtomicBool>,
+    cancellation: Arc<ScanCancellation>,
+    duplicate_scan_metrics: Option<Arc<SharedScanMetrics>>,
+    _subscription: Option<SharedSubscriptionLease>,
+}
+
+impl SourceStream {
+    fn direct(
+        receiver: mpsc::Receiver<StoreScanMessage>,
+        cancellation: Arc<ScanCancellation>,
+        duplicate_scan_metrics: Option<Arc<SharedScanMetrics>>,
+    ) -> Self {
+        Self {
+            receiver,
+            lagged: Arc::new(AtomicBool::new(false)),
+            cancellation,
+            duplicate_scan_metrics,
+            _subscription: None,
+        }
+    }
+
+    fn shared(
+        receiver: mpsc::Receiver<StoreScanMessage>,
+        lagged: Arc<AtomicBool>,
+        cancellation: Arc<ScanCancellation>,
+        subscription: Option<SharedSubscriptionLease>,
+    ) -> Self {
+        Self {
+            receiver,
+            lagged,
+            cancellation,
+            duplicate_scan_metrics: None,
+            _subscription: subscription,
+        }
+    }
+
+    async fn recv(&mut self) -> Option<StoreScanMessage> {
+        if self.cancellation.is_cancelled() {
+            return Some(cancelled_source_message());
+        }
+
+        let message = tokio::select! {
+            _ = self.cancellation.cancelled() => return Some(cancelled_source_message()),
+            message = self.receiver.recv() => message,
+        };
+
+        if let Some(message) = message {
+            if let (Some(metrics), StoreScanMessage::Chunk(chunk)) =
+                (&self.duplicate_scan_metrics, &message)
+            {
+                metrics.record_duplicate_physical_scan_bytes(chunk_decoded_row_bytes(chunk));
+            }
+            return Some(message);
+        }
+
+        self.lagged.swap(false, Ordering::AcqRel).then(|| {
+            StoreScanMessage::Failed(StoreScanFailure {
+                reason: BacktestHistoryFailureReason::Internal,
+                message: "shared backtest history scan subscriber lagged behind its bounded buffer; retry the request".to_string(),
+            })
+        })
+    }
+}
+
+fn cancelled_source_message() -> StoreScanMessage {
+    StoreScanMessage::Failed(StoreScanFailure {
+        reason: BacktestHistoryFailureReason::Internal,
+        message: "backtest history request was cancelled".to_string(),
+    })
+}
+
+/// Delivers one source message without awaiting a subscriber.
+///
+/// History chunks are lossless: a full subscriber is marked lagged and its
+/// sender is dropped. The receiver later observes a terminal failure through
+/// [`SourceStream`], while other subscribers keep receiving the shared scan.
+fn try_deliver_shared(
+    subscription: SharedScanSubscription,
+    message: StoreScanMessage,
+) -> Option<SharedScanSubscription> {
+    match subscription.sender.try_send(message) {
+        Ok(()) => Some(subscription),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            subscription.lagged.store(true, Ordering::Release);
+            None
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => None,
+    }
+}
+
+impl SharedScanLiveState {
+    fn new(subscribers: Vec<SharedScanSubscription>, planned_ranges: Vec<(i64, i64)>) -> Self {
+        Self {
+            subscribers,
+            planned_ranges,
+            replay: VecDeque::new(),
+            emitted_through_ns: None,
+        }
+    }
+
+    fn record_chunk(&mut self, chunk: &Arc<StoreChunk>) {
+        let Some(range) = chunk_bounds(chunk.as_ref()) else {
+            return;
+        };
+
+        self.emitted_through_ns = Some(
+            self.emitted_through_ns
+                .map_or(range.1, |through| through.max(range.1)),
+        );
+        self.replay.push_back(SharedReplayChunk {
+            range,
+            chunk: Arc::downgrade(chunk),
+        });
+        while self.replay.len() > SHARED_SCAN_REPLAY_WINDOW {
+            let _ = self.replay.pop_front();
+        }
+    }
+
+    /// Returns a replay prefix only when it proves that every already-emitted
+    /// chunk needed by `range` remains live.  The caller queues this prefix and
+    /// registers the live subscriber while holding the same state mutex.
+    fn late_join_replay(&self, range: (i64, i64)) -> Option<Vec<Arc<StoreChunk>>> {
+        if !self
+            .planned_ranges
+            .iter()
+            .any(|planned| planned.0 <= range.0 && range.1 <= planned.1)
+        {
+            return None;
+        }
+
+        let Some(emitted_through_ns) = self.emitted_through_ns else {
+            return Some(Vec::new());
+        };
+        if range.0 > emitted_through_ns {
+            return Some(Vec::new());
+        }
+
+        // Source slice ends are exclusive. The replay must cover every row
+        // already emitted for this slice, through its last representable
+        // timestamp, while later rows remain the live scan's responsibility.
+        let historical_end_ns = range.1.saturating_sub(1).min(emitted_through_ns);
+        let mut replay = Vec::new();
+        let mut first_required_chunk_seen = false;
+
+        for entry in &self.replay {
+            if entry.range.1 < range.0 {
+                continue;
+            }
+            if entry.range.0 > historical_end_ns {
+                break;
+            }
+
+            if !first_required_chunk_seen {
+                if entry.range.0 > range.0 {
+                    return None;
+                }
+                first_required_chunk_seen = true;
+            }
+
+            replay.push(entry.chunk.upgrade()?);
+        }
+
+        let last = replay.last()?;
+        let (_, last_ns) = chunk_bounds(last.as_ref())?;
+        if last_ns < historical_end_ns {
+            return None;
+        }
+
+        // Leave one channel slot for the next live chunk.  More replay would
+        // make a newly joined subscriber lag before it gets a chance to run.
+        (replay.len() < SHARED_SCAN_SUBSCRIBER_BUFFER).then_some(replay)
+    }
 }
 
 impl SharedScanRegistry {
     fn new(
         lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
         resources: Option<super::BacktestHistorySnapshotQueryResources>,
+        metrics: Arc<SharedScanMetrics>,
     ) -> Self {
         Self {
             entries: Arc::new(Mutex::new(Vec::new())),
             budgets: Arc::new(Mutex::new(Vec::new())),
             lifecycle_pin,
             resources,
+            metrics,
         }
     }
 
@@ -151,26 +466,30 @@ impl SharedScanRegistry {
         config: &BacktestHistoryClientConfig,
         plan: &PlannedBacktestHistoryRequest,
         slice: &super::planner::PlannedSourceSlice,
-        cancellation: Arc<AtomicBool>,
+        cancellation: Arc<ScanCancellation>,
         blocking_permits: Arc<Semaphore>,
         chunk_bytes: usize,
-    ) -> mpsc::Receiver<StoreScanMessage> {
+    ) -> SourceStream {
         let budget = self.budget_for(plan.symbol.as_str(), config.per_symbol_buffer_bytes);
         if plan.source_slices.len() != 1 {
-            return spawn_base_scan(BaseScanSpec {
-                family: plan.base_source,
-                cache_dir: config.cache_dir.clone(),
-                cache_symbol: slice.cache_symbol.clone(),
-                range: slice.range,
-                minute_snapshot: plan.minute_snapshot.clone(),
-                provisional_as_of_ns: provisional_as_of(plan),
-                chunk_bytes,
+            return SourceStream::direct(
+                spawn_base_scan(BaseScanSpec {
+                    family: plan.base_source,
+                    cache_dir: config.cache_dir.clone(),
+                    cache_symbol: slice.cache_symbol.clone(),
+                    range: slice.range,
+                    minute_snapshot: plan.minute_snapshot.clone(),
+                    provisional_as_of_ns: provisional_as_of(plan),
+                    chunk_bytes,
+                    cancellation: Arc::clone(&cancellation),
+                    blocking_permits,
+                    buffer_budget: budget,
+                    lifecycle_pin: self.lifecycle_pin.clone(),
+                    resources: self.resources.clone(),
+                }),
                 cancellation,
-                blocking_permits,
-                buffer_budget: budget,
-                lifecycle_pin: self.lifecycle_pin.clone(),
-                resources: self.resources.clone(),
-            });
+                None,
+            );
         }
 
         let key = BaseScanKey {
@@ -179,7 +498,10 @@ impl SharedScanRegistry {
             snapshot_hash: plan.snapshot_hash.clone(),
             finality: plan.finality,
         };
-        let (sender, receiver) = mpsc::channel(2);
+        let (sender, receiver) = mpsc::channel(SHARED_SCAN_SUBSCRIBER_BUFFER);
+        let lagged = Arc::new(AtomicBool::new(false));
+        // Lock-order invariant: registry `entries` is acquired before an entry's
+        // `state`. No path may hold `state` while acquiring `entries`.
         let mut entries = self
             .entries
             .lock()
@@ -198,39 +520,85 @@ impl SharedScanRegistry {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let SharedScanState::Collecting(subscribers) = &mut *state {
-                subscribers.push(SharedScanSubscription {
-                    range: slice.range,
-                    sender,
-                });
-                return receiver;
+            match &mut *state {
+                SharedScanState::Collecting(subscribers) => {
+                    self.metrics.record_collecting_hit();
+                    let subscription = entry.activity.subscribe();
+                    subscribers.push(SharedScanSubscription {
+                        range: slice.range,
+                        sender,
+                        lagged: Arc::clone(&lagged),
+                    });
+                    return SourceStream::shared(
+                        receiver,
+                        lagged,
+                        cancellation,
+                        Some(subscription),
+                    );
+                }
+                SharedScanState::Started(live) => {
+                    if let Some(replay) = live.late_join_replay(slice.range) {
+                        self.metrics.record_late_join(true);
+                        // The channel is private to this subscriber until it is
+                        // registered below. `late_join_replay` leaves one slot
+                        // free for the first live chunk.
+                        for chunk in replay {
+                            sender
+                                .try_send(StoreScanMessage::Chunk(chunk))
+                                .expect("new shared-scan subscriber channel must accept replay");
+                        }
+                        let subscription = entry.activity.subscribe();
+                        live.subscribers.push(SharedScanSubscription {
+                            range: slice.range,
+                            sender,
+                            lagged: Arc::clone(&lagged),
+                        });
+                        return SourceStream::shared(
+                            receiver,
+                            lagged,
+                            cancellation,
+                            Some(subscription),
+                        );
+                    }
+                    self.metrics.record_late_join(false);
+                }
+                SharedScanState::Finished => {}
             }
             drop(state);
             drop(entries);
-            return spawn_base_scan(BaseScanSpec {
-                family: plan.base_source,
-                cache_dir: config.cache_dir.clone(),
-                cache_symbol: slice.cache_symbol.clone(),
-                range: slice.range,
-                minute_snapshot: plan.minute_snapshot.clone(),
-                provisional_as_of_ns: provisional_as_of(plan),
-                chunk_bytes,
+            return SourceStream::direct(
+                spawn_base_scan(BaseScanSpec {
+                    family: plan.base_source,
+                    cache_dir: config.cache_dir.clone(),
+                    cache_symbol: slice.cache_symbol.clone(),
+                    range: slice.range,
+                    minute_snapshot: plan.minute_snapshot.clone(),
+                    provisional_as_of_ns: provisional_as_of(plan),
+                    chunk_bytes,
+                    cancellation: Arc::clone(&cancellation),
+                    blocking_permits,
+                    buffer_budget: budget,
+                    lifecycle_pin: self.lifecycle_pin.clone(),
+                    resources: self.resources.clone(),
+                }),
                 cancellation,
-                blocking_permits,
-                buffer_budget: budget,
-                lifecycle_pin: self.lifecycle_pin.clone(),
-                resources: self.resources.clone(),
-            });
+                Some(Arc::clone(&self.metrics)),
+            );
         }
 
+        let activity = SharedScanActivity::new();
+        let subscription = activity.subscribe();
         let entry = SharedScanEntry {
             key,
             state: Arc::new(Mutex::new(SharedScanState::Collecting(vec![
                 SharedScanSubscription {
                     range: slice.range,
                     sender,
+                    lagged: Arc::clone(&lagged),
                 },
             ]))),
+            cancellation: Arc::clone(&cancellation),
+            activity,
             resources: self.resources.clone(),
         };
         entries.push(entry.clone());
@@ -244,7 +612,7 @@ impl SharedScanRegistry {
             budget,
             self.lifecycle_pin.clone(),
         ));
-        receiver
+        SourceStream::shared(receiver, lagged, cancellation, Some(subscription))
     }
 
     fn budget_for(&self, symbol: &str, capacity_bytes: usize) -> SymbolBufferBudget {
@@ -277,25 +645,29 @@ async fn run_shared_scan(
     // subscribe before the first source range is fixed. Later consumers fall
     // back to an independent bounded scan instead of delaying a ready run.
     tokio::task::yield_now().await;
-    let mut subscribers = {
+    let ranges = {
         let mut state = entry
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let SharedScanState::Collecting(subscribers) =
-            std::mem::replace(&mut *state, SharedScanState::Started)
+            std::mem::replace(&mut *state, SharedScanState::Finished)
         else {
             return;
         };
-        subscribers
+        let ranges = merge_ranges(
+            subscribers
+                .iter()
+                .map(|subscriber| subscriber.range)
+                .collect(),
+        );
+        *state = SharedScanState::Started(SharedScanLiveState::new(subscribers, ranges.clone()));
+        ranges
     };
-    let scan_cancellation = Arc::new(AtomicBool::new(false));
-    let ranges = merge_ranges(
-        subscribers
-            .iter()
-            .map(|subscriber| subscriber.range)
-            .collect(),
-    );
+    let scan_cancellation = Arc::new(ScanCancellation::new());
+    if finish_shared_scan_if_no_subscribers(&entry) {
+        return;
+    }
     for range in ranges {
         let mut source = spawn_base_scan(BaseScanSpec {
             family: entry.key.family,
@@ -311,36 +683,62 @@ async fn run_shared_scan(
             lifecycle_pin: lifecycle_pin.clone(),
             resources: entry.resources.clone(),
         });
-        while let Some(message) = source.recv().await {
+        loop {
+            let message = tokio::select! {
+                _ = entry.cancellation.cancelled() => {
+                    scan_cancellation.cancel();
+                    finish_shared_scan(&entry);
+                    return;
+                }
+                _ = entry.activity.wait_until_empty() => {
+                    if finish_shared_scan_if_no_subscribers(&entry) {
+                        scan_cancellation.cancel();
+                        return;
+                    }
+                    continue;
+                }
+                message = source.recv() => message,
+            };
+            let Some(message) = message else {
+                break;
+            };
             match message {
                 StoreScanMessage::Chunk(chunk) => {
-                    let mut active = Vec::with_capacity(subscribers.len());
-                    for subscriber in subscribers {
-                        if !chunk_intersects_range(chunk.as_ref(), subscriber.range)
-                            || subscriber
-                                .sender
-                                .send(StoreScanMessage::Chunk(Arc::clone(&chunk)))
-                                .await
-                                .is_ok()
-                        {
-                            active.push(subscriber);
+                    let no_subscribers = {
+                        let mut state = entry
+                            .state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let SharedScanState::Started(live) = &mut *state else {
+                            return;
+                        };
+                        live.record_chunk(&chunk);
+                        let subscribers = std::mem::take(&mut live.subscribers);
+                        let mut active = Vec::with_capacity(subscribers.len());
+                        for subscriber in subscribers {
+                            if !chunk_intersects_range(chunk.as_ref(), subscriber.range) {
+                                active.push(subscriber);
+                            } else if let Some(subscriber) = try_deliver_shared(
+                                subscriber,
+                                StoreScanMessage::Chunk(Arc::clone(&chunk)),
+                            ) {
+                                active.push(subscriber);
+                            }
                         }
-                    }
-                    subscribers = active;
-                    if subscribers.is_empty() {
-                        scan_cancellation.store(true, Ordering::Release);
+                        live.subscribers = active;
+                        live.subscribers.is_empty()
+                    };
+                    if no_subscribers {
+                        scan_cancellation.cancel();
                         finish_shared_scan(&entry);
                         return;
                     }
                 }
                 StoreScanMessage::Failed(error) => {
-                    for subscriber in subscribers {
-                        let _ = subscriber
-                            .sender
-                            .send(StoreScanMessage::Failed(error.clone()))
-                            .await;
+                    for subscriber in take_shared_subscribers_and_finish(&entry) {
+                        let _ =
+                            try_deliver_shared(subscriber, StoreScanMessage::Failed(error.clone()));
                     }
-                    finish_shared_scan(&entry);
                     return;
                 }
             }
@@ -350,11 +748,45 @@ async fn run_shared_scan(
 }
 
 fn finish_shared_scan(entry: &SharedScanEntry) {
-    let mut state = entry
-        .state
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *state = SharedScanState::Finished;
+    let previous = {
+        let mut state = entry
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::mem::replace(&mut *state, SharedScanState::Finished)
+    };
+    drop(previous);
+}
+
+fn finish_shared_scan_if_no_subscribers(entry: &SharedScanEntry) -> bool {
+    let previous = {
+        let mut state = entry
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !entry.activity.is_empty() {
+            return false;
+        }
+        std::mem::replace(&mut *state, SharedScanState::Finished)
+    };
+    drop(previous);
+    true
+}
+
+fn take_shared_subscribers_and_finish(entry: &SharedScanEntry) -> Vec<SharedScanSubscription> {
+    let previous = {
+        let mut state = entry
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::mem::replace(&mut *state, SharedScanState::Finished)
+    };
+
+    match previous {
+        SharedScanState::Collecting(subscribers) => subscribers,
+        SharedScanState::Started(live) => live.subscribers,
+        SharedScanState::Finished => Vec::new(),
+    }
 }
 
 fn spawn_base_scan(spec: BaseScanSpec) -> mpsc::Receiver<StoreScanMessage> {
@@ -402,7 +834,7 @@ fn spawn_base_scan(spec: BaseScanSpec) -> mpsc::Receiver<StoreScanMessage> {
     }
 }
 
-fn chunk_intersects_range(chunk: &super::store_worker::StoreChunk, range: (i64, i64)) -> bool {
+fn chunk_bounds(chunk: &StoreChunk) -> Option<(i64, i64)> {
     let (first, last) = match &chunk.rows {
         StoreRows::Ticks(rows) => (
             rows.first().map(|row| row.datetime),
@@ -413,7 +845,25 @@ fn chunk_intersects_range(chunk: &super::store_worker::StoreChunk, range: (i64, 
             rows.last().map(|row| row.datetime),
         ),
     };
-    first.is_some_and(|first| first < range.1) && last.is_some_and(|last| last >= range.0)
+    Some((first?, last?))
+}
+
+/// Byte-equivalent of decoded rows crossing the source-scan boundary.
+///
+/// This deliberately excludes cache codec and transport framing overhead: a
+/// single shared metric must remain comparable across cache implementations.
+fn chunk_decoded_row_bytes(chunk: &StoreChunk) -> u64 {
+    let bytes = match &chunk.rows {
+        StoreRows::Ticks(rows) => rows.len().saturating_mul(std::mem::size_of::<Tick>()),
+        StoreRows::CanonicalMinutes(rows) | StoreRows::CanonicalDaily(rows) => {
+            rows.len().saturating_mul(std::mem::size_of::<Kline>())
+        }
+    };
+    u64::try_from(bytes).unwrap_or(u64::MAX)
+}
+
+fn chunk_intersects_range(chunk: &StoreChunk, range: (i64, i64)) -> bool {
+    chunk_bounds(chunk).is_some_and(|(first, last)| first < range.1 && last >= range.0)
 }
 
 pub(crate) async fn execute_batch(
@@ -421,7 +871,7 @@ pub(crate) async fn execute_batch(
     requests: Vec<ValidatedBacktestHistoryRequest>,
     event_sender: mpsc::Sender<BacktestHistoryEventEnvelope>,
     telemetry: TelemetryHub,
-    cancellation: Arc<AtomicBool>,
+    cancellation: Arc<ScanCancellation>,
     mode: BacktestHistoryExecutionMode,
     execution_state: BacktestHistoryExecutionState,
 ) -> BacktestHistoryBatchReport {
@@ -430,11 +880,13 @@ pub(crate) async fn execute_batch(
         failure_reasons,
         resources,
         event_reservations,
+        shared_scan_metrics,
         mut prepared_plans,
     } = execution_state;
     let logical_permits = Arc::new(Semaphore::new(config.logical_concurrency));
     let blocking_permits = Arc::new(Semaphore::new(config.blocking_workers));
-    let scan_registry = SharedScanRegistry::new(lifecycle_pin, resources.clone());
+    let scan_registry =
+        SharedScanRegistry::new(lifecycle_pin, resources.clone(), shared_scan_metrics);
     let mut tasks = JoinSet::new();
     for request in requests {
         let prepared_plan = prepared_plans.remove(&request.request_id);
@@ -576,7 +1028,7 @@ async fn run_request(
         Err(execution) => {
             let reason = super::classify_snapshot_failure(
                 &execution.error,
-                context.cancellation.load(Ordering::Acquire),
+                context.cancellation.is_cancelled(),
             );
             context
                 .failure_reasons
@@ -660,7 +1112,7 @@ struct RequestExecutionContext {
     config: Arc<BacktestHistoryClientConfig>,
     event_sender: mpsc::Sender<BacktestHistoryEventEnvelope>,
     telemetry: TelemetryHub,
-    cancellation: Arc<AtomicBool>,
+    cancellation: Arc<ScanCancellation>,
     blocking_permits: Arc<Semaphore>,
     scan_registry: SharedScanRegistry,
     chunk_bytes: usize,
@@ -706,7 +1158,7 @@ async fn execute_request(
     let mut rows_written = 0usize;
     let fill_coordinator = RemoteFillCoordinator::new(Arc::clone(config), telemetry.clone());
     for slice in &plan.source_slices {
-        if cancellation.load(Ordering::Acquire) {
+        if cancellation.is_cancelled() {
             return Err(ExecutionFailure {
                 error: DataError::InvalidState("backtest history request was cancelled"),
                 emitted_rows: 0,
@@ -759,7 +1211,8 @@ async fn execute_request(
         let outcome = fill_coordinator
             .ensure_coverage_until_cancelled(
                 fill_request,
-                cancellation.as_ref(),
+                cancellation.as_atomic(),
+                &cancellation.stop_starting_fills,
                 mode == BacktestHistoryExecutionMode::MaterializeCache,
             )
             .await
@@ -829,19 +1282,13 @@ async fn execute_request(
 }
 
 async fn await_or_request_cancelled<T>(
-    cancellation: &AtomicBool,
+    cancellation: &ScanCancellation,
     future: impl Future<Output = Result<T>>,
 ) -> Result<T> {
-    let cancellation_wait = async {
-        while !cancellation.load(Ordering::Acquire) {
-            tokio::time::sleep(REQUEST_CANCELLATION_POLL_INTERVAL).await;
-        }
-    };
-    tokio::pin!(cancellation_wait);
     tokio::pin!(future);
     tokio::select! {
         biased;
-        _ = &mut cancellation_wait => Err(DataError::InvalidState(
+        _ = cancellation.cancelled() => Err(DataError::InvalidState(
             "backtest history request was cancelled while planning cache sources",
         )),
         result = &mut future => result,
@@ -850,17 +1297,11 @@ async fn await_or_request_cancelled<T>(
 
 async fn acquire_logical_permit_until_cancelled(
     permits: Arc<Semaphore>,
-    cancellation: &AtomicBool,
+    cancellation: &ScanCancellation,
 ) -> Result<OwnedSemaphorePermit> {
-    let cancellation_wait = async {
-        while !cancellation.load(Ordering::Acquire) {
-            tokio::time::sleep(REQUEST_CANCELLATION_POLL_INTERVAL).await;
-        }
-    };
-    tokio::pin!(cancellation_wait);
     tokio::select! {
         biased;
-        _ = &mut cancellation_wait => Err(DataError::InvalidState(
+        _ = cancellation.cancelled() => Err(DataError::InvalidState(
             "backtest history request was cancelled while waiting for scheduler capacity",
         )),
         permit = permits.acquire_owned() => permit.map_err(|_| DataError::InvalidState(
@@ -1074,7 +1515,7 @@ async fn execute_tick_plan(
                         chunk_bytes,
                     );
                     while let Some(message) = source.recv().await {
-                        if cancellation.load(Ordering::Acquire) {
+                        if cancellation.is_cancelled() {
                             return Err(DataError::InvalidState(
                                 "backtest history request was cancelled",
                             ));
@@ -1122,7 +1563,7 @@ async fn execute_tick_plan(
                         chunk_bytes,
                     );
                     while let Some(message) = source.recv().await {
-                        if cancellation.load(Ordering::Acquire) {
+                        if cancellation.is_cancelled() {
                             return Err(DataError::InvalidState(
                                 "backtest history request was cancelled",
                             ));
@@ -1211,7 +1652,7 @@ async fn execute_minute_plan(
                     chunk_bytes,
                 );
                 while let Some(message) = source.recv().await {
-                    if cancellation.load(Ordering::Acquire) {
+                    if cancellation.is_cancelled() {
                         return Err(DataError::InvalidState(
                             "backtest history request was cancelled",
                         ));
@@ -1257,7 +1698,7 @@ async fn execute_minute_plan(
                 chunk_bytes,
             );
             while let Some(message) = source.recv().await {
-                if cancellation.load(Ordering::Acquire) {
+                if cancellation.is_cancelled() {
                     return Err(DataError::InvalidState(
                         "backtest history request was cancelled",
                     ));
@@ -1341,7 +1782,7 @@ async fn execute_daily_plan(
                     context.chunk_bytes,
                 );
                 while let Some(message) = source.recv().await {
-                    if context.cancellation.load(Ordering::Acquire) {
+                    if context.cancellation.is_cancelled() {
                         return Err(DataError::InvalidState(
                             "backtest history request was cancelled",
                         ));
@@ -1387,7 +1828,7 @@ async fn execute_daily_plan(
                     context.chunk_bytes,
                 );
                 while let Some(message) = source.recv().await {
-                    if context.cancellation.load(Ordering::Acquire) {
+                    if context.cancellation.is_cancelled() {
                         return Err(DataError::InvalidState(
                             "backtest history request was cancelled",
                         ));
@@ -1739,9 +2180,14 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use chrono::{TimeZone, Utc};
+    use tokio::sync::mpsc;
     use tqsdk_core::{Kline, Tick};
 
-    use super::super::{BacktestHistoryClient, BacktestHistoryPolicy, BacktestHistoryRequest};
+    use super::super::{
+        BacktestHistoryClient, BacktestHistoryFailureReason, BacktestHistoryPolicy,
+        BacktestHistoryRequest,
+    };
+    use super::ScanCancellation;
     use crate::{
         BacktestTickCache, MinuteKlineCache, MinuteKlineCacheSnapshot,
         backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
@@ -1750,9 +2196,214 @@ mod tests {
     const SECOND_NS: i64 = 1_000_000_000;
     const MINUTE_NS: i64 = 60 * SECOND_NS;
 
+    fn shared_scan_test_failure(message: &str) -> super::StoreScanMessage {
+        super::StoreScanMessage::Failed(super::StoreScanFailure {
+            reason: BacktestHistoryFailureReason::Internal,
+            message: message.to_string(),
+        })
+    }
+
+    #[tokio::test]
+    async fn lagged_shared_scan_stream_reports_terminal_failure() {
+        let (sender, receiver) = mpsc::channel(1);
+        let lagged = Arc::new(AtomicBool::new(true));
+        drop(sender);
+
+        let mut source =
+            super::SourceStream::shared(receiver, lagged, Arc::new(ScanCancellation::new()), None);
+        let Some(super::StoreScanMessage::Failed(failure)) = source.recv().await else {
+            panic!("lagged shared stream must report a terminal failure");
+        };
+        assert!(failure.message.contains("lagged behind its bounded buffer"));
+        assert!(source.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn shared_scan_stream_observes_cancellation_without_source_message() {
+        let (_sender, receiver) = mpsc::channel(1);
+        let cancellation = Arc::new(ScanCancellation::new());
+        let mut source = super::SourceStream::shared(
+            receiver,
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&cancellation),
+            None,
+        );
+
+        cancellation.cancel();
+        let message = tokio::time::timeout(Duration::from_secs(1), source.recv())
+            .await
+            .expect("shared source receive must wake on cancellation");
+        let Some(super::StoreScanMessage::Failed(failure)) = message else {
+            panic!("cancelled shared stream must report cancellation");
+        };
+        assert!(failure.message.contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn last_shared_subscription_drop_wakes_runner() {
+        let activity = super::SharedScanActivity::new();
+        let subscription = activity.subscribe();
+        let waiting = Arc::clone(&activity);
+        let waiter = tokio::spawn(async move {
+            waiting.wait_until_empty().await;
+        });
+
+        tokio::task::yield_now().await;
+        drop(subscription);
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("last shared subscription drop must wake the runner")
+            .expect("shared subscription waiter must not panic");
+        assert!(activity.is_empty());
+    }
+
+    #[test]
+    fn late_join_replay_is_complete_bounded_and_fail_closed() {
+        let first = super::super::store_worker::test_tick_chunk(vec![
+            Tick {
+                datetime: 0,
+                ..Tick::default()
+            },
+            Tick {
+                datetime: 10,
+                ..Tick::default()
+            },
+        ]);
+        let mut one_chunk = super::SharedScanLiveState::new(Vec::new(), vec![(0, 21)]);
+        one_chunk.record_chunk(&first);
+        let replay = one_chunk
+            .late_join_replay((0, 21))
+            .expect("live weak chunk covering the physical slice may replay");
+        assert_eq!(replay.len(), 1);
+        assert!(one_chunk.late_join_replay((0, 22)).is_none());
+        drop(replay);
+        drop(first);
+        assert!(one_chunk.late_join_replay((0, 21)).is_none());
+
+        let first = super::super::store_worker::test_tick_chunk(vec![Tick {
+            datetime: 0,
+            ..Tick::default()
+        }]);
+        let second = super::super::store_worker::test_tick_chunk(vec![Tick {
+            datetime: 20,
+            ..Tick::default()
+        }]);
+        let mut two_chunks = super::SharedScanLiveState::new(Vec::new(), vec![(0, 21)]);
+        two_chunks.record_chunk(&first);
+        two_chunks.record_chunk(&second);
+        assert!(two_chunks.late_join_replay((0, 21)).is_none());
+    }
+
+    #[test]
+    fn shared_scan_metrics_keep_hits_and_fallbacks_distinct() {
+        let empty = super::SharedScanMetrics::default().snapshot();
+        assert_eq!(empty.shared_scan_hit_ratio(), 0.0);
+        assert_eq!(empty.late_join_hit_ratio(), 0.0);
+
+        let metrics = super::SharedScanMetrics::default();
+        metrics.record_collecting_hit();
+        metrics.record_late_join(true);
+        metrics.record_late_join(false);
+        metrics.record_duplicate_physical_scan_bytes(123);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.eligible_requests, 3);
+        assert_eq!(snapshot.shared_scan_hits, 2);
+        assert_eq!(snapshot.late_join_attempts, 2);
+        assert_eq!(snapshot.late_join_hits, 1);
+        assert_eq!(snapshot.duplicate_physical_scans, 1);
+        assert_eq!(snapshot.duplicate_physical_scan_bytes, 123);
+        assert!((snapshot.shared_scan_hit_ratio() - 2.0 / 3.0).abs() < f64::EPSILON);
+        assert!((snapshot.late_join_hit_ratio() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn duplicate_scan_stream_counts_decoded_source_rows() {
+        let (sender, receiver) = mpsc::channel(1);
+        let metrics = Arc::new(super::SharedScanMetrics::default());
+        sender
+            .send(super::StoreScanMessage::Chunk(
+                super::super::store_worker::test_tick_chunk(vec![Tick {
+                    datetime: 0,
+                    ..Tick::default()
+                }]),
+            ))
+            .await
+            .unwrap();
+        drop(sender);
+
+        let mut source = super::SourceStream::direct(
+            receiver,
+            Arc::new(ScanCancellation::new()),
+            Some(Arc::clone(&metrics)),
+        );
+        assert!(matches!(
+            source.recv().await,
+            Some(super::StoreScanMessage::Chunk(_))
+        ));
+        assert_eq!(
+            metrics.snapshot().duplicate_physical_scan_bytes,
+            std::mem::size_of::<Tick>() as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn lagging_shared_subscriber_never_blocks_ready_subscriber() {
+        let (slow_sender, slow_receiver) = mpsc::channel(1);
+        let (fast_sender, mut fast_receiver) = mpsc::channel(1);
+        let slow_lagged = Arc::new(AtomicBool::new(false));
+        let fast_lagged = Arc::new(AtomicBool::new(false));
+        slow_sender
+            .try_send(shared_scan_test_failure("already queued"))
+            .unwrap();
+
+        let mut active = Vec::new();
+        for subscriber in [
+            super::SharedScanSubscription {
+                range: (0, 1),
+                sender: slow_sender,
+                lagged: Arc::clone(&slow_lagged),
+            },
+            super::SharedScanSubscription {
+                range: (0, 1),
+                sender: fast_sender,
+                lagged: Arc::clone(&fast_lagged),
+            },
+        ] {
+            if let Some(subscriber) =
+                super::try_deliver_shared(subscriber, shared_scan_test_failure("fan-out"))
+            {
+                active.push(subscriber);
+            }
+        }
+
+        assert_eq!(active.len(), 1);
+        assert!(slow_lagged.load(Ordering::Acquire));
+        assert!(!fast_lagged.load(Ordering::Acquire));
+        assert!(matches!(
+            fast_receiver.recv().await,
+            Some(super::StoreScanMessage::Failed(_))
+        ));
+
+        let mut slow_source = super::SourceStream::shared(
+            slow_receiver,
+            slow_lagged,
+            Arc::new(ScanCancellation::new()),
+            None,
+        );
+        assert!(matches!(
+            slow_source.recv().await,
+            Some(super::StoreScanMessage::Failed(_))
+        ));
+        let Some(super::StoreScanMessage::Failed(failure)) = slow_source.recv().await else {
+            panic!("full subscriber must fail instead of looking complete");
+        };
+        assert!(failure.message.contains("lagged behind its bounded buffer"));
+    }
+
     #[tokio::test]
     async fn cancellation_interrupts_a_pending_cache_source_plan() {
-        let cancellation = Arc::new(AtomicBool::new(false));
+        let cancellation = Arc::new(ScanCancellation::new());
         let task = tokio::spawn({
             let cancellation = Arc::clone(&cancellation);
             async move {
@@ -1764,7 +2415,7 @@ mod tests {
             }
         });
         tokio::task::yield_now().await;
-        cancellation.store(true, Ordering::Release);
+        cancellation.cancel();
 
         let error = tokio::time::timeout(Duration::from_secs(1), task)
             .await
@@ -1778,7 +2429,7 @@ mod tests {
     async fn cancellation_interrupts_a_pending_logical_permit() {
         let permits = Arc::new(tokio::sync::Semaphore::new(1));
         let held = Arc::clone(&permits).acquire_owned().await.unwrap();
-        let cancellation = Arc::new(AtomicBool::new(false));
+        let cancellation = Arc::new(ScanCancellation::new());
         let task = tokio::spawn({
             let permits = Arc::clone(&permits);
             let cancellation = Arc::clone(&cancellation);
@@ -1787,7 +2438,7 @@ mod tests {
             }
         });
         tokio::task::yield_now().await;
-        cancellation.store(true, Ordering::Release);
+        cancellation.cancel();
 
         let error = tokio::time::timeout(Duration::from_secs(1), task)
             .await
@@ -1841,7 +2492,7 @@ mod tests {
             .blocking_workers(2)
             .build()
             .unwrap();
-        let collected = client
+        let run = client
             .query_batch([
                 BacktestHistoryRequest::tick(1, symbol, start_ns, start_ns + 30 * SECOND_NS),
                 BacktestHistoryRequest::kline(
@@ -1874,13 +2525,13 @@ mod tests {
                 ),
             ])
             .await
-            .unwrap()
-            .collect_all(64 * 1024 * 1024)
-            .await
             .unwrap();
 
-        assert_eq!(collected.completed.len(), 5);
-        assert!(collected.failed.is_empty());
+        let (report, metrics) = run.finish_with_shared_scan_metrics().await;
+        assert_eq!(report.completed.len(), 5);
+        assert!(report.failed.is_empty());
+        assert!(metrics.shared_scan_hits > 0);
+        assert!(metrics.shared_scan_hit_ratio() > 0.0);
         assert_eq!(
             crate::backtest_history::store_worker::scan_open_counts(),
             (1, 1)

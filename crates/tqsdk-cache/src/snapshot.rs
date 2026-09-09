@@ -16,6 +16,7 @@ use tqsdk_data::{
     BacktestHistoryClient, BacktestHistoryPolicy, BacktestHistoryRequest, BacktestHistorySnapshot,
     BacktestHistorySnapshotFileDisposition, BacktestHistorySnapshotFileRole,
     BacktestHistorySnapshotManifestBuilder, BacktestTickCache, DataError,
+    backtest_history_snapshot_cache_path_requires_placeholder,
     classify_backtest_history_snapshot_cache_path,
 };
 
@@ -594,6 +595,11 @@ fn clone_directory(
         let disposition = classify_backtest_history_snapshot_cache_path(relative)
             .map_err(|error| CliError::Migration(error.to_string()))?;
         let BacktestHistorySnapshotFileDisposition::Include(role) = disposition else {
+            if !backtest_history_snapshot_cache_path_requires_placeholder(relative)
+                .map_err(|error| CliError::Migration(error.to_string()))?
+            {
+                continue;
+            }
             if let Some(parent) = destination.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -1035,14 +1041,13 @@ fn publish_generation(
     atomic_write_current(history_root, args.snapshot_id.as_str())?;
     let ready = ready_marker_path(history_root, args.snapshot_id.as_str());
     let mut cleanup_warning = None;
-    if ready.exists() {
-        if let Err(error) = fs::remove_file(ready)
+    if ready.exists()
+        && let Err(error) = fs::remove_file(ready)
             .and_then(|()| File::open(history_root.join(STAGING_DIR))?.sync_all())
-        {
-            cleanup_warning = Some(format!(
-                "snapshot committed but verification marker cleanup failed: {error}"
-            ));
-        }
+    {
+        cleanup_warning = Some(format!(
+            "snapshot committed but verification marker cleanup failed: {error}"
+        ));
     }
     Ok(json!({
         "command": command,
@@ -1665,10 +1670,10 @@ fn probe_reflink_support(
         nonce()?
     ));
     let result = try_reflink(source.as_path(), probe.as_path());
-    if let Err(error) = fs::remove_file(probe.as_path()) {
-        if error.kind() != ErrorKind::NotFound {
-            return Err(error.into());
-        }
+    if let Err(error) = fs::remove_file(probe.as_path())
+        && error.kind() != ErrorKind::NotFound
+    {
+        return Err(error.into());
     }
     result.map(Some)
 }

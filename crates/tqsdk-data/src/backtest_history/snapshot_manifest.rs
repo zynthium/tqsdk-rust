@@ -30,9 +30,9 @@ const MAX_CURRENT_RETRIES: usize = 8;
 pub enum BacktestHistorySnapshotFileRole {
     /// Append/recovery-capable Tick file; never safe to hardlink.
     TqbnMutableLayout,
-    /// Atomically replaced immutable minute generation.
+    /// Canonical minute file; new clones must copy because its layout may append.
     TqmkImmutableGeneration,
-    /// Atomically replaced immutable daily generation.
+    /// Canonical daily file; new clones must copy because its layout may append.
     TqdkImmutableGeneration,
     /// Content-addressed metadata snapshot.
     MetadataContentAddressed,
@@ -55,7 +55,7 @@ impl BacktestHistorySnapshotFileRole {
     /// Whether the immutable snapshot contract permits hardlink cloning.
     #[must_use]
     pub const fn allows_hardlink(self) -> bool {
-        !matches!(self, Self::TqbnMutableLayout | Self::PointerCopy)
+        matches!(self, Self::MetadataContentAddressed)
     }
 }
 
@@ -73,6 +73,25 @@ pub fn classify_backtest_history_snapshot_cache_path(
     path: impl AsRef<Path>,
 ) -> Result<BacktestHistorySnapshotFileDisposition, BacktestHistorySnapshotError> {
     classify_cache_relative_path(path.as_ref()).map_err(map_manifest_error)
+}
+
+/// Whether an excluded source file needs an empty placeholder in a clone.
+/// Private fill journals are omitted completely; existing exhaustive matches
+/// on the disposition enum remain source-compatible.
+pub fn backtest_history_snapshot_cache_path_requires_placeholder(
+    path: impl AsRef<Path>,
+) -> Result<bool, BacktestHistorySnapshotError> {
+    let path = path.as_ref();
+    Ok(matches!(
+        classify_cache_relative_path(path).map_err(map_manifest_error)?,
+        BacktestHistorySnapshotFileDisposition::Rebuild
+    ) && !is_private_fill_staging_path(path))
+}
+
+fn is_private_fill_staging_path(path: &Path) -> bool {
+    path.components()
+        .next()
+        .is_some_and(|component| component.as_os_str() == ".backtest-history-staging")
 }
 
 /// Deterministic manifest artifact produced from a stable staged cache view.
@@ -523,6 +542,19 @@ fn collect_manifest_input_files(
         let BacktestHistorySnapshotFileDisposition::Include(role) = disposition else {
             continue;
         };
+        if matches!(
+            role,
+            BacktestHistorySnapshotFileRole::TqmkImmutableGeneration
+                | BacktestHistorySnapshotFileRole::TqdkImmutableGeneration
+        ) && crate::kline_append_log::load::<serde_json::Value>(
+            &mut File::open(&path)
+                .map_err(|error| SnapshotManifestError::unavailable(error.to_string()))?,
+        )
+        .map_err(|error| SnapshotManifestError::corrupt(error.to_string()))?
+        .is_some()
+        {
+            required_features.insert("kline-append-v1".to_string());
+        }
         let sha256 = if role == BacktestHistorySnapshotFileRole::TqbnMutableLayout {
             let (sha256, requires_zstd) = tqbn_snapshot_file_sha256_and_requires_zstd(&path)
                 .map_err(|error| {
@@ -573,11 +605,13 @@ fn classify_cache_relative_path(
             )));
         }
     }
-    if path
-        .components()
-        .next()
-        .is_some_and(|component| component.as_os_str() == "minute-kline-provisional-v1")
-    {
+    if is_private_fill_staging_path(path) {
+        return Ok(BacktestHistorySnapshotFileDisposition::Rebuild);
+    }
+    if path.components().next().is_some_and(|component| {
+        component.as_os_str() == "minute-kline-provisional-v1"
+            || component.as_os_str() == ".kline-append-backups"
+    }) {
         return Ok(BacktestHistorySnapshotFileDisposition::Rebuild);
     }
     let file_name = path
@@ -1130,7 +1164,14 @@ fn validate_manifest(
         "catalog symbols",
         SnapshotManifestErrorKind::Corrupt,
     )?;
-    validate_files(generation_dir, manifest.files.as_slice())?;
+    validate_files(
+        generation_dir,
+        manifest.files.as_slice(),
+        manifest
+            .required_features
+            .iter()
+            .any(|feature| feature == "kline-append-v1"),
+    )?;
     validate_identity(manifest, manifest_value)?;
 
     let cache_dir = generation_dir.join("cache");
@@ -1182,6 +1223,7 @@ fn validate_required_features(features: &[String]) -> Result<(), SnapshotManifes
     )?;
     for feature in features {
         match feature.as_str() {
+            "kline-append-v1" => {}
             "tqbn-zstd" if cfg!(feature = "tqbn-zstd") => {}
             "tqbn-zstd" => {
                 return Err(SnapshotManifestError::incompatible(
@@ -1258,6 +1300,7 @@ fn validate_formats(formats: &[CacheFormat]) -> Result<(), SnapshotManifestError
 fn validate_files(
     generation_dir: &Path,
     files: &[ManifestFile],
+    allows_kline_append: bool,
 ) -> Result<(), SnapshotManifestError> {
     let paths = files
         .iter()
@@ -1284,7 +1327,16 @@ fn validate_files(
                 file.path
             )));
         }
-        if file.role == "tqbn_mutable_layout" {
+        let append_kline = matches!(
+            file.role.as_str(),
+            "tqmk_immutable_generation" | "tqdk_immutable_generation"
+        );
+        if append_kline && !allows_kline_append {
+            return Err(SnapshotManifestError::incompatible(
+                "Kline append file requires kline-append-v1",
+            ));
+        }
+        if file.role == "tqbn_mutable_layout" || append_kline {
             #[cfg(unix)]
             if metadata.nlink() > 1 {
                 return Err(SnapshotManifestError::corrupt(format!(
@@ -1690,7 +1742,18 @@ fn sha256_prefixed(bytes: &[u8]) -> String {
 }
 
 fn sha256_file(path: &Path) -> std::io::Result<String> {
-    let file = File::open(path)?;
+    let mut file = File::open(path)?;
+    if matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("tqmk" | "tqdk")
+    ) {
+        let index = crate::kline_append_log::require::<serde_json::Value>(&mut file)
+            .map_err(std::io::Error::other)?;
+        index
+            .require_clean_tail(&file)
+            .map_err(std::io::Error::other)?;
+        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(0))?;
+    }
     let mut reader = BufReader::with_capacity(64 * 1024, file);
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
@@ -1707,6 +1770,44 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn kline_envelope_requires_feature_clean_tail_and_private_inode() {
+        let root =
+            std::env::temp_dir().join(format!("snapshot-kline-envelope-{}", unique_suffix()));
+        let path = root.join("cache/daily-kline-v1/SHFE.au2406.tqdk");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        crate::kline_append_log::create(&path, serde_json::json!({"test": true}), &[b"payload"])
+            .unwrap();
+        let files = vec![ManifestFile {
+            path: "cache/daily-kline-v1/SHFE.au2406.tqdk".into(),
+            role: "tqdk_immutable_generation".into(),
+            size: fs::metadata(&path).unwrap().len(),
+            sha256: sha256_file(&path).unwrap(),
+        }];
+        assert!(validate_files(&root, &files, false).is_err());
+        validate_files(&root, &files, true).unwrap();
+        let alias = root.join("alias");
+        fs::hard_link(&path, &alias).unwrap();
+        assert!(validate_files(&root, &files, true).is_err());
+        fs::remove_file(&alias).unwrap();
+        {
+            use std::io::Write;
+            OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(b"uncommitted")
+                .unwrap();
+        }
+        assert!(sha256_file(&path).is_err());
+        fs::write(&path, b"legacy raw file").unwrap();
+        fs::hard_link(&path, &alias).unwrap();
+        assert!(sha256_file(&path).is_err());
+        assert!(validate_files(&root, &files, false).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
     use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 

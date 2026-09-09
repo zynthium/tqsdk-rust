@@ -738,13 +738,13 @@ async fn resolve_fill_window(
             ));
         }
         let open_day = current_open_trading_day()?;
-        if let Some(anchor) = args.end_day {
-            if anchor >= open_day {
-                return Err(CliError::Usage(format!(
-                    "--end-day with --last-trading-days must be before the current open TQBN trading day {}",
-                    open_day.format("%Y-%m-%d")
-                )));
-            }
+        if let Some(anchor) = args.end_day
+            && anchor >= open_day
+        {
+            return Err(CliError::Usage(format!(
+                "--end-day with --last-trading-days must be before the current open TQBN trading day {}",
+                open_day.format("%Y-%m-%d")
+            )));
         }
         let anchor = args.end_day.unwrap_or_else(|| {
             open_day
@@ -1920,16 +1920,15 @@ async fn fill(
         .as_ref()
         .map(tqsdk_data::TradingTimelineRuleCatalog::from_json_path)
         .transpose()?;
-    if let Some(catalog) = &timeline_catalog {
-        if !catalog.exception_review_complete
+    if let Some(catalog) = &timeline_catalog
+        && (!catalog.exception_review_complete
             || catalog.rules.is_empty()
             || catalog
                 .rules
                 .iter()
-                .any(|rule| rule.validation.status != "confirmed")
-        {
-            return Err(CliError::Usage("fill timeline catalog must contain only reviewed rules; use timeline without --apply to audit drafts".into()));
-        }
+                .any(|rule| rule.validation.status != "confirmed"))
+    {
+        return Err(CliError::Usage("fill timeline catalog must contain only reviewed rules; use timeline without --apply to audit drafts".into()));
     }
     let mut outcome = fill_inner(cache_dir, kind, market, args).await?;
     if let Some(catalog) = timeline_catalog
@@ -2286,7 +2285,7 @@ async fn refresh_provider_membership(
         let canary =
             probe_provider_membership_canary(&store, &acquisition, &args, cancellation.clone())
                 .await?;
-        if cancellation.is_cancelled() {
+        if cancellation.is_stop_requested() {
             progress_session.finish_checked(
                 ProgressTerminalStatus::Interrupted,
                 "provider membership refresh was cancelled before retries",
@@ -2353,6 +2352,11 @@ async fn refresh_provider_membership(
             .build()?;
         let progress_callback = reporter.clone();
         let report = client
+            .clone()
+            .on_fill_durability({
+                let progress = reporter.clone();
+                move |event| progress.observe_durability(&event)
+            })
             .orchestrate_fill(requests, config, cancellation.clone(), move |event| {
                 progress_callback.observe_history_progress(&event)
             })
@@ -2360,7 +2364,7 @@ async fn refresh_provider_membership(
         drop(client);
         let report = report?;
         if report.status() == BacktestHistoryFillTerminalStatus::Interrupted
-            || cancellation.is_cancelled()
+            || cancellation.is_stop_requested()
         {
             progress_session.finish_checked(
                 ProgressTerminalStatus::Interrupted,
@@ -2481,7 +2485,7 @@ async fn refresh_provider_membership(
                 .await?;
         let current_after = acquisition.project_provider_current_refresh(&discovered_after)?;
         acquisition.validate_provider_daily_refresh_current(&current_after)?;
-        if cancellation.is_cancelled() {
+        if cancellation.is_stop_requested() {
             progress_session.finish_checked(
                 ProgressTerminalStatus::Interrupted,
                 "provider membership refresh was cancelled before publication",
@@ -2509,7 +2513,7 @@ async fn refresh_provider_membership(
             )?;
             let receipt =
                 retry_state.refreshed(&acquisition, &next, &attempted_symbols, receipt_at_ns)?;
-            if cancellation.is_cancelled() {
+            if cancellation.is_stop_requested() {
                 return Ok(provider_membership_refresh_cancelled_outcome(
                     &canonical_cache_dir,
                     market,
@@ -2521,7 +2525,7 @@ async fn refresh_provider_membership(
                 ));
             }
             let acquisition_path = store.publish_acquisition(&next)?;
-            if cancellation.is_cancelled() {
+            if cancellation.is_stop_requested() {
                 return Ok(provider_membership_refresh_cancelled_outcome(
                     &canonical_cache_dir,
                     market,
@@ -2854,6 +2858,11 @@ async fn bootstrap_provider_history_and_fill(
         // remain bounded provider-unavailable audit facts for this acquisition.
         let bootstrap_config = provider_history_bootstrap_fill_config(&args)?;
         let bootstrap = client
+            .clone()
+            .on_fill_durability({
+                let progress = reporter.clone();
+                move |event| progress.observe_durability(&event)
+            })
             .orchestrate_fill(
                 requests,
                 bootstrap_config,
@@ -2950,7 +2959,7 @@ async fn bootstrap_provider_history_and_fill(
         ),
     )?;
 
-        if cancellation.is_cancelled() {
+        if cancellation.is_stop_requested() {
             return Err(DataError::InvalidState("provider history preparation cancelled").into());
         }
         let completed_at_ns = chrono::Utc::now().timestamp_nanos_opt().ok_or_else(|| {
@@ -3082,26 +3091,26 @@ async fn bootstrap_provider_history_and_fill(
     };
     if signal_context
         .as_ref()
-        .is_some_and(|(cancellation, _)| cancellation.is_cancelled())
+        .is_some_and(|(cancellation, _)| cancellation.is_stop_requested())
     {
         return Err(DataError::InvalidState("provider history preparation cancelled").into());
     }
     store.publish_acquisition(&acquisition)?;
-    if let Some(state) = &bootstrap_retry_state {
-        if !state.is_empty() {
-            store.publish_provider_daily_retry_state(state)?;
-        }
+    if let Some(state) = &bootstrap_retry_state
+        && !state.is_empty()
+    {
+        store.publish_provider_daily_retry_state(state)?;
     }
     if signal_context
         .as_ref()
-        .is_some_and(|(cancellation, _)| cancellation.is_cancelled())
+        .is_some_and(|(cancellation, _)| cancellation.is_stop_requested())
     {
         return Err(DataError::InvalidState("provider history preparation cancelled").into());
     }
     store.publish_semantic_catalog(&semantic)?;
     if signal_context
         .as_ref()
-        .is_some_and(|(cancellation, _)| cancellation.is_cancelled())
+        .is_some_and(|(cancellation, _)| cancellation.is_stop_requested())
     {
         return Err(DataError::InvalidState("provider history preparation cancelled").into());
     }
@@ -3469,6 +3478,11 @@ async fn fill_historical_universe_plan(
     };
     let progress_callback = reporter.clone();
     let fill_result = client
+        .clone()
+        .on_fill_durability({
+            let progress = reporter.clone();
+            move |event| progress.observe_durability(&event)
+        })
         .orchestrate_fill(
             requests.clone(),
             history_fill_config(&args)?,
@@ -3763,6 +3777,11 @@ async fn fill_daily(
     let signal_task = spawn_shutdown_signal_handler(signal_cancellation, CacheKind::Daily)?;
     let progress_callback = reporter.clone();
     let report = match client
+        .clone()
+        .on_fill_durability({
+            let progress = reporter.clone();
+            move |event| progress.observe_durability(&event)
+        })
         .orchestrate_fill(requests, fill_config, cancellation.clone(), move |event| {
             progress_callback.observe_history_progress(&event);
         })
@@ -3827,7 +3846,7 @@ async fn fill_daily(
             | BacktestHistoryFillTerminalStatus::Failed => ProgressTerminalStatus::Failed,
         },
         if interrupted {
-            "daily fill interrupted; accepted rows were flushed without committing failed ranges"
+            "daily fill interrupted; incomplete daily ranges remain uncommitted"
         } else if complete {
             "daily fill complete; final native daily coverage verified"
         } else {
@@ -4060,7 +4079,7 @@ async fn fill_minute(
     let warmup = builder.warmup().await;
     signal_task.abort();
     let _ = signal_task.await;
-    if fill_was_interrupted(cancellation.is_cancelled(), warmup.is_ok()) {
+    if fill_was_interrupted(cancellation.is_stop_requested(), warmup.is_ok()) {
         let interrupted_report = UnifiedFillReport::from_planned_terminal(
             "minute",
             &canonical_cache_dir,
@@ -4627,7 +4646,7 @@ async fn fill_tick(cache_dir: Option<&Path>, args: FillArgs) -> Result<CommandOu
     }
     let builder = apply_fill_targets(builder, &symbols, universe.as_deref())?;
     let warmup = builder.warmup().await;
-    if fill_was_interrupted(cancellation.is_cancelled(), warmup.is_ok()) {
+    if fill_was_interrupted(cancellation.is_stop_requested(), warmup.is_ok()) {
         signal_task.abort();
         let _ = signal_task.await;
         calendar_task.abort();
@@ -5108,6 +5127,12 @@ async fn verify_minute(
     let coverage_complete = statuses
         .iter()
         .all(tqsdk_data::MinuteKlineCacheStatus::is_complete);
+    if !args.replay && coverage_complete {
+        for (symbol, snapshot) in symbols.iter().zip(&snapshots) {
+            let mut reader = cache.open_reader(symbol, window.start_ns, window.end_ns, snapshot)?;
+            while reader.next_kline()?.is_some() {}
+        }
+    }
     let replay_rows = if args.replay && coverage_complete {
         let mut total = 0_u64;
         for (symbol, snapshot) in symbols.iter().zip(&snapshots) {
@@ -5235,6 +5260,11 @@ async fn verify_daily(
     let coverage_complete = statuses
         .iter()
         .all(tqsdk_data::DailyKlineCacheStatus::is_complete);
+    if !args.replay && coverage_complete {
+        for (symbol, snapshot) in symbols.iter().zip(&snapshots) {
+            cache.read_range(symbol, window.start_ns, window.end_ns, snapshot)?;
+        }
+    }
     let replay_rows = if args.replay && coverage_complete {
         let mut total = 0_u64;
         for (symbol, snapshot) in symbols.iter().zip(&snapshots) {
@@ -5774,7 +5804,7 @@ fn migrate_minute(cache_dir: Option<&Path>, args: MigrateArgs) -> Result<Command
                 )));
             }
         };
-    let report = cache.migrate_legacy_v4().map_err(|error| {
+    let report = cache.migrate_legacy_v4_with_lock(&_lock).map_err(|error| {
         CliError::Migration(format!(
             "migration rewrite failed; backup retained at {}: {error}",
             backup_dir.display()
@@ -6520,15 +6550,22 @@ fn daily_diagnostic_status_name(
 
 trait ShutdownCancellation {
     fn cancel(&self);
+    fn request_stop(&self);
 }
 
 impl ShutdownCancellation for BacktestRemoteFillCancellation {
+    fn request_stop(&self) {
+        BacktestRemoteFillCancellation::request_stop(self);
+    }
     fn cancel(&self) {
         BacktestRemoteFillCancellation::cancel(self);
     }
 }
 
 impl ShutdownCancellation for BacktestHistoryFillCancellation {
+    fn request_stop(&self) {
+        BacktestHistoryFillCancellation::request_stop(self);
+    }
     fn cancel(&self) {
         BacktestHistoryFillCancellation::cancel(self);
     }
@@ -6583,9 +6620,18 @@ async fn wait_for_shutdown_signal(
     mut hangup: Option<tokio::signal::unix::Signal>,
 ) {
     wait_for_one_shutdown_signal(&mut interrupt, terminate.as_mut(), hangup.as_mut()).await;
-    cancellation.cancel();
-    eprintln!("{}", shutdown_cancellation_message(kind));
-    wait_for_one_shutdown_signal(&mut interrupt, terminate.as_mut(), hangup.as_mut()).await;
+    cancellation.request_stop();
+    eprintln!(
+        "tqsdk-cache: stopping new work; allowing up to 5 seconds for the current window to commit"
+    );
+    tokio::select! {
+        _ = wait_for_one_shutdown_signal(&mut interrupt, terminate.as_mut(), hangup.as_mut()) => {},
+        _ = tokio::time::sleep(Duration::from_secs(5)) => {
+            cancellation.cancel();
+            eprintln!("{}", shutdown_cancellation_message(kind));
+            wait_for_one_shutdown_signal(&mut interrupt, terminate.as_mut(), hangup.as_mut()).await;
+        }
+    }
     eprintln!("tqsdk-cache: second shutdown signal received; exiting immediately");
     std::process::exit(130);
 }
@@ -6628,9 +6674,18 @@ async fn wait_for_shutdown_signal(
     kind: CacheKind,
 ) {
     let _ = tokio::signal::ctrl_c().await;
-    cancellation.cancel();
-    eprintln!("{}", shutdown_cancellation_message(kind));
-    let _ = tokio::signal::ctrl_c().await;
+    cancellation.request_stop();
+    eprintln!(
+        "tqsdk-cache: stopping new work; allowing up to 5 seconds for the current window to commit"
+    );
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {},
+        _ = tokio::time::sleep(Duration::from_secs(5)) => {
+            cancellation.cancel();
+            eprintln!("{}", shutdown_cancellation_message(kind));
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
     eprintln!("tqsdk-cache: second shutdown signal received; exiting immediately");
     std::process::exit(130);
 }

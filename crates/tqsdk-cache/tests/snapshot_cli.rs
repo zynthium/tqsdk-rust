@@ -102,6 +102,12 @@ fn tqbn_fixture(payload: &[u8]) -> Vec<u8> {
 }
 
 fn seed_source(root: &Path, marker: &[u8]) {
+    fs::create_dir_all(root.join(".backtest-history-staging/minute-v1")).unwrap();
+    fs::write(
+        root.join(".backtest-history-staging/minute-v1/uncommitted.json"),
+        b"private staging, never publish",
+    )
+    .unwrap();
     fs::create_dir_all(root.join("series/20260829/tick")).unwrap();
     fs::create_dir_all(root.join("minute-kline-v3")).unwrap();
     fs::create_dir_all(root.join("daily-kline-v1")).unwrap();
@@ -111,8 +117,27 @@ fn seed_source(root: &Path, marker: &[u8]) {
         tqbn_fixture(marker),
     )
     .unwrap();
-    fs::write(root.join("minute-kline-v3/SHFE.au2612-202608.tqmk"), marker).unwrap();
-    fs::write(root.join("daily-kline-v1/SHFE.au2612.tqdk"), marker).unwrap();
+    let snapshot = tqsdk_data::MinuteKlineCacheSnapshot::cst_v1();
+    let minute = tqsdk_data::MinuteKlineCache::open(root).unwrap();
+    minute
+        .store_final_range(
+            "SHFE.au2612",
+            DAY_START_NS,
+            DAY_START_NS + 60_000_000_000,
+            &snapshot,
+            &[],
+        )
+        .unwrap();
+    let minute_path = find_file_with_extension(&minute.namespace_dir(), "tqmk").unwrap();
+    fs::rename(
+        minute_path,
+        root.join("minute-kline-v3/SHFE.au2612-202608.tqmk"),
+    )
+    .unwrap();
+    tqsdk_data::DailyKlineCache::open(root)
+        .unwrap()
+        .store_final_range("SHFE.au2612", DAY_START_NS, DAY_END_NS, &snapshot, &[])
+        .unwrap();
     fs::write(
         root.join("backtest-history-metadata-v1/snapshots/content.json"),
         b"{}",
@@ -275,7 +300,7 @@ fn clone_stages_role_safe_generation_and_publish_commits_current() {
             fs::metadata(source.join("minute-kline-v3/SHFE.au2612-202608.tqmk")).unwrap();
         let staged_minute =
             fs::metadata(generation.join("cache/minute-kline-v3/SHFE.au2612-202608.tqmk")).unwrap();
-        assert_eq!(source_minute.ino(), staged_minute.ino());
+        assert_ne!(source_minute.ino(), staged_minute.ino());
     }
 
     let rejected = run_json(&[

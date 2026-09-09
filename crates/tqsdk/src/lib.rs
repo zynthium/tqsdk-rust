@@ -2044,7 +2044,7 @@ impl BacktestBuilder {
         if self
             .remote_fill_cancellation
             .as_ref()
-            .is_some_and(BacktestRemoteFillCancellation::is_cancelled)
+            .is_some_and(BacktestRemoteFillCancellation::is_stop_requested)
         {
             return Err(data_validation("remote backtest cache fill cancelled"));
         }
@@ -2063,7 +2063,7 @@ impl BacktestBuilder {
             if self
                 .remote_fill_cancellation
                 .as_ref()
-                .is_some_and(BacktestRemoteFillCancellation::is_cancelled)
+                .is_some_and(BacktestRemoteFillCancellation::is_stop_requested)
             {
                 return Err(data_validation("remote backtest cache fill cancelled"));
             }

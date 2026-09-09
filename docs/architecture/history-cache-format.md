@@ -1,8 +1,44 @@
 # History Cache Format
 
+分钟 fill 私有 journal 位于 `.backtest-history-staging/minute-v1/`，不是 KLOG 分区，
+不改变正式缓存格式；terminal、重启验证、grace 和回滚见 [Fill 恢复](history-fill-recovery.md)。
+
+## Canonical Kline append envelope v1
+
+分钟线仍按合约、交易月分区，日线仍按逻辑合约保存。两种 canonical payload（TQMK v5、
+TQDK v1）必须放入独立的 `TQKLOG01` 物理封装；下文定义的是片段内原始 payload 布局，
+不是普通 reader 仍支持的 standalone 文件布局。发布 manifest 必须声明 `kline-append-v1`。
+旧 raw 文件仅供显式离线迁移；普通 reader/fill/doctor/snapshot 不再兼容。所有访问程序须同步升级。
+
+封装包含 8-byte magic、两个 48-byte commit slot，以及独立编码的 payload 片段和 JSON 索引。
+slot 的 generation、index offset、index length、committed length、index checksum、slot checksum
+为六个 little-endian u64；checksum 使用 FNV-1a 64。writer 持 canonical 分区 exclusive lock，
+先写新增 payload 和索引并 fsync，再写交替 slot 并 fsync。reader 选择校验有效的最新 slot，
+固定 committed prefix；有效 slot 指向的索引损坏必须报错，不能回退为缓存缺失。
+损坏的未提交 slot 可保留上一提交。普通读取忽略未确认 suffix，下一次 writable fill preflight
+在锁内截断 suffix；doctor 和 snapshot manifest 构建拒绝带 suffix 的文件。
+
+普通 inspect/coverage 只验证提交索引、元数据身份和覆盖区间，不重新证明旧 payload 未发生
+磁盘损坏。查询读取片段时验证 checksum、行顺序与覆盖归属；完整读取还验证片段覆盖并集和
+行数与索引严格一致。doctor 和 CLI verify 深度验证，不能用 coverage 命中代替完整性审计。
+doctor 持分区共享锁，等待在途追加完成后再判断尾部。分钟 reader 按片段流式解压；
+日线有界读取在分配片段前重新核对已打开文件大小和预算。
+
+同 snapshot、严格位于旧覆盖之后的续填只追加新增数据。重叠修订或 snapshot 变化仍完整
+验证、合并并原子重写为 KLOG。最多保留 64 个片段，之后由下一次写入压实，限制历史索引
+累计空间。新建文件直接生成 KLOG，不再先写 raw；fill preflight 只恢复尾部，不隐式升级。
+日线远端片段最多 32 天；取消后仅重新请求未提交片段，不将未完成 rows 声称为 final。
+
+旧 raw 的迁移、外部备份与回滚规则见 [离线格式收缩](kline-cache-migration.md)。
+迁移持 root 排他锁和分区排他锁，先备份、在临时文件中逐字节和深读验证，再原子替换。
+以前的 `.kline-append-backups/` 只保留作回滚材料，不参与 live coverage 或 snapshot。
+
+新 snapshot 的 `.tqmk`/`.tqdk` 只允许 reflink/copy，禁止 hardlink；KLOG generation 多硬链接
+一律拒绝。旧 raw generation 需私有克隆、迁移后重新发布，不能原地修改。
+writer 追加前对已有多链接 inode 做 copy-on-write；非 Unix 平台保守复制，保护回滚备份。
+
 本文件只定义底层 cache 文件格式、file lock 和 opened-file snapshot 语义。history generation 的
-manifest envelope、结构共享、CURRENT、lease、发布/恢复/GC 合同见
-[history-snapshot-manifest.md](history-snapshot-manifest.md)；generation 层不得改写本文件的格式规则。
+manifest、CURRENT、lease、发布/恢复/GC 合同见 [history-snapshot-manifest.md](history-snapshot-manifest.md)。
 
 ## 文档定位
 
@@ -120,7 +156,7 @@ snapshot。hash 相同是快速路径；hash 不同时，只有双方 content-ad
 range 内 schema、market、logical symbol、session、交易日和 physical mapping 完全相同，才能复用旧
 coverage。缺失 sidecar、语义不匹配、损坏或不完整覆盖一律 fail closed，不能降级为近似命中。完成的远端
 range（包括合法的零行 range）才可标记 final coverage；当前或未来交易日不得标记为 final。
-文件更新按单月原子重写，reader 以流式方式读取，不必把整月 materialize 到内存。
+原始文件与重叠修订按单月原子重写；普通续填使用上述追加封装。reader 保持流式读取。
 每个文件的 metadata 与 coverage 保持原始二进制布局；row payload 仅在 zstd 压缩后更小时才以
 zstd frame 保存。压缩是无损的：它保留全部 Kline row 的 id、datetime、OHLC、volume、OI 和 epoch，
 不得因零成交或重复字段删除、合成或按固定频率填充 row。reader 流式解压并按未压缩 payload checksum
@@ -171,7 +207,7 @@ native daily cache 与 minute cache 独立；它只保存 official server-backte
 | file granularity | 一个 logical futures symbol 的所有 final 1d coverage；不按时间分区 |
 
 每次 remote fill 只请求和写入实际 missing `[start, end)` 区间；只有 stream terminal、chart cleanup
-成功且 range 在当前 CST trading day 之前，才可原子替换整个文件并提交 final coverage。合法零行 range
+成功且 range 在当前 CST trading day 之前，才可提交追加索引或原子替换文件。合法零行 range
 同样可以 final。取消、超时、协议错误、当前/未来交易日都不能提交 coverage。
 
 文件同时保存 immutable metadata snapshot、coverage、Kline rows 和 checksum。snapshot identity 不同时，reader
@@ -219,8 +255,8 @@ cache 文件。此 phase 与 official high-period chart 的实际一致性不由
 这里的 per-file lock 保护 writable cache root 内的文件操作；它不同于 generation
 `lease.lock`。已发布 generation 必须只读，relay 的 shared generation lease 保护整个 detached
 query/coordinator 生命周期，publisher 只有取得 exclusive generation lease 才能 GC。结构共享时
-`.tqbn` 因 append/truncate 语义禁止 hardlink；`.tqmk`/`.tqdk` 只有在继续保持 pathname
-atomic-replace 时才可作为 immutable generation file hardlink。
+`.tqbn`、`.tqmk`、`.tqdk` 的新 snapshot clone 均禁止 hardlink；canonical Kline 的旧 raw
+generation 不再兼容，须私有克隆、显式迁移后重新发布，不能原地转换。
 
 每个 `.tqbn` 日分区使用同路径的 `.tqbn.lock` sidecar 做 advisory file lock；该 sidecar 同时保存
 最近一次确认提交的 tail checkpoint。writer 持 exclusive lock，reader 持 shared lock。首次建文件在
@@ -286,6 +322,20 @@ v3 `TQTD`，所有长期访问同一 cache root 的进程必须同时升级。
 
 新写入和 append-log compaction 会在每个 market-data records block 后紧跟一个 crate-internal
 `TQRI` `Index` block。entry 记录前一个 records block 的 offset 和其行时间范围 `[start, end)`；
+
+当前 writer 写 records-index v2：除 offset/range 外，还带首尾 row id、首尾 timestamp 与严格递增
+id/timestamp 标志。只有请求完整覆盖该 block 且这些 v2 事实证明顺序时，streaming planner 才可直接采用
+index，避免为规划再次解压/扫描 payload；边界 block、v1 index、缺失/未知/不一致 index 一律仍解码扫描。
+对于最终仍可 streaming 的 fallback block，reader 最多保留 8 MiB 已解码 payload 并在首次消费时复用，
+避免同一 block 的第二次 decode；超过该硬上限仍走重读路径，绝不把整分区 materialize 到内存。
+这只是一项保守加速，不改变 last-write-wins、范围过滤或损坏数据的 fail-closed 语义。
+
+`TickDataSeriesReader::read_telemetry()` 暴露 reader-local 的 TQBN 工作量：`bytes_read` 和
+`bytes_decompressed` 只统计参与 records-row 规划/解码的 records payload，排除 metadata/index payload；
+`blocks_skipped` 只统计依据 range index 在 payload decode 前跳过的 records block；`blocks_decoded`
+包括 streaming、materialized fallback 和 planner fallback 实际解码的 records block；
+`materialized_rows` 是 fallback 保留给 iterator 的最终 rows。telemetry 是旁路计数，不得改变排序、
+canonicalization、range filtering 或 fallback 决策。
 records block 先写、index 后写，异常中断最多留下无索引 block。v3 reader 遇到缺失索引、
 offset/range 不合法或不认识的 index 时，对该 records block 回退完整解码；这类索引演进不改变 v3
 file identity 或 schema version。
@@ -293,6 +343,19 @@ file identity 或 schema version。
 范围 reader 顺序读取小型 block header/index，只读取、校验并解压与请求范围相交的 market-data
 payload。metadata、coverage 和 index 自身仍校验；未知 flags 仍必须拒绝。`scan()`、`diagnose()`、
 compaction 等完整性路径继续解码整个文件，因此范围读取跳过无关 payload 不会替代深度诊断。
+
+### Legacy Tick canonicalization spill
+
+当 records-index 无法证明 Tick blocks 的 id/time 单调性时，reader 仍保留既有的
+last-write-wins、payload replay 与 range filtering 规则；但不再把整个 partition 的
+`Vec<HistorySeriesRow>` 留在 heap。它在 reader-owned OS temporary directory 中建立临时
+SQLite 排序/集合索引（page cache 上限 4 MiB），将最终有序 Tick 写成 length-delimited fixed
+binary spool（保留全部浮点 bit pattern，包括非有限值），再由同一个 reader 顺序读取。
+
+该目录从不进入 cache root、manifest、checkpoint 或 lease 集合；reader drop 后删除。单行编码上限
+64 KiB，单次 legacy spill 输入上限 8 GiB；超过任一边界或临时 I/O/SQLite 失败均 fail closed，
+不会退回无界 materialization。`read_telemetry()` 继续报告 TQBN block decode 工作；这条路径的
+`materialized_rows` 保持 0，因为结果只驻留在临时 spool 而非 reader heap。
 
 ### Coverage Index Chain
 

@@ -120,6 +120,10 @@ fn tick_data_series_reader_reads_cached_ticks_in_order() {
     assert_eq!(reader.next_tick().unwrap().unwrap().id, 1);
     assert_eq!(reader.next_tick().unwrap().unwrap().id, 2);
     assert!(reader.next_tick().unwrap().is_none());
+    let telemetry = reader.read_telemetry();
+    assert!(telemetry.blocks_decoded > 0);
+    assert!(telemetry.bytes_read > 0);
+    assert!(telemetry.bytes_decompressed > 0);
 }
 
 #[test]

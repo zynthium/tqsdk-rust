@@ -253,9 +253,18 @@ pub struct BacktestTickCacheOperationLock {
     cache_dir: PathBuf,
     path: PathBuf,
     file: File,
+    exclusive: bool,
 }
 
 impl BacktestTickCacheOperationLock {
+    pub(crate) fn require_exclusive_for(&self, root: &Path) -> Result<()> {
+        if !self.exclusive || self.cache_dir.canonicalize()? != root.canonicalize()? {
+            return Err(DataError::InvalidState(
+                "migration requires the same cache root's exclusive gate",
+            ));
+        }
+        Ok(())
+    }
     #[must_use]
     pub fn cache_dir(&self) -> &Path {
         self.cache_dir.as_path()
@@ -729,6 +738,7 @@ impl BacktestTickCache {
                 cache_dir,
                 path,
                 file,
+                exclusive: false,
             }),
             Err(error) if error.kind() == ErrorKind::WouldBlock => Err(DataError::CacheBusy {
                 cache_dir,
@@ -760,6 +770,7 @@ impl BacktestTickCache {
                 cache_dir,
                 path,
                 file,
+                exclusive: true,
             })),
             Err(error) if error.kind() == ErrorKind::WouldBlock => Err(DataError::CacheBusy {
                 cache_dir,
@@ -793,6 +804,7 @@ impl BacktestTickCache {
                 cache_dir,
                 path,
                 file,
+                exclusive,
             }),
             Err(error) if error.kind() == ErrorKind::WouldBlock => Err(DataError::CacheBusy {
                 cache_dir,

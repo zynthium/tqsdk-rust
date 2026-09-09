@@ -112,10 +112,14 @@ coverage_summary 是审计/运维摘要，不是 query 或 `/coverage` 的 autho
 | role | 典型文件 | 允许 clone |
 | --- | --- | --- |
 | `tqbn_mutable_layout` | `.tqbn` | reflink，失败后普通 copy；禁止 hardlink |
-| `tqmk_immutable_generation` | `.tqmk` | reflink、hardlink、copy |
-| `tqdk_immutable_generation` | `.tqdk` | reflink、hardlink、copy |
+| `tqmk_immutable_generation` | `.tqmk` | reflink 或 copy；新 clone 禁止 hardlink |
+| `tqdk_immutable_generation` | `.tqdk` | reflink 或 copy；新 clone 禁止 hardlink |
 | `metadata_content_addressed` | immutable metadata snapshot | reflink、hardlink、copy |
 | `pointer_copy` | `active.json` 等 pointer | 独立 copy 或 rebuild |
+
+canonical Kline 文件必须使用 `TQKLOG01` 并声明 `kline-append-v1`。构建 manifest 前要求
+没有未提交尾部，读取 manifest 时拒绝多硬链接；旧 raw generation 不再兼容，须私有克隆、
+显式迁移后重新发布。`.kline-append-backups/` 是升级前恢复备份，不复制进 generation。
 
 必须排除并重建：
 
@@ -127,9 +131,8 @@ coverage_summary 是审计/运维摘要，不是 query 或 `/coverage` 的 autho
 symlink、device、FIFO、socket、absolute path、`..` escape、重复 normalized path、大小/hash 不符、
 未知 role 全部 fail closed。禁止未经分类的 `cp -al`。
 
-`.tqbn` 可能 append、checkpoint truncate 或 recovery truncate，因此永不 hardlink。当前
-`.tqmk`/`.tqdk` writer 使用临时文件加原子 pathname replace；只有这个不原地修改合同仍成立时才能
-跨 generation hardlink。任何未来改为原地写的格式，必须先收窄 role policy。
+`.tqbn` 以及采用追加封装的 `.tqmk`/`.tqdk` 都可能 append 或 recovery truncate，因此新 clone
+只允许 reflink/copy；旧 raw generation 也不能绕过 mandatory KLOG 的 reader gate。
 
 Daily 保持一个 logical symbol 一个 `.tqdk`，minute 保持按月，Tick 保持按交易日；snapshot 层不改变
 这些格式。
@@ -252,3 +255,10 @@ dry-run 不得为探测而创建持久目录或锁；临时探测只能位于操
 - minute v3 和未知格式保持 `LegacyUnsupported`/fail closed；
 - 新旧 writer 不得同时写同一 staging/source root；
 - rollback 只切 pointer 到已验证兼容 generation，不能依赖旧 binary 读取新格式。
+# Fill 暂存排除
+
+`.backtest-history-staging/` 归类为既有 `Rebuild`；新增
+`backtest_history_snapshot_cache_path_requires_placeholder(...)` 对该 namespace 返回 false，
+不复制也不创建空占位文件。旧 disposition 枚举保持源码兼容；锁仍可重建空文件。
+其中 journal 和中断残留临时文件均不进入发布 generation。
+见 [Fill 恢复合同](history-fill-recovery.md)。

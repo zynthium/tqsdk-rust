@@ -8,7 +8,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -371,6 +370,7 @@ impl BacktestRemoteFillInspectionProgress {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct BacktestRemoteFillTelemetry {
+    durability: Option<tqsdk_data::BacktestHistoryDurabilityProgress>,
     phase: BacktestRemoteFillPhase,
     plan: Option<RemoteFillPlan>,
     inspection: Option<BacktestRemoteFillInspectionProgress>,
@@ -385,9 +385,26 @@ pub struct BacktestRemoteFillTelemetry {
 }
 
 impl BacktestRemoteFillTelemetry {
+    fn durability_event(event: tqsdk_data::BacktestHistoryDurabilityEvent) -> Self {
+        Self {
+            phase: BacktestRemoteFillPhase::Streaming,
+            plan: None,
+            inspection: None,
+            logical_batch_id: None,
+            attempt: 0,
+            physical_symbol: Some(event.symbol),
+            requested_range: Some(event.progress.range),
+            accepted_rows: 0,
+            latest_cursor_ns: None,
+            elapsed: Duration::ZERO,
+            error: None,
+            durability: Some(event.progress),
+        }
+    }
     pub(crate) fn plan_ready(plan: RemoteFillPlan) -> Self {
         Self {
             phase: BacktestRemoteFillPhase::PlanReady,
+            durability: None,
             plan: Some(plan),
             inspection: None,
             logical_batch_id: None,
@@ -408,6 +425,7 @@ impl BacktestRemoteFillTelemetry {
     ) -> Self {
         Self {
             phase: BacktestRemoteFillPhase::Inspecting,
+            durability: None,
             plan: None,
             inspection: Some(inspection),
             logical_batch_id: None,
@@ -424,6 +442,7 @@ impl BacktestRemoteFillTelemetry {
     fn lifecycle(update: RemoteFillTelemetryUpdate) -> Self {
         Self {
             phase: update.phase,
+            durability: update.durability,
             plan: None,
             inspection: None,
             logical_batch_id: Some(update.logical_batch_id),
@@ -477,6 +496,12 @@ impl BacktestRemoteFillTelemetry {
         self.accepted_rows
     }
 
+    /// Per-window received/committed/staged counts, not inferred from a cursor.
+    #[must_use]
+    pub fn durability(&self) -> Option<&tqsdk_data::BacktestHistoryDurabilityProgress> {
+        self.durability.as_ref()
+    }
+
     #[must_use]
     pub fn latest_cursor_ns(&self) -> Option<i64> {
         self.latest_cursor_ns
@@ -498,6 +523,7 @@ pub type BacktestRemoteFillTelemetryHandler =
     Arc<dyn Fn(&BacktestRemoteFillTelemetry) + Send + Sync + 'static>;
 
 struct RemoteFillTelemetryUpdate {
+    durability: Option<tqsdk_data::BacktestHistoryDurabilityProgress>,
     phase: BacktestRemoteFillPhase,
     logical_batch_id: usize,
     attempt: usize,
@@ -512,7 +538,7 @@ struct RemoteFillTelemetryUpdate {
 /// Cooperative cancellation handle for a remote cache fill.
 #[derive(Clone, Default)]
 pub struct BacktestRemoteFillCancellation {
-    cancelled: Arc<AtomicBool>,
+    inner: BacktestHistoryFillCancellation,
 }
 
 impl BacktestRemoteFillCancellation {
@@ -522,12 +548,22 @@ impl BacktestRemoteFillCancellation {
     }
 
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        self.inner.cancel();
+    }
+
+    /// Stop dispatching new work; call `cancel()` when the grace period expires.
+    pub fn request_stop(&self) {
+        self.inner.request_stop();
     }
 
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        self.inner.is_cancelled()
+    }
+
+    #[must_use]
+    pub fn is_stop_requested(&self) -> bool {
+        self.inner.is_stop_requested()
     }
 }
 
@@ -589,7 +625,7 @@ impl RemoteBacktestFillRuntime {
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancellation
             .as_ref()
-            .is_some_and(BacktestRemoteFillCancellation::is_cancelled)
+            .is_some_and(BacktestRemoteFillCancellation::is_stop_requested)
     }
 
     fn emit_telemetry(&self, event: BacktestRemoteFillTelemetry) {
@@ -1028,19 +1064,15 @@ async fn fill_backtest_history_cache(
         .auth_provider(auth)
         .build()?;
 
-    let data_cancellation = BacktestHistoryFillCancellation::new();
-    let cancellation_bridge = runtime.cancellation.clone().map(|facade_cancellation| {
-        let data_cancellation = data_cancellation.clone();
-        tokio::spawn(async move {
-            loop {
-                if facade_cancellation.is_cancelled() {
-                    data_cancellation.cancel();
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
+    let durability_runtime = runtime.clone();
+    let client = client.on_fill_durability(move |event| {
+        durability_runtime.emit_telemetry(BacktestRemoteFillTelemetry::durability_event(event));
     });
+    let data_cancellation = runtime
+        .cancellation
+        .as_ref()
+        .map(|signal| signal.inner.clone())
+        .unwrap_or_default();
     let progress = Arc::new(Mutex::new(FacadeOrchestrationProgress::new(
         runtime.clone(),
     )));
@@ -1059,10 +1091,6 @@ async fn fill_backtest_history_cache(
             },
         )
         .await;
-    if let Some(bridge) = cancellation_bridge {
-        bridge.abort();
-        let _ = bridge.await;
-    }
     let report = report?;
 
     let mut rows_by_symbol = BTreeMap::new();
@@ -1121,7 +1149,7 @@ async fn fill_backtest_history_cache(
             for (symbol, ranges) in compaction_ranges {
                 for (start_ns, end_ns) in ranges {
                     if compaction_runtime.is_cancelled() {
-                        return Err(remote_fill_cancelled_error());
+                        return Ok(());
                     }
                     cache.compact_symbol_ticks_in_range(&symbol, start_ns, end_ns)?;
                 }
@@ -1135,9 +1163,7 @@ async fn fill_backtest_history_cache(
             ))
         })??;
     }
-    if runtime.is_cancelled() {
-        return Err(remote_fill_cancelled_error());
-    }
+    // All requested windows are committed; a late stop cannot undo completion.
     Ok(rows_by_symbol)
 }
 
@@ -1408,7 +1434,7 @@ async fn fill_backtest_history_cache_legacy(
             Err(error) => errors.push(format!("data-layer remote fill task failed: {error}")),
         }
     }
-    if runtime.is_cancelled() {
+    if runtime.is_cancelled() && completed_batches < total_batches {
         return Err(remote_fill_cancelled_error());
     }
     if !errors.is_empty() {
@@ -1441,7 +1467,7 @@ async fn fill_backtest_history_cache_legacy(
             for (symbol, ranges) in compaction_ranges {
                 for (start_ns, end_ns) in ranges {
                     if compaction_runtime.is_cancelled() {
-                        return Err(remote_fill_cancelled_error());
+                        return Ok(());
                     }
                     cache.compact_symbol_ticks_in_range(&symbol, start_ns, end_ns)?;
                 }
@@ -1454,9 +1480,6 @@ async fn fill_backtest_history_cache_legacy(
                 "remote backtest cache compaction task failed: {error}"
             ))
         })??;
-        if runtime.is_cancelled() {
-            return Err(remote_fill_cancelled_error());
-        }
     }
     Ok(rows_by_symbol)
 }
@@ -1753,6 +1776,7 @@ fn observe_materialized_telemetry(
     let (accepted_rows, made_progress) = history_progress.observe(&event);
     runtime.emit_telemetry(BacktestRemoteFillTelemetry::lifecycle(
         RemoteFillTelemetryUpdate {
+            durability: None,
             phase,
             logical_batch_id: logical_batch_id.saturating_add(1),
             attempt: 1,
@@ -1847,6 +1871,7 @@ fn observe_materialized_chunk(
     }
     runtime.emit_telemetry(BacktestRemoteFillTelemetry::lifecycle(
         RemoteFillTelemetryUpdate {
+            durability: None,
             phase: BacktestRemoteFillPhase::Streaming,
             logical_batch_id: logical_batch_id.saturating_add(1),
             attempt: 1,
@@ -1871,6 +1896,7 @@ fn emit_batch_telemetry(
     for symbol in &batch.symbols {
         runtime.emit_telemetry(BacktestRemoteFillTelemetry::lifecycle(
             RemoteFillTelemetryUpdate {
+                durability: None,
                 phase,
                 logical_batch_id,
                 attempt: 1,

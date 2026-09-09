@@ -1,5 +1,22 @@
 # `tqsdk-data` 最小 API 草图
 
+Fill 新增 `BacktestHistoryFillCancellation::request_stop()/is_stop_requested()` 和
+`BacktestHistoryClient::on_fill_durability(...)` 独立观察接口。
+旧 `BacktestHistoryTelemetryEvent` 的 struct literal 与取消方法保持源码兼容。
+Snapshot publisher 通过新增 `backtest_history_snapshot_cache_path_requires_placeholder(...)`
+查询是否重建占位文件，旧 disposition 枚举及穷尽匹配保持不变；私有暂存完全排除。
+字段与恢复语义见 [中断与续填](history-fill-recovery.md)。
+
+Canonical 日线／分钟线 reader 和 writer 统一要求 KLOG；旧 raw 不再隐式兼容。
+显式离线 `migrate_kline_cache` 拥有根排他锁、备份、转换和数据保全验证，见
+[迁移与收缩合同](kline-cache-migration.md)。`MinuteKlineCache::migrate_legacy_v4` 自取根排他锁；
+CLI 借用门禁的入口验证 exclusive 模式及同一 canonical root，避免重入或 shared-lock 绕过。
+
+Canonical minute/daily 的公开查询入口保持不变。`inspect`/`coverage` 对追加封装读取提交
+索引，不保证未读取旧 payload 的当前物理完整性；完整审计使用诊断或 CLI `verify`。
+显式 `orchestrate_fill` 在 root gate 内恢复 KLOG 未提交尾部，并拒绝旧 raw 分区，等待锁时可取消；
+不会把该写入行为加入 CacheOnly 查询。详见 [缓存格式](history-cache-format.md)。
+
 ## 文档定位
 本文档描述的是建立在现有 `tqsdk-core + tqsdk-session + replay/history contract` 之上的研究/离线数据工具层。
 
@@ -91,9 +108,20 @@ field schema、strict inspect、snapshot validator 和 lease-bearing read-only h
 
 ## 回测历史查询与缓存来源
 
+最后一个 shared receiver 退出时，runner 直接取消物理 scan；无需等待下一条 chunk 才发现闭合 channel。
+
+共享 scan 的 Started 后晚到请求只有在既定物理 slice 完整覆盖、且 bounded weak replay 可在同一线性化点完整升级时才合流；其余请求独立 scan。weak replay 不延长 source byte permit 生命周期，取消会直接唤醒等待中的 source reader。
+
+`BacktestHistoryRun::shared_scan_metrics()` 是 run-local、lock-free snapshot；
+`finish_with_shared_scan_metrics()` 在 coordinator 退出后取得终值。`shared_scan_hit_ratio` 只以实际遇到
+active shared scan 的可合流请求为分母；`late_join_hit_ratio` 只以 Started 后的 join 为分母。
+`duplicate_physical_scan_bytes` 记录 fallback scan 产出的 decoded row byte-equivalent，不得解释为原始
+文件、压缩流或网络字节。
+
 `BacktestHistoryClient` 是回测历史数据的公共异步查询入口。它拥有 metadata sidecar、source
 planner、official server-backtest cache fill、single-flight 协调、bounded cache scan 与 K 线聚合；
-`tqsdk-session` 只提供 server-history chart substrate，`tqsdk-task` 只拥有 replay/backtest event
+共享 scan 的每个 subscriber 有独立有界缓冲，落后者会显式失败并重试，不能阻塞其他 subscriber 或静默丢失
+历史 chunk。`tqsdk-session` 只提供 server-history chart substrate，`tqsdk-task` 只拥有 replay/backtest event
 语义，`tqsdk-wait` 不参与 data fill。
 
 同一个 `BacktestHistoryClient` 也拥有 tick、minute、daily fill scheduling：默认 symbol batch size 1、
@@ -206,7 +234,10 @@ adapter，不属于 query/read path：它在 exclusive root remote-fill gate 内
 此路径不自动 purge、重写或合并数据。
 
 执行图是 async orchestration 加有界 `spawn_blocking` reader：文件读取、TQBN 解压和记录解码仍是
-CPU/blocking 工作，不能仅把 API 换成 `tokio::fs` 就宣称性能提升。
+CPU/blocking 工作，不能仅把 API 换成 `tokio::fs` 就宣称性能提升。每个 run 保留自己的 worker
+上限；daemon 可以经 `BacktestHistorySnapshotQueryResources` 注入额外的共享 `Semaphore`，worker 在
+进入 blocking scan 前同时持有本地和 daemon permit，任一等待均可被取消唤醒。该共享预算是 host 的资源
+策略，不是 `tqsdk-data` 新建的全局 executor。
 materialize/fill-only run 在 coverage 提交后直接返回物理写入计数，不扫描 rows 回内存；cache hit
 报告 0，同一 shared fill 的物理 rows 只由一个 subscriber 计数。Tick fill 按交易日顺序切片并以
 8192 行缓冲追加，普通 final facade fill 只 compact 本轮实际远端回填且去重后的日分区，provisional 不 compact。
@@ -278,6 +309,10 @@ materialize/fill-only run 在 coverage 提交后直接返回物理写入计数�
 - `DailyKlineCachePurgeReport`
 - `HistorySeriesCache`
 - `HistorySeriesCacheReport`
+- `HistorySeriesReadTelemetry`（Records payload 的 bytes、storage read 时间与 codec decode
+  时间；仅用于观测，不改变 streaming 或 materialization fallback 语义。legacy Tick
+  canonicalization 使用 reader-owned bounded temporary SQLite/spool，故其 `materialized_rows`
+  为 0；临时目录不发布到 cache root，reader drop 后删除）
 - `HistorySeriesCacheMiss`
 - `HistorySeriesCacheScanReport`
 - `HistorySeriesCacheFileReport`

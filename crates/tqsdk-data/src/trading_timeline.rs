@@ -346,10 +346,9 @@ impl TradingTimelineRuleCatalog {
             if let (Some(start), Some(end)) = (
                 rule.candidate_trading_day_start.as_deref(),
                 rule.candidate_trading_day_end.as_deref(),
-            ) {
-                if start > end {
-                    return Err(validation("trading timeline rule epoch is inverted"));
-                }
+            ) && start > end
+            {
+                return Err(validation("trading timeline rule epoch is inverted"));
             }
             let _ = catalog_rule_to_timeline_rule(rule)?;
             rule.validation.status = required("validation.status", rule.validation.status.clone())?;

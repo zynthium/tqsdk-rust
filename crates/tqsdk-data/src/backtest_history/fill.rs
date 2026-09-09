@@ -48,9 +48,8 @@ const TICK_WRITE_BUFFER_ROWS: usize = 8_192;
 const SERVER_HISTORY_COMMIT_LOG_RETENTION: usize = 8;
 // Each canonical-minute slice can contain at most one row per minute.
 const MINUTE_FILL_MAX_SPAN_NS: i64 = 10_000 * 60_000_000_000;
-// Bound the otherwise whole-range daily terminal buffer while keeping
-// ordinary multi-year fills coarse-grained.
-const DAILY_FILL_MAX_SPAN_NS: i64 = 1_024 * 86_400_000_000_000;
+// Bound the uncommitted daily range so interruption cannot replay years of work.
+const DAILY_FILL_MAX_SPAN_NS: i64 = 32 * 86_400_000_000_000;
 const CROSS_PROCESS_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
 const EXTERNAL_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const REMOTE_FILL_RETRY_ATTEMPTS: usize = 3;
@@ -734,16 +733,17 @@ impl RemoteFillCoordinator {
         &self,
         request: BacktestHistoryFillRequest,
     ) -> Result<BacktestHistoryFillOutcome> {
-        self.ensure_coverage_inner(request, None, true).await
+        self.ensure_coverage_inner(request, None, None, true).await
     }
 
     pub(crate) async fn ensure_coverage_until_cancelled(
         &self,
         request: BacktestHistoryFillRequest,
         cancellation: &AtomicBool,
+        stop_starting: &Arc<AtomicBool>,
         claim_rows: bool,
     ) -> Result<BacktestHistoryFillOutcome> {
-        self.ensure_coverage_inner(request, Some(cancellation), claim_rows)
+        self.ensure_coverage_inner(request, Some(cancellation), Some(stop_starting), claim_rows)
             .await
     }
 
@@ -751,6 +751,7 @@ impl RemoteFillCoordinator {
         &self,
         request: BacktestHistoryFillRequest,
         cancellation: Option<&AtomicBool>,
+        stop_starting: Option<&Arc<AtomicBool>>,
         claim_rows: bool,
     ) -> Result<BacktestHistoryFillOutcome> {
         request.validate()?;
@@ -776,11 +777,21 @@ impl RemoteFillCoordinator {
         let mut rows_written = 0usize;
         for missing_range in missing_ranges.iter().copied() {
             for slice in self.split_fill_range(&request, missing_range)? {
-                let terminal_results =
-                    futures::future::join_all(self.subscribe(slice)?.into_iter().map(
-                        |subscription| subscription.wait_until_cancelled(cancellation, claim_rows),
-                    ))
-                    .await;
+                if cancellation.is_some_and(|flag| flag.load(Ordering::Acquire))
+                    || stop_starting.is_some_and(|flag| flag.load(Ordering::Acquire))
+                {
+                    return Err(DataError::InvalidState(
+                        "fill stopped before starting next window",
+                    ));
+                }
+                let terminal_results = futures::future::join_all(
+                    self.subscribe(slice, stop_starting)?
+                        .into_iter()
+                        .map(|subscription| {
+                            subscription.wait_until_cancelled(cancellation, claim_rows)
+                        }),
+                )
+                .await;
                 for result in terminal_results {
                     rows_written = rows_written.saturating_add(result?);
                 }
@@ -854,7 +865,11 @@ impl RemoteFillCoordinator {
         Ok(slices)
     }
 
-    fn subscribe(&self, request: BacktestHistoryFillRequest) -> Result<Vec<FillSubscription>> {
+    fn subscribe(
+        &self,
+        request: BacktestHistoryFillRequest,
+        stop_starting: Option<&Arc<AtomicBool>>,
+    ) -> Result<Vec<FillSubscription>> {
         let key = FillSeriesKey {
             canonical_cache_root: canonical_cache_root(self.config.cache_dir.as_path())?,
             family: request.family,
@@ -875,11 +890,13 @@ impl RemoteFillCoordinator {
                 let Some(shared) = weak.upgrade() else {
                     continue;
                 };
-                if shared.compatibility == compatibility {
-                    if let Some(overlap) = intersect_ranges(shared.range, request.range) {
-                        covered.push(overlap);
-                        subscriptions.push(FillSubscription::new(Arc::clone(&shared)));
-                    }
+                if shared.compatibility == compatibility
+                    && !shared.is_cancelled()
+                    && !shared.is_draining()
+                    && let Some(overlap) = intersect_ranges(shared.range, request.range)
+                {
+                    covered.push(overlap);
+                    subscriptions.push(FillSubscription::new(Arc::clone(&shared), stop_starting));
                 }
                 retained.push(Arc::downgrade(&shared));
             }
@@ -887,7 +904,7 @@ impl RemoteFillCoordinator {
 
             for range in subtract_ranges(request.range, covered) {
                 let shared = Arc::new(SharedFill::new(range, compatibility.clone()));
-                subscriptions.push(FillSubscription::new(Arc::clone(&shared)));
+                subscriptions.push(FillSubscription::new(Arc::clone(&shared), stop_starting));
                 active.push(Arc::downgrade(&shared));
                 pending_starts.push((shared, request.with_range(range)));
             }
@@ -913,6 +930,11 @@ impl RemoteFillCoordinator {
     ) -> Result<usize> {
         loop {
             self.ensure_not_cancelled(shared)?;
+            if shared.is_draining() {
+                return Err(DataError::InvalidState(
+                    "fill stopped before acquiring series lease",
+                ));
+            }
             if self.missing_ranges(request)?.is_empty() {
                 return Ok(0);
             }
@@ -977,7 +999,7 @@ impl RemoteFillCoordinator {
         );
 
         let consume_result = self
-            .consume_with_retries(request, shared, |event| match event {
+            .consume_with_retries(request, shared, |event, _new_attempt| match event {
                 ServerBacktestHistoryEvent::Ticks {
                     chart_id,
                     symbol,
@@ -1079,6 +1101,7 @@ impl RemoteFillCoordinator {
         request: &BacktestHistoryFillRequest,
         shared: &SharedFill,
     ) -> Result<usize> {
+        use super::fill_staging::{CHECKPOINT_SPAN_NS, MinuteFillJournal};
         if request.provisional_as_of_ns.is_none() {
             ensure_final_tick_range_is_closed(request.range)?;
         }
@@ -1086,83 +1109,165 @@ impl RemoteFillCoordinator {
             .minute_snapshot
             .as_ref()
             .ok_or(DataError::InvalidState(
-                "canonical-minute fill was missing its cache snapshot",
+                "canonical-minute fill requires a metadata snapshot",
             ))?;
         let cache = MinuteKlineCache::open(self.config.cache_dir.as_path())?;
-        let mut rows_by_datetime = BTreeMap::<i64, Kline>::new();
-        self.emit(
+        let mut journal = MinuteFillJournal::open(&self.config.cache_dir, request)?;
+        let previous_confirmed_end = journal.confirmed_end_ns;
+        let overlap = (previous_confirmed_end > journal.overlap_start_ns).then(|| {
+            journal
+                .rows
+                .range(journal.overlap_start_ns..previous_confirmed_end)
+                .map(|(datetime, row)| (*datetime, row.clone()))
+                .collect::<BTreeMap<_, _>>()
+        });
+        let mut start = journal.rewind();
+        let mut staged_rows = journal.rows.len();
+        self.emit_durability(
             request,
-            BacktestHistoryPhase::Fill,
-            0,
-            "starting canonical-minute fill slice",
+            (journal.rows.len(), 0, staged_rows),
+            journal.rows.keys().next_back().copied(),
+            Some((start, request.range.1)),
+            false,
         );
-
-        self.consume_with_retries(request, shared, |event| match event {
-            ServerBacktestHistoryEvent::CanonicalMinutes { symbol, rows, .. } => {
-                if symbol != request.cache_symbol {
-                    return Err(DataError::InvalidResponse(format!(
-                        "server canonical-minute fill returned unexpected symbol {symbol}"
-                    )));
+        while start < request.range.1 {
+            if shared.is_draining() {
+                return Err(DataError::InvalidState(
+                    "minute fill stopped between checkpoint windows",
+                ));
+            }
+            self.ensure_not_cancelled(shared)?;
+            let end = start
+                .saturating_add(CHECKPOINT_SPAN_NS)
+                .min(request.range.1);
+            let window = request.with_range((start, end));
+            let mut last_saved_rows = journal.rows.len();
+            let consume_result = self.consume_with_retries(&window, shared, |event, new_attempt| {
+                if new_attempt {
+                    journal.rows.retain(|datetime, _| *datetime < start);
                 }
-                for row in rows {
-                    if row.datetime >= request.range.0 && row.datetime < request.range.1 {
-                        rows_by_datetime.insert(row.datetime, row);
+                match event {
+                    ServerBacktestHistoryEvent::CanonicalMinutes { symbol, rows, .. } => {
+                        if symbol != request.cache_symbol {
+                            return Err(DataError::InvalidResponse(format!("server canonical-minute fill returned unexpected symbol {symbol}")));
+                        }
+                        for row in rows {
+                            if row.datetime >= start && row.datetime < end {
+                                journal.rows.insert(row.datetime, row);
+                            }
+                        }
+                        if journal.rows.len().saturating_sub(last_saved_rows) >= 1024 {
+                            journal.save()?;
+                            staged_rows = journal.rows.len();
+                            last_saved_rows = staged_rows;
+                        }
+                        self.emit_durability(request, (journal.rows.len(), 0, staged_rows), journal.rows.keys().next_back().copied(), Some((journal.overlap_start_ns, request.range.1)), false);
+                        Ok(false)
                     }
+                    ServerBacktestHistoryEvent::ChartCompleted { symbol, .. } => {
+                        if symbol != request.cache_symbol {
+                            return Err(DataError::InvalidResponse(format!("server canonical-minute fill completed unexpected symbol {symbol}")));
+                        }
+                        Ok(false)
+                    }
+                    ServerBacktestHistoryEvent::StreamCompleted => Ok(true),
+                    _ => Err(DataError::InvalidResponse("server canonical-minute fill returned non-minute rows".to_string())),
                 }
-                let latest_cursor_ns = rows_by_datetime
-                    .last_key_value()
-                    .map(|(datetime, _)| *datetime);
-                self.emit_with_cursor(
-                    request,
-                    BacktestHistoryPhase::Fill,
-                    rows_by_datetime.len(),
-                    latest_cursor_ns,
-                    "buffering canonical-minute rows until the server terminal",
-                );
-                Ok(false)
-            }
-            ServerBacktestHistoryEvent::ChartCompleted { symbol, .. } => {
-                if symbol != request.cache_symbol {
-                    return Err(DataError::InvalidResponse(format!(
-                        "server canonical-minute fill completed unexpected symbol {symbol}"
-                    )));
+            }).await;
+            // Even failed/cancelled windows retain tentative rows, never coverage.
+            if consume_result.is_ok() {
+                if end == previous_confirmed_end
+                    && let Some(expected) = &overlap
+                {
+                    journal.verify_overlap(expected, end)?;
                 }
-                Ok(false)
+                journal.overlap_start_ns = start;
+                journal.confirmed_end_ns = end;
             }
-            ServerBacktestHistoryEvent::StreamCompleted => Ok(true),
-            ServerBacktestHistoryEvent::Ticks { .. }
-            | ServerBacktestHistoryEvent::CanonicalDaily { .. } => Err(DataError::InvalidResponse(
-                "server canonical-minute fill returned Tick rows".to_string(),
-            )),
-        })
-        .await?;
-
+            journal.save()?;
+            staged_rows = journal.rows.len();
+            self.emit_durability(
+                request,
+                (journal.rows.len(), 0, staged_rows),
+                journal.rows.keys().next_back().copied(),
+                Some((journal.overlap_start_ns, request.range.1)),
+                false,
+            );
+            consume_result?;
+            start = end;
+        }
         self.ensure_not_cancelled(shared)?;
-        let rows = rows_by_datetime.into_values().collect::<Vec<_>>();
+        let rows = journal.rows.values().cloned().collect::<Vec<_>>();
         if let Some(as_of_ns) = request.provisional_as_of_ns {
             cache.store_provisional_range(
-                request.cache_symbol.as_str(),
+                &request.cache_symbol,
                 request.range.0,
                 request.range.1,
                 as_of_ns,
                 snapshot,
-                rows.as_slice(),
+                &rows,
             )?;
         } else {
             cache.store_final_range(
-                request.cache_symbol.as_str(),
+                &request.cache_symbol,
                 request.range.0,
                 request.range.1,
                 snapshot,
-                rows.as_slice(),
+                &rows,
             )?;
         }
-        self.emit_terminal(
+        journal.remove_after_commit()?;
+        self.emit_durability(
             request,
-            rows.len(),
-            "canonical-minute fill reached an explicit server terminal and committed coverage",
+            (rows.len(), rows.len(), 0),
+            rows.last().map(|row| row.datetime),
+            None,
+            true,
         );
         Ok(rows.len())
+    }
+
+    fn emit_durability(
+        &self,
+        request: &BacktestHistoryFillRequest,
+        rows: (usize, usize, usize),
+        latest_cursor_ns: Option<i64>,
+        redownload_range: Option<(i64, i64)>,
+        terminal: bool,
+    ) {
+        let (received_rows, committed_rows, staged_rows) = rows;
+        let event = BacktestHistoryTelemetryEvent {
+            request_id: request.request_id,
+            symbol: request.telemetry_symbol.clone(),
+            phase: BacktestHistoryPhase::Fill,
+            completed_rows: received_rows,
+            latest_cursor_ns,
+            message: if terminal {
+                "fill window durably committed"
+            } else {
+                "received rows are not committed coverage; staging is private"
+            }
+            .into(),
+        };
+        if let Some(observer) = &self.config.fill_durability {
+            observer(super::report::BacktestHistoryDurabilityEvent {
+                request_id: request.request_id,
+                symbol: request.telemetry_symbol.clone(),
+                progress: super::report::BacktestHistoryDurabilityProgress {
+                    range: request.range,
+                    received_rows,
+                    committed_rows,
+                    staged_rows,
+                    final_coverage: terminal && request.provisional_as_of_ns.is_none(),
+                    redownload_range,
+                },
+            });
+        }
+        if terminal {
+            self.telemetry.emit_terminal(event);
+        } else {
+            self.telemetry.emit(event);
+        }
     }
 
     async fn consume_with_retries<F>(
@@ -1172,7 +1277,7 @@ impl RemoteFillCoordinator {
         mut consume: F,
     ) -> Result<()>
     where
-        F: FnMut(ServerBacktestHistoryEvent) -> Result<bool>,
+        F: FnMut(ServerBacktestHistoryEvent, bool) -> Result<bool>,
     {
         let provider = self.config.auth_provider.as_ref().ok_or_else(|| {
             DataError::Validation(
@@ -1182,6 +1287,11 @@ impl RemoteFillCoordinator {
         let mut last_error = None;
         for attempt in 1..=REMOTE_FILL_RETRY_ATTEMPTS {
             self.ensure_not_cancelled(shared)?;
+            if shared.is_draining() {
+                return Err(DataError::InvalidState(
+                    "fill stopped before opening another source",
+                ));
+            }
             if attempt > 1 {
                 self.emit(
                     request,
@@ -1191,10 +1301,14 @@ impl RemoteFillCoordinator {
                 );
             }
             let credentials = self.await_or_shared_cancel(shared, provider.load()).await?;
-            let open_source = self
-                .config
-                .source_factory
-                .open(credentials, request.server_request());
+            if shared.is_draining() {
+                return Err(DataError::InvalidState(
+                    "fill stopped while loading source credentials",
+                ));
+            }
+            let server_request = request.server_request();
+            let expected_chart = server_request.charts[0].chart_id.clone();
+            let open_source = self.config.source_factory.open(credentials, server_request);
             let mut source = match self.await_or_shared_cancel(shared, open_source).await {
                 Ok(source) => source,
                 Err(error) => {
@@ -1207,6 +1321,8 @@ impl RemoteFillCoordinator {
                     return Err(error);
                 }
             };
+            let mut first_event = true;
+            let mut chart_completed = false;
             let attempt_result = loop {
                 let cancellation = shared.state.terminal.notified();
                 tokio::pin!(cancellation);
@@ -1227,11 +1343,39 @@ impl RemoteFillCoordinator {
                     }
                 };
                 match next_event {
-                    Ok(Some(event)) => match consume(event) {
-                        Ok(true) => break Ok(()),
-                        Ok(false) => {}
-                        Err(error) => break Err(error),
-                    },
+                    Ok(Some(event)) => {
+                        if request.family != FillFamily::Tick {
+                            let chart_id = match &event {
+                                ServerBacktestHistoryEvent::CanonicalMinutes {
+                                    chart_id, ..
+                                }
+                                | ServerBacktestHistoryEvent::CanonicalDaily { chart_id, .. }
+                                | ServerBacktestHistoryEvent::ChartCompleted { chart_id, .. } => {
+                                    Some(chart_id)
+                                }
+                                _ => None,
+                            };
+                            if chart_id.is_some_and(|chart_id| *chart_id != expected_chart)
+                                || (chart_completed
+                                    && !matches!(
+                                        event,
+                                        ServerBacktestHistoryEvent::StreamCompleted
+                                    ))
+                                || (matches!(event, ServerBacktestHistoryEvent::StreamCompleted)
+                                    && !chart_completed)
+                            {
+                                break Err(DataError::InvalidResponse("canonical Kline attempt has mismatched chart or missing/out-of-order terminal".into()));
+                            }
+                            if matches!(event, ServerBacktestHistoryEvent::ChartCompleted { .. }) {
+                                chart_completed = true;
+                            }
+                        }
+                        match consume(event, std::mem::take(&mut first_event)) {
+                            Ok(true) => break Ok(()),
+                            Ok(false) => {}
+                            Err(error) => break Err(error),
+                        }
+                    }
                     Ok(None) => {
                         break Err(DataError::InvalidResponse(
                             "server backtest history source ended without StreamCompleted"
@@ -1275,34 +1419,46 @@ impl RemoteFillCoordinator {
                 "canonical-daily fill is missing cache snapshot",
             ))?;
         let mut rows_by_datetime = BTreeMap::<i64, Kline>::new();
-        self.consume_with_retries(request, shared, |event| match event {
-            ServerBacktestHistoryEvent::CanonicalDaily { symbol, rows, .. } => {
-                if symbol != request.cache_symbol {
-                    return Err(DataError::InvalidResponse(format!(
-                        "server canonical-daily fill returned unexpected symbol {symbol}"
-                    )));
-                }
-                for row in rows {
-                    if row.datetime >= request.range.0 && row.datetime < request.range.1 {
-                        rows_by_datetime.insert(row.datetime, row);
+        self.consume_with_retries(request, shared, |event, new_attempt| {
+            if new_attempt {
+                rows_by_datetime.clear();
+            }
+            match event {
+                ServerBacktestHistoryEvent::CanonicalDaily { symbol, rows, .. } => {
+                    if symbol != request.cache_symbol {
+                        return Err(DataError::InvalidResponse(format!(
+                            "server canonical-daily fill returned unexpected symbol {symbol}"
+                        )));
                     }
+                    for row in rows {
+                        if row.datetime >= request.range.0 && row.datetime < request.range.1 {
+                            rows_by_datetime.insert(row.datetime, row);
+                        }
+                    }
+                    self.emit_durability(
+                        request,
+                        (rows_by_datetime.len(), 0, 0),
+                        rows_by_datetime.keys().next_back().copied(),
+                        Some(request.range),
+                        false,
+                    );
+                    Ok(false)
                 }
-                Ok(false)
-            }
-            ServerBacktestHistoryEvent::ChartCompleted { symbol, .. } => {
-                if symbol != request.cache_symbol {
-                    return Err(DataError::InvalidResponse(format!(
-                        "server canonical-daily fill completed unexpected symbol {symbol}"
-                    )));
+                ServerBacktestHistoryEvent::ChartCompleted { symbol, .. } => {
+                    if symbol != request.cache_symbol {
+                        return Err(DataError::InvalidResponse(format!(
+                            "server canonical-daily fill completed unexpected symbol {symbol}"
+                        )));
+                    }
+                    Ok(false)
                 }
-                Ok(false)
-            }
-            ServerBacktestHistoryEvent::StreamCompleted => Ok(true),
-            ServerBacktestHistoryEvent::Ticks { .. }
-            | ServerBacktestHistoryEvent::CanonicalMinutes { .. } => {
-                Err(DataError::InvalidResponse(
-                    "server canonical-daily fill returned non-daily rows".to_string(),
-                ))
+                ServerBacktestHistoryEvent::StreamCompleted => Ok(true),
+                ServerBacktestHistoryEvent::Ticks { .. }
+                | ServerBacktestHistoryEvent::CanonicalMinutes { .. } => {
+                    Err(DataError::InvalidResponse(
+                        "server canonical-daily fill returned non-daily rows".to_string(),
+                    ))
+                }
             }
         })
         .await?;
@@ -1315,6 +1471,13 @@ impl RemoteFillCoordinator {
             snapshot,
             rows.as_slice(),
         )?;
+        self.emit_durability(
+            request,
+            (rows.len(), rows.len(), 0),
+            rows.last().map(|row| row.datetime),
+            None,
+            true,
+        );
         Ok(rows.len())
     }
 
@@ -1491,6 +1654,7 @@ struct SharedFill {
 
 struct SharedFillState {
     consumers: AtomicUsize,
+    stop_signals: Mutex<Vec<Weak<AtomicBool>>>,
     cancel_requested: AtomicBool,
     terminal: Notify,
 }
@@ -1502,6 +1666,7 @@ impl SharedFill {
             compatibility,
             state: SharedFillState {
                 consumers: AtomicUsize::new(0),
+                stop_signals: Mutex::new(Vec::new()),
                 cancel_requested: AtomicBool::new(false),
                 terminal: Notify::new(),
             },
@@ -1510,16 +1675,39 @@ impl SharedFill {
         }
     }
 
-    fn subscribe(self: &Arc<Self>) -> FillConsumerGuard {
+    fn subscribe(self: &Arc<Self>, stop_starting: Option<&Arc<AtomicBool>>) -> FillConsumerGuard {
         self.state.consumers.fetch_add(1, Ordering::AcqRel);
+        let stop_signal = stop_starting
+            .cloned()
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        self.state
+            .stop_signals
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(Arc::downgrade(&stop_signal));
         FillConsumerGuard {
             shared: Arc::clone(self),
             active: true,
+            _stop_signal: stop_signal,
         }
     }
 
     fn is_cancelled(&self) -> bool {
         self.state.cancel_requested.load(Ordering::Acquire)
+    }
+
+    fn is_draining(&self) -> bool {
+        let mut signals = self
+            .state
+            .stop_signals
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        signals.retain(|signal| signal.strong_count() > 0);
+        !signals.is_empty()
+            && signals
+                .iter()
+                .filter_map(Weak::upgrade)
+                .all(|signal| signal.load(Ordering::Acquire))
     }
 
     fn complete(&self, result: std::result::Result<usize, String>) {
@@ -1572,8 +1760,8 @@ struct FillSubscription {
 }
 
 impl FillSubscription {
-    fn new(shared: Arc<SharedFill>) -> Self {
-        let consumer = shared.subscribe();
+    fn new(shared: Arc<SharedFill>, stop_starting: Option<&Arc<AtomicBool>>) -> Self {
+        let consumer = shared.subscribe(stop_starting);
         Self { shared, consumer }
     }
 
@@ -1617,6 +1805,7 @@ impl FillSubscription {
 struct FillConsumerGuard {
     shared: Arc<SharedFill>,
     active: bool,
+    _stop_signal: Arc<AtomicBool>,
 }
 
 impl FillConsumerGuard {
@@ -1802,6 +1991,8 @@ mod tests {
     use super::*;
     use crate::backtest_history::request::BacktestHistoryAuthProvider;
     use crate::backtest_history::telemetry::TelemetryHub;
+
+    include!("fill_restart_tests.rs");
 
     #[cfg(all(feature = "live", feature = "services"))]
     #[test]
@@ -2115,6 +2306,7 @@ mod tests {
                             "SHFE.au2608",
                         ),
                         cancellation.as_ref(),
+                        &Arc::new(AtomicBool::new(false)),
                         true,
                     )
                     .await
@@ -2194,8 +2386,8 @@ mod tests {
                 minute_snapshot: None,
             },
         ));
-        let query = FillSubscription::new(Arc::clone(&shared));
-        let materialization = FillSubscription::new(Arc::clone(&shared));
+        let query = FillSubscription::new(Arc::clone(&shared), None);
+        let materialization = FillSubscription::new(Arc::clone(&shared), None);
         shared.complete(Ok(7));
 
         assert_eq!(query.wait_until_cancelled(None, false).await.unwrap(), 0);
@@ -2254,7 +2446,8 @@ mod tests {
     #[tokio::test]
     async fn minute_rows_become_final_only_after_stream_terminal() {
         let root = temporary_root("minute-terminal");
-        let range = closed_range();
+        let closed = closed_range();
+        let range = (closed.0, closed.0 + 86_400_000_000_000);
         let snapshot = MinuteKlineCacheSnapshot::cst_v1();
         let opens = Arc::new(AtomicUsize::new(0));
         let telemetry = TelemetryHub::new();
@@ -2294,7 +2487,7 @@ mod tests {
             .unwrap();
 
         let terminal = telemetry_stream.next().await.expect("terminal telemetry");
-        assert_eq!(terminal.latest_cursor_ns, None);
+        assert_eq!(terminal.latest_cursor_ns, Some(range.0 + 60_000_000_000));
         let streaming = telemetry_stream.next().await.expect("streaming telemetry");
         assert_eq!(streaming.completed_rows, 1);
         assert_eq!(
@@ -2816,6 +3009,7 @@ mod tests {
     ) -> RemoteFillCoordinator {
         RemoteFillCoordinator::new(
             Arc::new(BacktestHistoryClientConfig {
+                fill_durability: None,
                 cache_dir: root,
                 policy: BacktestHistoryPolicy::RemoteOnMiss,
                 logical_concurrency: 1,
@@ -3198,12 +3392,39 @@ mod tests {
         fn open<'a>(
             &'a self,
             _credentials: BacktestHistoryCredentials,
-            _request: ServerBacktestHistoryRequest,
+            request: ServerBacktestHistoryRequest,
         ) -> OpenServerHistorySourceFuture<'a> {
             Box::pin(async move {
                 self.opens.fetch_add(1, Ordering::SeqCst);
+                let mut events = self.events.clone();
+                if request.charts[0].kind != ServerBacktestHistoryKind::Tick {
+                    let chart = &request.charts[0];
+                    for event in &mut events {
+                        match event {
+                            ServerBacktestHistoryEvent::CanonicalMinutes { chart_id, .. }
+                            | ServerBacktestHistoryEvent::CanonicalDaily { chart_id, .. }
+                            | ServerBacktestHistoryEvent::ChartCompleted { chart_id, .. } => {
+                                *chart_id = chart.chart_id.clone()
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !events.iter().any(|event| {
+                        matches!(event, ServerBacktestHistoryEvent::ChartCompleted { .. })
+                    }) && let Some(index) = events.iter().position(|event| {
+                        matches!(event, ServerBacktestHistoryEvent::StreamCompleted)
+                    }) {
+                        events.insert(
+                            index,
+                            ServerBacktestHistoryEvent::ChartCompleted {
+                                chart_id: chart.chart_id.clone(),
+                                symbol: chart.symbol.clone(),
+                            },
+                        );
+                    }
+                }
                 Ok(Box::new(ScriptedSource {
-                    events: self.events.clone().into(),
+                    events: events.into(),
                     first_event_delay: self.first_event_delay,
                     delayed: false,
                 }) as Box<dyn ServerHistorySource>)

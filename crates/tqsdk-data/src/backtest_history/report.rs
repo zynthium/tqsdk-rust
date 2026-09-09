@@ -292,6 +292,49 @@ pub struct BacktestHistoryBatchReport {
     pub failed: Vec<BacktestHistoryRequestFailure>,
 }
 
+/// Snapshot of shared physical-scan efficiency for one history run.
+///
+/// `duplicate_physical_scan_bytes` is decoded source-row bytes, not raw
+/// filesystem or network bytes. It is intentionally measured at the common
+/// scan boundary so cache backends can remain implementation-private.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BacktestHistorySharedScanMetrics {
+    /// Source requests that could use an active shared scan.
+    pub eligible_requests: u64,
+    /// Eligible requests served by either collecting or replayable live scan.
+    pub shared_scan_hits: u64,
+    /// Eligible requests that arrived after the physical scan started.
+    pub late_join_attempts: u64,
+    /// Late joins whose bounded replay plus live subscription was accepted.
+    pub late_join_hits: u64,
+    /// Fallback scans caused by an active scan lacking safe replay coverage.
+    pub duplicate_physical_scans: u64,
+    /// Decoded source-row bytes read by those duplicate fallback scans.
+    pub duplicate_physical_scan_bytes: u64,
+}
+
+impl BacktestHistorySharedScanMetrics {
+    /// Fraction of shareable source requests served by an existing scan.
+    #[must_use]
+    pub fn shared_scan_hit_ratio(self) -> f64 {
+        ratio(self.shared_scan_hits, self.eligible_requests)
+    }
+
+    /// Fraction of live-scan join attempts that could replay safely.
+    #[must_use]
+    pub fn late_join_hit_ratio(self) -> f64 {
+        ratio(self.late_join_hits, self.late_join_attempts)
+    }
+}
+
+fn ratio(numerator: u64, denominator: u64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
 /// Progress phase emitted on the independent telemetry stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BacktestHistoryPhase {
@@ -313,4 +356,26 @@ pub struct BacktestHistoryTelemetryEvent {
     /// Latest accepted source row timestamp observed by this progress snapshot.
     pub latest_cursor_ns: Option<i64>,
     pub message: String,
+}
+
+/// Exact, non-cumulative state of one physical fill window.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BacktestHistoryDurabilityProgress {
+    pub range: (i64, i64),
+    pub received_rows: usize,
+    pub committed_rows: usize,
+    /// False for provisional open-day checkpoints, even when rows are durable.
+    pub final_coverage: bool,
+    /// Rows in a private fsynced journal, NOT canonical coverage.
+    pub staged_rows: usize,
+    /// A restart must re-fetch this suffix, including the overlap window.
+    pub redownload_range: Option<(i64, i64)>,
+}
+
+/// Optional durability observer event, separate from the source-compatible telemetry struct.
+#[derive(Debug, Clone)]
+pub struct BacktestHistoryDurabilityEvent {
+    pub request_id: Option<BacktestHistoryRequestId>,
+    pub symbol: String,
+    pub progress: BacktestHistoryDurabilityProgress,
 }

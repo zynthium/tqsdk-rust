@@ -3,6 +3,7 @@
 mod context;
 mod executor;
 mod fill;
+mod fill_staging;
 mod metadata;
 mod orchestration;
 mod planner;
@@ -17,7 +18,6 @@ mod telemetry;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -27,6 +27,8 @@ use tokio::task::JoinHandle;
 
 use crate::backtest_tick_cache::{BacktestTickCache, BacktestTickCacheOperationLock};
 use crate::error::{DataError, Result};
+
+use self::store_worker::ScanCancellation;
 
 pub use context::{
     BacktestHistoryContextBoundary, BacktestHistoryContextRequest, BacktestHistoryContextResult,
@@ -50,10 +52,11 @@ pub use orchestration::{
 };
 pub use report::{
     BacktestHistoryBatchReport, BacktestHistoryChunk, BacktestHistoryCollected,
-    BacktestHistoryCollectedBatch, BacktestHistoryCoverageReport, BacktestHistoryEvent,
-    BacktestHistoryFailureReason, BacktestHistoryFinality, BacktestHistoryPhase,
-    BacktestHistoryPhysicalSegment, BacktestHistoryRequestFailure, BacktestHistoryRequestReport,
-    BacktestHistoryRows, BacktestHistoryTelemetryEvent,
+    BacktestHistoryCollectedBatch, BacktestHistoryCoverageReport, BacktestHistoryDurabilityEvent,
+    BacktestHistoryDurabilityProgress, BacktestHistoryEvent, BacktestHistoryFailureReason,
+    BacktestHistoryFinality, BacktestHistoryPhase, BacktestHistoryPhysicalSegment,
+    BacktestHistoryRequestFailure, BacktestHistoryRequestReport, BacktestHistoryRows,
+    BacktestHistorySharedScanMetrics, BacktestHistoryTelemetryEvent,
 };
 pub use request::{
     BacktestHistoryAuthProvider, BacktestHistoryClientBuilder, BacktestHistoryCredentials,
@@ -72,7 +75,9 @@ pub use snapshot::{
 pub use snapshot_manifest::{
     BacktestHistorySnapshotFileDisposition, BacktestHistorySnapshotFileRole,
     BacktestHistorySnapshotGenerationInfo, BacktestHistorySnapshotManifestArtifact,
-    BacktestHistorySnapshotManifestBuilder, classify_backtest_history_snapshot_cache_path,
+    BacktestHistorySnapshotManifestBuilder,
+    backtest_history_snapshot_cache_path_requires_placeholder,
+    classify_backtest_history_snapshot_cache_path,
 };
 use snapshot_resources::BacktestHistoryRunReservations;
 pub use snapshot_resources::{
@@ -81,7 +86,7 @@ pub use snapshot_resources::{
 };
 pub use telemetry::BacktestHistoryTelemetryStream;
 
-use executor::{BacktestHistoryExecutionMode, BacktestHistoryExecutionState};
+use executor::{BacktestHistoryExecutionMode, BacktestHistoryExecutionState, SharedScanMetrics};
 use planner::PlannedBacktestHistoryRequest;
 use request::{BacktestHistoryClientConfig, ValidatedBacktestHistoryRequest};
 
@@ -134,6 +139,17 @@ pub struct BacktestHistoryClient {
 }
 
 impl BacktestHistoryClient {
+    /// Installs an optional per-window durability observer for this client.
+    /// The callback runs on the fill worker and must return quickly without
+    /// re-entering cache maintenance. Existing telemetry struct literals remain compatible.
+    #[must_use]
+    pub fn on_fill_durability(
+        mut self,
+        observer: impl Fn(BacktestHistoryDurabilityEvent) + Send + Sync + 'static,
+    ) -> Self {
+        Arc::make_mut(&mut self.config).fill_durability = Some(Arc::new(observer));
+        self
+    }
     /// Starts configuring a client rooted at the shared backtest cache path.
     #[must_use]
     pub fn builder(cache_dir: impl Into<std::path::PathBuf>) -> BacktestHistoryClientBuilder {
@@ -286,6 +302,7 @@ impl BacktestHistoryClient {
             lifecycle_pin,
             resources,
             None,
+            None,
         )
     }
 
@@ -303,9 +320,11 @@ impl BacktestHistoryClient {
             Some(lifecycle_pin),
             resources,
             Some(plan),
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)] // Internal construction seam; no extra public configuration.
     fn start_run_with_resources_and_plan(
         &self,
         requests: Vec<ValidatedBacktestHistoryRequest>,
@@ -314,6 +333,7 @@ impl BacktestHistoryClient {
         lifecycle_pin: Option<BacktestHistoryLifecyclePin>,
         resources: Option<BacktestHistorySnapshotQueryResources>,
         prepared_plan: Option<PlannedBacktestHistoryRequest>,
+        cancellation: Option<Arc<ScanCancellation>>,
     ) -> Result<BacktestHistoryRun> {
         let root_gate = match self.config.policy {
             BacktestHistoryPolicy::CacheOnly => None,
@@ -350,8 +370,10 @@ impl BacktestHistoryClient {
         let failure_reasons = Arc::new(Mutex::new(BTreeMap::new()));
         let failure_reasons_for_task = Arc::clone(&failure_reasons);
         let config = Arc::clone(&self.config);
-        let cancellation = Arc::new(AtomicBool::new(false));
+        let cancellation = cancellation.unwrap_or_else(|| Arc::new(ScanCancellation::new()));
         let cancellation_for_task = Arc::clone(&cancellation);
+        let shared_scan_metrics = Arc::new(SharedScanMetrics::default());
+        let shared_scan_metrics_for_task = Arc::clone(&shared_scan_metrics);
         let telemetry_for_task = telemetry.clone();
         let coordinator = tokio::spawn(async move {
             let _root_gate = root_gate;
@@ -368,6 +390,7 @@ impl BacktestHistoryClient {
                         failure_reasons_for_task,
                         resources,
                         task_event_reservations,
+                        shared_scan_metrics_for_task,
                     );
                     match prepared_plan {
                         Some(plan) => state.with_prepared_plan(plan),
@@ -392,6 +415,7 @@ impl BacktestHistoryClient {
             collect_limit_bytes: self.config.collect_limit_bytes,
             telemetry: Some(telemetry.stream()),
             cancellation,
+            shared_scan_metrics,
             failure_reasons,
             event_reservations,
         })
@@ -425,14 +449,15 @@ pub struct BacktestHistoryRun {
     request_kinds: BTreeMap<BacktestHistoryRequestId, (BacktestHistoryKind, Option<i64>)>,
     collect_limit_bytes: usize,
     telemetry: Option<BacktestHistoryTelemetryStream>,
-    cancellation: Arc<AtomicBool>,
+    cancellation: Arc<ScanCancellation>,
+    shared_scan_metrics: Arc<SharedScanMetrics>,
     failure_reasons: BacktestHistoryFailureReasons,
     event_reservations: BacktestHistoryRunReservations,
 }
 
 impl Drop for BacktestHistoryRun {
     fn drop(&mut self) {
-        self.cancellation.store(true, Ordering::Release);
+        self.cancellation.cancel();
         self.event_reservations.close();
     }
 }
@@ -457,17 +482,34 @@ impl BacktestHistoryRun {
         self.telemetry.take()
     }
 
+    /// Returns a lock-free snapshot of shared physical-scan efficiency.
+    #[must_use]
+    pub fn shared_scan_metrics(&self) -> BacktestHistorySharedScanMetrics {
+        self.shared_scan_metrics.snapshot()
+    }
+
     /// Drains unconsumed events and returns all terminal outcomes.
     pub async fn finish(mut self) -> BacktestHistoryBatchReport {
         while self.events.recv().await.is_some() {}
         self.await_coordinator().await
     }
 
+    /// Drains the run and returns terminal outcomes with final shared-scan
+    /// metrics. This preserves [`Self::finish`] for callers that do not need
+    /// observability data.
+    pub async fn finish_with_shared_scan_metrics(
+        mut self,
+    ) -> (BacktestHistoryBatchReport, BacktestHistorySharedScanMetrics) {
+        while self.events.recv().await.is_some() {}
+        let report = self.await_coordinator().await;
+        (report, self.shared_scan_metrics())
+    }
+
     /// Requests cancellation, drains terminal events, and waits for cache-fill
     /// tasks to flush accepted partial rows before returning.
     #[doc(hidden)]
     pub async fn cancel_and_finish(mut self) -> BacktestHistoryBatchReport {
-        self.cancellation.store(true, Ordering::Release);
+        self.cancellation.cancel();
         while self.events.recv().await.is_some() {}
         self.await_coordinator().await
     }

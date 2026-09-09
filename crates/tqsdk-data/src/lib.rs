@@ -63,6 +63,9 @@ mod historical_universe_v4_resolution;
 mod historical_universe_v5;
 mod history_series_cache;
 mod integrity;
+mod kline_append_log;
+mod kline_cache_migration;
+pub use kline_cache_migration::{KlineCacheMigrationReport, migrate_kline_cache};
 mod live_quote;
 mod live_tick_cache_writer;
 mod minute_kline_cache;
@@ -102,9 +105,10 @@ pub use backtest_history::{
     BacktestHistoryClient, BacktestHistoryClientBuilder, BacktestHistoryCollected,
     BacktestHistoryCollectedBatch, BacktestHistoryContextBoundary, BacktestHistoryContextRequest,
     BacktestHistoryContextResult, BacktestHistoryCoverageReport, BacktestHistoryCredentials,
-    BacktestHistoryEvent, BacktestHistoryFailureReason, BacktestHistoryField,
-    BacktestHistoryFillCancellation, BacktestHistoryFillConfig, BacktestHistoryFillFamily,
-    BacktestHistoryFillProgress, BacktestHistoryFillSymbolResult, BacktestHistoryFillSymbolStatus,
+    BacktestHistoryDurabilityEvent, BacktestHistoryDurabilityProgress, BacktestHistoryEvent,
+    BacktestHistoryFailureReason, BacktestHistoryField, BacktestHistoryFillCancellation,
+    BacktestHistoryFillConfig, BacktestHistoryFillFamily, BacktestHistoryFillProgress,
+    BacktestHistoryFillSymbolResult, BacktestHistoryFillSymbolStatus,
     BacktestHistoryFillTerminalReport, BacktestHistoryFillTerminalStatus, BacktestHistoryFinality,
     BacktestHistoryInspection, BacktestHistoryKind, BacktestHistoryLiveCache,
     BacktestHistoryMaintenanceClient, BacktestHistoryMaintenanceClientBuilder,
@@ -112,15 +116,16 @@ pub use backtest_history::{
     BacktestHistoryPhase, BacktestHistoryPhysicalSegment, BacktestHistoryPolicy,
     BacktestHistoryPreparedContextRead, BacktestHistoryPreparedRead, BacktestHistoryRequest,
     BacktestHistoryRequestFailure, BacktestHistoryRequestId, BacktestHistoryRequestReport,
-    BacktestHistoryRows, BacktestHistoryRun, BacktestHistorySchemaSeries, BacktestHistorySnapshot,
-    BacktestHistorySnapshotError, BacktestHistorySnapshotEvent,
-    BacktestHistorySnapshotFileDisposition, BacktestHistorySnapshotFileRole,
-    BacktestHistorySnapshotGenerationInfo, BacktestHistorySnapshotManifestArtifact,
-    BacktestHistorySnapshotManifestBuilder, BacktestHistorySnapshotQueryResources,
-    BacktestHistorySnapshotResourceBudget, BacktestHistorySnapshotResourceReservation,
-    BacktestHistorySnapshotRun, BacktestHistoryTelemetryEvent, BacktestHistoryTelemetryStream,
-    BacktestHistoryTradingDay, BacktestHistoryValueKind, backtest_history_default_fields,
-    backtest_history_resolve_fields, backtest_history_schema_fields,
+    BacktestHistoryRows, BacktestHistoryRun, BacktestHistorySchemaSeries,
+    BacktestHistorySharedScanMetrics, BacktestHistorySnapshot, BacktestHistorySnapshotError,
+    BacktestHistorySnapshotEvent, BacktestHistorySnapshotFileDisposition,
+    BacktestHistorySnapshotFileRole, BacktestHistorySnapshotGenerationInfo,
+    BacktestHistorySnapshotManifestArtifact, BacktestHistorySnapshotManifestBuilder,
+    BacktestHistorySnapshotQueryResources, BacktestHistorySnapshotResourceBudget,
+    BacktestHistorySnapshotResourceReservation, BacktestHistorySnapshotRun,
+    BacktestHistoryTelemetryEvent, BacktestHistoryTelemetryStream, BacktestHistoryTradingDay,
+    BacktestHistoryValueKind, backtest_history_default_fields, backtest_history_resolve_fields,
+    backtest_history_schema_fields, backtest_history_snapshot_cache_path_requires_placeholder,
     classify_backtest_history_snapshot_cache_path,
 };
 #[doc(hidden)]
@@ -213,7 +218,7 @@ pub use history_series_cache::{
     HistorySeriesCacheFileReport, HistorySeriesCacheFileStatus,
     HistorySeriesCacheMaintenanceReport, HistorySeriesCacheMiss, HistorySeriesCacheReport,
     HistorySeriesCacheScanReport, HistorySeriesCoverageReport, HistorySeriesPurgeReport,
-    TickDataSeriesReader, default_history_cache_dir,
+    HistorySeriesReadTelemetry, TickDataSeriesReader, default_history_cache_dir,
 };
 pub use integrity::{
     DuplicatedHistoryRow, HistoryCacheStatus, HistoryDataKind, HistoryDuplicateField,

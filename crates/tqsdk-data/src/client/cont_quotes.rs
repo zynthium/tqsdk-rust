@@ -400,12 +400,13 @@ pub fn historical_cont_underlying_segments(
             continue;
         }
 
-        if let Some(last) = segments.last_mut() {
-            if last.symbol == row.symbol && last.underlying == row.underlying {
-                last.end_date.clone_from(&row.date);
-                last.trading_days += 1;
-                continue;
-            }
+        if let Some(last) = segments.last_mut()
+            && last.symbol == row.symbol
+            && last.underlying == row.underlying
+        {
+            last.end_date.clone_from(&row.date);
+            last.trading_days += 1;
+            continue;
         }
 
         segments.push(HistoricalContUnderlyingSegment {

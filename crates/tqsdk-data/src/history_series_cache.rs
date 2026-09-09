@@ -54,6 +54,30 @@ impl HistorySeriesCacheReport {
     }
 }
 
+/// Per-reader TQBN decode work observed while iterating a history series.
+///
+/// `bytes_read` counts Records-block payload bytes read for row planning or
+/// decoding, excluding TQBN metadata and index payloads. `bytes_decompressed`
+/// counts the decoded records payload bytes. A backend that does not expose
+/// this instrumentation returns the all-zero default snapshot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HistorySeriesReadTelemetry {
+    /// Records-block payload bytes read by this reader.
+    pub bytes_read: u64,
+    /// Decoded Records-block payload bytes produced by this reader.
+    pub bytes_decompressed: u64,
+    /// Monotonic time spent reading Records-block payload bytes from storage.
+    pub io_read_ns: u64,
+    /// Monotonic time spent decoding Records-block payload bytes.
+    pub decode_ns: u64,
+    /// Records blocks skipped before payload decoding from range metadata.
+    pub blocks_skipped: u64,
+    /// Records blocks whose payload was decoded, including planning fallbacks.
+    pub blocks_decoded: u64,
+    /// Result rows retained by a materialized reader fallback.
+    pub materialized_rows: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistorySeriesCacheMiss {
     pub cache_dir: PathBuf,
@@ -270,6 +294,12 @@ impl TickDataSeriesReader {
     #[must_use]
     pub fn end_datetime_ns(&self) -> i64 {
         self.end_datetime_ns
+    }
+
+    /// Returns decode and fallback work accumulated by this reader.
+    #[must_use]
+    pub fn read_telemetry(&self) -> HistorySeriesReadTelemetry {
+        self.reader.read_telemetry()
     }
 
     pub fn next_tick(&mut self) -> Result<Option<Tick>> {

@@ -1,17 +1,17 @@
 //! Bounded blocking cache readers used by the asynchronous query executor.
 
+use std::collections::BTreeSet;
 use std::mem::size_of;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 #[cfg(test)]
 use std::sync::{MutexGuard, OnceLock, mpsc as std_mpsc};
 
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tqsdk_core::{Kline, Tick};
 
 use super::BacktestHistorySnapshotQueryResources;
@@ -180,34 +180,161 @@ fn store_scan_failure_preserves_error_category_before_stringification() {
 /// Shared byte budget for every Tick and canonical-minute base scan belonging
 /// to one logical symbol. The producer waits off the Tokio runtime when a
 /// downstream consumer is holding all available source chunks.
+static NEXT_SCAN_CANCELLATION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Cancellation signal shared by async planning and blocking cache readers.
+///
+/// Blocking readers register their budget state so cancellation can wake a
+/// full byte budget immediately instead of polling a timed condition wait.
+pub(crate) struct ScanCancellation {
+    id: u64,
+    cancelled: AtomicBool,
+    pub(super) stop_starting_fills: Arc<AtomicBool>,
+    signal: watch::Sender<bool>,
+    budgets: Mutex<Vec<Weak<BufferBudgetState>>>,
+}
+
+impl ScanCancellation {
+    pub(crate) fn new() -> Self {
+        Self::with_stop_signal(Arc::new(AtomicBool::new(false)))
+    }
+
+    pub(super) fn with_stop_signal(stop_starting_fills: Arc<AtomicBool>) -> Self {
+        let (signal, _) = watch::channel(false);
+        Self {
+            id: NEXT_SCAN_CANCELLATION_ID.fetch_add(1, Ordering::Relaxed),
+            cancelled: AtomicBool::new(false),
+            stop_starting_fills,
+            signal,
+            budgets: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn as_atomic(&self) -> &AtomicBool {
+        &self.cancelled
+    }
+
+    pub(crate) fn cancel(&self) {
+        if self.cancelled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.signal.send_replace(true);
+
+        let mut budgets = self
+            .budgets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        budgets.retain(|budget| {
+            let Some(state) = budget.upgrade() else {
+                return false;
+            };
+            let mut usage = state
+                .usage
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            usage.cancelled.insert(self.id);
+            state.wake.notify_all();
+            true
+        });
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        let mut signal = self.signal.subscribe();
+        if *signal.borrow() {
+            return;
+        }
+        let _ = signal.changed().await;
+    }
+
+    fn register_budget(&self, budget: &Arc<BufferBudgetState>) {
+        let mut budgets = self
+            .budgets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        budgets.retain(|registered| registered.strong_count() > 0);
+        let weak = Arc::downgrade(budget);
+        if !budgets
+            .iter()
+            .any(|registered| Weak::ptr_eq(registered, &weak))
+        {
+            budgets.push(weak);
+        }
+        if self.is_cancelled() {
+            let mut usage = budget
+                .usage
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            usage.cancelled.insert(self.id);
+            budget.wake.notify_all();
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BufferBudgetState {
+    usage: Mutex<BufferBudgetUsage>,
+    wake: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct BufferBudgetUsage {
+    bytes: usize,
+    cancelled: BTreeSet<u64>,
+}
+
 #[derive(Clone)]
 pub(crate) struct SymbolBufferBudget {
     capacity_bytes: usize,
-    shared: Arc<(Mutex<usize>, Condvar)>,
+    shared: Arc<BufferBudgetState>,
 }
 
 impl SymbolBufferBudget {
     pub(crate) fn new(capacity_bytes: usize) -> Self {
         Self {
             capacity_bytes: capacity_bytes.max(size_of::<Tick>().max(size_of::<Kline>())),
-            shared: Arc::new((Mutex::new(0), Condvar::new())),
+            shared: Arc::new(BufferBudgetState {
+                usage: Mutex::new(BufferBudgetUsage::default()),
+                wake: Condvar::new(),
+            }),
         }
     }
 
-    fn acquire_blocking(&self, bytes: usize, cancellation: &AtomicBool) -> Option<BytePermit> {
+    fn acquire_blocking(
+        &self,
+        bytes: usize,
+        cancellation: &ScanCancellation,
+    ) -> Option<BytePermit> {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        cancellation.register_budget(&self.shared);
         let bytes = bytes.min(self.capacity_bytes).max(1);
-        let (lock, wake) = &*self.shared;
-        let mut used = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        while used.saturating_add(bytes) > self.capacity_bytes {
-            if cancellation.load(Ordering::Acquire) {
+        let mut usage = self
+            .shared
+            .usage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while usage.bytes.saturating_add(bytes) > self.capacity_bytes {
+            if usage.cancelled.contains(&cancellation.id) {
                 return None;
             }
-            let (next, _) = wake
-                .wait_timeout(used, Duration::from_millis(10))
+            usage = self
+                .shared
+                .wake
+                .wait(usage)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            used = next;
         }
-        *used = used.saturating_add(bytes);
+        if usage.cancelled.contains(&cancellation.id) {
+            return None;
+        }
+        usage.bytes = usage.bytes.saturating_add(bytes);
         Some(BytePermit {
             bytes,
             shared: Arc::clone(&self.shared),
@@ -218,16 +345,97 @@ impl SymbolBufferBudget {
 #[derive(Debug)]
 struct BytePermit {
     bytes: usize,
-    shared: Arc<(Mutex<usize>, Condvar)>,
+    shared: Arc<BufferBudgetState>,
 }
 
 impl Drop for BytePermit {
     fn drop(&mut self) {
-        let (lock, wake) = &*self.shared;
-        let mut used = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        *used = used.saturating_sub(self.bytes);
-        wake.notify_all();
+        let mut usage = self
+            .shared
+            .usage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        usage.bytes = usage.bytes.saturating_sub(self.bytes);
+        self.shared.wake.notify_all();
     }
+}
+
+#[cfg(test)]
+#[test]
+fn cancellation_wakes_a_full_byte_budget() {
+    let budget = SymbolBufferBudget::new(size_of::<Tick>());
+    let cancellation = Arc::new(ScanCancellation::new());
+    let held = budget
+        .acquire_blocking(size_of::<Tick>(), cancellation.as_ref())
+        .expect("first permit fits budget");
+    let (entered, entered_receiver) = std_mpsc::sync_channel(1);
+    let (result, result_receiver) = std_mpsc::sync_channel(1);
+    let waiting_budget = budget.clone();
+    let waiting_cancellation = Arc::clone(&cancellation);
+    let worker = std::thread::spawn(move || {
+        let _ = entered.send(());
+        let cancelled = waiting_budget
+            .acquire_blocking(size_of::<Tick>(), waiting_cancellation.as_ref())
+            .is_none();
+        let _ = result.send(cancelled);
+    });
+
+    entered_receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("second acquisition starts");
+    cancellation.cancel();
+    assert!(
+        result_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("cancellation wakes blocked acquisition")
+    );
+    drop(held);
+    worker.join().expect("blocked acquisition joins");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn shared_worker_budget_bounds_independent_local_worker_pools() {
+    let first_local = Arc::new(Semaphore::new(1));
+    let second_local = Arc::new(Semaphore::new(1));
+    let shared = Arc::new(Semaphore::new(1));
+    let first_cancellation = ScanCancellation::new();
+    let first = acquire_blocking_worker_permits(
+        first_local,
+        Some(Arc::clone(&shared)),
+        &first_cancellation,
+    )
+    .await
+    .expect("first worker permit acquisition succeeds")
+    .expect("first worker permit is not cancelled");
+    assert_eq!(shared.available_permits(), 0);
+
+    let second_cancellation = Arc::new(ScanCancellation::new());
+    let waiting_cancellation = Arc::clone(&second_cancellation);
+    let waiting_shared = Arc::clone(&shared);
+    let waiting = tokio::spawn(async move {
+        acquire_blocking_worker_permits(
+            second_local,
+            Some(waiting_shared),
+            waiting_cancellation.as_ref(),
+        )
+        .await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !waiting.is_finished(),
+        "an independent local pool must wait for the shared daemon budget"
+    );
+
+    drop(first);
+    let second = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+        .await
+        .expect("shared permit release wakes waiting scan")
+        .expect("waiting task joins")
+        .expect("second worker permit acquisition succeeds")
+        .expect("second worker permit is not cancelled");
+    assert_eq!(shared.available_permits(), 0);
+    drop(second);
+    assert_eq!(shared.available_permits(), 1);
 }
 
 fn chunk_allocation_upper_bound(target_bytes: usize, row_bytes: usize) -> Result<usize, DataError> {
@@ -276,7 +484,7 @@ impl StoreChunk {
     fn ticks(
         rows: Vec<Tick>,
         budget: &SymbolBufferBudget,
-        cancellation: &AtomicBool,
+        cancellation: &ScanCancellation,
         scan_reservation: Option<BacktestHistorySnapshotResourceReservation>,
     ) -> Option<Self> {
         let bytes = rows.capacity().saturating_mul(size_of::<Tick>());
@@ -291,7 +499,7 @@ impl StoreChunk {
     fn canonical_minutes(
         rows: Vec<Kline>,
         budget: &SymbolBufferBudget,
-        cancellation: &AtomicBool,
+        cancellation: &ScanCancellation,
         scan_reservation: Option<BacktestHistorySnapshotResourceReservation>,
     ) -> Option<Self> {
         let bytes = rows.capacity().saturating_mul(size_of::<Kline>());
@@ -306,7 +514,7 @@ impl StoreChunk {
     fn canonical_daily(
         rows: Vec<Kline>,
         budget: &SymbolBufferBudget,
-        cancellation: &AtomicBool,
+        cancellation: &ScanCancellation,
         scan_reservation: Option<BacktestHistorySnapshotResourceReservation>,
     ) -> Option<Self> {
         let bytes = rows.capacity().saturating_mul(size_of::<Kline>());
@@ -326,6 +534,16 @@ pub(crate) enum StoreRows {
     Ticks(Arc<[Tick]>),
     CanonicalMinutes(Arc<[Kline]>),
     CanonicalDaily(Arc<[Kline]>),
+}
+
+#[cfg(test)]
+pub(crate) fn test_tick_chunk(rows: Vec<Tick>) -> Arc<StoreChunk> {
+    let budget = SymbolBufferBudget::new(usize::MAX);
+    let cancellation = ScanCancellation::new();
+    Arc::new(
+        StoreChunk::ticks(rows, &budget, &cancellation, None)
+            .expect("fresh test cancellation must acquire a byte permit"),
+    )
 }
 
 /// One source-reader message. Failures retain a cloneable typed reason plus the
@@ -378,7 +596,7 @@ pub(crate) struct TickScanSpec {
     pub(crate) range: (i64, i64),
     pub(crate) provisional_as_of_ns: Option<i64>,
     pub(crate) target_bytes: usize,
-    pub(crate) cancellation: Arc<AtomicBool>,
+    pub(crate) cancellation: Arc<ScanCancellation>,
     pub(crate) permits: Arc<Semaphore>,
     pub(crate) buffer_budget: SymbolBufferBudget,
     pub(crate) lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
@@ -392,7 +610,7 @@ pub(crate) struct MinuteScanSpec {
     pub(crate) snapshot: MinuteKlineCacheSnapshot,
     pub(crate) provisional_as_of_ns: Option<i64>,
     pub(crate) target_bytes: usize,
-    pub(crate) cancellation: Arc<AtomicBool>,
+    pub(crate) cancellation: Arc<ScanCancellation>,
     pub(crate) permits: Arc<Semaphore>,
     pub(crate) buffer_budget: SymbolBufferBudget,
     pub(crate) lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
@@ -404,7 +622,7 @@ pub(crate) struct DailyScanSpec {
     pub(crate) symbol: String,
     pub(crate) range: (i64, i64),
     pub(crate) snapshot: DailyKlineCacheSnapshot,
-    pub(crate) cancellation: Arc<AtomicBool>,
+    pub(crate) cancellation: Arc<ScanCancellation>,
     pub(crate) permits: Arc<Semaphore>,
     pub(crate) buffer_budget: SymbolBufferBudget,
     pub(crate) lifecycle_pin: Option<super::BacktestHistoryLifecyclePin>,
@@ -413,6 +631,53 @@ pub(crate) struct DailyScanSpec {
 
 /// Starts the selected source reader without occupying a Tokio worker while
 /// file decoding or source-buffer backpressure is active.
+async fn acquire_blocking_worker_permits(
+    local_permits: Arc<Semaphore>,
+    shared_permits: Option<Arc<Semaphore>>,
+    cancellation: &ScanCancellation,
+) -> std::result::Result<
+    Option<(OwnedSemaphorePermit, Option<OwnedSemaphorePermit>)>,
+    StoreScanFailure,
+> {
+    let Some(local_permit) = acquire_worker_permit_until_cancelled(
+        local_permits,
+        cancellation,
+        "backtest history blocking scan workers unavailable",
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+
+    let Some(shared_permits) = shared_permits else {
+        return Ok(Some((local_permit, None)));
+    };
+    let Some(shared_permit) = acquire_worker_permit_until_cancelled(
+        shared_permits,
+        cancellation,
+        "backtest history daemon blocking scan workers unavailable",
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some((local_permit, Some(shared_permit))))
+}
+
+async fn acquire_worker_permit_until_cancelled(
+    permits: Arc<Semaphore>,
+    cancellation: &ScanCancellation,
+    unavailable: &'static str,
+) -> std::result::Result<Option<OwnedSemaphorePermit>, StoreScanFailure> {
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Ok(None),
+        permit = permits.acquire_owned() => permit
+            .map(Some)
+            .map_err(|_| StoreScanFailure::unavailable(unavailable)),
+    }
+}
+
 pub(crate) fn spawn_scan(spec: StoreScanSpec) -> mpsc::Receiver<StoreScanMessage> {
     match spec {
         StoreScanSpec::Tick(spec) => spawn_tick_scan(spec),
@@ -440,14 +705,20 @@ fn spawn_tick_scan(spec: TickScanSpec) -> mpsc::Receiver<StoreScanMessage> {
     let (sender, receiver) = mpsc::channel(2);
     tokio::spawn(async move {
         let scan_lifecycle_pin = lifecycle_pin;
-        let permit = match permits.acquire_owned().await {
-            Ok(permit) => permit,
-            Err(_) => {
-                let _ = sender
-                    .send(StoreScanMessage::Failed(StoreScanFailure::unavailable(
-                        "backtest history blocking scan workers are unavailable",
-                    )))
-                    .await;
+        let shared_worker_permits = resources
+            .as_ref()
+            .and_then(BacktestHistorySnapshotQueryResources::blocking_worker_permits);
+        let (permit, shared_permit) = match acquire_blocking_worker_permits(
+            permits,
+            shared_worker_permits,
+            cancellation.as_ref(),
+        )
+        .await
+        {
+            Ok(Some(permits)) => permits,
+            Ok(None) => return,
+            Err(error) => {
+                let _ = sender.send(StoreScanMessage::Failed(error)).await;
                 return;
             }
         };
@@ -461,7 +732,7 @@ fn spawn_tick_scan(spec: TickScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 wait_on_blocking_scan_test_gate();
             }
             let _lifecycle_pin = blocking_lifecycle_pin;
-            let _permit = permit;
+            let _worker_permits = (permit, shared_permit);
             let scan_allocation_upper_bound =
                 match chunk_allocation_upper_bound(target_bytes, size_of::<Tick>()) {
                     Ok(bound) => bound,
@@ -493,7 +764,7 @@ fn spawn_tick_scan(spec: TickScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 }
             };
             loop {
-                if blocking_cancellation.load(Ordering::Acquire) {
+                if blocking_cancellation.is_cancelled() {
                     return;
                 }
                 let scan_reservation = match next_scan_reservation.take() {
@@ -538,7 +809,7 @@ fn spawn_tick_scan(spec: TickScanSpec) -> mpsc::Receiver<StoreScanMessage> {
             }
         });
         if let Err(error) = join.await
-            && !cancellation.load(Ordering::Acquire)
+            && !cancellation.is_cancelled()
         {
             let _ = sender
                 .send(StoreScanMessage::Failed(StoreScanFailure::internal(
@@ -571,14 +842,20 @@ fn spawn_minute_scan(spec: MinuteScanSpec) -> mpsc::Receiver<StoreScanMessage> {
     let (sender, receiver) = mpsc::channel(2);
     tokio::spawn(async move {
         let scan_lifecycle_pin = lifecycle_pin;
-        let permit = match permits.acquire_owned().await {
-            Ok(permit) => permit,
-            Err(_) => {
-                let _ = sender
-                    .send(StoreScanMessage::Failed(StoreScanFailure::unavailable(
-                        "backtest history blocking scan workers are unavailable",
-                    )))
-                    .await;
+        let shared_worker_permits = resources
+            .as_ref()
+            .and_then(BacktestHistorySnapshotQueryResources::blocking_worker_permits);
+        let (permit, shared_permit) = match acquire_blocking_worker_permits(
+            permits,
+            shared_worker_permits,
+            cancellation.as_ref(),
+        )
+        .await
+        {
+            Ok(Some(permits)) => permits,
+            Ok(None) => return,
+            Err(error) => {
+                let _ = sender.send(StoreScanMessage::Failed(error)).await;
                 return;
             }
         };
@@ -592,7 +869,7 @@ fn spawn_minute_scan(spec: MinuteScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 wait_on_blocking_scan_test_gate();
             }
             let _lifecycle_pin = blocking_lifecycle_pin;
-            let _permit = permit;
+            let _worker_permits = (permit, shared_permit);
             let scan_allocation_upper_bound =
                 match chunk_allocation_upper_bound(target_bytes, size_of::<Kline>()) {
                     Ok(bound) => bound,
@@ -629,7 +906,7 @@ fn spawn_minute_scan(spec: MinuteScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 }
             };
             loop {
-                if blocking_cancellation.load(Ordering::Acquire) {
+                if blocking_cancellation.is_cancelled() {
                     return;
                 }
                 let scan_reservation = match next_scan_reservation.take() {
@@ -674,7 +951,7 @@ fn spawn_minute_scan(spec: MinuteScanSpec) -> mpsc::Receiver<StoreScanMessage> {
             }
         });
         if let Err(error) = join.await
-            && !cancellation.load(Ordering::Acquire)
+            && !cancellation.is_cancelled()
         {
             let _ = sender
                 .send(StoreScanMessage::Failed(StoreScanFailure::internal(
@@ -703,14 +980,20 @@ fn spawn_daily_scan(spec: DailyScanSpec) -> mpsc::Receiver<StoreScanMessage> {
     let (sender, receiver) = mpsc::channel(2);
     tokio::spawn(async move {
         let scan_lifecycle_pin = lifecycle_pin;
-        let permit = match permits.acquire_owned().await {
-            Ok(permit) => permit,
-            Err(_) => {
-                let _ = sender
-                    .send(StoreScanMessage::Failed(StoreScanFailure::unavailable(
-                        "backtest history blocking scan workers unavailable",
-                    )))
-                    .await;
+        let shared_worker_permits = resources
+            .as_ref()
+            .and_then(BacktestHistorySnapshotQueryResources::blocking_worker_permits);
+        let (permit, shared_permit) = match acquire_blocking_worker_permits(
+            permits,
+            shared_worker_permits,
+            cancellation.as_ref(),
+        )
+        .await
+        {
+            Ok(Some(permits)) => permits,
+            Ok(None) => return,
+            Err(error) => {
+                let _ = sender.send(StoreScanMessage::Failed(error)).await;
                 return;
             }
         };
@@ -724,8 +1007,8 @@ fn spawn_daily_scan(spec: DailyScanSpec) -> mpsc::Receiver<StoreScanMessage> {
                 wait_on_blocking_scan_test_gate();
             }
             let _lifecycle_pin = blocking_lifecycle_pin;
-            let _permit = permit;
-            if blocking_cancellation.load(Ordering::Acquire) {
+            let _worker_permits = (permit, shared_permit);
+            if blocking_cancellation.is_cancelled() {
                 return;
             }
             let cache = DailyKlineCache::open_read_only(&cache_dir);
@@ -779,7 +1062,7 @@ fn spawn_daily_scan(spec: DailyScanSpec) -> mpsc::Receiver<StoreScanMessage> {
             let _ = blocking_sender.blocking_send(StoreScanMessage::Chunk(Arc::new(chunk)));
         });
         if let Err(error) = join.await
-            && !cancellation.load(Ordering::Acquire)
+            && !cancellation.is_cancelled()
         {
             let _ = sender
                 .send(StoreScanMessage::Failed(StoreScanFailure::internal(

@@ -558,6 +558,16 @@ fn minute_migrate_rewrites_v4_with_a_rollback_backup() {
         .unwrap();
     let path = cache.month_file_path("KQ.i@SHFE.au", "202001");
     let mut bytes = std::fs::read(&path).unwrap();
+    if bytes.starts_with(b"TQKLOG01") {
+        let offset = u64::from_le_bytes(bytes[64..72].try_into().unwrap()) as usize;
+        let len = u64::from_le_bytes(bytes[72..80].try_into().unwrap()) as usize;
+        let index: serde_json::Value =
+            serde_json::from_slice(&bytes[offset..offset + len]).unwrap();
+        let segment = &index["segments"][0];
+        let offset = segment["offset"].as_u64().unwrap() as usize;
+        let len = segment["len"].as_u64().unwrap() as usize;
+        bytes = bytes[offset..offset + len].to_vec();
+    }
     bytes[4..6].copy_from_slice(&4_u16.to_le_bytes());
     std::fs::write(&path, bytes).unwrap();
     let backup_dir = cache_dir.with_file_name(format!(
@@ -586,7 +596,7 @@ fn minute_migrate_rewrites_v4_with_a_rollback_backup() {
         std::fs::read(backup_dir.join(path.strip_prefix(&cache_dir).unwrap())).unwrap()[4..6],
         4_u16.to_le_bytes()
     );
-    assert_eq!(std::fs::read(&path).unwrap()[4..6], 5_u16.to_le_bytes());
+    assert_eq!(&std::fs::read(&path).unwrap()[..8], b"TQKLOG01");
 
     let _ = std::fs::remove_dir_all(cache_dir);
     let _ = std::fs::remove_dir_all(backup_dir);
@@ -812,7 +822,24 @@ fn daily_fill_jsonl_progress_and_report_use_the_shared_terminal_contract() {
 #[cfg(unix)]
 #[test]
 fn daily_fill_sighup_persists_one_interrupted_terminal_report() {
-    let cache_dir = temp_dir("daily-fill-sighup-v3");
+    daily_fill_shutdown_persists_report("-HUP");
+}
+
+#[cfg(unix)]
+#[test]
+fn daily_fill_sigint_persists_one_interrupted_terminal_report() {
+    daily_fill_shutdown_persists_report("-INT");
+}
+
+#[cfg(unix)]
+#[test]
+fn daily_fill_sigterm_persists_one_interrupted_terminal_report() {
+    daily_fill_shutdown_persists_report("-TERM");
+}
+
+#[cfg(unix)]
+fn daily_fill_shutdown_persists_report(signal: &str) {
+    let cache_dir = temp_dir(&format!("daily-fill-{signal}"));
     let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
     DailyKlineCache::open(&cache_dir)
         .unwrap()
@@ -869,7 +896,7 @@ fn daily_fill_sighup_persists_one_interrupted_terminal_report() {
     }
     assert!(
         Command::new("kill")
-            .args(["-HUP", &child.id().to_string()])
+            .args([signal, &child.id().to_string()])
             .status()
             .unwrap()
             .success()

@@ -1,5 +1,14 @@
 # `tqsdk-data`
 
+Fill 的日线分段、分钟 terminal 子窗口 journal、两阶段取消及 durability telemetry
+统一由本层拥有。见 [中断与续填](../../docs/architecture/history-fill-recovery.md)。
+
+Canonical minute/daily cache 必须使用共享 `TQKLOG01` 追加封装。
+旧 raw 仅由显式 `migrate_kline_cache` 工具接收，普通 fill 不再隐式转换；coverage 读取提交元数据，reader
+和诊断负责 payload 校验。顺序续填追加，重叠更新、snapshot 变化与定期压实使用原子替换。
+Snapshot clone 对 Kline 文件必须使用 copy/reflink。见
+[格式、兼容与恢复合同](../../docs/architecture/history-cache-format.md)。
+
 TradingTimeline rebuild 使用 root 共享生命周期锁和目标指数分钟月分区共享 pin，
 从 metadata/coverage 检查前保持到发布完成；不再与无关 Tick fill 互斥。
 产品锁覆盖 active 读取、增量合并及提交。单次最多 256 个不同月分区，缺失锁文件
@@ -128,8 +137,15 @@ Universe 只选 instrument，不选择数据流。V2 `file:` 被拒绝，外部 
 `BacktestHistoryClient` 是 local-backtest durable history 的异步入口，不是 `DataClient` 专业历史下载
 API 的别名。它统一拥有 metadata sidecar、CacheOnly/RemoteOnMiss planner、official server-backtest
 fill、进程内 single-flight、跨进程 per-series fill lease、shared cache-root gate、bounded cache reader
-与 K 线聚合；`tqsdk-session` 仅提供 Tick/60s/native-1d
-server-history chart substrate，`tqsdk-task` 仅消费结果来安排 replay event。
+与 K 线聚合；同源进程内 shared scan 为每个 subscriber 使用有界缓冲，缓冲满时只让该请求显式失败并重试，
+绝不阻塞其他请求或静默丢弃历史 chunk。Started 后的晚到请求只有在既定物理 slice 完整覆盖、且不延长
+source byte permit 生命周期的弱引用 replay 仍可完整升级时才合流；其余请求独立 scan。取消会直接唤醒等待中的
+source reader；最后一个 receiver 退出也会停止物理 scan。`BacktestHistoryRun::shared_scan_metrics()` 提供 run-local
+快照；`finish_with_shared_scan_metrics()` 返回最终值。`shared_scan_hit_ratio` 的分母是遇到 active
+shared scan 的可合流请求，`late_join_hit_ratio` 的分母是 Started 后的 join；
+`duplicate_physical_scan_bytes` 是 fallback scan 解码出的 row byte-equivalent，不伪装成文件或网络 I/O
+字节数。`tqsdk-session` 仅提供 Tick/60s/native-1d server-history chart substrate，`tqsdk-task`
+仅消费结果来安排 replay event。
 
 历史全合约/动态 membership 不复用 current universe grammar。`HistoricalFillUniverseSpec`
 接受 `physical:all` 或受限的 `timeline(...)`。默认 acquisition 先记录稳定的完整 provider roster；
@@ -193,7 +209,10 @@ daily reader 才能复用旧 coverage；写入新缺口会在 per-symbol lock �
 重写或合并。
 
 storage orchestration 是 async，但 TQBN 解压/解码仍由有界 `spawn_blocking` worker 执行；不提供把
-`tokio::fs` 当作性能开关的第二条 production path。
+`tokio::fs` 当作性能开关的第二条 production path。嵌入 daemon 时，owner 可通过
+`BacktestHistorySnapshotQueryResources::with_blocking_worker_permits(...)` 注入跨请求共享的
+`Semaphore`，把本 crate 的每 run/per-symbol 限额进一步收敛为进程级 CPU work 上限；该 opt-in
+资源只由 owner 创建，data crate 不自建全局 worker pool。
 
 普通 `RemoteOnMiss` fill/query 持 shared root gate；refresh、stale repair 和稳定维护持 exclusive gate。
 实际缺口再以 `cache family × cache symbol` 的跨进程 lease 串行化，等待者重查 coverage 后复用 owner
@@ -236,7 +255,9 @@ runtime commit 清理。这样保留 cursor/revision 语义，同时避免默认
   price storage、self-describing metadata、explicit final coverage records、non-final
   provisional checkpoint records 和 forward-compatible record lengths；market-data records
   block 以 8 MiB 未压缩 payload 为目标上限，并紧跟
-  crate-internal `TQRI` 时间索引，使范围读取只解压相交 block；新建/compact 日分区还会维护
+ crate-internal `TQRI` 时间索引，使范围读取只解压相交 block。新写 index 还保存首尾 id/时间与
+ 严格单调性证明；只有完整覆盖且得到该证明的 block 才跳过 planner 的预解码，旧/边界/可疑 index
+ 继续保守扫描；新建/compact 日分区还会维护
   coverage index chain。每个 `.tqbn.lock` sidecar 还记录已确认 file length、bounded tail checksum 和
   最新 coverage-index head；coverage/range reader 只读取该 confirmed prefix，不要求物理文件尾恰好是
   coverage index。reader 在 shared lock 内打开 data file 并固定 snapshot，checkpoint 有效时可释放锁后
@@ -260,6 +281,17 @@ runtime commit 清理。这样保留 cursor/revision 语义，同时避免默认
 - `HistorySeriesCache::read_kline_data_series` /
   `HistorySeriesCache::read_tick_data_series` 是显式 cache-only reader，
   缺口返回 typed `DataError::CacheMiss`，不会联网补齐
+- `HistorySeriesCache::open_tick_data_series_reader(...)` 返回的 reader 可通过
+  `read_telemetry()` 读取 TQBN decode 工作量：records payload 的 `bytes_read` /
+  `bytes_decompressed`、storage read 与 codec decode 的累计 `io_read_ns` /
+  `decode_ns`、索引直接跳过的 `blocks_skipped`、实际 decode 的 `blocks_decoded` 和
+  fallback 留存的 `materialized_rows`。这些计数不含 metadata/index
+  payload，且不改变 streaming、last-write-wins 或 fallback 语义
+- 无法由 records index 证明单调性的 legacy Tick 页仍执行相同 canonicalization，但会使用
+  reader-owned temporary SQLite/fixed-binary spool，而非完整 `Vec`；该临时 spool 保留浮点 bit
+  pattern，该临时目录不进入 cache root，reader
+  drop 后删除。SQLite page cache 上限 4 MiB，单行编码上限 64 KiB，单次 spill 输入上限 8 GiB；
+  任一边界或临时 I/O 失败均 fail closed，`materialized_rows` 保持 0
 - `HistorySeriesCache::write_kline_range(...)` / `write_tick_range(...)`
   是 typed range writer，会把 rows 与 `[start, end)` coverage 一起写入；
   `kline_coverage(...)` / `tick_coverage(...)`、`kline_series_path(...)` /
@@ -279,7 +311,7 @@ runtime commit 清理。这样保留 cursor/revision 语义，同时避免默认
   `minute-kline-v3/trading-YYYYMM/<escaped-symbol>.tqmk`。v5 的 row payload 仅在 zstd 更小时
   无损压缩，保留所有 Kline row；旧 v4 只能显式迁移，普通 reader/fill 会 fail closed。daily format id 是
   `tqsdk.daily-kline.single-file.v1`，路径为 `daily-kline-v1/<escaped-symbol>.tqdk`；它按 logical
-  symbol 单文件原子替换，不按时间分区。`BacktestHistoryClient` 的 `<60s` K 由 tick rows 按 session
+  symbol 单文件存储，不按时间分区；同快照单调续填使用 KLOG 追加，重叠更新或快照变更仍原子替换。`BacktestHistoryClient` 的 `<60s` K 由 tick rows 按 session
   聚合，`N × 60s` K 由 closed canonical minutes 按固定 CST `18:00` trading-day grid 临时聚合，`2d` 至
   `28d` K 由 final native 1d rows 临时聚合。task 仅把结果安排为 replay event。1d row 目前只含 Kline
   OHLC、volume、open/close OI；结算价和涨跌停价未支持。facade 不读取/写入 native higher-period
@@ -390,7 +422,7 @@ Python-compatible mmap 缓存；旧 binary/mmap history cache 已从 public surf
 - `BacktestHistoryRequestFailure`（既有 query 兼容面）/ `BacktestHistoryFailureReason`（strict snapshot seam typed failure）
 - `BacktestHistorySnapshot` / `BacktestHistoryLiveCache` / `BacktestHistoryPreparedRead` /
   `BacktestHistorySnapshotRun` / `BacktestHistorySnapshotQueryResources`
-- `BacktestHistorySnapshotResourceBudget` / `BacktestHistorySnapshotResourceReservation`（daemon-owned scan budget 与 opaque RAII guard）
+- `BacktestHistorySnapshotResourceBudget` / `BacktestHistorySnapshotResourceReservation`（daemon-owned scan budget 与 opaque RAII guard；可由 query resources 附带共享 blocking-worker budget）
 - `BacktestHistoryMetadataCache` / `BacktestHistoryMaintenanceClient`
 - `DailyKlineCache` / `DailyKlineCoverage` / `DailyKlineCacheStatus` /
   `DailyKlineCacheDiagnosticReport` / `DailyKlineCachePurgeReport`
@@ -416,6 +448,7 @@ Python-compatible mmap 缓存；旧 binary/mmap history cache 已从 public surf
 - `LiveTickCacheWriteReport`
 - `HistorySeriesCache`
 - `HistorySeriesCacheReport`
+- `HistorySeriesReadTelemetry`
 - `HistorySeriesCacheMiss`
 - `HistorySeriesCacheScanReport`
 - `HistorySeriesCacheFileReport`
@@ -598,5 +631,9 @@ S49 contract
 `TQSDK_HISTORY_CACHE_BENCH_INPUT_START_NS` 和 `TQSDK_HISTORY_CACHE_BENCH_INPUT_END_NS`；benchmark
 会以该 range 的 cache-only ticks 作为 write/read 样本，并同时报告完整读取与 `read_ticks_1pct`
 小范围读取；不联网、不修改输入 cache。
+
+设置 `TQSDK_HISTORY_CACHE_BENCH_STREAM_ONLY=1` 时，benchmark 改为直接以 read-only store
+流式读取输入 cache，不执行 write/read materialized 对照。该模式用于真实语料的 reader RSS
+测量；延迟统计固定为 16,384 个 reservoir 样本，避免测量本身随 row 数线性占用内存。
 
 相关设计文档见 [../../docs/architecture/api-data.md](../../docs/architecture/api-data.md)。

@@ -115,7 +115,7 @@ fn publish_cache_snapshot(
         "manifest_version": 1,
         "created_at": "2026-08-29T00:00:00Z",
         "minimum_reader": "0.1.0",
-        "required_features": [],
+        "required_features": ["kline-append-v1"],
         "cache_formats": [
             {"family": "daily", "format_id": "tqsdk.daily-kline.single-file.v1", "schema_version": 1},
             {"family": "minute", "format_id": "tqsdk.minute-kline.monthly.v5", "schema_version": 5},
@@ -241,12 +241,21 @@ fn public_manifest_builder_owns_roles_identity_and_staging_validation() {
         minimal_tqbn(0x01),
     )
     .unwrap();
-    std::fs::write(
-        cache.join("minute-kline-v3/SHFE.au2612-202608.tqmk"),
-        b"minute",
-    )
-    .unwrap();
-    std::fs::write(cache.join("daily-kline-v1/SHFE.au2612.tqdk"), b"daily").unwrap();
+    let snapshot = MinuteKlineCacheSnapshot::cst_v1();
+    MinuteKlineCache::open(&cache)
+        .unwrap()
+        .store_final_range(
+            "SHFE.au2612",
+            MINUTE_START_NS,
+            MINUTE_END_NS,
+            &snapshot,
+            &[],
+        )
+        .unwrap();
+    tqsdk_data::DailyKlineCache::open(&cache)
+        .unwrap()
+        .store_final_range("SHFE.au2612", DAY_START_NS, DAY_END_NS, &snapshot, &[])
+        .unwrap();
     std::fs::write(
         cache.join("backtest-metadata-v2/snapshots/content.json"),
         b"{}",
@@ -270,7 +279,10 @@ fn public_manifest_builder_owns_roles_identity_and_staging_validation() {
     assert!(artifact.identity_sha256().starts_with("sha256:"));
     assert!(artifact.metadata_snapshot_hash().starts_with("sha256:"));
     let manifest: Value = serde_json::from_slice(artifact.manifest_bytes()).unwrap();
-    assert_eq!(manifest["required_features"], json!(["tqbn-zstd"]));
+    assert_eq!(
+        manifest["required_features"],
+        json!(["kline-append-v1", "tqbn-zstd"])
+    );
     assert_eq!(manifest["files"].as_array().unwrap().len(), 5);
     assert!(
         manifest["files"]

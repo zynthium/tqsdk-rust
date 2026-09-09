@@ -257,7 +257,8 @@ fn daily_fast_inventory_uses_the_embedded_symbol_without_decoding_the_tail() {
     let path = cache.symbol_file_path(symbol);
     assert!(path.ends_with("daily-kline-v1/SHFE_au2402.tqdk"));
     let mut bytes = std::fs::read(&path).unwrap();
-    *bytes.last_mut().unwrap() ^= 0xff;
+    let index_start = u64::from_le_bytes(bytes[64..72].try_into().unwrap()) as usize;
+    bytes[index_start - 1] ^= 0xff; // Corrupt payload, leave committed summary intact.
     std::fs::write(&path, bytes).unwrap();
 
     let inventory = DailyKlineCache::open_read_only(&root)
@@ -330,7 +331,7 @@ fn daily_cache_rejects_an_unsupported_file_version() {
         .unwrap();
     let path = cache.symbol_file_path("SHFE.au2402");
     let mut bytes = std::fs::read(&path).unwrap();
-    bytes[4..6].copy_from_slice(&2u16.to_le_bytes());
+    bytes[..8].copy_from_slice(b"TQKLOG02");
     std::fs::write(&path, bytes).unwrap();
 
     assert_eq!(

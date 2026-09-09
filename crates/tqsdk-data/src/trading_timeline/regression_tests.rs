@@ -458,14 +458,20 @@ fn post_rename_sync_failure_reports_visible_but_uncertain_activation() {
     assert_eq!(active.snapshot.decisions.len(), 2);
 }
 
+static FIXTURE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct Fixture {
     root: PathBuf,
     cache: MinuteKlineCache,
     catalog: TradingTimelineRuleCatalog,
+    _serial: std::sync::MutexGuard<'static, ()>,
 }
 impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
+        let serial = FIXTURE_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root = std::env::temp_dir().join(format!(
             "timeline-regression-{}-{}",
             std::process::id(),
@@ -485,6 +491,7 @@ impl Fixture {
             root,
             cache,
             catalog,
+            _serial: serial,
         }
     }
     fn store(&self, days: &[NaiveDate], rows: &[Kline]) {
@@ -551,7 +558,7 @@ fn monday_day_session_uses_monday_not_saturday_and_scans_once_per_month() {
     .unwrap();
     assert_eq!(
         crate::minute_kline_cache::TEST_MONTH_SCAN_COUNT.with(std::cell::Cell::get),
-        1
+        0 // KLOG coverage uses the commit index, not a legacy payload scan.
     );
     assert_eq!(compiled.open_intervals.len(), days.len());
     let monday = ns("2024-01-08T09:00:00+08:00");
@@ -695,7 +702,7 @@ fn two_months_scan_twice_and_catalog_mutation_is_rejected() {
     assert_eq!(built.decisions.len(), 2);
     assert_eq!(
         crate::minute_kline_cache::TEST_MONTH_SCAN_COUNT.with(std::cell::Cell::get),
-        2
+        0 // Both months use committed indexes.
     );
     let mut altered = fixture.catalog.clone();
     altered.rules[0].sessions_cst[0][1] = "09:03".into();

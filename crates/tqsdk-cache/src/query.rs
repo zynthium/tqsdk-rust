@@ -1784,7 +1784,7 @@ fn format_duration_label_nanos(value_ns: u128) -> String {
         ("ns", 1),
     ];
     for (suffix, unit_ns) in UNITS {
-        if value_ns % unit_ns == 0 {
+        if value_ns.is_multiple_of(unit_ns) {
             return format!("{}{suffix}", value_ns / unit_ns);
         }
     }

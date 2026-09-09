@@ -159,6 +159,7 @@ pub struct BacktestHistoryFillCancellation {
 #[derive(Default)]
 struct BacktestHistoryFillCancellationState {
     cancelled: AtomicBool,
+    stopping: Arc<AtomicBool>,
     notify: Notify,
 }
 
@@ -179,6 +180,7 @@ impl BacktestHistoryFillCancellation {
 
     /// Requests cancellation. Accepted cache rows are flushed before the run ends.
     pub fn cancel(&self) {
+        self.state.stopping.store(true, Ordering::Release);
         self.state.cancelled.store(true, Ordering::Release);
         self.state.notify.notify_waiters();
     }
@@ -188,11 +190,26 @@ impl BacktestHistoryFillCancellation {
         self.state.cancelled.load(Ordering::Acquire)
     }
 
-    /// Waits until cancellation is requested.
+    /// True for either a graceful stop or immediate cancellation request.
+    #[must_use]
+    pub fn is_stop_requested(&self) -> bool {
+        self.is_cancelled() || self.state.stopping.load(Ordering::Acquire)
+    }
+
+    /// Stops dispatching work while allowing the current remote window to finish.
+    /// Call `cancel()` after a bounded grace period to interrupt remaining work.
+    pub fn request_stop(&self) {
+        self.state.stopping.store(true, Ordering::Release);
+        self.state.notify.notify_waiters();
+    }
+
+    /// Waits for immediate cooperative cancellation; `request_stop()` alone does not resolve it.
     pub async fn cancelled(&self) {
         loop {
             let notified = self.state.notify.notified();
-            if self.is_cancelled() {
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.state.cancelled.load(Ordering::Acquire) {
                 return;
             }
             notified.await;
@@ -475,7 +492,7 @@ impl BacktestHistoryClient {
                     .map(|request| request_meta(request, key.family))
             })
             .collect::<Vec<_>>();
-        if cancellation.is_cancelled() {
+        if cancellation.is_stop_requested() {
             return Ok(finish_interrupted(all_meta, observer.as_ref()));
         }
 
@@ -486,7 +503,7 @@ impl BacktestHistoryClient {
             self.acquire_orchestration_root_gate(config.lock_wait, &cancellation)
                 .await?
         };
-        if cancellation.is_cancelled() {
+        if cancellation.is_stop_requested() {
             return Ok(finish_interrupted(all_meta, observer.as_ref()));
         }
 
@@ -519,7 +536,7 @@ impl BacktestHistoryClient {
         while !batches.is_empty() || !tasks.is_empty() {
             while tasks.len() < config.symbol_concurrency
                 && !batches.is_empty()
-                && !cancellation.is_cancelled()
+                && !cancellation.is_stop_requested()
             {
                 let mut batch = batches.pop_front().expect("checked non-empty fill queue");
                 batch.pending_batches = batches.len();
@@ -574,7 +591,7 @@ impl BacktestHistoryClient {
         };
         let deadline = Instant::now() + lock_wait;
         loop {
-            if cancellation.is_cancelled() {
+            if cancellation.is_stop_requested() {
                 return Ok(None);
             }
             match try_acquire() {
@@ -632,11 +649,48 @@ async fn execute_fill_batch(
         symbols: symbols.clone(),
     });
 
-    let mut run = client.start_run(
+    if root_gate.is_some() && client.config.policy != BacktestHistoryPolicy::CacheOnly {
+        let root = client.config.cache_dir.clone();
+        let symbols = symbols.clone();
+        let family = batch.family;
+        let range = batch.requested_range;
+        let cancellation = cancellation.clone();
+        let gate = root_gate.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let _gate = gate;
+            for symbol in symbols {
+                if cancellation.is_stop_requested() {
+                    break;
+                }
+                match family {
+                    BacktestHistoryFillFamily::Daily => crate::DailyKlineCache::open(&root)?
+                        .prepare_append_index(&symbol, || cancellation.is_stop_requested())?,
+                    BacktestHistoryFillFamily::Minute => crate::MinuteKlineCache::open(&root)?
+                        .prepare_append_index(&symbol, range, || {
+                            cancellation.is_stop_requested()
+                        })?,
+                    BacktestHistoryFillFamily::Tick => {}
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| {
+            DataError::InvalidResponse(format!("fill index worker failed: {error}"))
+        })??;
+    }
+    let mut run = client.start_run_with_resources_and_plan(
         batch.requests,
         BacktestHistoryExecutionMode::MaterializeCache,
         root_gate,
         None,
+        None,
+        None,
+        Some(Arc::new(
+            super::store_worker::ScanCancellation::with_stop_signal(Arc::clone(
+                &cancellation.state.stopping,
+            )),
+        )),
     )?;
     let mut telemetry = run.take_telemetry();
     let mut events_open = true;
@@ -690,6 +744,24 @@ async fn execute_fill_batch(
     let run_report = match stop {
         FillStop::Completed => run.finish().await,
         FillStop::Failed(_) | FillStop::Interrupted(_) => run.cancel_and_finish().await,
+    };
+    // Cancellation can flush a journal after the select loop exits. Forward that
+    // final durability state before publishing the batch's terminal outcome.
+    if telemetry_open {
+        while let Some(event) = next_telemetry(&mut telemetry).await {
+            observer(BacktestHistoryFillProgress::Telemetry {
+                family: batch.family,
+                batch_number: batch.number,
+                total_batches: batch.total,
+                requested_range: batch.requested_range,
+                event,
+            });
+        }
+    }
+    let stop = if cancellation.is_stop_requested() && !run_report.failed.is_empty() {
+        FillStop::Interrupted("stopped after current fill window".to_string())
+    } else {
+        stop
     };
     let results = symbol_results(batch.meta, Some(run_report), stop.clone());
     let rows_written = results.iter().map(|result| result.rows_written).sum();
@@ -920,6 +992,22 @@ fn emit_finished(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn graceful_stop_waits_for_explicit_force_cancel() {
+        let signal = super::BacktestHistoryFillCancellation::new();
+        signal.request_stop();
+        assert!(signal.is_stop_requested());
+        assert!(!signal.is_cancelled());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), signal.cancelled())
+                .await
+                .is_err()
+        );
+        signal.cancel();
+        tokio::time::timeout(std::time::Duration::from_millis(10), signal.cancelled())
+            .await
+            .unwrap();
+    }
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1019,6 +1107,7 @@ mod tests {
         opens: Arc<AtomicUsize>,
     ) -> BacktestHistoryClient {
         BacktestHistoryClient::from_config(BacktestHistoryClientConfig {
+            fill_durability: None,
             cache_dir,
             policy: BacktestHistoryPolicy::RemoteOnMiss,
             logical_concurrency: 4,
