@@ -1,9 +1,128 @@
 # 验收标准与测试矩阵
 
+Fill 暂存/收尾/durability 变更执行 [恢复合同验证](history-fill-recovery.md#验证)，
+包含跨重启、retry 隔离、非终态拒绝、grace 与共享消费者隔离；禁止使用真实账号替代离线证明。
+
+Canonical Kline 追加／恢复变更须运行：
+
+```bash
+cargo test -p tqsdk-data --test kline_append_recovery
+cargo test -p tqsdk-data --test kline_cache_migration
+cargo test -p tqsdk-data
+cargo test -p tqsdk-cache
+cargo clippy -p tqsdk-data -p tqsdk-cache --all-targets -- -D warnings
+```
+
+验收包括旧 raw 显式迁移／普通 reader 拒绝、外部备份、coverage 索引、payload 深度校验、追加前缀不变、损坏 slot
+恢复、未提交 suffix、64 片段空间上界、opened-reader snapshot、硬链接隔离、诊断等待在途追加，以及
+SIGINT/SIGTERM/SIGHUP 的 interrupted/130 收尾。信号与本地 mock socket 测试需要允许相应
+系统调用的环境；沙箱阻止信号投递不等于生产取消逻辑失败。不得以 coverage 命中替代
+snapshot 发布前的完整验证；含追加封装的 manifest 必须声明 `kline-append-v1`。
+
 TradingTimeline 热路径性能：使用独立只读 release 基准
 [TradingTimeline 性能结论](../research/2026-09-07-trading-timeline-performance.md)。
 覆盖生产 75 品种、顺序/随机查询、跨休市位移、历史规模增长、零分配及独立系统调用跟踪。
 加载成本必须单列；批平均分位数不得称为单次调用尾延迟，不将微基准等同于策略吞吐。
+
+Runtime DIFF 基线使用：
+
+```bash
+cargo run -p tqsdk-core --release --example diff_ingest_microbench
+```
+
+该基准覆盖 wire JSON parse、decode、state commit、rolling tick 和 typed market read；默认含
+1、100、1,000 symbol 规模。每项输出单次迭代的 p50/p95/p99/p999、events/s；typed read 额外
+输出 COW snapshot 与 live partition guard 的 lock wait/hold、shared roots、clone counters。
+它是单进程基线，不替代 CPU/event、allocation、RSS 或端到端 relay/backtest 的 profiler 证据。
+
+Relay quote fan-out 基线使用：
+
+```bash
+cargo run -p tqsdk-relay --release --example quote_fanout_microbench
+```
+
+该基准对 1、10、100、500 个 quote client 逐次测量 `RelayEngine` 的 market tick fan-out，输出
+p50/p95/p99/p999 与 events/s，并在 warm-up 阶段断言所有 client frame 共享同一个 `Arc<Value>`。
+它刻意不冒充 WebSocket socket write、per-client queue 或网络调度基准；这些必须以独立端到端场景测量。
+
+TQBN streaming reader 基线使用：
+
+```bash
+cargo run -p tqsdk-data --release --example history_series_cache_microbench
+```
+
+其中 `stream_tick_reader_1pct` 专测 partial-range streaming 读取；输出的
+`blocks_decoded` 必须只按触及 records block 计数，且 `materialized_rows=0`。
+
+除 write/read、coverage、compaction 外，该示例还逐行测量 `TickDataSeriesReader`，输出
+p50/p95/p99/p999、rows/s 与 `bytes_read`、`bytes_decompressed`、`blocks_skipped`、
+`blocks_decoded`、`materialized_rows`、`io_read_ns` 与 `decode_ns`。后两项仅覆盖 Records
+payload，分别定位 storage 与 codec 瓶颈。总耗时包含 reader open/planning；行延迟只计 `next_tick()`，
+因此 planner double decode 或 materialization fallback 会在 telemetry 中显式可见。
+
+非单调 legacy Tick page 必须额外覆盖 bounded spill：结果与同一 canonicalization 规则逐行一致、
+`materialized_rows=0`、reader drop 后临时目录消失。该路径的临时 SQLite page cache 上限 4 MiB；
+64 KiB 单行与 8 GiB 输入边界必须 fail closed，不能退回 full-partition heap materialization。
+
+CacheOnly backtest merge/callback 基线使用：
+
+```bash
+cargo run -p tqsdk-task --release --example history_backtest_replay_microbench
+```
+
+该示例先写入临时 TQBN cache，再经 `HistoryBacktestReplayStream` 做 cache-only reader、N-way `BinaryHeap` merge 和无分配 strategy callback；分别输出 single-event 与 bounded batch 的每 event 分位延迟、events/s 和 `strategy_callback_ns_per_event`。默认覆盖 10/100/500/1,000 symbol、每 symbol 256 tick，结束后删除它自己创建的临时目录。它是 synthetic、单机 cache 基线，不代表真实日/月/半年数据、策略业务逻辑或 broker 行为。
+
+Task commit/risk/submit 基线使用：
+
+```bash
+cargo run -p tqsdk-task --release --example commit_risk_submit_microbench
+```
+
+每个样本先 commit 一条 quote，再由 `RiskEngine::max_price_deviation` 读取当前市场状态并提交
+一个唯一 client-order id；输出 p50/p95/p99/p999、events/s 与 dispatch 数。它只使用
+`ManualSession` 并逐轮 drain dispatch，因此不访问真实账户、网络或交易所，也不代表 broker latency。
+`TQSDK_TASK_BENCH_SYMBOL_COUNTS=10,100,500,1000` 会在固定 symbol catalog 间轮转；每轮仍只提交一笔订单，因此可比较 active-universe 增长而不混入批量下单。
+
+四条路径的统一本地 runner：
+
+```bash
+python3 scripts/run_performance_matrix.py --output-dir /tmp/tqsdk-performance-matrix
+```
+
+真实数据必须另附显式 corpus，而不是把 synthetic 小样本误称为日/月基线：
+
+```json
+{
+  "cases": [
+    {"name":"one-day","cache_dir":"/data/tq-cache","symbol":"SHFE.rb2601","start_ns":0,"end_ns":1},
+    {"name":"one-month","cache_dir":"/data/tq-cache","symbol":"SHFE.rb2601","start_ns":0,"end_ns":1},
+    {"name":"six-months","cache_dir":"/data/tq-cache","symbol":"SHFE.rb2601","start_ns":0,"end_ns":1}
+  ]
+}
+```
+
+将真实纳秒边界替换 `0/1` 后运行：
+
+```bash
+python3 scripts/run_performance_matrix.py \
+  --output-dir /tmp/tqsdk-performance-matrix-real \
+  --history-corpus /path/to/history-corpus.json
+```
+
+runner 将每个 case 作为单独的 `tqbn-streaming-reader-corpus-*` 样本写入 manifest，保留 cache path、
+symbol、范围、原始输出与资源统计；`--quick` 禁止搭配 corpus。真实 corpus case 必须设置
+`TQSDK_HISTORY_CACHE_BENCH_STREAM_ONLY=1`：只读打开既有 cache、只跑 streaming reader，
+不得把 write/read materialized baseline 或 benchmark 自身无界 latency 样本计入 reader RSS。
+
+runner 在采样窗口外预构建 release example，随后直接执行二进制；仅在 benchmark 明示 `events=` 时才在 manifest 的 `derived_metrics` 推导 CPU ns/event 与 filesystem blocks/event。
+
+`--quick` 仅做 wiring smoke，不可用于性能结论。正常运行生成 11 个基础命令：runtime batch symbol、task symbol catalog、TQBN cache scan symbol、cache-only backtest merge/callback、relay downstream client 各覆盖 10/100/500/1000；task、backtest 与 relay 在单个 benchmark 进程中输出四组样本。`--history-corpus` 会额外加入每个真实 cache range 的 streaming-only reader 命令。TQBN streaming reader 的 synthetic 基础样本仍只是 rows/codec 指标，backtest merge 使用 synthetic bounded cache；两者都不应误读为真实日/月/半年数据集。每条路径保留原始 stdout，并写入
+`tqsdk.performance-matrix.v3` manifest（git/toolchain/host metadata、命令、环境、wall time，以及
+POSIX 可用时的 user/system CPU、单个子进程 peak RSS、文件系统 input/output blocks）。manifest 的
+`reported_metrics` 只结构化摘录 benchmark 自己输出的 latency table 或 `key=value` 指标，不推导缺失
+指标。这些是命令级统计，不等同于 CPU/event、alloc/event、聚合进程树 RSS、锁等待或磁盘 MB/s；后者仍须
+由具体 benchmark 或 profiler 输出。
+输出目录必须是新的，避免将不同机器或 revision 的结果混写；该 runner 不是 CI SLO gate。
 
 TradingTimeline 锁粒度回归：`cargo test -p tqsdk-data trading_timeline --lib`、
 `cargo test -p tqsdk-cache timeline --bin tqsdk-cache`。覆盖跨进程根共享共存、
@@ -65,7 +184,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 
 ### 统一状态树
 - market / trade / replay / query / schema / system 状态都必须进入同一 runtime state tree
-- 任意已提交 revision 都必须能提供内部一致的 snapshot
+- retention 内任意已提交 revision 都必须能提供内部一致的 immutable-root snapshot；被裁剪 revision 必须显式报告 lag，不能返回当前 head 冒充历史
 - query/schema 结果不得躲在独立 side cache 中绕开 snapshot
 - schema 状态键必须由 `schema_id` 决定，不能退化成 transport route label
 - core 不得内部创建 Tokio runtime 作为 sync fallback；需要网络 IO 的调用方必须自带 async runtime
@@ -89,8 +208,9 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 - runtime core 不得为不同 future facade 维护不同的提交通道
 - 多个 cursor 必须能独立推进，不互相污染
 - `CommitLog` 不得因为 revision 扫描而在长会话中退化为线性读取
-- `CommitLog` 必须有 retention 策略，且不能截断仍被活动 cursor 需要的提交
-- `SessionClientBuilder` 的显式 commit retention 必须传播到所建 runtime；未配置时保持 core 默认值
+- `CommitLog` 必须有 hard entry 与 accounted-byte retention；活动 cursor 不得无限 pin 住保留区
+- lagged cursor 必须保持位置并提供显式恢复：resync-to-head、持久重放或失败退出；兼容 `next()` 可选择 documented resync-to-head，不能永久卡死
+- `SessionClientBuilder` 的显式 commit retention / byte limit 必须传播到所建 runtime；未配置时保持 core 默认值
 
 ### adapter 边界
 - adapter 可以编解码和保留短期协议态
@@ -125,13 +245,21 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | auth/session/system 控制 | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_auth_context.rs`、`crates/tqsdk-core/tests/runtime_contract_session_state.rs`、`crates/tqsdk-core/tests/runtime_contract_session_runtime.rs`、`crates/tqsdk-core/tests/runtime_contract_ws_transport.rs`、`crates/tqsdk-core/src/transport/websocket.rs` 单元测试 | 覆盖 auth context、topology/bootstrap、refresh-auth、session state，以及初始 WebSocket 黑洞的有界超时、重试和脱敏错误 |
 | GraphQL / HTTP query | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_pending_route_executor.rs`、`crates/tqsdk-core/tests/runtime_contract_adapters.rs` | 覆盖 GraphQL query 的 HTTP request 合同、pending route 执行与 query snapshot |
 | schema / metadata / bootstrap 交互 | `crates/tqsdk-core/tests/runtime_contract_v1_capability.rs`、`crates/tqsdk-core/tests/runtime_contract_pending_route_executor.rs`、`crates/tqsdk-core/tests/runtime_contract_session.rs`、`crates/tqsdk-core/tests/runtime_contract_bootstrap.rs` | 覆盖 schema HTTP 请求、bootstrap topology 与 metadata/state 写入 |
-| reader-first 读契约 | `crates/tqsdk-core/tests/runtime_contract_reader_surface.rs`、`crates/tqsdk-core/tests/runtime_contract_surface.rs`、`crates/tqsdk-core/tests/runtime_contract_runtime_core.rs`、`crates/tqsdk-core/tests/runtime_contract_domain_state.rs` | 覆盖 `RuntimeReader`、`SnapshotReadGuard`、`CommitReadGuard`、`MarketTradeStateReadGuard`、`CursorLagged`、共享 commit identity 与兼容 surface |
+| reader-first 读契约 | `crates/tqsdk-core/tests/runtime_contract_reader_surface.rs`、`crates/tqsdk-core/tests/runtime_contract_surface.rs`、`crates/tqsdk-core/tests/runtime_contract_runtime_core.rs`、`crates/tqsdk-core/tests/runtime_contract_domain_state.rs` | 覆盖 `RuntimeReader`、`SnapshotReadGuard`、`CommitReadGuard`、`MarketTradeStateReadGuard`、`CursorLagged`、共享 commit identity、COW snapshot clone=0 / lock telemetry 与兼容 surface |
 | 官方对象 typed schema | `crates/tqsdk-core/tests/runtime_contract_types.rs`、`crates/tqsdk-core/tests/runtime_contract_reader_surface.rs` | 覆盖 `objs.py` 对象族和 core 补充 diff 对象的 typed schema surface、期货 `Order`/`Trade` 协议枚举字段解码，以及 reader 侧 `decode<T>()` 接入 |
 | 纯交易时段 helper | `crates/tqsdk-core/tests/trading_session.rs` | 覆盖 `TradingSessionSchedule` 的 open / pre-close / closed、跨午夜 rollover、空 schedule 和非法空窗口 |
 | 默认 facade crate | `crates/tqsdk/tests/facade_contract.rs`、`crates/tqsdk/examples/api_contract_s33_default_facade.rs`、`crates/tqsdk/examples/api_contract_s37_facade_server_backtest.rs`、`crates/tqsdk/examples/api_contract_s38_facade_local_backtest.rs`、`crates/tqsdk/examples/api_contract_s39_facade_same_body.rs`、`crates/tqsdk/examples/api_contract_s40_facade_local_backtest_target_pos.rs`、`crates/tqsdk/examples/api_contract_s41_facade_server_replay.rs`、`crates/tqsdk/examples/api_contract_s43_facade_backtest_history_cache.rs`、`crates/tqsdk/examples/api_contract_s44_facade_backtest_remote_on_miss.rs`、`crates/tqsdk/examples/api_contract_s45_facade_backtest_cache_warmup.rs`、`crates/tqsdk/examples/api_contract_s46_facade_record_ticks.rs`、`crates/tqsdk/examples/api_contract_s47_facade_market_cache_policy.rs` | 覆盖 `tqsdk::prelude::*`、`Tq` / `TqBuilder`、统一 `.backtest(...)` 默认共享 history cache mode、显式 `.disabled_cache()` server mode、cache-backed local backtest builder、`BacktestTickCache` facade export、server replay session endpoint 接入、自动 heartbeat 和显式 replay 控制、resolved TQKQ target-position helper、`TargetPos` intent API 与增量 execution report、curated `advanced::*` 下钻命名空间，以及默认 facade 的 persistent-cache backtest / warmup / remote-on-miss cache fill / live record_ticks cache writer / shared `MarketCachePolicy` / universe selector / server replay / custom replay backtest / live-backtest same-body 策略入口和 local backtest TargetPos 执行闭环 |
 | 远端 tick 缓存补齐 | `crates/tqsdk-data/src/backtest_history/fill.rs` 单元测试、`crates/tqsdk-session/tests/server_backtest_history.rs`、`crates/tqsdk/src/backtest_remote.rs` 单元测试、`crates/tqsdk/tests/facade_contract.rs` | 覆盖 clean source lane 顺序复用、取消/错误 lane discard、显式 chart cleanup、每日 coverage checkpoint、不设默认 batch 墙钟超时、显式超时解析、流式 tick id 区间合并与公开 accumulator 语义一致性、future range 拒绝、idle/exhausted terminal coverage 保护，以及 facade cache warmup / remote-on-miss 契约 |
 | 可选 market relay | `cargo test -p tqsdk-relay --tests` | 覆盖 relay 配置、dry-run 启动自检、结构化启动诊断、分层 HTTP `/health`、`/metrics`、`/symbol-metrics`、原子 `/dashboard-snapshot`、dashboard 5 分钟 `timeline_history` 服务端内存缓存、内置 `/dashboard`、上游连接/订阅/补历史阶段 telemetry 和 backfilling 可观测进度、等待首样本或补历史无样本合约 `initializing` 非问题状态、frame/event idle 秒级告警、raw frame 后先发 `peek_message` 再 JSON decode 的顺序 guard、上游 idle 期间周期性 `peek_message` 恢复守卫、peek/decode timing metrics、200 合约 decode guard、可恢复 decode health、每日合约集合刷新调度、typed metadata 期货产品发现与分批查询、每品种主力-only 快捷选择、每品种活跃度前 N 合约选择、上游一合约一 tick chart 订阅、tick row 连续性缺口/重复/乱序 telemetry、当前 universe ∪ 当前订阅健康集合、dashboard read-model 低频缓存、dashboard read-model 锁外分类、进程内固定容量事件账本、单 chart `ins_list` 长度防线、tick view width 配置、下游 market 协议、interest/chart-id 隔离、K 线 `[start,end)` 合成、tick-ring 冷启动回放、bootstrap 队列限流、observability、WebSocket loopback、upstream tick scaffold 和 quote-only 远月行情更新 |
+| relay dynamic desired-set | `cargo test -p tqsdk-relay --test server_ws relay_configured_upstream_reconciles` | 覆盖基础 universe 外的 chart 动态补订，以及 chart 删除或 downstream 断开时将 quote 集收敛回基础 universe、用 `set_chart(ins_list: "")` 删除上游 tick chart；防止失活 interest 永久占用上游资源。 |
 | relay endpoint opt-in | `cargo test -p tqsdk-session --test session_builder builder_accepts_explicit_market_relay_url_without_enabling_other_routes` | 确认 relay 只显式改 market endpoint，不启用 trade/query/auth |
+
+Relay downstream queue verification must cover a full reliable-frame queue
+(client disconnect), quote latest-wins coalescing by symbol, and the explicit
+per-client encoded-byte cap. These checks belong in
+`cargo test -p tqsdk-relay --tests` and do not require live credentials.
+The same gate must cover cache LRU eviction under `max_symbols` / retained-byte
+reservation, and reject a configuration that cannot fit one tick ring.
 
 ### Provider-unavailable membership maintenance
 
@@ -185,13 +313,13 @@ gate/例外日 fail-closed，以及唯一规则日与歧义日的编译边界。
 | publisher role-aware clone/import 与 source/history 隔离、prewarm auth-on-miss、strict inspect + real query smoke、publish crash/recover、rollback/scrub、invalid-CURRENT fail-closed 与 tombstone/lease-aware GC | `crates/tqsdk-cache/tests/snapshot_cli.rs` |
 | HTTP grammar、JSON、error、ETag、gzip、limits/cancel，以及 live cache commit 无发布/重启即时可见、maintenance 互斥恢复 | `crates/tqsdk-relay/tests/history_http.rs` |
 | dedicated runtime、market-lock isolation、reload、generation health、默认 wildcard CORS 与无 identity `OPTIONS` preflight | `crates/tqsdk-relay/tests/history_runtime.rs` |
-| readiness/reload/query/buffer/compression metrics、单条结构化 audit | `crates/tqsdk-relay/src/history/observability.rs`、`crates/tqsdk-relay/src/metrics_http_impl.rs` 单元测试 |
+| readiness/reload/query/buffer/compression metrics（含 CPU shed）、单条结构化 audit | `crates/tqsdk-relay/src/history/observability.rs`、`crates/tqsdk-relay/src/metrics_http_impl.rs` 单元测试 |
 | market send-to-downstream p99、顺序/无丢失、gzip/fallback 容量特征 | `crates/tqsdk-relay/tests/history_isolation_gate.rs` ignored same-spec candidate gate；非阻塞，不作为低并发功能验收 |
 
 还必须验证 `cargo check -p tqsdk-relay --no-default-features` 和
 `cargo check -p tqsdk-relay --no-default-features --features history`，证明 history 只传播本地
 reader feature。低并发功能验收不承诺 history 吞吐量或 market p99 SLO；部署侧必须由受控 gateway
-设置符合实际业务的低并发配额。8 并发 history、512 MiB budget、2 gzip workers 的测试继续观察
+设置符合实际业务的低并发配额。8 并发 history、512 MiB budget、4 个 shared CPU-work permit、2 gzip workers 的测试继续观察
 market 无丢失/乱序/异常断连，以及 p99 增量是否不超过 `max(1 ms, 10%)`，但作为非阻塞容量特征项。
 2026-08-29 当前生产宿主机未达到该 p99 目标；这不是已通过的性能门，但不阻塞低并发功能验收。
 完整合同见
@@ -294,7 +422,7 @@ rtk cargo test -p tqsdk-data --test history_series_tqbn_corruption
 rtk cargo test -p tqsdk-data --lib tqbn
 rtk cargo test -p tqsdk-data --features tqbn-zstd --lib tqbn
 rtk cargo check -p tqsdk-data --features tqbn-zstd --example history_series_cache_microbench
-TQSDK_HISTORY_CACHE_BENCH_INPUT_CACHE_DIR=<cache-root> TQSDK_HISTORY_CACHE_BENCH_INPUT_SYMBOL=<symbol> TQSDK_HISTORY_CACHE_BENCH_INPUT_START_NS=<start-ns> TQSDK_HISTORY_CACHE_BENCH_INPUT_END_NS=<end-ns> rtk cargo run -p tqsdk-data --release --example history_series_cache_microbench
+TQSDK_HISTORY_CACHE_BENCH_INPUT_CACHE_DIR=<cache-root> TQSDK_HISTORY_CACHE_BENCH_INPUT_SYMBOL=<symbol> TQSDK_HISTORY_CACHE_BENCH_INPUT_START_NS=<start-ns> TQSDK_HISTORY_CACHE_BENCH_INPUT_END_NS=<end-ns> TQSDK_HISTORY_CACHE_BENCH_STREAM_ONLY=1 rtk cargo run -p tqsdk-data --release --example history_series_cache_microbench
 rtk cargo test -p tqsdk-data
 rtk cargo test -p tqsdk-data --test backtest_tick_cache_ops
 rtk cargo test -p tqsdk-data --test backtest_tick_cache_ops repair_tick_locks
@@ -360,7 +488,8 @@ rtk cargo check -p tqsdk-data --all-features --examples
 coverage index chain 的多段读取、tail checkpoint 的 confirmed length/checksum/index head、未确认截断或坏
 checksum suffix 的 read 隔离与 writer 恢复、无 checkpoint 旧文件的严格全量校验、首次原子初始化等待、
 opened-file snapshot 不阻塞并发 append/atomic replace、引用 coverage block 损坏保护、daily partition file
-identity、records range index 的无关 block 跳过与未知 flags 拒绝、scan、损坏报告、
+identity、records range index 的无关 block 跳过与未知 flags 拒绝、scan、损坏报告；其中 TQRI v1
+必须保守回退，v2 仅在完整覆盖且顺序事实成立时跳过 planner payload scan、
 size-limit maintenance，以及通过
 `enforce_limits(...)` 执行的 append-log compaction 和
 `BacktestTickCache::compact_symbol_ticks(...)` 的按 symbol 全部 tick 日分区 compact、range 版本只触碰相交
@@ -420,7 +549,7 @@ data 必须从专用 session runtime state 清理，同时 final coverage 仍只
 所有分区；tick 与 `--dry-run` 必须拒绝该 destructive flag。
 metadata tests 还覆盖 remote-on-miss 的短 snapshot 不会降级更宽 active pointer、更宽 snapshot 会升级 active
 pointer、以及 partial range 的 metadata refresh 扩展到完整 CST trading month。
-`daily_kline_cache` 覆盖 v1 单 logical-symbol `.tqdk` 的 atomic replace（rename 后 parent directory fsync）、
+`daily_kline_cache` 覆盖 v1 单 logical-symbol `.tqdk` 的重叠范围／快照变更 atomic replace（rename 后 parent directory fsync）、
 final coverage、retained-sidecar 对既有 coverage 的 compatible reheader、mapping 变化时 fail-closed 且文件 bytes
 不变、fixed-header/embedded-symbol fast inventory、全文件 checksum/rows diagnosis、显式 `purge_symbol()` 与
 当前/未来 CST trading day final-coverage rejection。
@@ -572,6 +701,25 @@ S49 tick companion-lock repair 的正式 contract 位于
 `try_acquire_consistency_read_lock()`，默认只运行
 `BacktestTickCache::repair_tick_locks(BacktestTickCacheLockRepairMode::DryRun)`；只有显式 opt-in 才调用
 `Apply`。该 example 由 `cargo check -p tqsdk-data --example api_contract_s49_tick_lock_repair` 覆盖。
+
+## Durable hard-risk authority validation
+
+`tqsdk-hard-risk` 是 opt-in SQLite/WAL durable authority，不属于 default-members；workspace
+测试和该 crate 的显式 gate 都必须覆盖它。它的验证不得连接真实账号、发送订单或依赖 broker。
+
+```bash
+cargo test -p tqsdk-hard-risk
+cargo clippy -p tqsdk-hard-risk --all-targets --no-deps -- -D warnings
+cargo check -p tqsdk-hard-risk --examples
+```
+
+单元测试必须证明：同一 stable identity 在 usage check 前去重；不同 fingerprint fail closed；
+`BEGIN IMMEDIATE` 下两独立进程只允许一个 daily-limit winner；WAL/full-sync 已启用；未提交事务
+不留下 usage；lease expiry 只进入 `Indeterminate`；incomplete trade snapshot 拒绝 recovery；
+runtime command id 重启/复用不改变 durable identity；terminal evidence/audit 保留且不释放
+`CountPreparedAttempt` reservation；未知/更高 schema version 拒绝隐式 rewrite。调用方自己的
+broker adapter 还必须在每个 network/crash 边界做 credential- and live-order-gated integration test，
+包括 matching/mismatched client id、complete/incomplete snapshot 和 terminal reconciliation。
 
 ## Public API Documentation Batch Validation
 
@@ -754,7 +902,8 @@ representative 1,800-row window; context probing is capped at 16 scans and the
    Tokio 多线程 runtime。需要多线程时，应在测试附近保留原因。
 
 history HTTP 验证还必须覆盖 paired CPU-set fail-fast、实际 worker affinity 握手、64 KiB
-threshold、gzip level 1、两 worker 有界 try admission 与池满 identity fallback，以及
+threshold、gzip level 1、两 worker 有界 try admission、共享 CPU-work budget 耗尽时的 identity
+fallback/telemetry，以及
 identity/gzip ETag、304、`Vary`、q=0 和 timeout（压缩计入 10 s）。512 MiB 检查应覆盖
 scan、JSON 和 compression buffers。生产同规格性能 gate 是非阻塞容量特征项，不得由单元测试
 或 affinity 配置本身宣称通过。2026-08-29 当前生产宿主机未达到该 p99 目标；需要高并发或明确

@@ -11,7 +11,7 @@
 
 ## 项目概况
 
-`tqsdk-rust` 是面向天勤 / TQSDK 生态的 Rust Cargo workspace，使用 Rust edition 2024，MSRV 为 1.85。核心架构是“稳定底座 + 可替换 facade”：所有可见状态变化共享同一套 runtime state tree、commit/revision 和 cursor 语义，上层 crate 只演进用户使用形态。
+`tqsdk-rust` 是面向天勤 / TQSDK 生态的 Rust Cargo workspace，使用 Rust edition 2024，MSRV 为 1.88。核心架构是“稳定底座 + 可替换 facade”：所有可见状态变化共享同一套 runtime state tree、commit/revision 和 cursor 语义，上层 crate 只演进用户使用形态。
 
 | Crate | 角色 |
 | --- | --- |
@@ -20,6 +20,7 @@
 | `tqsdk-session` | shared session、one-shot request/response/direct-query |
 | `tqsdk-wait` | Python 风格 single-owner `wait_update()` facade |
 | `tqsdk-task` | 执行工具层、策略 host、risk gate、replay/backtest foundation |
+| `tqsdk-hard-risk` | 可选 SQLite/WAL durable hard-risk authority；不进入默认 SDK/desk hot path |
 | `tqsdk-data` | research/offline data、history、cache、export |
 | `tqsdk-relay` | 可选 market relay/cache service，不改变 SDK 默认直连路径 |
 
@@ -127,6 +128,7 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 - `tqsdk-session` 负责 shared session、one-shot request/response/direct-query、GraphQL、schema、metadata、calendar、ranking、EDB、auth refresh、replay control。
 - `tqsdk-wait` 只做 single-owner diff-backed continuous consumption；可以通过 `session()` 复用底层 session，但不得复制 direct query API。
 - `tqsdk-task` 是执行工具层；`tqsdk-data` 是 research/offline data 层；不要把 task/data 能力下沉回 core/session/wait 或调用方自建消费层。
+- `tqsdk-hard-risk` 是调用方/上层服务显式选择的 single-host durable admission authority；只能向下依赖，不能把 SQLite/WAL、audit、跨进程 recovery 反向塞入 core/session/wait/task 或 `TradingDeskProfile`。它不拥有 broker send、runtime state tree 或多节点 HA；ambiguous submit 必须 fail closed 为 `Indeterminate` 并由完整 trade snapshot 对账。
 - `tqsdk-relay` 是可选 market relay/cache service；它是 workspace member 但不属于 Cargo default-members；不要让现有 SDK crates 默认依赖 relay，也不要把 relay 扩展成通用天勤代理或多 provider 聚合框架。
 - relay history 只允许作为独立 listener/runtime 的本地 CacheOnly sibling：查询/manifest/lease primitive 归 `tqsdk-data`，发布/恢复/GC 归 `tqsdk-cache`；不得进入 `RelayEngine`、获取 market mutex、RemoteOnMiss、读取远端凭证或直接解析 cache 文件。
 - 所有可见状态变化必须经过 `RuntimeHandle -> StateStore -> CommitResult -> RuntimeReader/UpdateCursor`。不得新增旁路通知、第二棵状态树或 facade 私有 revision。

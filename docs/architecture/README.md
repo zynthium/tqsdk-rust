@@ -1,5 +1,11 @@
 # tqsdk-rs 分层内核架构
 
+历史获取的分段提交、私有暂存、有限收尾和持久化进度见 [Fill 中断与续填](history-fill-recovery.md)。
+
+Canonical Kline 的追加封装、恢复和显式离线迁移由 `tqsdk-data` 统一拥有；普通 reader/fill
+仅接收 KLOG，不再隐式转换旧 raw。迁移与收缩见 [离线迁移合同](kline-cache-migration.md)。普通 coverage 与深度完整性审计分离，新 snapshot 禁止硬链接 Kline 文件。
+物理格式、备份与旧 binary 回滚合同见 [history-cache-format.md](history-cache-format.md)。
+
 TradingTimeline rebuild 的稳定视图由 root 共享生命周期锁、目标指数分钟月分区 pin
 及产品发布锁提供；普通 Tick fill 不再阻塞。每产品持久化为 V1 紧凑、原子替换的
 `timeline.json`；旧 pre-compact layout 不参与运行时读取。实现归属仍为 `tqsdk-data`，
@@ -233,6 +239,14 @@ minute cache 使用 v5 文件身份，只有远端 terminal 成功后才提交 f
     journal 或 cache writer
   - public fake market / fake broker test harness
   - ownership / guarded order / execution report（事件流 + 聚合摘要）
+- `tqsdk-hard-risk`
+  - opt-in SQLite/WAL durable hard-risk authority；以稳定
+    `(namespace, account_id, client_order_id)` 去重、持久 daily reservation、owner/lease
+    fencing、`Prepared -> Submitting -> Submitted | Indeterminate -> Terminal` 审计状态机
+  - fail-closed storage/schema/recovery gate；不拥有 broker send、账号凭据、runtime state tree
+    或多节点 HA/leader election
+  - 仅由调用方或上层服务显式依赖；不反向进入 core/session/wait/task 默认依赖，也不成为
+    `TradingDeskProfile` hot-path writer
 - `tqsdk-data`
   - research/offline data crate
   - `DataClient`
@@ -361,6 +375,9 @@ progress（plain/TTY/JSONL）。新 fill report 统一写 schema v4 与 `cache_k
 - S31 trading desk profile 是 task 层的薄执行 profile，但 hot path 固定在
   `tqsdk-session + RuntimeReader`；它不进入 `tqsdk-data`，也不把 durable sidecar
   变成 task profile 的 public dependency。
+- 需要 crash/restart 后唯一 hard-risk admission 时，调用方可显式接入
+  `tqsdk-hard-risk`。它是单机 durable authority，不改变上述 S31 边界；详细 lifecycle、
+  schema 和 recovery contract 见 [`api-hard-risk.md`](api-hard-risk.md)。
 
 Universe Language V2 的 `except(...)` 是 `tqsdk-data` parser 输入糖：`except(view:...)` 保持 view scope，`except(all:...)` 产生 global filter；二者均归一为既有 `!` AST，不能改变 artifact identity。
 

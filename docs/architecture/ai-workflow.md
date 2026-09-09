@@ -1,5 +1,13 @@
 # AI 工作流与架构守则
 
+Fill 私有 journal、terminal/retry 隔离和有限收尾须遵循 [中断与续填合同](history-fill-recovery.md)。
+暂存永不代替 canonical coverage；不要用接收 cursor 推断持久化进度。
+
+维护 canonical Kline fill 时，必须区分提交索引命中与完整 payload 审计。旧 raw 升级只能
+发生在显式离线迁移工具的 root 排他锁和分区写锁内；普通 reader/fill/Timeline 不再兼容 raw。
+不得恢复 `.tqmk`/`.tqdk` 的新 snapshot hardlink 优化；旧 raw snapshot 须私有克隆迁移后重新发布；新布局不得共享
+可变 inode。备份、checkpoint、压实与 rollback 规则见 [history-cache-format.md](history-cache-format.md)。
+
 TradingTimeline 锁契约：root shared → 全部目标分钟月分区 shared pin → 短时 metadata
 解析 → 产品发布 exclusive。月 pin 必须先于 coverage 并贯穿发布；产品锁必须覆盖
 load/merge/write。不要只将 root exclusive 改 shared，或复用 remote-fill lease
@@ -21,6 +29,7 @@ TradingTimeline 只使用 V1 每产品单文件原子替换。涉及旧 pre-comp
 | crate 边界或 public API | [`README.md`](README.md)、[`crate-boundaries.md`](crate-boundaries.md) | 对应 `api-*.md`、contract example |
 | runtime / 状态 / cursor / command | [`runtime-core/overview.md`](runtime-core/overview.md) | `runtime-core/*.md`、[`validation.md`](validation.md) |
 | feature、用户入口或验证 | 根 README、目标 crate README | contract example、`validation.md` |
+| durable hard-risk / SQLite authority | [`api-hard-risk.md`](api-hard-risk.md)、[`crate-boundaries.md`](crate-boundaries.md)、目标 crate README | contract example、`validation.md`、migration/recovery tests |
 | Universe DSL、snapshot/timeline 或入口能力 | [`universe-language.md`](universe-language.md) | 受影响 crate README、contract example、`validation.md` |
 | 历史 universe proof、artifact、retry receipt 或 plan 持久化 | [`historical-universe-catalog.md`](historical-universe-catalog.md)、[`universe-language.md`](universe-language.md) | `tqsdk-data`/`tqsdk-cache` README、`validation.md` |
 | history cache finality、open-day provisional 或 as-traded freeze | [`api-data.md`](api-data.md)、[`backtest-tick-cache-cli.md`](backtest-tick-cache-cli.md) | `tqsdk-data`/`tqsdk-cache` README、`validation.md` |

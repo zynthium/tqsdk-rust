@@ -1,5 +1,8 @@
 # 文档索引
 
+[Fill 中断与续填](architecture/history-fill-recovery.md)：日线分段、分钟私有暂存、
+Ctrl+C 有限收尾和 durability 进度的当前合同。
+
 本文档是仓库级文档入口。它负责说明各类文档的职责边界，避免后续人工或 AI 代码助手把历史审查记录、执行计划和当前架构权威混用。superpowers 里的 spec / plan 属于执行记录，完成代码修改后应默认进入 archive，不要长期留在活跃目录。
 
 ## 权威层级
@@ -38,8 +41,11 @@ minute、native daily 的统一 fill/progress/schema-v4 report，以及三类 in
 - [Relay 内置只读历史查询 ADR](architecture/history-relay.md)：三 crate ownership、隔离、live-cache 即时可见性与 published rollback adapter。
 - [Relay History HTTP v1](architecture/history-relay-http.md)：严格请求、all-or-nothing JSON、typed error、ETag 与 gzip。
 - [History Snapshot Manifest v1](architecture/history-snapshot-manifest.md)：结构共享、manifest identity、lease、发布/恢复/GC。
+- [Canonical Kline 离线迁移](architecture/kline-cache-migration.md)：mandatory KLOG、外部备份、幂等迁移、停写门禁与回滚。
 - [历史 Universe Catalog](architecture/historical-universe-catalog.md)：provider 数据 membership 证明、
  plan v1–v5、kind-aware targets、V4→V5 source-preserving migration 与不可变 artifact chain。
+- [Durable hard-risk authority](architecture/api-hard-risk.md)：opt-in SQLite/WAL admission、stable client id、
+  fail-closed recovery、schema rollout/rollback 与 single-host boundary。
 
 ## AI 助手读取顺序
 

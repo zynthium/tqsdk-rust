@@ -1,5 +1,14 @@
 # tqsdk-rust
 
+`tqsdk-cache fill` 支持日线分段续填、分钟私有暂存和首次中断最多 5 秒收尾；
+进度区分接收、持久化和暂存。见 [Fill 恢复合同](docs/architecture/history-fill-recovery.md)。
+
+历史分钟／日线统一使用提交片段增量更新。旧 raw 文件须先执行显式离线迁移并保留外部备份；
+普通 reader/fill 不再兼容或自动转换旧格式，所有访问程序须同步升级。
+迁移步骤见 [离线格式收缩](docs/architecture/kline-cache-migration.md)。
+日常 coverage 检查不再全量解码，完整审计使用 `verify`／`doctor`。见
+[缓存格式与恢复](docs/architecture/history-cache-format.md)。
+
 面向天勤 / TQSDK 生态的 Rust SDK 工作区，用一套共享的异步 runtime 支撑行情、
 交易、策略执行和研究数据工作流。
 
@@ -34,6 +43,7 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
 | [`tqsdk-session`](crates/tqsdk-session) | 共享 session、lazy connection、命令推进、one-shot direct query、metadata、schema 和 service query |
 | [`tqsdk-wait`](crates/tqsdk-wait) | Python 风格 `TqApi`、`wait_update()`、`is_changing()`、live object refs、serial window 和 wait-style 交易命令 |
 | [`tqsdk-task`](crates/tqsdk-task) | `TargetPosTask`、scheduler、typed order builder、pre-trade risk gate、strategy host、fake market / fake broker、task-owned replay source、streaming local backtest execution、Python-compatible local backtest sim、kline default price tick、cash/equity drawdown summary、低延迟 trading desk profile |
+| [`tqsdk-hard-risk`](crates/tqsdk-hard-risk) | 可选 SQLite/WAL durable hard-risk authority：stable client-order identity、fail-closed admission、daily reservation、lease fencing、restart recovery 与 retained audit；不进入默认 SDK/desk hot path，也不宣称多节点 HA |
 | [`tqsdk-data`](crates/tqsdk-data) | 历史数据 page/series/download、CSV export、option greeks、主连数据、`BacktestHistoryClient` 异步缓存查询、TQBN daily v3 (`.tqbn`) tick cache、canonical final-60s K cache、native final-1d K cache、tick companion-lock repair API 和共享 universe selector |
 | [`tqsdk-cache`](crates/tqsdk-cache) | 可选 tick / canonical-minute / native-daily cache 运维与区间查询 CLI：统一逐合约 streaming fill progress/schema-v4 report、proof-pinned 历史 universe plan、默认文本摘要、按需 versioned JSON、lossless JSONL / token-aware LLM CSV、inventory/inspect/verify/doctor/purge，以及显式 `--history-root` 的 immutable snapshot clone/import、prewarm/query-smoke、publish/recover/rollback/scrub 和 lease-aware GC；不进入默认策略 hot path |
 | [`tqsdk-relay`](crates/tqsdk-relay) | 可选 market relay / cache service：用共享上游 tick 源服务多个 SDK 客户端，并可在独立 listener/runtime 上启用默认 wildcard CORS、即时观察已提交 fill 进度的只读 CacheOnly history sibling；未配置 relay 时 SDK 仍直连天勤 |
@@ -52,11 +62,12 @@ dependency 使用；正式 crates.io 发布前，public API 仍可能继续收�
   `cache_dir` / `market_cache`，需要显式自定义 replay source 时用
   `.replay_backtest(source)`；官方单日复盘用 `.server_replay(...)`。
 - 做执行工具、风控、策略 host、fake broker 或本地 sim：用 `tqsdk-task`。
+- 对真实硬风控需要重启后仍保持唯一准入、审计和 fail-closed 恢复：显式使用 `tqsdk-hard-risk`；它围绕调用方自己的 broker submit/reconcile 流程工作，不替代多节点 authority。
 - 自建 facade、多个异步消费者或极低层热路径：用 `tqsdk-core + tqsdk-session`。
 
 ## 环境要求
 
-- Rust 1.85 或更新版本
+- Rust 1.88 或更新版本
 - Tokio runtime
 - 天勤 / TQSDK 账号，用于 live 行情、交易、query 和历史数据示例
 
@@ -539,6 +550,9 @@ cargo check --examples
 `cargo test -p tqsdk-relay --tests` 等 relay gate。
 `tqsdk-cache` 同样是可选运维二进制；修改它时显式运行
 `cargo test -p tqsdk-cache` 和 `cargo clippy -p tqsdk-cache --all-targets -- -D warnings`。
+`tqsdk-hard-risk` 同样是可选 durable authority；修改它时显式运行
+`cargo test -p tqsdk-hard-risk` 和
+`cargo clippy -p tqsdk-hard-risk --all-targets --no-deps -- -D warnings`。
 
 常用验证命令：
 

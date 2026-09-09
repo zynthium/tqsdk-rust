@@ -1,5 +1,8 @@
 # 当前 Crate 边界审计
 
+历史 fill 的分钟 journal、恢复边界、两阶段取消与 durability 进度归 `tqsdk-data`；
+facade 只转发 token/字段，CLI 只设置 5 秒收尾及渲染。见 [Fill 恢复](history-fill-recovery.md)。
+
 ## 文档定位
 本文档用于审计当前 workspace 已落地 crate 的职责边界是否合理，以及它们是否足以承载后续继续对齐 `tqsdk-python` 与现有 `tqsdk-rs` 的能力。
 
@@ -325,6 +328,40 @@ sink、WAL、journal 或 cache writer。
 
 后续主要工作不是继续拓宽 public surface，而是继续稳固 planner、ownership 和执行报告语义。
 
+## `tqsdk-hard-risk`
+
+### 正确职责
+
+`tqsdk-hard-risk` 是调用方或上层服务显式选择的单机 durable hard-risk authority。它应继续承担：
+
+- SQLite/WAL durable order admission：稳定
+  `(namespace, account_id, client_order_id)` 去重、immutable request/policy fingerprint、短
+  `BEGIN IMMEDIATE` reservation transaction 与 daily rule usage；
+- `Prepared -> Submitting -> Submitted | Indeterminate -> Terminal` 持久状态机、owner/lease
+  fencing、terminal retained audit 和完整 trade snapshot 后的 restart recovery gate；
+- `WAL`、`synchronous=FULL`、foreign-key、schema-version 和 busy/error fail-closed contract；
+- 把 runtime run id / command id 仅记录为诊断 receipt，绝不当作 durable order identity。
+
+它不提交订单、不持有账户/凭据、不读取或写入 runtime state tree、不拥有 market/trade projection，
+也不承诺 multi-host quorum、leader election、replication 或 HA。网络 send 必须在 SQLite transaction
+之外；任何 ambiguous send 进入 `Indeterminate`，只能由调用方从权威 broker/trade snapshot 显式对账，
+不得自动重发。
+
+### 不应吸收的能力
+
+- 不将 SQLite writer/WAL/journal 反向塞入 `tqsdk-core`、`tqsdk-session`、`tqsdk-wait`、
+  `tqsdk-task::RiskEngine` 或 `TradingDeskProfile`；
+- 不把 process-local `RiskEngine` usage 当作 durable authority，也不以 terminal cleanup 释放已计数
+  hard-risk reservation；
+- 不把 single-host SQLite 误写成跨节点硬风控；多节点部署必须使用外部具有同等 CAS/fencing 语义的
+  authority；
+- 不在 market/trade partition lock 或 websocket/task hot path 内执行 blocking SQLite I/O。
+
+### 判断
+
+这是 `tqsdk-task` 执行契约之外的上层 durable sidecar，并保持依赖只向下、默认 SDK 路径不变。
+详细 API、schema rollout/rollback 和 recovery 见 [`api-hard-risk.md`](api-hard-risk.md)。
+
 ## `tqsdk-data`
 
 ### 正确职责
@@ -356,9 +393,11 @@ projection 仅保留给 V4 验证与迁移，不参与 normal V5 write path。�
   `minute-kline-v3`；旧 v4 只允许显式备份迁移，v3 诊断为 `LegacyUnsupported`
 - `DailyKlineCache`：独立 v1 logical-symbol `.tqdk` cache，只持久化 official server-side
   backtest terminal 确认的 native 1d K；一个 logical symbol 一个
-  `daily-kline-v1/<escaped-symbol>.tqdk` 原子替换文件，不按时间分区。`2d..=28d` 仅从 final 1d
+  `daily-kline-v1/<escaped-symbol>.tqdk` 文件，不按时间分区；同快照、单调向后填充使用 KLOG 增量追加，重叠范围或快照变更仍原子替换。`2d..=28d` 仅从 final 1d
   rows 临时聚合，daily miss 不回退到 minute。snapshot/checksum/schema 错误 fail closed；结算价和
   涨跌停价未支持
+- Canonical Kline 文件必须使用 KLOG；普通 reader/fill 不再接收旧 raw。显式离线迁移、
+  同 root 排他门禁验证及备份／保全逻辑归 `tqsdk-data`，CLI/example 不复制格式解析。
 - 三层 source policy 固定为 tick 服务 tick 与 `<60s`、canonical minute 服务 `60s..<1d`、native
   daily 服务 `1d..=28d`。三类 cache 都没有 automatic retention/max-byte eviction 或后台清理
 - minute 的 `fast_inventory()`/deep `diagnose()` 与 daily 的 `fast_inventory()`/`diagnose_all()`
