@@ -1,5 +1,8 @@
 # 回测缓存 CLI
 
+> 2026-09-10 默认 Tick root 已迁移到 schema 4。当前程序不再运行时读取或改写 Tick
+> v2/v3；`migrate` 的长期职责是 closed-month sealing。旧备份回滚必须配套冻结迁移器/旧二进制。
+
 > 文件名保留 `backtest-tick-cache-cli.md` 作为既有链接兼容；本页定义的对象已包含 tick 与
 > canonical-minute 与 native-daily cache。
 
@@ -9,9 +12,10 @@
 backtest/warmup 与 `tqsdk-data` 的 cache API，适合 cron、CI 或人工检查；它不改变 SDK 的默认运行
 路径，也不拥有 session、状态树、remote protocol client、live recording loop、store adapter、relay 或
 daemon。
-
-它不是新的 cache format 定义者：tick 的持久化合同属于 `BacktestTickCache` / common schema 4（兼容读取 TQBN v2/v3），minute
-与 daily 的持久化合同分别属于 `MinuteKlineCache` 与 `DailyKlineCache`。格式细节见
+它不是新的 cache format 定义者：tick 持久化合同属于 `BacktestTickCache` /
+common schema 4，runtime 不兼容读取 pre-schema-4 Tick；minute 与 daily 的持久化合同分别属于
+`MinuteKlineCache` 与 `DailyKlineCache`。格式细节见
+[history-cache-format.md](history-cache-format.md)。
 [history-cache-format.md](history-cache-format.md)。
 
 ## 历史动态 universe
@@ -91,45 +95,30 @@ minute 的 `--market futures|stock` 仅在 minute `fill` 时选择 server-side b
 - tick fill 不支持 stock market；`--kind tick --market stock` 是 usage error。
 - daily fill 仅支持 futures；可使用 futures `--symbol` / `--universe`，且只请求 server-side native
   `1d` chart，绝不从 tick 或 minute 聚合。
-
 ## Tick companion lock repair
 
-`repair-locks` 是只面向既有 tick `.tqbn` companion lock 的 operator remediation，不是数据修复。
-默认 `DryRun` 为每个唯一 Tick 分区报告 legacy `<partition>/.tqbn.lock`，并逐文件报告
-`<file>.tqbn.lock`；显式 `--apply` 先以 non-truncating open 创建缺失 legacy lock，再创建缺失的逐文件
-regular sidecar。它绝不改写 TQBN bytes、rows、final/provisional coverage 或 index，也不访问 remote 或 auth，
-且绝不调用 fill 或 compaction。
+`repair-locks` 只处理既有 Tick `.tqbn` 的当前逐文件 `<file>.tqbn.lock` sidecar，
+不是数据修复。DryRun 只检查；`--apply` 通过正常 TQBN/file 排他锁路径以 non-truncating
+open 补齐缺失 sidecar。它不改写 rows、coverage、index，不访问 remote/auth，也不调用 fill/compaction。
 
-操作必须由可写 cache owner 在停止同一 root 的 reader/writer 后进行。CLI 全程持有 exclusive root
-stable-view gate；`--apply` 直接非截断创建缺失 legacy lock，并在创建缺失逐文件 sidecar 时取得 normal
-exclusive TQBN/file lock。
-单个无效/non-regular legacy lock、sidecar、I/O 或 lock 失败会保留在相应目录级或逐文件结果中，仍继续处理
-其余目标；只要存在任一失败，命令就以 exit code `1` 结束。
-
-同一合同也由 public
-`BacktestTickCache::repair_tick_locks(BacktestTickCacheLockRepairMode::{DryRun, Apply})` 提供。
-`DryRun` 可使用 `open_read_only(...)`；`Apply` 必须使用 writable cache。Apply 在内部取得根共享写门禁，
+操作必须由可写 cache owner 在停止同一 root 的 reader/writer 后进行。CLI 全程持有
+exclusive root stable-view gate；单个无效 sidecar、I/O 或 lock 错误标为失败，但后续文件继续处理。
+public `BacktestTickCache::repair_tick_locks(...)` 保留旧分区锁报告字段供兼容，字段固定为空或零。
 与迁移根独占门禁互斥；不能把该调用当作 fill、`enforce_limits(...)` 或 compaction 的替代。
+## Tick schema 4 closed-month sealing
 
-## Tick TQBN v2/v3 到 common schema 4 迁移
+`migrate` 默认只诊断并报告计划，不创建 root、lock、backup 或数据文件。当前二进制不再转换
+pre-schema-4 Tick：DryRun 仍报告 `legacy_files`，但 Apply 遇到非零值会 fail closed，并提示
+使用冻结的 pre-v4 迁移器。默认缓存已完成该一次性旧格式迁移。
 
-`migrate` 默认只深度诊断并报告计划，不创建 root、lock、backup 或数据文件。计划同时报告
-`legacy_files`、`pack_source_files`、`pending_month_packs`、`migration_symbols` 与容量估算；即使
-legacy 文件已全部转成 schema 4，只要封闭月份仍是日文件，Apply 仍可继续封存。容量是保守估算，
-不是磁盘上界；迁移中途遇到 `ENOSPC` 会停止，保留已完成分区和完整 backup，重启可继续。
+对于 schema 4 日分区，计划报告 `pack_source_files`、`pending_month_packs`、
+`migration_symbols` 与容量估算。Apply 必须提供 cache root 外、同文件系统的
+`--backup-dir`；CLI 在 exclusive root gate 内重建计划、备份受影响数据/锁文件并绑定 generation。
 
-`--apply` 必须同时给出 `--backup-dir`；首次运行时目录必须不存在或为空，并位于 cache root 外且与 cache 同文件系统。完整备份发布 v2 durable manifest：绑定 cache root 路径与持久化 generation identity，并为每个数据/锁文件记录长度和 SHA-256。若进程在数据改写阶段中断，以完全相同的 cache root 和 backup 目录重跑会先在 exclusive gate 内清理严格命名的未发布 generation/COW 候选，随后验证 manifest、全部备份文件及当前待迁移输入均已受该代备份保护，再从剩余 symbol/月继续。错根、备份摘要不符、同路径源被非迁移替换、畸形候选、非空但无完整 manifest 或出现未受备份保护的新迁移输入时 fail closed。
-
-封闭月包原子发布后立即成为该月权威。发布与日源文件清理之间中断时，重跑只验证残留日文件的 row key/coverage 已被月包包含并删除残留，不允许残留覆盖月包中的晚到修订；range purge 同时删除目标交易日的残留日文件。lazy reader 从分区枚举到所有候选路径均已打开/固定期间持 shared root gate，随后由 opened-file snapshot 固定内容；因此与需要替换尚未打开路径的迁移互斥。竞争时维护返回 `CacheBusy`，reader 不会把消失路径当成空分区。
-CLI 取得 exclusive root stable-view gate 后重新深度诊断，硬链接备份所有已识别 Tick 数据文件（完整 mixed generation），并复制现有
-`<file>.tqbn.lock` 与 `<partition>/.tqbn.lock`。备份目录逐级 fsync 完成后，才按 symbol 生成 common schema 4
-候选、逐字段比对 rows/coverage/provisional、深度复检并原子发布；随后把已封闭交易月写成
-`partition_scheme=2` 月包，并在月包发布成功后删除源日文件和逐文件 companion lock。
-
-任一 backup、rewrite 或验证失败都会停止，保留 backup，绝不自动删除或回滚部分迁移。若在月包发布与
-源文件删除之间中断，reader 优先选择月包；同一命令重跑只在确认月包已包含残留数据后删除残留。成功条件是所有 Tick
-文件可深度解码、schema 均为 4，且不存在待封存的封闭月日文件。`legacy_binary_rollback_safe` 只有在迁移前不存在 common 文件时为 true；
-旧 binary 回滚必须恢复任何 common writer 启动前保留的整代数据。migration 不访问 remote、auth 或 minute cache。
+月包候选深验后原子发布，再删除源日文件和 companion lock。若在发布与删除之间中断，
+reader 优先月包；同目录重跑只验证并删除已被月包包含的残留。备份损坏、错 root、源被替换、
+畸形候选、容量不足或未受保护的新输入都 fail closed。成功条件是
+`legacy_files=0`、`pending_month_packs=0`、`problem_files=0`。migration 不访问 remote/auth。
 
 Tick 快速 `inventory` 对热日文件只读 metadata/magic，对冷月包再读取 common index/coverage 以统计逻辑交易日，仍不解码 payload。`verify --replay` 在一把 exclusive root gate 内连续完成 coverage 检查和 canonical reader 流式解码/计数，中间不会放锁。空的既有 root 可只读返回 incomplete 且不创建 operation lock；非空 root 缺锁直接 fail closed。
 
@@ -291,7 +280,7 @@ closed trading day。显式 `--start-day/--end-day` 仍表达调用者的数据�
 ## 输出、报告与进度
 
 默认 stdout 是人工摘要；`--output-format json` 请求稳定机器输出，默认 V3 envelope，
-`--output-schema v2` 仅保留旧兼容 shape。coverage 不完整或 `repair-locks` 存在 legacy/逐文件失败时退出 `1`，usage
+`--output-schema v2` 仅保留旧兼容 shape。coverage 不完整或 `repair-locks` 存在逐文件失败时退出 `1`，usage
 错误退出 `2`，cache busy 退出 `75`，协作式取消退出 `130`。
 
 - 新生成的 tick、minute、daily fill report 都使用 schema v4，包含 `cache_kind`、统一 terminal status、
@@ -309,13 +298,11 @@ closed trading day。显式 `--start-day/--end-day` 仍表达调用者的数据�
   text output 会显示 `local holidays, years YYYY–YYYY`；dry-run remote candidate 还会显示
   `not persisted` 与 candidate hash。
 - `--progress jsonl` 始终写 stderr，schema 为 v2、kind 为 `tqsdk-cache.progress`，并含
-  `cache_kind: "tick" | "minute" | "daily"`。脚本不得继续按 schema v1 解析。
-- `repair-locks` 不写 fill report。V3 result 以 `legacy_partition_locks_scanned`、
-  `legacy_partition_locks_missing`、`legacy_partition_locks_created`、
-  `legacy_partition_locks_already_present`、`legacy_partition_locks_failed` 和
-  `legacy_partition_locks[]`（`partition_dir`、`lock_path`、`status`、`error`）报告目录级 legacy 结果；
-  既有 `scanned_files`、`missing_files`、`created_files`、`already_present_files`、`failed_files` 与
-  `files[]` 保持逐文件结果。DryRun 中 `missing` 本身不是失败；`failed` 表示无效/non-regular lock 或
+- `repair-locks` 不写 fill report。V3 result 保留 `legacy_partition_locks_*` 和
+  `legacy_partition_locks[]` 字段供旧脚本解析，但它们固定为空或零。当前结果使用
+  `scanned_files`、`missing_files`、`created_files`、`already_present_files`、
+  `failed_files` 与 `files[]` 表达逐文件 sidecar 状态。DryRun 的 `missing` 不是失败；
+  `failed` 表示无效/non-regular sidecar 或 I/O/lock error。
   I/O/lock error，后续目标仍会尝试。
 
 `query` 的 raw format 只适用于 query 命令，stdout 是 data、stderr 是诊断：
@@ -357,7 +344,7 @@ payload，但 stdout 本身没有 atomic-write 保证；`--output PATH` 仅用�
 | 普通 tick/minute/daily `fill` | shared | 多个互不冲突 series 可并发；阻止 refresh/repair/verify/doctor/purge 穿插 |
 | `query --policy remote-on-miss` | shared | coverage inspection、远端补洞和 cache materialization 处于同一普通操作窗口 |
 | `metadata-refresh` | exclusive | 官方 metadata sidecar refresh 与普通 fill/read plan 互斥 |
-| tick `repair-locks`（含 DryRun） | exclusive | 枚举、创建 legacy/逐文件 lock 到完成期间取得 root-wide stable view，不与协作式 reader/writer/fill 交错 |
+| tick `repair-locks` DryRun / `--apply` | shared / exclusive | DryRun 只读枚举；Apply 在创建逐文件 lock 到完成期间取得 root-wide stable view |
 | cache refresh、`fill --repair-stale` | exclusive | 删除/重建与普通 fill/read plan 互斥 |
 | tick/minute/daily `verify`、tick/minute/daily `doctor` | exclusive | coverage/replay/深度诊断获得 root-wide stable view |
 | 真实 tick/minute/daily `purge` | exclusive | 日分区、月文件或 daily symbol 文件删除不与普通 fill/query 交错 |
@@ -397,8 +384,7 @@ tick、minute 和 daily 都没有自动 retention、max-byte eviction 或后台 
 - daily purge 要求恰好一个 logical `--symbol`，拒绝日期参数，并删除该 symbol 的完整 `.tqdk` 文件。
 `fill --repair-stale` 是另一条显式 minute maintenance path，不能和 `--dry-run` 或 tick 使用；它只在
 同一 root remote-fill lock 和 repair 所需 auth preflight 成功后删除已由 active snapshot 比较定位的冲突整月
-分区，并立刻由同一 remote fill 请求补齐。lock busy 或 auth 缺失时不删除任何分区。
-`repair-locks` 不属于上述数据维护：它只补缺失的 tick legacy/逐文件 companion lock，绝不能改用 fill 或 compaction。
+`repair-locks` 不属于数据维护：它只补缺失的 Tick 逐文件 companion lock，绝不能改用 fill 或 compaction。
 
 ## 验收
 

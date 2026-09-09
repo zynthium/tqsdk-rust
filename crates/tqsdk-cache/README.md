@@ -1,5 +1,9 @@
 # `tqsdk-cache`
 
+> 当前 runtime 已退役 Tick v2/v3 fallback：普通读写遇到旧格式会 fail closed。
+> Tick `migrate` 只封存 schema 4 的闭月日分区；DryRun 若报告 `legacy_files > 0`，
+> 必须先用冻结的 pre-v4 迁移器处理，不能由当前二进制原地转换。
+
 首次 Ctrl+C/SIGTERM/SIGHUP 停止新任务，给当前窗口最多 5 秒收尾；再次信号立即退出。
 日线按 32 天片段续填，分钟线独立暂存 terminal 子窗口，重启重拉必要重叠后继续。
 TTY/plain/JSONL 区分 received_rows、committed_rows、staged_rows。
@@ -140,15 +144,18 @@ header 与 embedded logical symbol，`doctor` 完整解码 `.tqdk` 并校验 che
 同时包含三类缓存。
 `metadata-refresh` 不属于 cache family；保留默认 `--kind tick`，只支持 `--market futures`。
 
-Tick 显式迁移同时完成旧 schema 转换与封闭月份打包。DryRun 会报告 `legacy_files`、`pack_source_files`、`pending_month_packs`、迁移合约和容量估算；即使旧 schema 已全部转换，只要仍有待封存的 current 日文件，`--apply` 也会继续执行。Apply 必须停止同一 root 的旧进程，并把完整 mixed generation 备份到 cache root 外：
+Tick `migrate` 在当前二进制中只负责把 schema 4 的封闭月日分区打包。DryRun 仍报告
+`legacy_files`、`pack_source_files`、`pending_month_packs` 与容量估算；若
+`legacy_files > 0`，Apply 会 fail closed，并要求先用冻结的 pre-v4 迁移器。默认缓存已完成旧格式迁移。
 
 ```bash
 tqsdk-cache migrate --kind tick --cache-dir DIR
 tqsdk-cache migrate --kind tick --cache-dir DIR --apply --backup-dir DIR-before-tick-v4
 ```
 
-每个月包先深验并原子发布，再删除源日文件；发布后月包即为权威，残留日文件只允许在 row key/coverage 被月包包含时校验删除，不能覆盖月包修订。完整 backup 的 v2 durable manifest 绑定持久化 cache generation，并记录每个数据/锁文件的 SHA-256。Ctrl-C/崩溃若发生在改写阶段，使用同一 cache root 与 backup 目录重跑会先清理严格命名的未发布 generation/COW 候选，再验证整代备份及当前待迁移输入并续作；错根、备份损坏、同路径源被非迁移替换、畸形候选、非空但无完整 manifest 或出现未受保护的新输入均 fail closed。
-它显式调用官方 metadata source，在 exclusive root remote-fill lock 内保存 immutable sidecar；不会改写
+每个月包先深验并原子发布，再删除源日文件；发布后月包即为权威。中断重跑只校验并删除
+已被月包包含的残留日文件，不覆盖月包修订。backup manifest 绑定 cache generation，并记录
+数据/锁文件的 SHA-256；错根、备份损坏、源被替换、畸形候选或未受保护的新输入均 fail closed。
 `.tqbn` 或 minute 文件。新 snapshot 覆盖请求窗口即可供 `CacheOnly` 解析；除 `KQ.m@` 外的 native daily fill 会忽略覆盖较窄的 retained sidecar，主连/tick/minute 仍要求完整 metadata。若已有更宽、兼容的 active
 snapshot，显式维护仍原子推进 active pointer；旧 snapshot 按 content hash 保留，可供已绑定旧 cache
 partition 的 reader 使用。
@@ -203,28 +210,26 @@ tick、minute 与 daily cache 都没有自动 retention、max-byte eviction 或�
 
 ### Tick companion lock repair
 
-`repair-locks` 只接受 `--kind tick`（也是默认 kind）；`--kind minute|all repair-locks` 是 usage error。
-它用于补回**既有** tick TQBN 缺失的 legacy `<partition>/.tqbn.lock` 和逐文件
-`<file>.tqbn.lock` companion lock，而不是修复行情数据。先停止同一 cache root 的所有 reader/writer，再由
-可写 owner 执行：CLI 在整个操作中持有 exclusive root stable-view gate；`--apply` 先以非截断方式创建每个
-唯一 Tick 分区缺失的 legacy lock，再为缺失的逐文件 sidecar 取得 normal exclusive TQBN/file lock。
+`repair-locks` 只接受 `--kind tick`（也是默认 kind）；`--kind minute|daily|all` 均拒绝。
+它只检查当前逐文件 `<file>.tqbn.lock` companion lock。调用方先停止同一 root 的
+reader/writer，再由 CLI 取得 exclusive stable-view gate；`--apply` 通过正常 TQBN/file
+排他锁路径以 non-truncating open 创建缺失 sidecar。
 
 ```bash
-# 默认 DryRun：检查每个 Tick 分区的 legacy lock，并逐文件检查 sidecar。
+# 默认 DryRun：逐文件检查当前 sidecar。
 cargo run -p tqsdk-cache -- \
   repair-locks \
   --cache-dir /var/lib/tqsdk/history --kind tick
 
-# 只有确认计划且 reader/writer 已停止后，才创建缺失的 legacy 和逐文件 lock file。
+# 确认计划且停止 reader/writer 后，只补缺失的逐文件 lock。
 cargo run -p tqsdk-cache -- \
   repair-locks \
   --cache-dir /var/lib/tqsdk/history --kind tick --apply
 ```
 
-DryRun 不创建 TQBN companion lock；`--apply` 只创建缺失的 regular lock，绝不改写 TQBN bytes、rows、coverage、
-index 或 remote/auth state，也绝不调用 fill 或 compaction。JSON 将 unique parent 的 legacy 结果放在
-`legacy_partition_locks[]`（并提供 `legacy_partition_locks_*` 计数），逐文件结果保持在 `files[]`。无效 lock、
-I/O 或 lock 错误会标为 `failed`，但后续目标仍会继续尝试；任一 legacy 或逐文件失败都以 exit code `1` 结束。
+该命令绝不改写 TQBN bytes、rows、coverage、index 或 remote/auth state，也不调用 fill/compaction。
+JSON 中 `legacy_partition_locks[]` 及其计数字段为既有输出兼容保留，固定为空或零。
+无效 sidecar、I/O 或 lock 错误标为 `failed`，后续文件仍继续尝试；任一逐文件失败以 exit code `1` 结束。
 
 ## 常用命令
 
@@ -527,7 +532,7 @@ cargo run -p tqsdk-cache -- \
 | 命令 | tick | minute | daily |
 | --- | --- | --- | --- |
 | `inventory` | 快速枚举日分区和文件问题，不解码 records | 快速枚举月文件，不解码文件内容 | 读取 fixed header 与 embedded logical symbol，不读 rows/checksum |
-| `repair-locks` | 默认 DryRun 检查每个 legacy 分区 lock 并逐文件检查 sidecar；`--apply` 只补既有 `.tqbn` 缺失的 lock | 不支持 | 不支持 |
+| `repair-locks` | 默认 DryRun 逐文件检查 sidecar；`--apply` 只补既有 `.tqbn` 缺失的 lock | 不支持 | 不支持 |
 | `inspect` | 显式 physical cache symbol 的 coverage | 显式 logical cache symbol 的 final-60s coverage | 显式 logical cache symbol 的 native-1d final coverage |
 | `verify` | CacheOnly coverage，选配完整本地 tick replay | CacheOnly final coverage，选配流式读取 minute rows | CacheOnly final coverage，选配读取 native-1d rows |
 | `doctor` | 深度解码 TQBN tick partitions | 深度解码 monthly minute files，并报告 `readable`、`legacy_unsupported`、`unsupported_version` 或 `corrupt` | 深度解码每个 `.tqdk` 并校验 checksum/rows |
@@ -573,7 +578,7 @@ root advisory gate 的规则固定如下：
 | 操作 | root gate |
 | --- | --- |
 | 普通 tick/minute/daily fill、`query --policy remote-on-miss` | shared |
-| tick `repair-locks`（含 DryRun） | exclusive |
+| tick `repair-locks` DryRun / `--apply` | shared / exclusive |
 | tick schema 迁移与封闭月打包 | exclusive |
 | cache refresh、`fill --repair-stale`、tick/minute/daily verify/doctor、真实 tick/minute/daily purge | exclusive |
 | inventory、fill dry-run、tick/minute/daily purge dry-run | none |

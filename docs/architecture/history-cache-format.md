@@ -12,51 +12,29 @@ Daily、Minute、Tick 共用 `TQHIST01` envelope、双提交槽、checksum、ind
 | Minute | 合约×交易月，不增加年包 | 每年最多 12 个文件；年包会放大局部刷新、修复与锁冲突 |
 | Daily | 每逻辑合约一个全历史文件 | 每日只追加最新日期；全量 payload 校验只属于 doctor/显式迁移 |
 
-Tick 开放月份写入 `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn`（`partition_scheme=1`）；显式迁移把封闭月份合并到 `series/monthly/<YYYYMM>/tick/<escaped-symbol>.tqbn`（`partition_scheme=2`）。月包内仍按交易日规范化行；server chart 的 Tick id 只在同一交易日内参与 replay 去重，不能跨日比较。
+Tick 开放月份写入 `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn`
+（`partition_scheme=1`）；封闭月份合并到
+`series/monthly/<YYYYMM>/tick/<escaped-symbol>.tqbn`
+（`partition_scheme=2`）。月包内仍按交易日组织 extent；server chart Tick id
+只在同一交易日内参与 replay 去重，不能跨日比较。
 
-封存按“候选文件深验并原子发布 → 删除源日文件”执行。月包一旦发布即为该月权威；若进程在两步之间中断，reader 优先选择月包，重跑只在残留日文件的 row key 与 coverage 均被月包包含时删除残留，绝不把残留反向合并进月包。已封存月的迟到写入直接更新月包，不重建日文件。范围 purge 以交易日为逻辑删除单位，重写相交月包、同步删除相交残留日文件并保留其余日期，避免旧日数据复活。
+封存按“候选深验 → 原子发布 → 删除日源文件”执行。月包发布后即为该月权威；若进程在发布与
+清理之间中断，reader 优先月包，重跑只删除 row key/coverage 已被月包包含的残留日文件，
+绝不把残留反向合并进月包。已封存月的迟到写入直接更新月包。范围 purge 重写相交月包并同步
+删除相交残留日文件，避免旧日数据复活。
 
-锁粒度绑定物理 mutation 单元：开放 Tick 日文件、封闭 Tick 月包、Minute 月文件、Daily 合约文件各自使用文件锁；不同物理文件可以并发，同一文件串行。普通 fill/query mutation 持 root shared gate；lazy reader 从枚举物理路径到所有候选路径均已打开/固定同样持 root shared gate，随后由 opened-file snapshot 固定剩余内容。月包封存、格式迁移和破坏性 purge 持 root exclusive gate；无法取得时 fail-fast 为 `CacheBusy`，再按稳定路径顺序取得文件锁。logical symbol lease 只负责远端补洞去重，不能替代文件锁。
+锁粒度绑定物理 mutation 单元：开放 Tick 日文件、封闭 Tick 月包、Minute 月文件、
+Daily 合约文件各自使用逐文件 sidecar lock。普通 fill/query 持 root shared gate；
+lazy reader 在候选路径全部打开/固定前同样持 root shared gate；封存、格式迁移和破坏性维护
+持 root exclusive gate，再按稳定路径顺序取得文件锁。目录级 Tick lock 已退役。
 
-快速库存把物理月包映射回 index/coverage 中的逻辑交易日，仅读 common header/index，不扫描 Tick payload。完整 migration backup 使用独立 v2 manifest：cache root 内持久化 generation identity，manifest 逐文件记录相对路径、长度、原 schema 与 SHA-256。重试在 exclusive gate 内先清理严格命名的未发布 generation/COW 候选，再校验 generation、备份摘要和当前仍存在的输入；只有 legacy→当前 schema 的合法原子改写可解释源摘要变化。
+Daily 只追加最新日期，Minute 只处理受影响交易月；正常续填依赖 header/index/coverage，
+不会重读全历史 payload。深度 checksum/row 验证只属于 doctor、显式 verify 或迁移。
 
-## P1 工作区过渡：统一容器（尚未部署）
-
-当前工作区的 native daily/Minute reader/writer 已接入 `TQHIST01`；Tick store 已按 magic
-接入 common Tick schema 4；既有 TQBN 按 magic 保持读写兼容，但只有已存在的 legacy 文件继续追加。Minute 公开身份为
-`tqsdk.minute-kline.monthly.v6`，交易月目录仍不变。
-默认真实缓存和已安装程序尚未切换，不能把此阶段构建直接覆盖到现有运行环境。
-三类容器与冷 Tick 月包实现已完成；真实数据迁移和部署仍未完成。
-下文旧 Kline KLOG 描述是迁移输入合同，不再是本工作区的新写入格式。
-
-Minute 新 reader 固定 FD/index 后逐相交块解码，保留有界单块缓冲；空覆盖 extent 无需
-数据块。普通路径拒绝旧 KLOG/raw，显式迁移先备份，再对候选文件逐字段比较后发布。
-历史 v4 迁移入口仍为显式兼容工具；Snapshot feature probe 和 doctor 必须识别新容器。
-Timeline 的内存 snapshot 在 load 完成后已脱离路径，无需长期持有 FD；`.tqbn`/`.tqmk`/`.tqdk` 作为 family/layout hint 保留，
-真正的编码身份只由 magic/index 决定，避免为统一 suffix 引入一次无收益的全盘迁移。
-
-Tick 公共块 codec 已实现为 `TickXorV1`（payload magic `TX01`）：首行保存全部
-31 个 64-bit word，后续行用 31-bit 变化掩码和规范 unsigned LEB128 表示 XOR。
-价格不做定点量化，保留浮点位模式、全部五档盘口、整数极值和独立 epoch presence/value。
-每块最多 8,192 行，解码前校验行数/字节界限；内存预算按 Tick 对象而非 Kline 对象计费。
-相同时间戳允许，块内时间不得倒退；各块独立校验/压缩且无需前块解码状态。
-Tick codec 已通过按 magic 分派接入现有 store 的 reader、write/coverage/provisional、
-此为迁移的 expand 阶段：不会隐式转换旧文件，但新建 Tick 日分区已切换到 common schema 4。
-Tick 的 `Unverified` extent 只表示已提交行，不产生 final/provisional 完整覆盖；
-coverage overlay 保留现有行切片，边界处才解码块，provisional 不得降级 final。
-普通 reader 在短锁内固定 FD/index，释放锁后逐块读取；共享 inode 写入沿用 COW。
-时间与 ID 均严格递增的追加不扫描旧 payload；块索引保存 ID 范围及严格顺序见证，
-解码时逐块复核。批内/跨批/旧块非单调、时间重叠或达到压实阈值时，仍原子重建
-整分区；旧重放规则能递归传播，不能假设固定 20 分钟尾窗足够。
-common Tick 文件诊断报告 schema 4、可变行宽；旧 v3 迁移命令在规划阶段拒绝较新 schema。
-
-**已批准的语义修正：**旧 Tick reader 的重放规范化依赖请求范围；同 ID/同 payload 的
-两行相差 10ms 时，全日读取只保留后行，而仅覆盖前 5ms 的读取仍保留前行。
-当前 common 异常写入路径按整日规范化后永久替换，不能同时复现上述两个结果。
-用户已批准改为稳定的交易日级规范化：迁移等价 oracle 是旧数据整交易日读取后的
-canonical set，不再承诺复现旧版范围相关的窄查询异常。新建 Tick 日分区默认写入
-离线 Tick 迁移已有显式候选验证入口；真实目录切换、运行时旧格式收缩和冷包仍须按 migrate-verify-contract 顺序完成。
-离线 Tick 迁移、运行时旧格式收缩和冷包写入放大优化仍未完成。
+Tick schema 4 使用 `TickXorV1`（payload `TX01`）可变宽编码：首行完整，后续行编码
+id/time delta 和变化字段。每条接收 snapshot 都持久化；canonicalization 只消除已证明的
+跨批重放。pre-schema-4 Tick 文件在 read/coverage/write/compact 路径统一 fail closed，
+只能用冻结迁移器处理。
 
 新容器使用双提交槽、独立压缩/校验块、物理 block 表和独立的逻辑 extent 表。
 extent 明确记录 coverage、metadata identity、finality 和有效行切片；零切片表示
@@ -148,27 +126,13 @@ manifest、CURRENT、lease、发布/恢复/GC 合同见 [history-snapshot-manife
 
 ## 文档定位
 
-本文档定义 `tqsdk-data` 历史序列缓存当前的 common-container 格式，以及迁移期只读识别的 TQBN daily v2/v3 (`.tqbn`) 格式。
-它只约束本仓库 Rust cache 的默认持久化合同，不扩大 public API，也不承诺兼容旧 Python
-`DataSeries` binary/mmap cache、旧 `.tqseries` cache 或旧单文件 `.tqbn` layout。
+本文定义 `tqsdk-data` 历史缓存当前格式与恢复合同，不承诺兼容 Python
+`DataSeries` binary/mmap 文件。Daily、Minute、Tick 均使用 `TQHIST01` envelope；
+payload codec 和物理后缀按数据族区分。
 
-相关文档：
-
-- [data facade / research tooling](api-data.md)
-- [backtest tick cache operations](backtest-tick-cache-operations.md)
-- [backtest cache operator CLI](backtest-tick-cache-cli.md)
-- [crate 边界审计](crate-boundaries.md)
-- [验收标准与测试矩阵](validation.md)
-
-## Current Decision
-
-`TQHIST01` common container 是 `tqsdk-rust` history cache 当前默认和 canonical 格式。
-
-TQBN daily v2/v3 是一个 DBN-like 的旧内部二进制记录流格式，由 `tqsdk-data` 的
-crate-internal codec 和 store adapter 在迁移期读写。新建 Tick 分区使用 common schema 4；
-旧 TQBN 文件可继续追加，或经显式、带备份且逐文件验证的迁移入口转换，但不再作为新增文件目标。
-旧 `.tqseries` 和旧单文件 `.tqbn` layout 不是默认格式，不作为新增缓存文件目标，
-也不提供兼容读取或迁移 store。
+Tick 新建、读取、追加、coverage、provisional、compact 与月包封存都只接受 common schema 4。
+pre-schema-4 Tick 文件 fail closed；旧默认缓存已由冻结迁移器完成一次性迁移。Kline TQBN
+codec 仍服务其现有路径，但不能借此重新引入 Tick v2/v3 fallback。
 
 默认构建启用 Cargo feature `tqbn-zstd`。hot append writer 对 records block 使用 zstd level 1；
 append-log compaction 重写 records block 时使用 zstd level 3。两种路径都只有压缩后 payload
@@ -335,187 +299,70 @@ open/close OI。结算价、涨跌停价目前不在 Kline 或 daily cache schem
 cache 文件。此 phase 与 official high-period chart 的实际一致性不由固定 CST 假设推断；tag CI 必须以外置、
 哈希验证的 official `tqsdk-python` golden packet 验证物理夜盘/假日、`KQ.m` roll、`KQ.i` 的 1d/2d/5d/28d。
 
-## Tick common schema 4 File Identity
+## Tick schema 4 File Identity
 
 | 项 | 值 |
 | --- | --- |
 | format id | `tqsdk.history-container.tick.v1` |
 | schema version | `4` |
+| file magic | `TQHIST01` |
 | file extension | `.tqbn` |
-| root layout | `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn` 和 `series/<YYYYMMDD>/kline/<duration_ns>/<escaped-symbol>.tqbn` |
+| hot layout | `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn` |
+| sealed layout | `series/monthly/<YYYYMM>/tick/<escaped-symbol>.tqbn` |
 
-路径语义：
+schema 4 只定义 Tick common-container。Kline 虽保留同一 `.tqbn` 后缀，但仍使用下文独立的
+Kline TQBN backend；后缀名不能作为格式分派依据。
 
-- `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn` 存储某一交易日的 tick history series，
-  也是 `BacktestTickCache` 的 tick-only 持久缓存分区文件。
-- `series/<YYYYMMDD>/kline/<duration_ns>/<escaped-symbol>.tqbn` 存储某一交易日的 K 线 history series；
-  `duration_ns` 是该 K 线周期的纳秒整数值。
-- `<YYYYMMDD>` 是中国市场交易日；18:00 CST 之后归下一交易日，周末归并到下一个周一交易日。
-- `<escaped-symbol>` 是用于文件系统路径的 symbol escape 结果；它是 cache 内部路径合同，
-  不是新的 public symbol 表示法。
-- `HistorySeriesCache::tick_series_path(...)` / `kline_series_path(...)` 返回逻辑 series
-  路径，不代表单个物理文件；`scan()`、coverage、purge 和 compact 会遍历匹配的全部日分区文件。
+热分区按交易日保存。闭月维护在 root-exclusive gate 下先验证同一 symbol 的全部分区，再原子发布
+月包并删除已经包含的日源；当前月继续按日追加。18:00 CST 后归下一交易日，周末归并到下一个
+周一交易日。逻辑 series path 不代表单个物理文件，range reader、coverage、purge 和 compact 都按
+请求区间枚举日文件与月包。
 
-## 文件锁、opened-file snapshot 与尾部恢复
+## 文件锁与 opened-file snapshot
 
-`.tqsdk-cache-operation.lock` 是可写 cache root 的根级门禁。普通写者与命中已有文件的 reader 取得
-shared；迁移、purge、maintenance 与 `Refresh` 取得 exclusive。reader 先枚举候选路径；没有任何实际
-文件时直接返回 miss，不为只读空根创建锁。命中时在 shared 根锁内重新枚举，并在全部候选文件打开、
-固定 FD 后释放根锁。调用方已持同根 exclusive token 时，只有显式 token-aware 的同步 Tick 写、coverage
-复查与范围 compact 可跳过重复取锁；授权按线程作用域收回，不能使其他线程绕过 exclusive。
+`.tqsdk-cache-operation.lock` 是 cache-root generation gate：普通读写持 shared；迁移、purge、
+closed-month sealing、repair apply 与 destructive maintenance 持 exclusive。调用方已经附加同根
+exclusive token 时，只能通过显式 caller-held bypass 进入内部操作，不能再次取得 shared lock 自锁。
 
-这里的 per-file lock 保护 writable cache root 内的文件操作；它不同于 generation
-`lease.lock`。已发布 generation 必须只读，relay 的 shared generation lease 保护整个 detached
-query/coordinator 生命周期，publisher 只有取得 exclusive generation lease 才能 GC。结构共享时
-`.tqbn`、`.tqmk`、`.tqdk` 的新 snapshot clone 均禁止 hardlink；canonical Kline 的旧 raw
-generation 不再兼容，须私有克隆、显式迁移后重新发布，不能原地转换。
-
-每个 `.tqbn` 日分区使用同路径的 `.tqbn.lock` sidecar 做 advisory file lock；该 sidecar 同时保存
-最近一次确认提交的 tail checkpoint。writer 持 exclusive lock，reader 持 shared lock。首次建文件在
-exclusive lock 内写临时文件、flush/sync 后原子 rename，并同步父目录；reader 不会观察半初始化 prefix。
-
-reader 的打开协议消除“先看文件不存在、writer 随后建锁和文件”的 TOCTOU：
-
-- 已有 sidecar 时，reader 先取得 shared lock，再打开 data file；锁内仍不存在才是明确的 missing snapshot。
-- sidecar 与 legacy lock 都不存在时，reader 打开 data file 并暂时锁住该已打开文件，然后再次检查
-  sidecar；若 writer 已创建 sidecar，reader 切换到它并等待 writer，不能把正在初始化的文件误判为损坏。
-- checkpoint 校验成功后，reader 记录已打开 file handle 和 confirmed prefix length，即可释放 shared
-  lock，再从该 handle 读取 snapshot。后续 append 不超过 confirmed prefix；并发 compaction 的 rename
-  也不会改变 reader 已打开的 inode snapshot。
-- 没有有效 checkpoint 的旧文件在 shared lock 内记录已打开 file handle 和当时的完整物理长度，之后可释放
-  lock；解码必须严格校验该捕获长度内的全部内容，不能忽略或截断其中的损坏 suffix。
-
-每次成功 append/coverage/provisional commit 在 data file `flush()` / `sync_data()` 后更新 tail
-checkpoint。checkpoint 包含 confirmed file length、该边界前的 bounded tail checksum，以及最新
-coverage-index head offset。coverage 与 range reader 只读取这个 confirmed prefix；checkpoint 之后的
-短写、截断 block 或 checksum 损坏 suffix 不参与当前读取，下一 writer 在 exclusive lock 内从 confirmed
-边界继续验证并截断坏 suffix 后恢复。checkpoint 缺失、版本未知、长度越界或 checksum 不匹配时，不得
-把任意 prefix 猜成安全快照，仍按旧文件严格全量校验。
-
-该协议保证当前实现之间的进程内/跨进程并发读写与异常恢复，不承诺新旧 binary 版本长期混跑。
-升级 cache writer 时应同步升级所有持续访问同一 root 的进程；per-file lock 不能让不了解 tail
-checkpoint 的旧 reader 获得新 reader 的 confirmed-prefix 语义。
+每个当前 Tick 文件只使用同路径 `<file>.tqbn.lock` 做 advisory per-file lock。退役的
+`<partition>/.tqbn.lock` 不再读取或创建；public repair report 中相应字段仅保留为空/零的兼容壳。
+writer 在锁内完成 append 或 copy-on-write 发布；reader 在 root gate 内枚举并打开所有候选 FD，随后
+读取已固定的 inode generation。硬链接数据文件在 mutation 前必须分离，避免改写 snapshot inode。
 
 ## Binary Contract
 
-TQBN 文件是按记录顺序解码的二进制 record stream。
+### Tick schema 4 common-container
 
-- 所有 scalar fields 都使用 little-endian 编码。
-- 每条 record 都以 `TqbnRecordHeader` 开头。
-- `TqbnRecordHeader.length_words` 表示整条 record 的长度，单位是 4 字节 word。
-- 一条 record 的 byte span 是 `length_words * 4`，从 `TqbnRecordHeader` 起算。
-- reader 遇到未知 record type 时，必须使用 `length_words * 4` 跳过整条 record。
-- `length_words` 不能让 record 短于 `TqbnRecordHeader`，也不能越过文件尾；这类输入按格式损坏处理。
+文件以 `TQHIST01` 开始，包含有界 metadata、两个固定 commit slot、不可变 data block 与 embedded
+index/extent。有效 commit slot 指向一个完整且 checksum 正确的 index generation；reader 选择最新有效
+commit。append 先写 data/index 并持久化，再切换 commit slot，因此未提交尾部不可见，torn slot 可回退
+到上一 generation。coverage 与 provisional checkpoint 都属于 committed embedded state，不使用 Kline
+TQBN 的 `TQCI` chain 或 sidecar tail checkpoint。
 
-record stream 可以包含 metadata、coverage 和 data rows 等内部 record。record type 的枚举值、
-metadata layout 和 codec helper 不进入 public API。
+### TickXorV1 sparse payload
 
-每个 block 使用 `TQBB` block header 包裹 payload。block header 中的 flags byte 当前只定义
-`0x01 = zstd records payload`。checksum 始终覆盖实际落盘 payload：未压缩 block 校验原始 records，
-zstd block 校验压缩后的 bytes；reader 校验 checksum 后再按 flags 解码 records。未启用
-`tqbn-zstd` 的 reader 遇到 zstd block 必须返回明确的格式错误，不能静默返回坏数据。
+schema 4 Tick data block 使用 `TX01` sparse payload：首行保存完整 keyframe，后续行保存 id/time 的
+zigzag-varint delta、changed-field bitmask 与变化字段值。depth、row count、payload 长度、checksum 和
+字段 mask 都有上限；损坏或未知编码 fail closed。
 
-### TickDelta sparse payload
+writer 以 8,192 行为目标块大小。顺序 append 只解码可能重叠的边界块；ID 回退或跨批重放改用
+交易日级稳定 canonicalization，维持 last-write-wins 与 payload replay 语义。实现不再创建 SQLite
+spill，也不保留 pre-schema-4 Tick reader。普通范围读取只访问相交块及必要 index；doctor、verify 与
+compaction 才深验全部块。
 
-v3 的 Tick `Records` block 可使用 `TQTD` payload：首行是完整 keyframe；后续每一行保存 id/time 的
-zigzag-varint delta、changed-field bitmask 与每个变化字段的值。depth、row count、保留字节和全部变长字段
-均严格校验。字段使用既有 fixed-point / NaN sentinel / epoch 编码，因此可逐 bit 还原 Tick 的 id、时间、
-成交字段与五档盘口。
+### Coverage and provisional state
 
-这不是按 500ms 或任意 tick 频率补齐：每个收到的 snapshot 都保留，`last_price=null`、未成交或连续相同
-盘口也不删除。每个 block 最多 8192 行；若 delta payload 加上可选 zstd 后不小于既有固定 record payload，
-writer 回退固定 records。稀疏合约由 field-delta 获益，随机变化合约不会被更差编码强制放大。
+final coverage、row count、id bounds 与单调性证明随 schema 4 embedded index 一起提交。provisional
+checkpoint 显式记录 `range_start_ns`、`complete_through_ns`、`as_of_ns`、rows 与可选 id range；它不计入
+final cache hit，且不能覆盖或降级已经提交的 final coverage。
 
-TQBN v2/v3 只保留为迁移期兼容路径，不是长期格式合同。新 writer 对既有 TQBN 文件继续安全追加，
-对不存在的分区创建 common schema 4；应尽快执行 `tqsdk-cache migrate --apply --backup-dir DIR` 收缩兼容面。
-旧 binary 不能读取 common schema 4。真实迁移前必须停止所有旧 reader/writer，先保留“任何 common writer 启动前”的完整
-generation，再部署能读取两种 magic 的新 binary，并在根独占锁内备份和转换。旧 binary 回滚必须同时恢复该整代数据，
-不能只替换可执行文件。
+### Kline TQBN backend（保留）
 
-### Records Range Index
-
-新写入和 append-log compaction 会在每个 market-data records block 后紧跟一个 crate-internal
-`TQRI` `Index` block。entry 记录前一个 records block 的 offset 和其行时间范围 `[start, end)`；
-
-当前 writer 写 records-index v2：除 offset/range 外，还带首尾 row id、首尾 timestamp 与严格递增
-id/timestamp 标志。只有请求完整覆盖该 block 且这些 v2 事实证明顺序时，streaming planner 才可直接采用
-index，避免为规划再次解压/扫描 payload；边界 block、v1 index、缺失/未知/不一致 index 一律仍解码扫描。
-对于最终仍可 streaming 的 fallback block，reader 最多保留 8 MiB 已解码 payload 并在首次消费时复用，
-避免同一 block 的第二次 decode；超过该硬上限仍走重读路径，绝不把整分区 materialize 到内存。
-这只是一项保守加速，不改变 last-write-wins、范围过滤或损坏数据的 fail-closed 语义。
-
-`TickDataSeriesReader::read_telemetry()` 暴露 reader-local 的 TQBN 工作量：`bytes_read` 和
-`bytes_decompressed` 只统计参与 records-row 规划/解码的 records payload，排除 metadata/index payload；
-`blocks_skipped` 只统计依据 range index 在 payload decode 前跳过的 records block；`blocks_decoded`
-包括 streaming、materialized fallback 和 planner fallback 实际解码的 records block；
-`materialized_rows` 是 fallback 保留给 iterator 的最终 rows。telemetry 是旁路计数，不得改变排序、
-canonicalization、range filtering 或 fallback 决策。
-records block 先写、index 后写，异常中断最多留下无索引 block。v3 reader 遇到缺失索引、
-offset/range 不合法或不认识的 index 时，对该 records block 回退完整解码；这类索引演进不改变 v3
-file identity 或 schema version。
-
-范围 reader 顺序读取小型 block header/index，只读取、校验并解压与请求范围相交的 market-data
-payload。metadata、coverage 和 index 自身仍校验；未知 flags 仍必须拒绝。`scan()`、`diagnose()`、
-compaction 等完整性路径继续解码整个文件，因此范围读取跳过无关 payload 不会替代深度诊断。
-
-### Legacy Tick canonicalization spill
-
-当 records-index 无法证明 Tick blocks 的 id/time 单调性时，reader 仍保留既有的
-last-write-wins、payload replay 与 range filtering 规则；但不再把整个 partition 的
-`Vec<HistorySeriesRow>` 留在 heap。它在 reader-owned OS temporary directory 中建立临时
-SQLite 排序/集合索引（page cache 上限 4 MiB），将最终有序 Tick 写成 length-delimited fixed
-binary spool（保留全部浮点 bit pattern，包括非有限值），再由同一个 reader 顺序读取。
-
-该目录从不进入 cache root、manifest、checkpoint 或 lease 集合；reader drop 后删除。单行编码上限
-64 KiB，单次 legacy spill 输入上限 8 GiB；超过任一边界或临时 I/O/SQLite 失败均 fail closed，
-不会退回无界 materialization。`read_telemetry()` 继续报告 TQBN block decode 工作；这条路径的
-`materialized_rows` 保持 0，因为结果只驻留在临时 spool 而非 reader heap。
-
-### Coverage Index Chain
-
-新建日分区和 append-log compaction 会写入 crate-internal `Index` block 链：文件首个 block 是固定
-`TQCI` root，之后每个 coverage record block 后紧跟一个 index block。每个 entry 指向其紧邻的、未压缩的
-固定宽度 coverage block，并记录前一个 index offset 与同一 `[start, end)` range。它不改变 format id 或
-schema version，普通 record reader 可以忽略 `Index` block。coverage chain 与 `TQRI` records index
-可以交错存在；coverage tail 查找会忽略合法 `TQRI` entry。
-
-新文件的 tail checkpoint 保存 confirmed prefix 内最新 `TQCI` head，因此 coverage inspection 不要求
-物理文件最后一个 block 恰好是 `TQCI`。只要 checkpoint 的 confirmed length/tail checksum、head offset、
-整条链到首 block root，以及每个引用 block 的 type、offset、checksum、coverage record 和 range 都匹配，
-即可只读小型索引。索引链不完整或任一校验失败时，reader 回退扫描 confirmed prefix；没有有效 checkpoint
-的旧文件才回退严格扫描整个物理文件。任何路径都不能读取未确认 suffix 或把损坏分区判断为 complete。
-coverage 永远在 rows 已 `sync_data()` 后写入；异常崩溃可以留下 coverage gap，但不能让 coverage 比其 rows
-更早持久化。
-
-每个 `Coverage` / `ProvisionalCoverage` record 与紧邻、引用它的 `TQCI` block 构成恢复原子对。writer
-恢复时若发现 record 后没有合法相邻 `TQCI`，必须从该 record 起点截断；它属于未确认 tail，fallback/full
-scan 也不得把它重新解释为已提交 coverage。
-
-### Provisional Coverage Checkpoints
-
-这里的 `ProvisionalCoverage` 是行情语义上的盘中高水位 record，不是上一节 `.tqbn.lock` 中用于确认
-物理文件 prefix 的 tail checkpoint；两者必须分别验证。
-
-当前交易日盘中回填使用独立的 `ProvisionalCoverage` record（rtype `19`），记录
-`range_start_ns`、`complete_through_ns`、`as_of_ns`、row 数和可选 tick id 范围。
-对应 `TQCI` entry 使用 `0x02` provisional flag，并与 final coverage 共用同一条索引链。
-
-provisional checkpoint 的合同是：
-
-- 只表示“截至 `as_of_ns`，`[range_start_ns, complete_through_ns)` 已完成一次远端快照”；
-  它永远不合并进普通 final coverage，也不能令 `BacktestTickCoverage::is_complete()` 为真。
-- `range_start_ns`、`complete_through_ns - 1` 和 `as_of_ns - 1` 必须映射到同一个
-  TQBN trading-day partition；跨分区 checkpoint 必须在写入前拒绝。
-- 重跑盘中 fill 可以从 checkpoint 前固定 overlap 处继续，以覆盖边界迟到数据；新 checkpoint
-  只有在本轮 rows 已持久化且远端 range 成功结束后才追加。远端明确成功结束的空增量也可以
-  推进 checkpoint；取消、超时或未确认结束不能推进。
-- provisional fill 只追加 rows/checkpoint，不在每次盘中续填后重写全历史；final reconcile
-  才执行 compaction，以合并碎片、提高压缩率并清理失效 checkpoint。
-- 一旦 final coverage 完整覆盖 checkpoint，读取端立即忽略它；后续 compaction 会物理淘汰
-  已被 final coverage 取代的 checkpoint，并只保留每个起点最新的有效 checkpoint。
-- 同一 v3 reader 不认识 rtype `19` 时按 `length_words` 跳过 record；不认识 `0x02` 索引 flag 时
-  回退扫描 record stream。它不能把 provisional 错判为 final；这不构成对 v2/v3 binary 长期混跑的承诺。
-
+`series/<YYYYMMDD>/kline/<duration_ns>/<escaped-symbol>.tqbn` 继续使用 Kline TQBN framing。
+`TQBB` record blocks、`TQCI` coverage-index chain、`TQRI` range index、
+`TqbnRecordHeader.length_words` 与 sidecar tail checkpoint 的合同仅适用于该 backend，不属于 Tick
+schema 4。启用 `tqbn-zstd` 时，只有压缩后更小才设置压缩 flag；checksum 始终覆盖实际落盘 payload，
+未启用该 feature 的 reader 遇到压缩 block 必须明确报错。
 ## Price Encoding
 
 价格字段使用固定小数点 `i64` 编码：
@@ -534,21 +381,14 @@ UNDEF_PRICE = i64::MAX
 
 ## Compatibility
 
-TQBN reader 的兼容规则是：
+Kline TQBN reader 继续遵循其 record/block 向前兼容规则；这不构成 Tick schema 兼容承诺：
 
-1. 已知 v1 record type 按 v1 struct 的已知 prefix 解码。
-2. 如果 `length_words * 4` 大于 v1 struct 长度，reader 解码 v1 已知字段后跳过尾部额外 bytes。
-3. 如果已知 record type 的长度短于 v1 struct 所需长度，reader 必须拒绝该 record，除非有明确的
-   compat module 负责该旧 layout。
-4. 未知 record type 一律按 `length_words * 4` 跳过，不影响同一文件内后续已知 record 的读取。
+1. 已知 record type 按已知 prefix 解码，额外尾部 bytes 跳过。
+2. 已知 record type 短于所需长度时拒绝，除非有明确 compat module。
+3. 未知 record type 按声明长度跳过，不影响后续已知 record。
+4. 已知 block flags 按 feature-gated path 处理；未知 flags 拒绝。
+5. `TQRI` 仅是加速索引；缺失或无效时回退完整解码对应 records block。
+6. tail checkpoint 无效时严格扫描 Kline TQBN，不得静默丢 coverage。
 
-5. 已知 block flags 按 feature-gated path 处理；未知 block flags 必须拒绝。
-6. `TQRI` 是可选加速结构；缺失或无效时必须回退解码对应 records block，不能静默漏行。
-7. tail checkpoint 是 sidecar 加速与恢复合同；无效时严格读取旧文件，不得把坏 suffix 静默裁成命中。
-
-这些规则允许后续 record 尾部追加字段，但不允许 silent truncation。任何需要读取旧 layout 的逻辑都应
-集中在 compat module 中，不能散落在 normal decode path。
-
-layout 兼容性单独处理：当前 store 只识别 daily v2 路径。旧单文件 `.tqbn`
-(`series/<escaped-symbol>/tick.tqbn` / `series/<escaped-symbol>/<duration_ns>.tqbn`) 和旧
-`.tqseries` 文件不会参与 coverage/read/purge/compact，也不会自动迁移。
+Tick runtime 只接受 common schema 4。旧 Tick TQBN 以及旧单文件布局不会进入
+coverage/read/write/purge/compact，也不会被当作 cache miss 自动覆盖。

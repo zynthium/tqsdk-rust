@@ -7,12 +7,12 @@ TQBN 追加前会保护已有共享 data inode：Unix / Windows 多链接数据�
 Fill 的日线分段、分钟 terminal 子窗口 journal、两阶段取消及 durability telemetry
 统一由本层拥有。见 [中断与续填](../../docs/architecture/history-fill-recovery.md)。
 
-工作区统一容器尚未部署：daily/Minute/Tick 已接入 `TQHIST01`；Minute 公开身份为
+工作区统一容器已部署：daily/Minute/Tick 均接入 `TQHIST01`；Minute 公开身份为
 `tqsdk.minute-kline.monthly.v6`，物理路径仍按交易月。Tick 开放月按交易日写入，封闭月由显式迁移封存为
 `series/monthly/<YYYYMM>/tick/<symbol>.tqbn`。旧 raw/KLOG/TQBN 仅供显式离线迁移。
 真实缓存和已安装 P0 程序尚未切换；旧 daily KLOG 也仅接受显式离线迁移。
-Tick store 已按 magic 接入新容器读写、coverage/provisional、压实和诊断；新分区默认创建 common schema 4，
-既有 TQBN 文件继续兼容追加。离线 Tick 格式迁移与冷月封存已实现；真实默认目录切换尚未完成。
+Tick store 仅接受 common schema 4 读写、coverage/provisional、压实和诊断；旧 Tick TQBN 文件 fail closed，
+不得视为 cache miss 或被原地覆盖。冷月封存仍由显式维护执行；旧格式恢复须配套回滚冻结迁移器。
 新容器 `Unverified` 行不能推导完整 coverage；不得据此提前迁移真实目录。
 Tick 规范化决策已批准：迁移与 common reader 按稳定交易日语义去重，不再保留随请求范围变化的旧异常结果。
 日线范围读取现在按独立块选取并固定已打开 FD，doctor 保持全量审计。
@@ -261,11 +261,10 @@ runtime commit 清理。这样保留 cursor/revision 语义，同时避免默认
   `DataClient::run_configured_history_cache_maintenance()` 的容量/保留期策略；history
   reads/writes 不会自动清理 tick 或 K 线数据
 - `HistorySeriesCache` 是稳定 facade，底层 store adapter 是 crate 内部实现细节；
-  `HistorySeriesCache::open(root_dir)` 使用 common history container；新建 Tick 分区为
-  `tqsdk.history-container.tick.v1` / schema 4，迁移期仍按 magic 读取 TQBN daily v2/v3。旧 Tick
- 首 snapshot 完整持久化，后续 snapshot 只写变化字段与 id/time delta；每条接收的 snapshot 都保留，
- 不按 tick 频率填充，也不删除无成交或重复盘口。v2 文件写入前须执行
- `tqsdk-cache migrate --apply --backup-dir DIR`。Tick 封闭月迁移先原子发布月包，再清理日源文件；月包发布后即为权威，中断重跑只能验证/删除被包含的残留日文件，不能把旧内容合回月包。完整 backup 的 v2 durable manifest 绑定持久化 cache generation，并记录每个数据/锁文件的 SHA-256；同一目录重跑会先验证备份完整性与保护范围。
+  `HistorySeriesCache::open(root_dir)` 使用 common history container。Tick 只读写
+  `tqsdk.history-container.tick.v1` / schema 4；pre-schema-4 Tick 文件一律 fail closed，
+  不会被当作 cache miss、自动覆盖或原地升级。已迁移默认 root 的旧备份只能用冻结迁移器恢复。
+  Tick 封闭月迁移先原子发布月包，再清理日源文件；中断重跑只验证/删除已被月包包含的残留日文件。
   TQBN 是 tqsdk-specific DBN-like binary format，使用 fixed-width records、fixed-point
   price storage、self-describing metadata、explicit final coverage records、non-final
   provisional checkpoint records 和 forward-compatible record lengths；market-data records
@@ -288,25 +287,15 @@ runtime commit 清理。这样保留 cursor/revision 语义，同时避免默认
   压缩 block。`--no-default-features` 可关闭该支持，`tqsdk` / `tqsdk-task` facade 提供同名
   feature 转发。
   旧 Python `DataSeries` binary/mmap cache
-  不再作为 public surface 暴露，已有旧文件不会自动迁移
-- `BacktestTickCache::open(...)` 复用同一个 store adapter；默认 tick 日分区文件路径是
-  `series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn`
-- TQBN store 支持递归 `scan()`、按保留期/总大小 `enforce_limits(...)` 清理和格式损坏报告；
-  `enforce_limits(...)` 也会执行 append-log compaction，合并重复 rows 并保留 last-write-wins 语义
-- `HistorySeriesCache::read_kline_data_series` /
-  `HistorySeriesCache::read_tick_data_series` 是显式 cache-only reader，
-  缺口返回 typed `DataError::CacheMiss`，不会联网补齐
-- `HistorySeriesCache::open_tick_data_series_reader(...)` 返回的 reader 可通过
-  `read_telemetry()` 读取 TQBN decode 工作量：records payload 的 `bytes_read` /
-  `bytes_decompressed`、storage read 与 codec decode 的累计 `io_read_ns` /
-  `decode_ns`、索引直接跳过的 `blocks_skipped`、实际 decode 的 `blocks_decoded` 和
-  fallback 留存的 `materialized_rows`。这些计数不含 metadata/index
-  payload，且不改变 streaming、last-write-wins 或 fallback 语义
-- 无法由 records index 证明单调性的 legacy Tick 页仍执行相同 canonicalization，但会使用
-  reader-owned temporary SQLite/fixed-binary spool，而非完整 `Vec`；该临时 spool 保留浮点 bit
-  pattern，该临时目录不进入 cache root，reader
-  drop 后删除。SQLite page cache 上限 4 MiB，单行编码上限 64 KiB，单次 spill 输入上限 8 GiB；
-  任一边界或临时 I/O 失败均 fail closed，`materialized_rows` 保持 0
+`BacktestTickCache::open(...)` 使用热日/冷月物理分区：
+`series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn` 与
+`series/monthly/<YYYYMM>/tick/<escaped-symbol>.tqbn`。Tick schema 4 reader 按 extent/index
+流式读取相交块并执行交易日级 last-write-wins/replay canonicalization；不再存在旧 Tick
+SQLite spill 或 v2/v3 fallback。
+
+`HistorySeriesCache::read_kline_data_series` / `read_tick_data_series` 是 cache-only；
+coverage 不完整返回 `DataError::CacheMiss`，不会联网补齐。
+`HistorySeriesCache::open_tick_data_series_reader(...)` 返回增量 reader，避免整段 materialize。
 - `HistorySeriesCache::write_kline_range(...)` / `write_tick_range(...)`
   是 typed range writer，会把 rows 与 `[start, end)` coverage 一起写入；
   `kline_coverage(...)` / `tick_coverage(...)`、`kline_series_path(...)` /
@@ -353,15 +342,12 @@ runtime commit 清理。这样保留 cursor/revision 语义，同时避免默认
   `purge_symbol_ticks_in_range(...)` 和
   `compact_symbol_ticks(...)` 是按 `(symbol, tick)` 的全部日分区文件粒度的显式运维入口；facade
   final fill 使用范围版本，只重写本轮实际远端回填范围相交的日分区，避免 cache-hit 历史被重复 compact
-- `BacktestTickCache::repair_tick_locks(BacktestTickCacheLockRepairMode)` 是只针对既有 tick
-  `.tqbn` companion lock 的运维 API：`DryRun` 按唯一 Tick 分区检查 legacy
-  `<partition>/.tqbn.lock`，并逐文件检查 `<file>.tqbn.lock`；`Apply` 先以非截断方式创建缺失的
-  legacy lock，再通过正常逐文件排他锁创建缺失 sidecar。调用方必须在停止同一 root 的 reader/writer 后持有
-  `try_acquire_consistency_read_lock()`；`Apply` 还要求可写 cache。它不改 TQBN bytes、rows、coverage 或
-  index，不访问远端/认证，也不是 fill 或 compaction。目录级和逐文件结果都保留
-  `Missing` / `AlreadyPresent` / `Created` / `Failed` 状态；单个失败不会阻止其余目标继续处理
-- `BacktestTickCache::open_read_only(...)` 不创建 root，也拒绝任何写入；`fast_inventory()` 只读取
-  daily file metadata / magic，`diagnose()` 解码全部 tick partitions 并返回文件级状态。root-scoped
+`BacktestTickCache::repair_tick_locks(BacktestTickCacheLockRepairMode)` 是 companion-lock 运维
+API：`DryRun` 逐文件检查 `<file>.tqbn.lock`；`Apply` 通过正常排他锁路径补齐缺失 sidecar。
+Apply 会取得或复用 exclusive root stable-view gate；调用方仍必须先停止同一 root 的 reader/writer。
+该操作不修改 Tick bytes、coverage 或 index，
+不访问远端/认证，也不是 fill 或 compaction。为兼容既有 JSON/public struct，旧分区锁字段
+仍存在，但固定为空或零。
   `try_acquire_remote_fill_shared_lock()` 允许普通 fill/query 并发，
   `try_acquire_remote_fill_lock()` / `try_acquire_consistency_read_lock()` 提供与普通操作互斥的 exclusive
   maintenance/stable view；它们是 advisory lock，不替代单 TQBN 文件写锁。每个 series 的远端补洞另有
@@ -626,20 +612,19 @@ materialization；[examples/api_contract_s28_option_greeks.rs](examples/api_cont
 S30 contract
 [examples/api_contract_s30_history_series_cache.rs](examples/api_contract_s30_history_series_cache.rs)
 覆盖看盘软件 / 交易终端的历史序列持久化缓存。该能力只在 builder 显式开启后
-影响 `get_kline_data_series` / `get_tick_data_series`；默认 `DataClient::from_session(...)` 仍保持无缓存行为。
-Tick 当前默认和 canonical 编码为 common schema 4；路径后缀仍为 `.tqbn` 并由 magic 分派，legacy TQBN v2/v3 仅作迁移期兼容。
-`series/<YYYYMMDD>/tick/<escaped-symbol>.tqbn` 和
-`series/<YYYYMMDD>/kline/<duration_ns>/<escaped-symbol>.tqbn` 日分区布局。旧 `.tqseries`
-和旧单文件 `.tqbn` layout 直接废弃为默认缓存格式，不提供兼容读取或迁移 store；旧 Python 兼容 binary/mmap cache
-同样不做自动迁移，也不承诺 Python 与 Rust 进程同目录互写。默认 features 启用
-`tqbn-zstd`，只改变 TQBN internal block payload，不新增用户可选 store API。
+覆盖看盘软件 / 交易终端的历史序列持久化缓存。该能力只在 builder 显式开启后
+影响 `get_kline_data_series` / `get_tick_data_series`；默认 `DataClient::from_session(...)`
+仍保持无缓存行为。Tick 当前只接受 common schema 4；路径后缀保留 `.tqbn`，热数据按日，
+封闭月份按月包。pre-schema-4 Tick 文件 fail closed，需由冻结迁移器处理。Kline 仍保留其
+TQBN 编码路径；旧 `.tqseries`、Python binary/mmap cache 不提供自动迁移或同目录互写。
+默认 features 启用 `tqbn-zstd`，只改变内部 block payload，不新增用户可选 store API。
 
 S49 contract
 [examples/api_contract_s49_tick_lock_repair.rs](examples/api_contract_s49_tick_lock_repair.rs)
 展示 `BacktestTickCache::repair_tick_locks(...)` 的显式 root gate：默认 `DryRun`，只有设置
-`TQ_CACHE_REPAIR_LOCKS_APPLY=1` 才调用 `Apply`。它只补既有 tick `.tqbn` 缺失的 companion lock；运行前
-必须停止同一 root 的 reader/writer。报告将 legacy 分区级 `<partition>/.tqbn.lock` 与逐文件
-`<file>.tqbn.lock` 分开呈现；不能把它当作 fill、数据修复或 compaction。
+`TQ_CACHE_REPAIR_LOCKS_APPLY=1` 才调用 `Apply`。它只检查或补齐当前
+`<file>.tqbn.lock` companion lock；运行前必须停止同一 root 的 reader/writer。
+报告中的 legacy 分区锁字段仅为输出兼容保留，始终为空或零；该操作不是 fill、数据修复或 compaction。
 
 `history_series_cache_microbench` 默认生成 synthetic ticks。要对本地完整 cache range 复测，设置
 `TQSDK_HISTORY_CACHE_BENCH_INPUT_CACHE_DIR`、`TQSDK_HISTORY_CACHE_BENCH_INPUT_SYMBOL`、

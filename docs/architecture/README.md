@@ -1,10 +1,9 @@
 # tqsdk-rs 分层内核架构
 
-统一历史容器 P1 尚未部署：工作区 daily/Minute 已接入 `TQHIST01`，Tick 仍使用 TQBN。
-Minute 为 monthly.v6，交易月路径不变；下文 KLOG-only 的 Kline 部分属于迁移输入，真实缓存切换尚未完成。
-当前接入和平台限制见 [格式过渡合同](history-cache-format.md)。
-TickXorV1 已按文件 magic 接入 Tick store；旧文件及新分区默认仍为 TQBN，不能用适配器接入代表迁移或三类默认切换完成。
-Tick 另有待用户确认的范围相关去重语义差异；默认切换及真实迁移暂不放行，见 [格式合同](history-cache-format.md)。
+统一历史容器已部署：daily/Minute/Tick 均使用 `TQHIST01`；Tick runtime 仅接受 schema 4。
+默认缓存 generation 迁移已完成；pre-schema-4 Tick 文件 fail closed，回滚旧备份必须配套冻结迁移器。
+Minute 使用 monthly.v6；Tick 热数据按日、封闭月份按月包。当前接入和平台限制见
+[格式过渡合同](history-cache-format.md)。
 
 历史获取的分段提交、私有暂存、有限收尾和持久化进度见 [Fill 中断与续填](history-fill-recovery.md)。
 
