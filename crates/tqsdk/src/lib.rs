@@ -2347,10 +2347,14 @@ impl BacktestBuilder {
             ));
         }
         let cache = self.resolved_cache()?;
-        let _root_gate = cache.try_acquire_remote_fill_lock()?;
+        let root_gate = cache.try_acquire_remote_fill_lock()?;
         self.symbols
             .iter()
-            .map(|symbol| cache.purge_symbol_ticks(symbol).map_err(Error::from))
+            .map(|symbol| {
+                cache
+                    .purge_symbol_ticks_with_lock(&root_gate, symbol)
+                    .map_err(Error::from)
+            })
             .collect()
     }
 
@@ -2424,7 +2428,7 @@ impl BacktestBuilder {
         self.validate_cache_market_kind()?;
         let cache = self.resolved_cache()?;
         let planned = self.planned_inputs()?;
-        let _root_gate = cache.try_acquire_remote_fill_lock()?;
+        let root_gate = cache.try_acquire_remote_fill_lock()?;
         let mut tick_sources = resolve_backtest_tick_sources(
             cache.cache_dir(),
             &planned.tick_symbols,
@@ -2446,7 +2450,7 @@ impl BacktestBuilder {
         for (symbol, _, _) in physical_tick_ranges(&tick_sources) {
             if tick_symbols.insert(symbol.clone()) {
                 reports.push(BacktestHistoryCachePurgeReport::Tick(
-                    cache.purge_symbol_ticks(&symbol)?,
+                    cache.purge_symbol_ticks_with_lock(&root_gate, &symbol)?,
                 ));
             }
         }
@@ -2661,8 +2665,11 @@ impl BacktestBuilder {
             tqsdk_data::MinuteKlineCache::open(cache.cache_dir())?
         };
         if refresh {
+            let root_gate = remote_fill_lock
+                .as_deref()
+                .expect("refresh policy holds an exclusive cache-root gate");
             for (symbol, _, _) in &physical_ranges {
-                cache.purge_symbol_ticks(symbol)?;
+                cache.purge_symbol_ticks_with_lock(root_gate, symbol)?;
             }
             for symbol in &minute_symbols {
                 minute_cache.purge_range(symbol, self.start_ns, self.end_ns)?;
@@ -3279,8 +3286,11 @@ impl BacktestBuilder {
             ));
         }
         if refresh {
+            let root_gate = remote_fill_lock
+                .as_deref()
+                .expect("refresh policy holds an exclusive cache-root gate");
             for (symbol, _, _) in prepared_input_physical_tick_ranges(&prepared_inputs) {
-                cache.purge_symbol_ticks(symbol)?;
+                cache.purge_symbol_ticks_with_lock(root_gate, symbol)?;
             }
             let minute_cache = tqsdk_data::MinuteKlineCache::open(cache.cache_dir())?;
             let mut minute_symbols = BTreeSet::new();

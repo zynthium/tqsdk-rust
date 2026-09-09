@@ -1677,6 +1677,36 @@ fn facade_backtest_builder_inspects_and_purges_explicit_symbol_cache() {
 }
 
 #[tokio::test]
+async fn facade_history_cache_purge_reuses_its_exclusive_root_gate_for_ticks() {
+    let symbol = "SHFE.rb2601";
+    let cache_dir = temp_cache_dir();
+    let cache = BacktestTickCache::open(&cache_dir).unwrap();
+    cache
+        .store_ticks(
+            symbol,
+            1_000,
+            3_000,
+            [tick(1, 1_000, 100.0), tick(2, 2_000, 101.0)],
+        )
+        .unwrap();
+
+    let reports = Tq::futures()
+        .backtest(1_000, 3_000)
+        .cache_dir(&cache_dir)
+        .unwrap()
+        .symbol(symbol)
+        .purge_history_cache()
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        &reports[..],
+        [tqsdk::BacktestHistoryCachePurgeReport::Tick(report)]
+            if report.symbol == symbol && report.removed_files > 0
+    ));
+}
+
+#[tokio::test]
 async fn facade_backtest_refresh_purges_symbol_cache_before_remote_fill() {
     let symbol = "SHFE.rb2601";
     let cache_dir = temp_cache_dir();
