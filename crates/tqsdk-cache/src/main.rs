@@ -1,10 +1,13 @@
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tqsdk::{BacktestRemoteFillCancellation, BacktestRemoteFillConfig, RemoteFillPlan, Tq};
@@ -5002,8 +5005,52 @@ async fn verify_tick(
         ))
         .into());
     }
-    let _lock = cache.try_acquire_existing_consistency_read_lock()?;
-    let warmup = cache_only_warmup(&canonical_cache_dir, &window, &symbols).await?;
+    let root_gate = cache
+        .try_acquire_existing_consistency_read_lock()?
+        .map(Arc::new);
+    let Some(root_gate) = root_gate else {
+        if cache.fast_inventory()?.total_files != 0 {
+            return Err(DataError::InvalidState(
+                "non-empty history cache is missing its root operation lock",
+            )
+            .into());
+        }
+        let statuses = symbols
+            .iter()
+            .map(|symbol| tqsdk_data::BacktestTickCacheStatus {
+                backend_format: BACKTEST_TICK_CACHE_FORMAT_ID,
+                cache_dir: canonical_cache_dir.clone(),
+                series_path: cache.tick_series_path(symbol),
+                series_path_exists: false,
+                symbol: symbol.clone(),
+                range_start_ns: window.start_ns,
+                range_end_ns: window.end_ns,
+                cached_ranges: Vec::new(),
+                missing_ranges: vec![(window.start_ns, window.end_ns)],
+            })
+            .map(|status| cache_status_json(&status))
+            .collect::<Vec<_>>();
+        return Ok(CommandOutcome {
+            value: json!({
+                "schema_version": REPORT_SCHEMA_VERSION,
+                "command": "verify",
+                "cache_kind": "tick",
+                "cache_dir": canonical_cache_dir,
+                "requested_days": window,
+                "source_report": source_report,
+                "symbols": symbols,
+                "coverage_complete": false,
+                "replay_rows": Value::Null,
+                "min_rows": args.min_rows,
+                "statuses": statuses,
+            }),
+            exit_code: 1,
+        });
+    };
+    let verification_cache = cache
+        .clone()
+        .with_exclusive_root_gate(Arc::clone(&root_gate))?;
+    let warmup = cache_only_warmup(verification_cache, &window, &symbols).await?;
     let coverage_complete = warmup.symbols_missing == 0
         && warmup
             .symbols
@@ -5011,7 +5058,12 @@ async fn verify_tick(
             .all(|symbol| symbol.after.is_complete());
 
     let replay_rows = if args.replay {
-        Some(cache_only_replay(&canonical_cache_dir, &window, &symbols).await?)
+        Some(cache_only_replay(
+            &cache,
+            root_gate.as_ref(),
+            &window,
+            &symbols,
+        )?)
     } else {
         None
     };
@@ -5738,6 +5790,7 @@ struct MinuteMigrationPlan {
 struct TickMigrationFile {
     path: PathBuf,
     size_bytes: u64,
+    schema_version: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -5745,13 +5798,44 @@ struct TickMigrationPlan {
     problem_files: usize,
     legacy_files: usize,
     current_files: usize,
+    pack_source_files: usize,
+    pending_month_packs: usize,
     source_bytes: u64,
+    pack_source_bytes: u64,
     estimated_output_bytes: u64,
     estimated_required_available_bytes: u64,
     available_bytes: u64,
     capacity_estimate_ok: bool,
+    legacy_symbols: Vec<String>,
     symbols: Vec<String>,
     files: Vec<TickMigrationFile>,
+}
+
+const TICK_MIGRATION_BACKUP_MANIFEST: &str = ".tqsdk-tick-migration-backup-v2.json";
+const TICK_MIGRATION_CACHE_GENERATION: &str = ".tqsdk-cache-generation-v1";
+const TICK_MIGRATION_CACHE_GENERATION_TEMP_PREFIX: &str = ".tqsdk-cache-generation-v1.tmp-";
+
+#[derive(Debug)]
+struct PreparedMigrationBackupDir {
+    path: PathBuf,
+    existed: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct TickMigrationBackupManifest {
+    schema_version: u32,
+    cache_dir: PathBuf,
+    cache_generation: String,
+    data_files: Vec<MigrationBackupEntry>,
+    lock_files: Vec<MigrationBackupEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct MigrationBackupEntry {
+    relative_path: PathBuf,
+    size_bytes: u64,
+    sha256: String,
+    source_schema_version: Option<u32>,
 }
 
 #[derive(Debug, Default)]
@@ -5805,7 +5889,13 @@ fn migrate_minute(cache_dir: Option<&Path>, args: MigrateArgs) -> Result<Command
             MigrationOutcomeDetails::default(),
         ));
     }
-    let backup_dir = prepare_migration_backup_dir(&canonical_cache_dir, &backup_dir)?;
+    let prepared_backup = prepare_migration_backup_dir(&canonical_cache_dir, &backup_dir)?;
+    if prepared_backup.existed {
+        return Err(CliError::Usage(
+            "existing --backup-dir retry is supported only for Tick migration".to_string(),
+        ));
+    }
+    let backup_dir = prepared_backup.path;
     let (backup_data_files, backup_lock_files) =
         match backup_minute_migration_inputs(&canonical_cache_dir, &backup_dir, &plan) {
             Ok(report) => report,
@@ -5970,7 +6060,7 @@ fn migrate_tick(
             MigrationOutcomeDetails::default(),
         ));
     }
-    if plan.problem_files != 0 || plan.legacy_files == 0 {
+    if plan.problem_files != 0 {
         return Ok(migration_outcome(
             canonical_cache_dir,
             false,
@@ -5986,8 +6076,9 @@ fn migrate_tick(
     let (cache, canonical_cache_dir) = open_cache(Some(canonical_cache_dir.as_path()))?;
     let lock = cache.try_acquire_consistency_read_lock()?;
     cache.validate_tick_migration_source(&lock)?;
+    cleanup_tick_migration_cache_generation_candidates(&canonical_cache_dir)?;
     let plan = tick_migration_plan(&cache, &canonical_cache_dir)?;
-    if plan.problem_files != 0 || plan.legacy_files == 0 {
+    if plan.problem_files != 0 || (plan.legacy_files == 0 && plan.pack_source_files == 0) {
         return Ok(migration_outcome(
             canonical_cache_dir,
             false,
@@ -6002,7 +6093,8 @@ fn migrate_tick(
         )));
     }
 
-    let backup_dir = prepare_migration_backup_dir(&canonical_cache_dir, backup_dir)?;
+    let prepared_backup = prepare_migration_backup_dir(&canonical_cache_dir, backup_dir)?;
+    let backup_dir = prepared_backup.path;
     let (backup_data_files, backup_lock_files) =
         match backup_migration_inputs(&canonical_cache_dir, &backup_dir, &plan) {
             Ok(report) => report,
@@ -6034,12 +6126,14 @@ fn migrate_tick(
         .iter()
         .filter(|file| file.schema_version != Some(BACKTEST_TICK_CACHE_SCHEMA_VERSION))
         .count();
-    if after.problem_files != 0 || remaining_legacy != 0 {
+    let after_plan = tick_migration_plan_from_report(&after)?;
+    if after.problem_files != 0 || remaining_legacy != 0 || after_plan.pack_source_files != 0 {
         return Err(CliError::Migration(format!(
-            "migration validation found {} problem files and {} non-v{} files; backup retained at {}",
+            "migration validation found {} problem files, {} non-v{} files, and {} unpacked closed Tick files; backup retained at {}",
             after.problem_files,
             remaining_legacy,
             BACKTEST_TICK_CACHE_SCHEMA_VERSION,
+            after_plan.pack_source_files,
             backup_dir.display()
         )));
     }
@@ -6069,15 +6163,32 @@ fn tick_migration_plan(
     cache: &BacktestTickCache,
     cache_dir: &Path,
 ) -> Result<TickMigrationPlan, CliError> {
-    let mut plan = tick_migration_plan_from_report(cache.diagnose()?)?;
+    let report = cache.diagnose()?;
+    let mut plan = tick_migration_plan_from_report(&report)?;
     plan.available_bytes = fs2::available_space(cache_dir)?;
-    plan.capacity_estimate_ok =
-        plan.legacy_files == 0 || plan.available_bytes >= plan.estimated_required_available_bytes;
+    plan.capacity_estimate_ok = (plan.legacy_files == 0 && plan.pack_source_files == 0)
+        || plan.available_bytes >= plan.estimated_required_available_bytes;
     Ok(plan)
 }
 
+fn closed_tick_daily_month(path: &Path, current_month: &str) -> Option<String> {
+    let tick_dir = path.parent()?;
+    if tick_dir.file_name()?.to_str()? != "tick" {
+        return None;
+    }
+    let day = tick_dir.parent()?.file_name()?.to_str()?;
+    if day.len() != 8
+        || !day.bytes().all(|byte| byte.is_ascii_digit())
+        || NaiveDate::parse_from_str(day, "%Y%m%d").is_err()
+        || day.get(..6)? >= current_month
+    {
+        return None;
+    }
+    Some(day[..6].to_owned())
+}
+
 fn tick_migration_plan_from_report(
-    report: tqsdk_data::BacktestTickCacheDiagnosticReport,
+    report: &tqsdk_data::BacktestTickCacheDiagnosticReport,
 ) -> Result<TickMigrationPlan, CliError> {
     if report.files.iter().any(|file| {
         file.schema_version
@@ -6099,27 +6210,43 @@ fn tick_migration_plan_from_report(
         .filter(|file| file.schema_version != Some(BACKTEST_TICK_CACHE_SCHEMA_VERSION))
         .map(|file| file.symbol.clone())
         .collect::<BTreeSet<_>>();
+    let current_month = backtest_tick_trading_day_for_timestamp_ns(current_timestamp_ns()?)?
+        .format("%Y%m")
+        .to_string();
+    let mut pack_keys = BTreeSet::new();
+    let mut pack_symbols = BTreeSet::new();
+    let mut pack_source_files = 0_usize;
+    let mut pack_source_bytes = 0_u64;
+    for file in &report.files {
+        let Some(month) = closed_tick_daily_month(&file.path, current_month.as_str()) else {
+            continue;
+        };
+        pack_source_files += 1;
+        pack_source_bytes = pack_source_bytes.saturating_add(file.size_bytes);
+        pack_keys.insert((file.symbol.clone(), month));
+        pack_symbols.insert(file.symbol.clone());
+    }
+    let mut migration_symbols = legacy_symbols.clone();
+    migration_symbols.extend(pack_symbols);
     let files = report
         .files
         .iter()
         .map(|file| TickMigrationFile {
             path: file.path.clone(),
             size_bytes: file.size_bytes,
+            schema_version: file.schema_version,
         })
         .collect::<Vec<_>>();
     let source_bytes: u64 = files.iter().map(|file| file.size_bytes).sum();
-    let estimated_output_bytes = if legacy_files == 0 {
-        0
-    } else {
-        report
-            .files
-            .iter()
-            .filter(|file| file.schema_version != Some(BACKTEST_TICK_CACHE_SCHEMA_VERSION))
-            .map(|file| file.size_bytes)
-            .sum::<u64>()
-            .saturating_mul(2)
-    };
-    let reserve_bytes = if legacy_files == 0 {
+    let legacy_output_bytes = report
+        .files
+        .iter()
+        .filter(|file| file.schema_version != Some(BACKTEST_TICK_CACHE_SCHEMA_VERSION))
+        .map(|file| file.size_bytes)
+        .sum::<u64>()
+        .saturating_mul(2);
+    let estimated_output_bytes = legacy_output_bytes.saturating_add(pack_source_bytes);
+    let reserve_bytes = if legacy_files == 0 && pack_source_files == 0 {
         0
     } else {
         (1024_u64 * 1024 * 1024).max(estimated_output_bytes / 20)
@@ -6130,12 +6257,16 @@ fn tick_migration_plan_from_report(
         problem_files: report.problem_files,
         legacy_files,
         current_files,
+        pack_source_files,
+        pending_month_packs: pack_keys.len(),
         source_bytes,
+        pack_source_bytes,
         estimated_output_bytes,
         estimated_required_available_bytes,
         available_bytes: 0,
         capacity_estimate_ok: false,
-        symbols: legacy_symbols.into_iter().collect(),
+        legacy_symbols: legacy_symbols.into_iter().collect(),
+        symbols: migration_symbols.into_iter().collect(),
         files,
     })
 }
@@ -6157,12 +6288,16 @@ fn migration_outcome(
             "completed": details.completed,
             "target_format": BACKTEST_TICK_CACHE_FORMAT_ID,
             "target_schema_version": BACKTEST_TICK_CACHE_SCHEMA_VERSION,
-            "legacy_symbols": plan.symbols,
+            "legacy_symbols": plan.legacy_symbols,
+            "migration_symbols": plan.symbols,
         "legacy_files": plan.legacy_files,
         "current_files": plan.current_files,
+            "pack_source_files": plan.pack_source_files,
+            "pending_month_packs": plan.pending_month_packs,
         "legacy_binary_rollback_safe": plan.current_files == 0,
             "problem_files": plan.problem_files,
-            "source_bytes": plan.source_bytes,
+        "source_bytes": plan.source_bytes,
+            "pack_source_bytes": plan.pack_source_bytes,
             "estimated_output_bytes": plan.estimated_output_bytes,
         "estimated_required_available_bytes": plan.estimated_required_available_bytes,
             "available_bytes": plan.available_bytes,
@@ -6180,7 +6315,10 @@ fn migration_outcome(
     }
 }
 
-fn prepare_migration_backup_dir(cache_dir: &Path, requested: &Path) -> Result<PathBuf, CliError> {
+fn prepare_migration_backup_dir(
+    cache_dir: &Path,
+    requested: &Path,
+) -> Result<PreparedMigrationBackupDir, CliError> {
     let name = requested
         .file_name()
         .filter(|name| !name.is_empty())
@@ -6196,20 +6334,33 @@ fn prepare_migration_backup_dir(cache_dir: &Path, requested: &Path) -> Result<Pa
         ));
     }
     let backup_dir = parent.join(name);
-    if backup_dir.exists() {
-        return Err(CliError::Usage(
-            "--backup-dir must not already exist".to_string(),
-        ));
-    }
     if backup_dir.starts_with(cache_dir) {
         return Err(CliError::Usage(
-            "--backup-dir must be outside cache root".to_string(),
+            "--backup-dir must be outside the cache root".to_string(),
         ));
+    }
+    match fs::symlink_metadata(&backup_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() => {
+            return Ok(PreparedMigrationBackupDir {
+                path: backup_dir,
+                existed: true,
+            });
+        }
+        Ok(_) => {
+            return Err(CliError::Usage(
+                "existing --backup-dir must be a regular directory".to_string(),
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     fs::create_dir(&backup_dir)?;
     sync_backup_directory(&parent)?;
     sync_backup_directory(&backup_dir)?;
-    Ok(backup_dir)
+    Ok(PreparedMigrationBackupDir {
+        path: backup_dir,
+        existed: false,
+    })
 }
 
 fn backup_migration_inputs(
@@ -6217,7 +6368,19 @@ fn backup_migration_inputs(
     backup_dir: &Path,
     plan: &TickMigrationPlan,
 ) -> Result<(usize, usize), CliError> {
+    let cache_generation = ensure_tick_migration_cache_generation(cache_dir)?;
+    let manifest_path = backup_dir.join(TICK_MIGRATION_BACKUP_MANIFEST);
+    if manifest_path.is_file() {
+        return validate_tick_migration_backup(cache_dir, backup_dir, plan);
+    }
+    if fs::read_dir(backup_dir)?.next().is_some() {
+        return Err(CliError::Migration(format!(
+            "backup directory {} is non-empty but has no completed Tick migration manifest",
+            backup_dir.display()
+        )));
+    }
     let mut backup_data_files = 0;
+    let mut data_entries = Vec::new();
     let mut lock_paths = BTreeSet::new();
     for file in &plan.files {
         let relative = file.path.strip_prefix(cache_dir).map_err(|_| {
@@ -6229,6 +6392,12 @@ fn backup_migration_inputs(
         })?;
         let target = backup_dir.join(relative);
         hard_link_migration_file(&file.path, &target)?;
+        data_entries.push(MigrationBackupEntry {
+            relative_path: relative.to_path_buf(),
+            size_bytes: fs::metadata(&target)?.len(),
+            sha256: sha256_file(&target)?,
+            source_schema_version: file.schema_version,
+        });
         backup_data_files += 1;
         lock_paths.insert(file.path.with_extension("tqbn.lock"));
         let partition_lock = file.path.parent().ok_or_else(|| {
@@ -6241,6 +6410,7 @@ fn backup_migration_inputs(
     }
 
     let mut backup_lock_files = 0;
+    let mut lock_entries = Vec::new();
     for lock_path in lock_paths {
         if !lock_path.exists() {
             continue;
@@ -6252,10 +6422,287 @@ fn backup_migration_inputs(
                 cache_dir.display()
             ))
         })?;
-        copy_migration_lock(&lock_path, &backup_dir.join(relative))?;
+        let target = backup_dir.join(relative);
+        copy_migration_lock(&lock_path, &target)?;
+        lock_entries.push(MigrationBackupEntry {
+            relative_path: relative.to_path_buf(),
+            size_bytes: fs::metadata(&target)?.len(),
+            sha256: sha256_file(&target)?,
+            source_schema_version: None,
+        });
         backup_lock_files += 1;
     }
+    data_entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    lock_entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    persist_tick_migration_backup_manifest(
+        backup_dir,
+        &TickMigrationBackupManifest {
+            schema_version: 2,
+            cache_dir: cache_dir.to_path_buf(),
+            cache_generation,
+            data_files: data_entries,
+            lock_files: lock_entries,
+        },
+    )?;
     Ok((backup_data_files, backup_lock_files))
+}
+
+fn validate_tick_migration_backup(
+    cache_dir: &Path,
+    backup_dir: &Path,
+    plan: &TickMigrationPlan,
+) -> Result<(usize, usize), CliError> {
+    let manifest_path = backup_dir.join(TICK_MIGRATION_BACKUP_MANIFEST);
+    let metadata = fs::symlink_metadata(&manifest_path)?;
+    if !metadata.file_type().is_file() {
+        return Err(CliError::Migration(format!(
+            "Tick migration backup manifest {} is not a regular file",
+            manifest_path.display()
+        )));
+    }
+    let manifest: TickMigrationBackupManifest =
+        serde_json::from_reader(File::open(&manifest_path)?)?;
+    let cache_generation = read_tick_migration_cache_generation(cache_dir)?;
+    if manifest.schema_version != 2
+        || manifest.cache_dir != cache_dir
+        || manifest.cache_generation != cache_generation
+    {
+        return Err(CliError::Migration(format!(
+            "Tick migration backup {} belongs to a different cache or manifest version",
+            backup_dir.display()
+        )));
+    }
+
+    let mut backed_up_data_paths = BTreeMap::new();
+    for entry in &manifest.data_files {
+        validate_migration_backup_entry(backup_dir, entry)?;
+        if backed_up_data_paths
+            .insert(entry.relative_path.clone(), entry)
+            .is_some()
+        {
+            return Err(CliError::Migration(format!(
+                "Tick migration backup manifest contains duplicate data path {}",
+                entry.relative_path.display()
+            )));
+        }
+    }
+    for entry in &manifest.lock_files {
+        validate_migration_backup_entry(backup_dir, entry)?;
+    }
+    for file in &plan.files {
+        let relative = file.path.strip_prefix(cache_dir).map_err(|_| {
+            CliError::Migration(format!(
+                "migration input {} is outside cache root {}",
+                file.path.display(),
+                cache_dir.display()
+            ))
+        })?;
+        let Some(entry) = backed_up_data_paths.get(relative).copied() else {
+            if is_tick_month_pack_relative_path(relative) {
+                continue;
+            }
+            return Err(CliError::Migration(format!(
+                "existing backup {} does not preserve current migration input {}",
+                backup_dir.display(),
+                file.path.display()
+            )));
+        };
+        let source_sha256 = sha256_file(&file.path)?;
+        if source_sha256 != entry.sha256
+            && !(entry.source_schema_version != Some(BACKTEST_TICK_CACHE_SCHEMA_VERSION)
+                && file.schema_version == Some(BACKTEST_TICK_CACHE_SCHEMA_VERSION))
+        {
+            return Err(CliError::Migration(format!(
+                "current migration input {} changed outside the recorded migration generation",
+                file.path.display()
+            )));
+        }
+    }
+    Ok((manifest.data_files.len(), manifest.lock_files.len()))
+}
+
+fn is_tick_month_pack_relative_path(path: &Path) -> bool {
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    components.len() == 5
+        && components[0] == "series"
+        && components[1] == "monthly"
+        && components[2].len() == 6
+        && components[2].bytes().all(|byte| byte.is_ascii_digit())
+        && components[3] == "tick"
+        && components[4].ends_with(".tqbn")
+}
+
+fn validate_migration_backup_entry(
+    backup_dir: &Path,
+    entry: &MigrationBackupEntry,
+) -> Result<(), CliError> {
+    if entry.relative_path.is_absolute()
+        || entry
+            .relative_path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(CliError::Migration(format!(
+            "Tick migration backup manifest contains unsafe path {}",
+            entry.relative_path.display()
+        )));
+    }
+    let path = backup_dir.join(&entry.relative_path);
+    let metadata = fs::symlink_metadata(&path)?;
+    if !metadata.file_type().is_file()
+        || metadata.len() != entry.size_bytes
+        || sha256_file(&path)? != entry.sha256
+    {
+        return Err(CliError::Migration(format!(
+            "Tick migration backup file {} does not match its manifest",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn persist_tick_migration_backup_manifest(
+    backup_dir: &Path,
+    manifest: &TickMigrationBackupManifest,
+) -> Result<(), CliError> {
+    let manifest_path = backup_dir.join(TICK_MIGRATION_BACKUP_MANIFEST);
+    let temporary_path = backup_dir.join(format!(
+        ".tqsdk-tick-migration-backup-v2.tmp-{}",
+        std::process::id()
+    ));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary_path)?;
+    serde_json::to_writer_pretty(&mut file, manifest)?;
+    file.write_all(b"\n")?;
+    file.flush()?;
+    file.sync_all()?;
+    fs::rename(&temporary_path, &manifest_path)?;
+    sync_backup_directory(backup_dir)
+}
+
+fn ensure_tick_migration_cache_generation(cache_dir: &Path) -> Result<String, CliError> {
+    match read_tick_migration_cache_generation(cache_dir) {
+        Ok(generation) => return Ok(generation),
+        Err(CliError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let created_at_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| CliError::Migration(format!("system clock before UNIX epoch: {error}")))?
+        .as_nanos();
+    let mut hasher = Sha256::new();
+    hasher.update(cache_dir.as_os_str().as_encoded_bytes());
+    hasher.update(std::process::id().to_le_bytes());
+    hasher.update(created_at_ns.to_le_bytes());
+    let generation = format!("sha256:{:x}", hasher.finalize());
+    let path = cache_dir.join(TICK_MIGRATION_CACHE_GENERATION);
+    let temporary_path = cache_dir.join(format!(
+        "{TICK_MIGRATION_CACHE_GENERATION_TEMP_PREFIX}{}-{created_at_ns}",
+        std::process::id()
+    ));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary_path)?;
+    file.write_all(generation.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.flush()?;
+    file.sync_all()?;
+    fs::rename(&temporary_path, &path)?;
+    sync_backup_directory(cache_dir)?;
+    Ok(generation)
+}
+
+fn read_tick_migration_cache_generation(cache_dir: &Path) -> Result<String, CliError> {
+    let path = cache_dir.join(TICK_MIGRATION_CACHE_GENERATION);
+    let metadata = fs::symlink_metadata(&path)?;
+    if !metadata.file_type().is_file() {
+        return Err(CliError::Migration(format!(
+            "Tick migration cache generation {} is not a regular file",
+            path.display()
+        )));
+    }
+    let generation = fs::read_to_string(&path)?;
+    let generation = generation.trim();
+    if generation.len() != 71
+        || !generation.starts_with("sha256:")
+        || !generation[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(CliError::Migration(format!(
+            "Tick migration cache generation {} is invalid",
+            path.display()
+        )));
+    }
+    Ok(generation.to_ascii_lowercase())
+}
+
+fn cleanup_tick_migration_cache_generation_candidates(cache_dir: &Path) -> Result<(), CliError> {
+    let mut removed = false;
+    for entry in fs::read_dir(cache_dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if !file_name.starts_with(TICK_MIGRATION_CACHE_GENERATION_TEMP_PREFIX) {
+            continue;
+        }
+        if !is_tick_migration_cache_generation_candidate(file_name) {
+            return Err(CliError::Migration(format!(
+                "Tick migration rejects malformed cache-generation candidate {}",
+                entry.path().display()
+            )));
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if !metadata.file_type().is_file() {
+            return Err(CliError::Migration(format!(
+                "Tick migration cache-generation candidate {} is not a regular file",
+                entry.path().display()
+            )));
+        }
+        fs::remove_file(entry.path())?;
+        removed = true;
+    }
+    if removed {
+        sync_backup_directory(cache_dir)?;
+    }
+    Ok(())
+}
+
+fn is_tick_migration_cache_generation_candidate(file_name: &str) -> bool {
+    let Some(suffix) = file_name.strip_prefix(TICK_MIGRATION_CACHE_GENERATION_TEMP_PREFIX) else {
+        return false;
+    };
+    let fields = suffix.split('-').collect::<Vec<_>>();
+    fields.len() == 2
+        && fields.iter().all(|field| {
+            !field.is_empty()
+                && field.bytes().all(|byte| byte.is_ascii_digit())
+                && field.parse::<u128>().is_ok()
+        })
+}
+
+fn sha256_file(path: &Path) -> Result<String, CliError> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 fn backup_minute_migration_inputs(
@@ -6483,13 +6930,13 @@ fn builder_with_market_environment_auth(
 }
 
 async fn cache_only_warmup(
-    cache_dir: &Path,
+    cache: BacktestTickCache,
     window: &TradingDayWindow,
     symbols: &[String],
 ) -> Result<tqsdk::BacktestCacheWarmupReport, CliError> {
     let mut builder = Tq::futures()
         .backtest(window.start_ns, window.end_ns)
-        .cache_store(BacktestTickCache::open_read_only(cache_dir))
+        .cache_store(cache)
         .cache_only();
     for symbol in symbols {
         builder = builder.symbol(symbol);
@@ -6497,24 +6944,20 @@ async fn cache_only_warmup(
     Ok(builder.warmup().await?)
 }
 
-async fn cache_only_replay(
-    cache_dir: &Path,
+fn cache_only_replay(
+    cache: &BacktestTickCache,
+    root_gate: &tqsdk_data::BacktestTickCacheOperationLock,
     window: &TradingDayWindow,
     symbols: &[String],
 ) -> Result<u64, CliError> {
-    let mut builder = Tq::futures()
-        .backtest(window.start_ns, window.end_ns)
-        .cache_store(BacktestTickCache::open_read_only(cache_dir))
-        .cache_only();
+    let mut rows = 0_u64;
     for symbol in symbols {
-        builder = builder.symbol(symbol);
+        rows = rows.saturating_add(cache.verify_replay_rows_with_lock(
+            root_gate,
+            tqsdk_data::TickDataSeriesRequest::new(symbol.clone(), window.start_ns, window.end_ns),
+        )?);
     }
-    let mut tq = builder.connect().await?;
-    while tq.next().await? {}
-    Ok(tq
-        .backtest_summary()
-        .map(|summary| summary.tick_count() as u64)
-        .unwrap_or_default())
+    Ok(rows)
 }
 
 fn normalized_symbols(values: Vec<String>) -> Result<Vec<String>, CliError> {
@@ -6870,7 +7313,7 @@ mod tests {
                 })
                 .collect(),
         };
-        let error = super::tick_migration_plan_from_report(report)
+        let error = super::tick_migration_plan_from_report(&report)
             .err()
             .unwrap();
         assert!(error.to_string().contains("newer Tick container"));
@@ -6901,12 +7344,40 @@ mod tests {
                 .collect(),
         };
 
-        let plan = super::tick_migration_plan_from_report(report).unwrap();
+        let plan = super::tick_migration_plan_from_report(&report).unwrap();
         assert_eq!(plan.legacy_files, 1);
         assert_eq!(plan.current_files, 1);
         assert_eq!(plan.files.len(), 2);
         assert_eq!(plan.source_bytes, 312);
         assert_eq!(plan.estimated_output_bytes, 208);
+    }
+
+    #[test]
+    fn tick_migration_plan_includes_current_closed_daily_partitions() {
+        let report = tqsdk_data::BacktestTickCacheDiagnosticReport {
+            backend_format: "history-container-v1",
+            cache_dir: std::path::PathBuf::from("cache"),
+            problem_files: 0,
+            files: vec![tqsdk_data::BacktestTickCacheDiagnostic {
+                path: std::path::PathBuf::from("cache/series/19700105/tick/SHFE.test2601.tqbn"),
+                file_name: "SHFE.test2601.tqbn".into(),
+                trading_day: Some("1970-01-05".into()),
+                symbol: "SHFE.test2601".into(),
+                status: tqsdk_data::HistorySeriesCacheFileStatus::Readable,
+                id_range: None,
+                rows: 0,
+                size_bytes: 104,
+                schema_version: Some(super::BACKTEST_TICK_CACHE_SCHEMA_VERSION),
+                error: None,
+            }],
+        };
+
+        let plan = super::tick_migration_plan_from_report(&report).unwrap();
+        assert_eq!(plan.legacy_files, 0);
+        assert_eq!(plan.pack_source_files, 1);
+        assert_eq!(plan.pending_month_packs, 1);
+        assert_eq!(plan.pack_source_bytes, 104);
+        assert_eq!(plan.symbols, vec!["SHFE.test2601"]);
     }
 
     use std::path::PathBuf;
@@ -7782,20 +8253,31 @@ mod tests {
         let cache_dir = parent.join("cache");
         let backup_dir = parent.join("backup");
         let cache = BacktestTickCache::open(&cache_dir).unwrap();
+        let now_ns = super::current_timestamp_ns().unwrap();
         cache
             .store_ticks(
                 "SHFE.op2701",
-                1_000,
-                2_000,
+                now_ns.saturating_sub(1),
+                now_ns.saturating_add(1),
                 [Tick {
                     id: 1,
-                    datetime: 1_000,
+                    datetime: now_ns,
                     ..Tick::default()
                 }],
             )
             .unwrap();
         let source_path = cache.diagnose().unwrap().files[0].path.clone();
         let bytes = std::fs::read(&source_path).unwrap();
+        let orphan = source_path.with_file_name(format!(
+            "{}.cow-1-2-3",
+            source_path.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::write(&orphan, b"unpublished").unwrap();
+        let generation_candidate = cache_dir.join(format!(
+            "{}123-456",
+            super::TICK_MIGRATION_CACHE_GENERATION_TEMP_PREFIX
+        ));
+        std::fs::write(&generation_candidate, b"unpublished").unwrap();
 
         let outcome = migrate(
             Some(&cache_dir),
@@ -7814,6 +8296,8 @@ mod tests {
             super::BACKTEST_TICK_CACHE_SCHEMA_VERSION
         );
         assert!(!backup_dir.exists());
+        assert!(!orphan.exists());
+        assert!(!generation_candidate.exists());
         let files = BacktestTickCache::open_read_only(&cache_dir)
             .diagnose()
             .unwrap()
@@ -7824,6 +8308,45 @@ mod tests {
             Some(super::BACKTEST_TICK_CACHE_SCHEMA_VERSION)
         );
         assert_eq!(std::fs::read(source_path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn tick_migration_rejects_published_root_before_cleaning_generation_candidate() {
+        let parent = std::env::temp_dir().join(format!(
+            "tqsdk-cache-migrate-published-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cache_dir = parent.join("cache");
+        let backup_dir = parent.join("backup");
+        let _cache = BacktestTickCache::open(&cache_dir).unwrap();
+        std::fs::write(cache_dir.join("manifest.json"), b"published").unwrap();
+        std::fs::write(cache_dir.join("lease.lock"), b"").unwrap();
+        let generation_candidate = cache_dir.join(format!(
+            "{}123-456",
+            super::TICK_MIGRATION_CACHE_GENERATION_TEMP_PREFIX
+        ));
+        std::fs::write(&generation_candidate, b"unpublished").unwrap();
+
+        let error = match migrate(
+            Some(&cache_dir),
+            CacheKind::Tick,
+            MigrateArgs {
+                apply: true,
+                backup_dir: Some(backup_dir.clone()),
+            },
+        ) {
+            Ok(_) => panic!("published cache root must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("published snapshot"));
+        assert!(generation_candidate.is_file());
+        assert!(!backup_dir.exists());
+        std::fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]
@@ -7846,16 +8369,21 @@ mod tests {
         std::fs::write(&source, b"legacy-data").unwrap();
         std::fs::write(&source_lock, b"checkpoint").unwrap();
         std::fs::write(&partition_lock, b"partition-lock").unwrap();
-        let plan = super::TickMigrationPlan {
+        let mut plan = super::TickMigrationPlan {
             files: vec![super::TickMigrationFile {
                 path: source.clone(),
                 size_bytes: 11,
+                schema_version: Some(3),
             }],
+            legacy_symbols: vec!["SHFE.test2601".into()],
             symbols: vec!["SHFE.test2601".into()],
             legacy_files: 1,
             current_files: 0,
+            pack_source_files: 0,
+            pending_month_packs: 0,
             problem_files: 0,
             source_bytes: 11,
+            pack_source_bytes: 0,
             estimated_output_bytes: 22,
             estimated_required_available_bytes: 1024 * 1024 * 1024 + 22,
             available_bytes: u64::MAX,
@@ -7877,11 +8405,70 @@ mod tests {
         std::fs::write(&replacement, b"common-data").unwrap();
         std::fs::rename(replacement, &source).unwrap();
         std::fs::write(&source_lock, b"new-checkpoint").unwrap();
-        assert_eq!(std::fs::read(backup_source).unwrap(), b"legacy-data");
+        let error = super::backup_migration_inputs(&cache_dir, &backup_dir, &plan).unwrap_err();
+        assert!(error.to_string().contains("changed outside"));
+        assert!(
+            backup_dir
+                .join(super::TICK_MIGRATION_BACKUP_MANIFEST)
+                .is_file()
+        );
+        assert_eq!(std::fs::read(&backup_source).unwrap(), b"legacy-data");
         assert_eq!(
             std::fs::read(backup_dir.join(source_lock.strip_prefix(&cache_dir).unwrap())).unwrap(),
             b"checkpoint"
         );
+        std::fs::write(&source, b"legacy-data").unwrap();
+        assert_eq!(
+            super::backup_migration_inputs(&cache_dir, &backup_dir, &plan).unwrap(),
+            (1, 2),
+            "same-content source replacement remains the same protected generation"
+        );
+
+        std::fs::write(&backup_source, b"legacy-DATA").unwrap();
+        let error = super::backup_migration_inputs(&cache_dir, &backup_dir, &plan).unwrap_err();
+        assert!(error.to_string().contains("does not match its manifest"));
+        std::fs::write(&backup_source, b"legacy-data").unwrap();
+
+        let generation_path = cache_dir.join(super::TICK_MIGRATION_CACHE_GENERATION);
+        let generation = std::fs::read(&generation_path).unwrap();
+        std::fs::write(&generation_path, format!("sha256:{}\n", "0".repeat(64))).unwrap();
+        let error = super::backup_migration_inputs(&cache_dir, &backup_dir, &plan).unwrap_err();
+        assert!(error.to_string().contains("different cache"));
+        std::fs::write(&generation_path, generation).unwrap();
+
+        let unprotected = cache_dir.join("series/20260106/tick/SHFE.test2601.tqbn");
+        std::fs::create_dir_all(unprotected.parent().unwrap()).unwrap();
+        std::fs::write(&unprotected, b"new-input").unwrap();
+        plan.files.push(super::TickMigrationFile {
+            path: unprotected,
+            size_bytes: 9,
+            schema_version: Some(3),
+        });
+        let error = super::backup_migration_inputs(&cache_dir, &backup_dir, &plan).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not preserve current migration input")
+        );
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn existing_migration_backup_inside_cache_root_is_rejected() {
+        let parent = std::env::temp_dir().join(format!(
+            "tqsdk-cache-nested-backup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cache_dir = parent.join("cache");
+        let backup_dir = cache_dir.join("backup");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+
+        let error = super::prepare_migration_backup_dir(&cache_dir, &backup_dir).unwrap_err();
+        assert!(error.to_string().contains("outside the cache root"));
         std::fs::remove_dir_all(parent).unwrap();
     }
 
@@ -7938,6 +8525,71 @@ mod tests {
             panic!("expected fill command");
         };
         assert!(args.include_open_day);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tick_verify_keeps_one_root_generation_through_replay() {
+        let root = std::env::temp_dir().join(format!(
+            "tqsdk-cache-verify-generation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let range = tqsdk_data::backtest_tick_trading_day_range(
+            chrono::NaiveDate::from_ymd_opt(2020, 1, 2).unwrap(),
+        )
+        .unwrap();
+        let cache = tqsdk_data::BacktestTickCache::open(&root).unwrap();
+        cache
+            .store_ticks(
+                "SHFE.rb2601",
+                range.start_ns,
+                range.end_ns,
+                [tqsdk::advanced::core::Tick {
+                    id: 1,
+                    datetime: range.start_ns.saturating_add(1),
+                    ..tqsdk::advanced::core::Tick::default()
+                }],
+            )
+            .unwrap();
+        let root_gate = std::sync::Arc::new(cache.try_acquire_consistency_read_lock().unwrap());
+        let verification_cache = cache
+            .clone()
+            .with_exclusive_root_gate(std::sync::Arc::clone(&root_gate))
+            .unwrap();
+        let window = super::TradingDayWindow::closed_from_days(
+            chrono::NaiveDate::from_ymd_opt(2020, 1, 2).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2020, 1, 2).unwrap(),
+        )
+        .unwrap();
+        let symbols = vec!["SHFE.rb2601".to_string()];
+
+        let warmup = super::cache_only_warmup(verification_cache, &window, &symbols)
+            .await
+            .unwrap();
+        assert_eq!(warmup.symbols_missing, 0);
+        assert!(matches!(
+            tqsdk_data::BacktestTickCache::open(&root)
+                .unwrap()
+                .purge_symbol_ticks("SHFE.rb2601"),
+            Err(tqsdk_data::DataError::CacheBusy { .. })
+        ));
+        assert_eq!(
+            super::cache_only_replay(&cache, root_gate.as_ref(), &window, &symbols).unwrap(),
+            1
+        );
+
+        drop(root_gate);
+        assert_eq!(
+            cache
+                .purge_symbol_ticks("SHFE.rb2601")
+                .unwrap()
+                .removed_files,
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

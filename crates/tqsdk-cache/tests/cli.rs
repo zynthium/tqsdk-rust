@@ -2177,7 +2177,12 @@ fn fill_reuses_complete_cache_without_auth_and_report_binds_its_root() {
     assert_eq!(persisted["cache_kind"], "tick");
 
     let verified = run_without_auth_json(["verify", "--report", report_path.to_str().unwrap()]);
-    assert!(verified.status.success());
+    assert!(
+        verified.status.success(),
+        "verify stdout={} stderr={}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
     let verified_json: Value = serde_json::from_slice(&verified.stdout).unwrap();
     let verified_result = v3_result(&verified_json, "verify", "success", 0);
     assert_eq!(verified_result["cache_kind"], "tick");
@@ -2243,6 +2248,88 @@ fn tick_verify_report_does_not_create_a_missing_cache_root() {
 
     fs::remove_dir_all(source_root).unwrap();
     fs::remove_file(report_path).unwrap();
+}
+
+#[test]
+fn tick_verify_accepts_an_empty_existing_root_without_creating_a_lock() {
+    let cache_dir = temp_dir("verify-empty-root");
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    let verified = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "verify",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--replay",
+        "--min-rows",
+        "0",
+    ]);
+
+    assert_eq!(verified.status.code(), Some(1));
+    let json: Value = serde_json::from_slice(&verified.stdout).unwrap();
+    let result = v3_result(&json, "verify", "incomplete", 1);
+    assert_eq!(result["coverage_complete"], false);
+    assert_eq!(result["replay_rows"], Value::Null);
+    assert!(!cache_dir.join(".tqsdk-cache-operation.lock").exists());
+    fs::remove_dir_all(cache_dir).unwrap();
+}
+
+#[test]
+fn tick_verify_replay_streams_rows_from_the_locked_cache_generation() {
+    let cache_dir = temp_dir("verify-replay-rows");
+    let range = backtest_tick_trading_day_range(day(2020, 1, 2)).unwrap();
+    BacktestTickCache::open(&cache_dir)
+        .unwrap()
+        .store_ticks(
+            "SHFE.rb2601",
+            range.start_ns,
+            range.end_ns,
+            [
+                Tick {
+                    id: 1,
+                    datetime: range.start_ns.saturating_add(1),
+                    ..Tick::default()
+                },
+                Tick {
+                    id: 2,
+                    datetime: range.start_ns.saturating_add(2),
+                    ..Tick::default()
+                },
+            ],
+        )
+        .unwrap();
+
+    let verified = run_without_auth_json([
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "verify",
+        "--symbol",
+        "SHFE.rb2601",
+        "--start-day",
+        "2020-01-02",
+        "--end-day",
+        "2020-01-02",
+        "--replay",
+        "--min-rows",
+        "2",
+    ]);
+
+    assert!(
+        verified.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    let json: Value = serde_json::from_slice(&verified.stdout).unwrap();
+    let result = v3_result(&json, "verify", "success", 0);
+    assert_eq!(result["coverage_complete"], true);
+    assert_eq!(result["replay_rows"], 2);
+    fs::remove_dir_all(cache_dir).unwrap();
 }
 
 #[test]
@@ -3723,6 +3810,8 @@ fn tick_migration_dry_run_and_apply_convert_a_frozen_schema3_fixture() {
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     let result = v3_result(&json, "migrate", "success", 0);
     assert_eq!(result["legacy_files"], 1);
+    assert_eq!(result["pack_source_files"], 1);
+    assert_eq!(result["pending_month_packs"], 1);
     assert_eq!(result["target_schema_version"], 4);
     assert_eq!(result["capacity_estimate_ok"], true);
     assert!(
@@ -3751,7 +3840,9 @@ fn tick_migration_dry_run_and_apply_convert_a_frozen_schema3_fixture() {
     let result = v3_result(&json, "migrate", "success", 0);
     assert_eq!(result["completed"], true);
     assert_eq!(result["legacy_files"], 1);
-    assert_eq!(&fs::read(&source).unwrap()[..8], b"TQHIST01");
+    let pack = cache_dir.join("series/monthly/202601/tick/SHFE.test2601.tqbn");
+    assert!(!source.exists());
+    assert_eq!(&fs::read(pack).unwrap()[..8], b"TQHIST01");
     assert_eq!(
         fs::read(backup_dir.join(source.strip_prefix(&cache_dir).unwrap())).unwrap(),
         old_bytes
