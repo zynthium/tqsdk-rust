@@ -1023,6 +1023,7 @@ mod tests {
     use crate::backtest_tick_cache::backtest_tick_trading_day_range;
 
     #[tokio::test]
+    #[cfg(all(feature = "live", feature = "services"))]
     async fn idle_timeout_cancels_the_batch_and_preserves_its_cause() {
         let opens = Arc::new(AtomicUsize::new(0));
         let root = temporary_root("idle-timeout");
@@ -1066,6 +1067,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(all(feature = "live", feature = "services"))]
     async fn batch_timeout_is_distinct_from_idle_timeout() {
         let root = temporary_root("batch-timeout");
         let client = client_with_never_source(root.clone(), Arc::new(AtomicUsize::new(0)));
@@ -1100,6 +1102,37 @@ mod tests {
             report.symbols()[0].error,
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    #[cfg(not(all(feature = "live", feature = "services")))]
+    async fn unavailable_remote_features_fail_before_starting_the_source() {
+        let opens = Arc::new(AtomicUsize::new(0));
+        let client =
+            client_with_never_source(temporary_root("disabled-remote"), Arc::clone(&opens));
+        let range = closed_range();
+        let report = client
+            .orchestrate_fill(
+                [BacktestHistoryRequest::tick(
+                    1,
+                    "SHFE.au2608",
+                    range.start_ns,
+                    range.end_ns,
+                )],
+                BacktestHistoryFillConfig::default(),
+                BacktestHistoryFillCancellation::new(),
+                |_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.status(), BacktestHistoryFillTerminalStatus::Failed);
+        assert!(
+            report.symbols()[0]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("requires tqsdk-data features"))
+        );
+        assert_eq!(opens.load(Ordering::SeqCst), 0);
     }
 
     fn client_with_never_source(

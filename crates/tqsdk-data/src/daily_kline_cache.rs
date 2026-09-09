@@ -21,6 +21,8 @@ use crate::kline_append_log;
 use crate::minute_kline_cache::MinuteKlineCacheSnapshot;
 use crate::{DataError, Result};
 
+mod container;
+
 /// Canonical native daily-Kline duration accepted by this cache.
 pub const DAILY_KLINE_DURATION_NS: i64 = 86_400_000_000_000;
 
@@ -194,42 +196,26 @@ impl DailyKlineCache {
         for path in daily_cache_file_paths(&self.namespace_dir())? {
             let _lock = crate::kline_cache_migration::partition_lock(&path, apply)?;
             let mut input = File::open(&path)?;
-            let index = kline_append_log::load::<DailySummary>(&mut input)?;
-            let bytes = fs::read(&path)?;
-            let file = if index.is_some() {
+            let index = container::load(&mut input)?;
+            let size = usize::try_from(input.metadata()?.len()).map_err(|_| {
+                DataError::InvalidResponse("daily migration file size overflow".into())
+            })?;
+            let file = if let Some(index) = &index {
+                index.require_clean_tail(&input)?;
                 load_file_unchecked(&path)?
             } else {
-                decode_daily_file_bytes(&bytes)?
+                container::load_legacy(&path)?
             };
             if self.symbol_file_path(&file.symbol) != path {
                 return Err(DataError::InvalidResponse(
                     "daily migration path identity mismatch".into(),
                 ));
             }
-            if let Some(index) = &index {
-                index.require_clean_tail(&input)?;
-            }
             if apply && index.is_none() {
                 crate::kline_cache_migration::backup_partition(&self.root_dir, &path, backup)?;
-
-                crate::kline_cache_migration::replace_legacy(
-                    &path,
-                    DailySummary::from_file(&file),
-                    &bytes,
-                    |temporary| {
-                        let verified = load_file_unchecked(temporary)?;
-                        if encode_complete_daily_file(&verified)?
-                            != encode_complete_daily_file(&file)?
-                        {
-                            return Err(DataError::InvalidResponse(
-                                "daily migration changed data".into(),
-                            ));
-                        }
-                        Ok(())
-                    },
-                )?;
+                container::migrate(&path, &file)?;
             }
-            report.record(&path, bytes.len(), index.is_none(), apply);
+            report.record(&path, size, index.is_none(), apply);
         }
         Ok(())
     }
@@ -250,8 +236,8 @@ impl DailyKlineCache {
             return Ok(());
         };
         let mut input = OpenOptions::new().read(true).write(true).open(&path)?;
-        let index = kline_append_log::require::<DailySummary>(&mut input)?;
-        kline_append_log::recover(&path, &mut input, &index)
+        let index = container::require(&mut input, None)?;
+        container::recover(&path, &mut input, &index)
     }
 
     pub fn open(root_dir: impl AsRef<Path>) -> Result<Self> {
@@ -487,7 +473,7 @@ impl DailyKlineCache {
         };
         validate_file(&delta)?;
         if let Ok(mut input) = OpenOptions::new().read(true).write(true).open(&path)
-            && let Some(index) = kline_append_log::load::<DailySummary>(&mut input)?
+            && let Some(index) = container::load(&mut input)?
             && !index.needs_compaction()
             && index.summary.symbol == symbol
             && index.summary.snapshot == *snapshot
@@ -514,27 +500,10 @@ impl DailyKlineCache {
                 rows: summary.rows,
                 cached_ranges: summary.coverage.clone(),
             };
-            kline_append_log::append(
-                &path,
-                &mut input,
-                index,
-                summary,
-                &encode_complete_daily_file(&delta)?,
-            )?;
+            container::append(&path, &mut input, index, &delta)?;
             return Ok(report);
         }
         let existing = load_file(self.root_dir.as_path(), path.as_path(), symbol, snapshot)?;
-        let append_base = existing
-            .as_ref()
-            .filter(|file| {
-                file.snapshot == *snapshot
-                    && file
-                        .coverage
-                        .last()
-                        .is_none_or(|range| range.1 <= range_start_ns)
-            })
-            .map(encode_complete_daily_file)
-            .transpose()?;
         let mut rows_by_datetime = existing
             .as_ref()
             .map(|file| {
@@ -559,15 +528,7 @@ impl DailyKlineCache {
             rows,
         };
         validate_file(&file)?;
-        if let Some(base) = append_base {
-            kline_append_log::create(
-                &path,
-                DailySummary::from_file(&file),
-                &[&base, &encode_complete_daily_file(&delta)?],
-            )?;
-        } else {
-            write_file_atomically(path.as_path(), &file)?;
-        }
+        write_file_atomically(path.as_path(), &file)?;
         Ok(DailyKlineCacheWriteReport {
             cache_dir: self.root_dir.clone(),
             path,
@@ -588,28 +549,13 @@ impl DailyKlineCache {
         range_end_ns: i64,
         snapshot: &DailyKlineCacheSnapshot,
     ) -> Result<Vec<Kline>> {
-        let status = self.inspect(symbol.as_ref(), range_start_ns, range_end_ns, snapshot)?;
-        if !status.is_complete() {
-            return Err(DataError::InvalidState(
-                "daily kline cache coverage incomplete",
-            ));
-        }
-        let Some(file) = load_file(
-            self.root_dir.as_path(),
-            status.path.as_path(),
+        container::read_range(
+            self,
             symbol.as_ref(),
+            (range_start_ns, range_end_ns),
             snapshot,
-        )?
-        else {
-            return Err(DataError::InvalidState(
-                "daily kline cache coverage disappeared during read",
-            ));
-        };
-        Ok(file
-            .rows
-            .into_iter()
-            .filter(|row| row.datetime >= range_start_ns && row.datetime < range_end_ns)
-            .collect())
+            None,
+        )
     }
 
     /// Reads file metadata, the fixed header, and the embedded logical symbol only.
@@ -698,44 +644,13 @@ impl DailyKlineCache {
         snapshot: &DailyKlineCacheSnapshot,
         max_allocation_bytes: usize,
     ) -> Result<Vec<Kline>> {
-        let symbol = symbol.as_ref();
-        validate_symbol(symbol)?;
-        if range_start_ns >= range_end_ns {
-            return Err(DataError::Validation(
-                "daily kline cache range must have positive width".to_string(),
-            ));
-        }
-        let path = self.symbol_file_path(symbol);
-        let file = load_file_bounded(
-            self.root_dir.as_path(),
-            path.as_path(),
-            symbol,
+        container::read_range(
+            self,
+            symbol.as_ref(),
+            (range_start_ns, range_end_ns),
             snapshot,
-            max_allocation_bytes,
-        )?
-        .ok_or(DataError::InvalidState(
-            "daily kline cache coverage disappeared during read",
-        ))?;
-        let cached_ranges =
-            intersect_ranges(file.coverage.as_slice(), (range_start_ns, range_end_ns));
-        if !missing_ranges(cached_ranges.as_slice(), (range_start_ns, range_end_ns)).is_empty() {
-            return Err(DataError::InvalidState(
-                "daily kline cache coverage incomplete",
-            ));
-        }
-        let mut rows = Vec::new();
-        rows.try_reserve_exact(file.rows.len())
-            .map_err(|_| DataError::CollectLimitExceeded {
-                limit_bytes: max_allocation_bytes,
-                attempted_bytes: daily_read_allocation_upper_bound(path.as_path())
-                    .unwrap_or(usize::MAX),
-            })?;
-        rows.extend(
-            file.rows
-                .into_iter()
-                .filter(|row| row.datetime >= range_start_ns && row.datetime < range_end_ns),
-        );
-        Ok(rows)
+            Some(max_allocation_bytes),
+        )
     }
 
     /// Reads and validates one symbol file without modifying it.
@@ -857,26 +772,13 @@ struct DailySummary {
     rows: usize,
 }
 
-impl DailySummary {
-    fn from_file(file: &DailyFile) -> Self {
-        Self {
-            symbol: file.symbol.clone(),
-            snapshot: file.snapshot.clone(),
-            coverage: file.coverage.clone(),
-            rows: file.rows.len(),
-        }
-    }
-}
-
 fn daily_log_summary(path: &Path) -> Result<Option<DailySummary>> {
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    Ok(Some(
-        kline_append_log::require::<DailySummary>(&mut file)?.summary,
-    ))
+    Ok(Some(container::require(&mut file, None)?.summary))
 }
 
 fn validate_daily_summary(
@@ -889,7 +791,7 @@ fn validate_daily_summary(
     validate_snapshot(&summary.snapshot)?;
     if summary.rows > MAX_ROWS
         || summary.coverage.len() > MAX_COVERAGE_RECORDS
-        || merge_ranges(summary.coverage.clone())? != summary.coverage
+        || !coverage_is_canonical(&summary.coverage)
         || summary.symbol != symbol
     {
         return Err(DataError::InvalidResponse(
@@ -983,7 +885,7 @@ fn diagnose_existing_path(
     }
     let validated = (|| {
         let mut input = File::open(&path)?;
-        if let Some(index) = kline_append_log::load::<DailySummary>(&mut input)? {
+        if let Some(index) = container::load(&mut input)? {
             index.require_clean_tail(&input)?;
         }
         load_file_unchecked(path.as_path())
@@ -1023,6 +925,7 @@ fn diagnose_existing_path(
                 || error
                     .to_string()
                     .contains("unsupported append envelope version")
+                || error.to_string().contains("unsupported container")
             {
                 DailyKlineCacheDiagnosticStatus::UnsupportedVersion
             } else {
@@ -1061,7 +964,7 @@ fn daily_cache_file_paths(namespace_dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn read_daily_file_prefix(path: &Path) -> Result<String> {
-    let summary = kline_append_log::require::<DailySummary>(&mut File::open(path)?)?.summary;
+    let summary = container::require(&mut File::open(path)?, None)?.summary;
     validate_symbol(&summary.symbol)?;
     Ok(summary.symbol)
 }
@@ -1072,7 +975,7 @@ struct DailyFileHeader {
 }
 
 fn read_daily_file_header(path: &Path) -> Result<DailyFileHeader> {
-    let summary = kline_append_log::require::<DailySummary>(&mut File::open(path)?)?.summary;
+    let summary = container::require(&mut File::open(path)?, None)?.summary;
     validate_symbol(&summary.symbol)?;
     Ok(DailyFileHeader {
         symbol: summary.symbol,
@@ -1124,57 +1027,11 @@ fn load_file(
     Ok(Some(file))
 }
 
-fn load_file_bounded(
-    cache_dir: &Path,
-    path: &Path,
-    expected_symbol: &str,
-    expected_snapshot: &DailyKlineCacheSnapshot,
-    max_allocation_bytes: usize,
-) -> Result<Option<DailyFile>> {
-    match fs::metadata(path) {
-        Ok(metadata) => {
-            if !metadata.is_file() {
-                return Err(DataError::InvalidResponse(
-                    "daily kline cache path is not a regular file".to_string(),
-                ));
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    }
-    let file = load_file_unchecked_with_limit(path, Some(max_allocation_bytes))?;
-    if file.symbol != expected_symbol {
-        return Err(DataError::InvalidResponse(
-            "daily kline cache symbol does not match file path".to_string(),
-        ));
-    }
-    if !minute_cache_snapshots_are_compatible(
-        cache_dir,
-        expected_symbol,
-        &file.snapshot,
-        expected_snapshot,
-        file.coverage.as_slice(),
-    )? {
-        return Err(DataError::InvalidResponse(
-            "daily kline cache metadata snapshot mismatch".to_string(),
-        ));
-    }
-    Ok(Some(file))
-}
-
 fn daily_read_allocation_upper_bound(path: &Path) -> Result<usize> {
-    let metadata = fs::metadata(path)?;
-    if !metadata.is_file() {
-        return Err(DataError::InvalidResponse(
-            "daily kline cache path is not a regular file".to_string(),
-        ));
-    }
-    let file_bytes = usize::try_from(metadata.len()).map_err(|_| {
-        DataError::InvalidResponse("daily kline cache file length overflows usize".to_string())
-    })?;
-    daily_read_allocation_upper_bound_for_file_bytes(file_bytes)
+    container::read_allocation_upper_bound(path)
 }
 
+#[cfg(test)]
 fn daily_read_allocation_upper_bound_for_file_bytes(file_bytes: usize) -> Result<usize> {
     let max_rows = file_bytes
         .saturating_sub(FILE_HEADER_BYTES)
@@ -1203,56 +1060,7 @@ fn load_file_unchecked_with_limit(
     path: &Path,
     max_allocation_bytes: Option<usize>,
 ) -> Result<DailyFile> {
-    let file_bytes = usize::try_from(fs::metadata(path)?.len()).map_err(|_| {
-        DataError::InvalidResponse("daily kline cache file length overflows usize".to_string())
-    })?;
-    let allocation_upper_bound = daily_read_allocation_upper_bound_for_file_bytes(file_bytes)?;
-    if max_allocation_bytes.is_some_and(|limit| allocation_upper_bound > limit) {
-        return Err(DataError::CollectLimitExceeded {
-            limit_bytes: max_allocation_bytes.unwrap_or(usize::MAX),
-            attempted_bytes: allocation_upper_bound,
-        });
-    }
-    let mut input = File::open(path)?;
-    let index = kline_append_log::load_bounded::<DailySummary>(&mut input, max_allocation_bytes)?
-        .ok_or_else(kline_append_log::migration_required)?;
-
-    let snapshot_bytes = usize::try_from(input.metadata()?.len())
-        .map_err(|_| DataError::InvalidResponse("daily file size overflow".into()))?;
-    let attempted_bytes = daily_read_allocation_upper_bound_for_file_bytes(snapshot_bytes)?;
-    if let Some(limit_bytes) = max_allocation_bytes
-        && attempted_bytes > limit_bytes
-    {
-        return Err(DataError::CollectLimitExceeded {
-            limit_bytes,
-            attempted_bytes,
-        });
-    }
-    let mut file = DailyFile {
-        symbol: index.summary.symbol.clone(),
-        snapshot: index.summary.snapshot.clone(),
-        coverage: Vec::new(),
-        rows: Vec::new(),
-    };
-    for segment in &index.segments {
-        let decoded =
-            decode_daily_file_bytes(&kline_append_log::read_segment(&mut input, segment)?)?;
-        if decoded.symbol != file.symbol || decoded.snapshot != file.snapshot {
-            return Err(DataError::InvalidResponse(
-                "daily append segment identity mismatch".into(),
-            ));
-        }
-        file.coverage.extend(decoded.coverage);
-        file.rows.extend(decoded.rows);
-    }
-    file.coverage = merge_ranges(file.coverage)?;
-    if file.coverage != index.summary.coverage || file.rows.len() != index.summary.rows {
-        return Err(DataError::InvalidResponse(
-            "daily append summary disagrees with rows".into(),
-        ));
-    }
-    validate_file(&file)?;
-    Ok(file)
+    container::load_full(path, max_allocation_bytes)
 }
 
 fn decode_daily_file_bytes(bytes: &[u8]) -> Result<DailyFile> {
@@ -1315,18 +1123,11 @@ fn decode_daily_file_bytes(bytes: &[u8]) -> Result<DailyFile> {
     let mut rows = Vec::with_capacity(rows_len);
     for _ in 0..rows_len {
         let epoch = read_i64(payload, &mut cursor)?;
-        rows.push(Kline {
-            id: read_i64(payload, &mut cursor)?,
-            datetime: read_i64(payload, &mut cursor)?,
-            open: read_f64(payload, &mut cursor)?,
-            high: read_f64(payload, &mut cursor)?,
-            low: read_f64(payload, &mut cursor)?,
-            close: read_f64(payload, &mut cursor)?,
-            volume: read_i64(payload, &mut cursor)?,
-            open_oi: read_i64(payload, &mut cursor)?,
-            close_oi: read_i64(payload, &mut cursor)?,
-            epoch: (epoch != NONE_EPOCH).then_some(epoch),
-        });
+        let fields = read_bytes(payload, &mut cursor, crate::kline_codec::FIELD_BYTES)?;
+        rows.push(crate::kline_codec::decode_fields(
+            fields.try_into().expect("validated Kline field width"),
+            (epoch != NONE_EPOCH).then_some(epoch),
+        ));
     }
     let file = DailyFile {
         symbol,
@@ -1339,13 +1140,10 @@ fn decode_daily_file_bytes(bytes: &[u8]) -> Result<DailyFile> {
 }
 
 fn write_file_atomically(path: &Path, file: &DailyFile) -> Result<()> {
-    kline_append_log::create(
-        path,
-        DailySummary::from_file(file),
-        &[&encode_complete_daily_file(file)?],
-    )
+    container::create(path, file)
 }
 
+#[cfg(test)]
 fn encode_complete_daily_file(file: &DailyFile) -> Result<Vec<u8>> {
     let payload = encode_file(file)?;
     let mut bytes = Vec::with_capacity(FILE_HEADER_BYTES.saturating_add(payload.len()));
@@ -1358,6 +1156,7 @@ fn encode_complete_daily_file(file: &DailyFile) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(test)]
 fn encode_file(file: &DailyFile) -> Result<Vec<u8>> {
     let mut payload = Vec::new();
     write_string(&mut payload, file.symbol.as_str())?;
@@ -1372,15 +1171,7 @@ fn encode_file(file: &DailyFile) -> Result<Vec<u8>> {
     write_len(&mut payload, file.rows.len(), "rows")?;
     for row in &file.rows {
         payload.extend_from_slice(&row.epoch.unwrap_or(NONE_EPOCH).to_le_bytes());
-        payload.extend_from_slice(&row.id.to_le_bytes());
-        payload.extend_from_slice(&row.datetime.to_le_bytes());
-        payload.extend_from_slice(&row.open.to_le_bytes());
-        payload.extend_from_slice(&row.high.to_le_bytes());
-        payload.extend_from_slice(&row.low.to_le_bytes());
-        payload.extend_from_slice(&row.close.to_le_bytes());
-        payload.extend_from_slice(&row.volume.to_le_bytes());
-        payload.extend_from_slice(&row.open_oi.to_le_bytes());
-        payload.extend_from_slice(&row.close_oi.to_le_bytes());
+        crate::kline_codec::encode_fields(&mut payload, row);
     }
     Ok(payload)
 }
@@ -1398,8 +1189,7 @@ fn validate_file(file: &DailyFile) -> Result<()> {
             "daily kline cache has too many rows".to_string(),
         ));
     }
-    let coverage = merge_ranges(file.coverage.clone())?;
-    if coverage != file.coverage {
+    if !coverage_is_canonical(&file.coverage) {
         return Err(DataError::InvalidResponse(
             "daily kline cache coverage is not sorted and merged".to_string(),
         ));
@@ -1423,6 +1213,11 @@ fn validate_file(file: &DailyFile) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn coverage_is_canonical(coverage: &[(i64, i64)]) -> bool {
+    coverage.iter().all(|&(start, end)| start < end)
+        && coverage.windows(2).all(|pair| pair[0].1 < pair[1].0)
 }
 
 fn validate_snapshot(snapshot: &DailyKlineCacheSnapshot) -> Result<()> {
@@ -1514,13 +1309,26 @@ mod bounded_read_tests {
             )
             .unwrap();
         let upper = cache.read_range_allocation_upper_bound(symbol).unwrap();
+        // Indexed empty coverage needs only its index allocation budget.
+        assert!(
+            cache
+                .read_range_bounded(
+                    symbol,
+                    start_ns,
+                    end_ns,
+                    &DailyKlineCacheSnapshot::cst_v1(),
+                    upper,
+                )
+                .unwrap()
+                .is_empty()
+        );
         let error = cache
             .read_range_bounded(
                 symbol,
                 start_ns,
                 end_ns,
                 &DailyKlineCacheSnapshot::cst_v1(),
-                upper.saturating_sub(1),
+                1,
             )
             .unwrap_err();
         assert!(matches!(error, DataError::CollectLimitExceeded { .. }));
@@ -1563,6 +1371,7 @@ fn escaped_symbol(symbol: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 fn write_string(output: &mut Vec<u8>, value: &str) -> Result<()> {
     let bytes = value.as_bytes();
     if bytes.len() > MAX_STRING_BYTES {
@@ -1575,6 +1384,7 @@ fn write_string(output: &mut Vec<u8>, value: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn write_len(output: &mut Vec<u8>, value: usize, field: &str) -> Result<()> {
     let value = u32::try_from(value).map_err(|_| {
         DataError::Validation(format!("daily kline cache {field} count exceeds u32"))
@@ -1619,14 +1429,6 @@ fn read_i64(input: &[u8], cursor: &mut usize) -> Result<i64> {
         read_bytes(input, cursor, 8)?
             .try_into()
             .expect("fixed i64 slice"),
-    ))
-}
-
-fn read_f64(input: &[u8], cursor: &mut usize) -> Result<f64> {
-    Ok(f64::from_le_bytes(
-        read_bytes(input, cursor, 8)?
-            .try_into()
-            .expect("fixed f64 slice"),
     ))
 }
 

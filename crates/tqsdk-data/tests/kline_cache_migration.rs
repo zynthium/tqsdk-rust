@@ -1,6 +1,8 @@
 use chrono::{TimeZone, Utc};
+#[path = "support/legacy_minute.rs"]
+mod legacy_minute;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tqsdk_data::{
     BacktestTickCache, DailyKlineCache, MinuteKlineCache, MinuteKlineCacheSnapshot,
     migrate_kline_cache,
@@ -24,19 +26,37 @@ impl Drop for Root {
     }
 }
 
-fn raw_payload(path: &Path) -> Vec<u8> {
-    let bytes = fs::read(path).unwrap();
-    if &bytes[..8] != b"TQKLOG01" {
-        return bytes;
-    }
-    let slot = &bytes[56..104]; // A fresh file publishes generation 1 in slot 1.
-    let offset = u64::from_le_bytes(slot[8..16].try_into().unwrap()) as usize;
-    let len = u64::from_le_bytes(slot[16..24].try_into().unwrap()) as usize;
-    let index: serde_json::Value = serde_json::from_slice(&bytes[offset..offset + len]).unwrap();
-    let segment = &index["segments"][0];
-    let start = segment["offset"].as_u64().unwrap() as usize;
-    let size = segment["len"].as_u64().unwrap() as usize;
-    bytes[start..start + size].to_vec()
+// An independent old-format fixture: new daily files no longer contain a
+// nested raw envelope that can be extracted from their first block.
+fn raw_empty_daily(
+    symbol: &str,
+    snapshot: &MinuteKlineCacheSnapshot,
+    start: i64,
+    end: i64,
+) -> Vec<u8> {
+    let string = |output: &mut Vec<u8>, value: &str| {
+        output.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        output.extend_from_slice(value.as_bytes());
+    };
+    let mut payload = Vec::new();
+    string(&mut payload, symbol);
+    payload.extend_from_slice(&snapshot.version.to_le_bytes());
+    string(&mut payload, &snapshot.calendar_hash);
+    string(&mut payload, &snapshot.session_hash);
+    payload.extend_from_slice(&1_u32.to_le_bytes());
+    payload.extend_from_slice(&start.to_le_bytes());
+    payload.extend_from_slice(&end.to_le_bytes());
+    payload.extend_from_slice(&0_u32.to_le_bytes());
+    let checksum = payload.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    let mut bytes = Vec::from(*b"TQDK");
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&checksum.to_le_bytes());
+    bytes.extend_from_slice(&payload);
+    bytes
 }
 
 #[test]
@@ -69,8 +89,20 @@ fn migration_is_lossless_resumable_and_exclusively_gated() {
     ];
     let originals: Vec<_> = paths
         .iter()
-        .map(|path| {
-            let bytes = raw_payload(path);
+        .enumerate()
+        .map(|(index, path)| {
+            let bytes = if index == 0 {
+                raw_empty_daily("SHFE.au2406", &snapshot, day, day + 86_400_000_000_000)
+            } else {
+                legacy_minute::raw_month(
+                    5,
+                    "SHFE.au2406",
+                    "202401",
+                    &snapshot,
+                    (day, day + 60_000_000_000),
+                    &[],
+                )
+            };
             fs::write(path, &bytes).unwrap();
             bytes
         })
@@ -103,8 +135,24 @@ fn migration_is_lossless_resumable_and_exclusively_gated() {
     }
     let report = migrate_kline_cache(&root, &backup, true).unwrap();
     assert_eq!(report.migrated_files, 2);
-    for (path, bytes) in paths.iter().zip(&originals) {
-        assert_eq!(&raw_payload(path), bytes);
+    for (index, (path, bytes)) in paths.iter().zip(&originals).enumerate() {
+        if index == 1 {
+            assert_eq!(&fs::read(path).unwrap()[..8], b"TQHIST01");
+        } else {
+            assert_eq!(&fs::read(path).unwrap()[..8], b"TQHIST01");
+            assert!(
+                daily
+                    .inspect("SHFE.au2406", day, day + 86_400_000_000_000, &snapshot)
+                    .unwrap()
+                    .is_complete()
+            );
+            assert!(
+                daily
+                    .read_range("SHFE.au2406", day, day + 86_400_000_000_000, &snapshot)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
         assert_eq!(
             &fs::read(backup.join(path.strip_prefix(&root).unwrap())).unwrap(),
             bytes

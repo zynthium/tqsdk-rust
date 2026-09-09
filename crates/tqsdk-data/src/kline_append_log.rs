@@ -2,8 +2,12 @@
 //!
 //! The data and index are synced before publishing an alternating commit slot.
 //! Readers pin a committed prefix; an incomplete suffix is never coverage.
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(test)]
+use std::fs;
+use std::fs::{File, OpenOptions};
+#[cfg(test)]
+use std::io::Write;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use fs2::FileExt;
@@ -15,17 +19,6 @@ const MAGIC: &[u8; 8] = b"TQKLOG01";
 const SLOT_BYTES: usize = 48;
 const HEADER_BYTES: u64 = 8 + 2 * SLOT_BYTES as u64;
 const MAX_INDEX_BYTES: u64 = 16 * 1024 * 1024;
-
-pub(crate) fn verify_migrated_payload(path: &Path, expected: &[u8]) -> Result<()> {
-    let mut file = File::open(path)?;
-    let index =
-        load::<serde_json::Value>(&mut file)?.ok_or_else(|| invalid("missing migrated index"))?;
-    index.require_clean_tail(&file)?;
-    if index.segments.len() != 1 || read_segment(&mut file, &index.segments[0])? != expected {
-        return Err(invalid("migration did not preserve the original payload"));
-    }
-    Ok(())
-}
 
 pub(crate) fn pin_for_diagnosis(path: &Path) -> Result<Option<File>> {
     let extension = path
@@ -85,10 +78,6 @@ pub(crate) struct Index<T> {
 }
 
 impl<T> Index<T> {
-    pub(crate) fn needs_compaction(&self) -> bool {
-        self.segments.len() >= 64
-    }
-
     pub(crate) fn require_clean_tail(&self, file: &File) -> Result<()> {
         if file.metadata()?.len() != self.committed_len {
             return Err(invalid(
@@ -247,6 +236,7 @@ impl Read for SegmentInput {
 }
 
 /// Caller must hold the canonical partition's exclusive lock.
+#[cfg(test)]
 pub(crate) fn append<T: Serialize>(
     path: &Path,
     file: &mut File,
@@ -267,6 +257,7 @@ pub(crate) fn append<T: Serialize>(
     publish(file, index)
 }
 
+#[cfg(test)]
 pub(crate) fn recover<T>(path: &Path, file: &mut File, index: &Index<T>) -> Result<()> {
     #[cfg(unix)]
     let shared = {
@@ -306,6 +297,7 @@ pub(crate) fn recover<T>(path: &Path, file: &mut File, index: &Index<T>) -> Resu
     Ok(())
 }
 
+#[cfg(test)]
 fn publish<T: Serialize>(file: &mut File, index: Index<T>) -> Result<()> {
     let generation = index
         .generation
@@ -337,6 +329,7 @@ fn publish<T: Serialize>(file: &mut File, index: Index<T>) -> Result<()> {
 }
 
 /// Atomically converts a validated legacy payload and its first extension.
+#[cfg(test)]
 pub(crate) fn create<T: Serialize>(path: &Path, summary: T, payloads: &[&[u8]]) -> Result<()> {
     let temporary = path.with_extension(format!(
         "append-{}-{}.tmp",

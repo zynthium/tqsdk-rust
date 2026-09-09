@@ -47,6 +47,7 @@
 mod aggregation;
 mod backtest_history;
 mod backtest_tick_cache;
+mod cache_file;
 mod client;
 mod daily_kline_cache;
 mod download;
@@ -61,10 +62,12 @@ mod historical_universe_resolution;
 mod historical_universe_v4;
 mod historical_universe_v4_resolution;
 mod historical_universe_v5;
+mod history_container;
 mod history_series_cache;
 mod integrity;
 mod kline_append_log;
 mod kline_cache_migration;
+mod kline_codec;
 pub use kline_cache_migration::{KlineCacheMigrationReport, migrate_kline_cache};
 mod live_quote;
 mod live_tick_cache_writer;
@@ -134,14 +137,15 @@ pub use backtest_history::{
     resolve_minute_cache_metadata_snapshot,
 };
 pub use backtest_tick_cache::{
-    BacktestCachePolicy, BacktestTickCache, BacktestTickCacheDiagnostic,
-    BacktestTickCacheDiagnosticReport, BacktestTickCacheFastInventory,
-    BacktestTickCacheFastInventorySymbol, BacktestTickCacheInventory,
-    BacktestTickCacheInventorySymbol, BacktestTickCacheLegacyPartitionLockRepair,
-    BacktestTickCacheLockRepairFile, BacktestTickCacheLockRepairMode,
-    BacktestTickCacheLockRepairReport, BacktestTickCacheLockRepairStatus,
-    BacktestTickCacheOperationLock, BacktestTickCachePurgeReport, BacktestTickCacheStatus,
-    BacktestTickCacheWriteReport, BacktestTickCoverage, BacktestTickFill, BacktestTickFillReport,
+    BACKTEST_TICK_CACHE_FORMAT_ID, BACKTEST_TICK_CACHE_SCHEMA_VERSION, BacktestCachePolicy,
+    BacktestTickCache, BacktestTickCacheDiagnostic, BacktestTickCacheDiagnosticReport,
+    BacktestTickCacheFastInventory, BacktestTickCacheFastInventorySymbol,
+    BacktestTickCacheInventory, BacktestTickCacheInventorySymbol,
+    BacktestTickCacheLegacyPartitionLockRepair, BacktestTickCacheLockRepairFile,
+    BacktestTickCacheLockRepairMode, BacktestTickCacheLockRepairReport,
+    BacktestTickCacheLockRepairStatus, BacktestTickCacheOperationLock,
+    BacktestTickCachePurgeReport, BacktestTickCacheStatus, BacktestTickCacheWriteReport,
+    BacktestTickCoverage, BacktestTickFill, BacktestTickFillReport,
     BacktestTickProvisionalCoverage, BacktestTickTradingDayRange,
     backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
 };

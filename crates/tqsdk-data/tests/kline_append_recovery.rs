@@ -66,7 +66,7 @@ fn daily_append_preserves_prefix_recovers_tail_and_isolates_existing_hardlinks()
     put(1);
     let path = cache.symbol_file_path("SHFE.au2406");
     let before = fs::read(&path).unwrap();
-    assert_eq!(&before[..8], b"TQKLOG01");
+    assert_eq!(&before[..8], b"TQHIST01");
     put(2);
     let after = fs::read(&path).unwrap();
     assert_eq!(&before[104..], &after[104..before.len()]);

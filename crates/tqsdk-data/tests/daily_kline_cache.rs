@@ -331,7 +331,7 @@ fn daily_cache_rejects_an_unsupported_file_version() {
         .unwrap();
     let path = cache.symbol_file_path("SHFE.au2402");
     let mut bytes = std::fs::read(&path).unwrap();
-    bytes[..8].copy_from_slice(b"TQKLOG02");
+    bytes[..8].copy_from_slice(b"TQHIST02");
     std::fs::write(&path, bytes).unwrap();
 
     assert_eq!(

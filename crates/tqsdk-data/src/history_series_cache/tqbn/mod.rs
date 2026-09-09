@@ -1,4 +1,5 @@
 mod codec;
+mod container;
 mod fixed;
 mod format;
 mod metadata;
@@ -103,7 +104,10 @@ const TQBN_RECORDS_INDEX_KNOWN_FLAGS: u8 = TQBN_RECORDS_INDEX_FLAG_STRICTLY_INCR
 /// Stream a TQBN snapshot file while deriving its manifest checksum and
 /// feature requirements.  Snapshot publication must not materialize an
 /// entire partition merely to inspect its block flags.
-pub(crate) fn snapshot_file_sha256_and_requires_zstd(path: &Path) -> Result<(String, bool)> {
+pub(crate) fn snapshot_file_sha256_and_requires_zstd(path: &Path) -> Result<(String, bool, bool)> {
+    if container::matches(path)? {
+        return container::snapshot_file_sha256_and_requires_zstd(path);
+    }
     let mut file = File::open(path)?;
     let mut prefix_header = [0_u8; TQBN_PREFIX_HEADER_LEN];
     file.read_exact(&mut prefix_header)?;
@@ -169,7 +173,11 @@ pub(crate) fn snapshot_file_sha256_and_requires_zstd(path: &Path) -> Result<(Str
             remaining -= chunk_len;
         }
     }
-    Ok((format!("sha256:{:x}", hasher.finalize()), requires_zstd))
+    Ok((
+        format!("sha256:{:x}", hasher.finalize()),
+        requires_zstd,
+        false,
+    ))
 }
 const TQBN_TICK_LEGACY_TIMESTAMP_SKEW_NS: i64 = 1_000;
 const TQBN_TICK_LEGACY_SAME_ID_TIMESTAMP_SKEW_NS: i64 = 20_000_000;
@@ -189,6 +197,8 @@ const TQBN_TICK_LEGACY_ID_REPLAY_SKEW_NS: i64 = 10 * 60 * 1_000_000_000;
 pub(super) struct TqbnHistoryStore {
     root_dir: Arc<PathBuf>,
     read_only: bool,
+    #[cfg(test)]
+    legacy_new_tick_files: bool,
 }
 
 #[derive(Debug, Default)]
@@ -300,6 +310,7 @@ struct TqbnReadRange {
 }
 
 struct TqbnReader {
+    common_partition: Option<Box<container::Reader>>,
     paths: Vec<PathBuf>,
     path_index: usize,
     symbol: String,
@@ -605,6 +616,7 @@ fn read_tqbn_spill_i64(bytes: &[u8], offset: &mut usize) -> Result<i64> {
 }
 
 enum PreparedTqbnPartition {
+    Common(Box<container::Reader>),
     Missing,
     Streaming(TqbnStreamingPartition),
     Spilled(TqbnSpilledPartition),
@@ -684,6 +696,8 @@ impl TqbnHistoryStore {
         Ok(Self {
             root_dir: Arc::new(root_dir),
             read_only: false,
+            #[cfg(test)]
+            legacy_new_tick_files: false,
         })
     }
 
@@ -691,6 +705,8 @@ impl TqbnHistoryStore {
         Self {
             root_dir: Arc::new(root_dir),
             read_only: true,
+            #[cfg(test)]
+            legacy_new_tick_files: false,
         }
     }
 
@@ -701,6 +717,100 @@ impl TqbnHistoryStore {
             ));
         }
         Ok(())
+    }
+
+    fn acquire_shared_write_gate(&self) -> Result<File> {
+        let path = self.root_dir.join(".tqsdk-cache-operation.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)?;
+        match FileExt::try_lock_shared(&file) {
+            Ok(()) => Ok(file),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Err(DataError::CacheBusy {
+                cache_dir: self.root_dir.as_ref().clone(),
+                operation: "history cache write",
+            }),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn acquire_exclusive_maintenance_gate(&self) -> Result<File> {
+        let path = self.root_dir.join(".tqsdk-cache-operation.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)?;
+        match FileExt::try_lock_exclusive(&file) {
+            Ok(()) => Ok(file),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Err(DataError::CacheBusy {
+                cache_dir: self.root_dir.as_ref().clone(),
+                operation: "history cache maintenance",
+            }),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn append_tick_segment(
+        &self,
+        path: &Path,
+        segment: &HistorySeriesWriteSegment<'_>,
+    ) -> Result<HistorySeriesSegmentReport> {
+        #[cfg(test)]
+        if self.legacy_new_tick_files && !path.exists() {
+            return append_legacy_segment_to_file(path, segment);
+        }
+        append_segment_to_file(path, segment)
+    }
+
+    fn append_tick_segment_with_coverage(
+        &self,
+        path: &Path,
+        segment: &HistorySeriesWriteSegment<'_>,
+        coverage: &[HistorySeriesCoverageCommit],
+    ) -> Result<HistorySeriesSegmentReport> {
+        #[cfg(test)]
+        if self.legacy_new_tick_files && !path.exists() {
+            return append_legacy_segment_and_coverage_to_file(path, segment, coverage);
+        }
+        append_segment_and_coverage_to_file(path, segment, coverage)
+    }
+
+    fn append_partition_coverage(
+        &self,
+        path: &Path,
+        start_ns: i64,
+        end_ns: i64,
+        source: &HistorySeriesCoverageCommit,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if self.legacy_new_tick_files && source.kind == HistorySeriesKind::Tick && !path.exists() {
+            let commit = HistorySeriesCoverageCommit {
+                symbol: source.symbol.clone(),
+                kind: source.kind,
+                range_start_ns: start_ns,
+                range_end_ns: end_ns,
+                rows: source.rows,
+                id_range: source.id_range,
+            };
+            ensure_parent_dir(path)?;
+            return with_exclusive_tqbn_lock(path, || {
+                append_legacy_coverage_to_file(path, &commit)
+            });
+        }
+        append_coverage_to_partition_file(
+            path,
+            source.symbol.as_str(),
+            source.kind,
+            start_ns,
+            end_ns,
+            source.rows,
+            source.id_range,
+        )
     }
 
     pub(super) fn series_path(&self, symbol: &str, duration_ns: i64) -> PathBuf {
@@ -1043,7 +1153,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
     }
 
     fn schema_version(&self) -> u32 {
-        TQBN_SCHEMA_VERSION
+        super::HISTORY_SERIES_CACHE_SCHEMA_VERSION
     }
 
     fn root_dir(&self) -> &Path {
@@ -1136,6 +1246,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
 
     fn repair_tick_locks(&self) -> Result<Vec<HistorySeriesTickLockRepair>> {
         self.ensure_writable()?;
+        let _root_gate = self.acquire_shared_write_gate()?;
         let mut repaired = Vec::new();
         for file in list_tqbn_file_metas(self.root_dir.as_path())?
             .into_iter()
@@ -1173,6 +1284,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
         &self,
     ) -> Result<Vec<HistorySeriesTickLegacyPartitionLockRepair>> {
         self.ensure_writable()?;
+        let _root_gate = self.acquire_shared_write_gate()?;
         let mut repaired = Vec::new();
         for partition_dir in tick_tqbn_partition_dirs(self.root_dir.as_path())? {
             let lock_path = partition_dir.join(LEGACY_LOCK_FILE_NAME);
@@ -1215,6 +1327,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
         retention_days: Option<u64>,
     ) -> Result<HistorySeriesCacheMaintenanceReport> {
         self.ensure_writable()?;
+        let _root_gate = self.acquire_exclusive_maintenance_gate()?;
         let mut report = HistorySeriesCacheMaintenanceReport::default();
         evict_expired_tqbn_files(self.root_dir.as_path(), retention_days, &mut report)?;
         compact_tqbn_files(self.root_dir.as_path())?;
@@ -1224,8 +1337,24 @@ impl HistorySeriesStore for TqbnHistoryStore {
 
     fn compact_series(&self, symbol: &str, kind: HistorySeriesKind) -> Result<()> {
         self.ensure_writable()?;
+        let _root_gate = self.acquire_exclusive_maintenance_gate()?;
         for path in self.partition_paths_for_series(symbol, kind)? {
             compact_tqbn_file(&path, symbol, kind)?;
+        }
+        Ok(())
+    }
+
+    fn migrate_tick_series_to_current(&self, symbol: &str) -> Result<()> {
+        self.ensure_writable()?;
+        for path in self.partition_paths_for_series(symbol, HistorySeriesKind::Tick)? {
+            with_exclusive_tqbn_lock(&path, || {
+                if container::matches(&path)? {
+                    container::scan(&path, symbol)?;
+                    return Ok(());
+                }
+                let state = parse_tqbn_committed_tick_partition(&path, symbol)?;
+                container::migrate(&path, symbol, &state)
+            })?;
         }
         Ok(())
     }
@@ -1238,6 +1367,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
         range_end_ns: i64,
     ) -> Result<()> {
         self.ensure_writable()?;
+        let _root_gate = self.acquire_exclusive_maintenance_gate()?;
         for path in self.partition_paths_for_range(symbol, kind, range_start_ns, range_end_ns)? {
             match fs::metadata(&path) {
                 Ok(metadata) if metadata.is_file() => compact_tqbn_file(&path, symbol, kind)?,
@@ -1331,6 +1461,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
         segment: HistorySeriesWriteSegment<'_>,
     ) -> Result<HistorySeriesSegmentReport> {
         self.ensure_writable()?;
+        let _root_gate = self.acquire_shared_write_gate()?;
         validate_segment_rows(&segment)?;
         let (rows, id_range, datetime_range) = segment_rows_summary(&segment)?;
         let mut touched_path = None;
@@ -1374,7 +1505,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
                         rows: HistorySeriesWriteRows::Ticks(rows),
                     };
                     with_exclusive_tqbn_lock(&path, || {
-                        append_segment_to_file(&path, &partition_segment)
+                        self.append_tick_segment(&path, &partition_segment)
                     })?;
                     touched_path.get_or_insert(path);
                 }
@@ -1428,6 +1559,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
         coverage: &[HistorySeriesCoverageCommit],
     ) -> Result<HistorySeriesSegmentReport> {
         self.ensure_writable()?;
+        let _root_gate = self.acquire_shared_write_gate()?;
         validate_segment_rows(&segment)?;
         let (HistorySeriesKind::Tick, HistorySeriesWriteRows::Ticks(rows)) =
             (segment.kind, &segment.rows)
@@ -1476,7 +1608,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
             rows: HistorySeriesWriteRows::Ticks(partition_rows),
         };
         with_exclusive_tqbn_lock(&path, || {
-            append_segment_and_coverage_to_file(
+            self.append_tick_segment_with_coverage(
                 &path,
                 &partition_segment,
                 partition_coverage.as_slice(),
@@ -1486,6 +1618,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
 
     fn append_coverage(&self, commit: HistorySeriesCoverageCommit) -> Result<()> {
         self.ensure_writable()?;
+        let _root_gate = self.acquire_shared_write_gate()?;
         validate_coverage_range(commit.range_start_ns, commit.range_end_ns)?;
         for partition in partition_ranges(commit.range_start_ns, commit.range_end_ns)? {
             let path = self.partition_series_path(
@@ -1493,21 +1626,14 @@ impl HistorySeriesStore for TqbnHistoryStore {
                 commit.symbol.as_str(),
                 commit.kind,
             );
-            append_coverage_to_partition_file(
-                &path,
-                commit.symbol.as_str(),
-                commit.kind,
-                partition.start_ns,
-                partition.end_ns,
-                commit.rows,
-                commit.id_range,
-            )?;
+            self.append_partition_coverage(&path, partition.start_ns, partition.end_ns, &commit)?;
         }
         Ok(())
     }
 
     fn append_provisional(&self, commit: HistorySeriesProvisionalCoverage) -> Result<()> {
         self.ensure_writable()?;
+        let _root_gate = self.acquire_shared_write_gate()?;
         validate_provisional_coverage(&commit)?;
         for partition in partition_ranges(commit.range_start_ns, commit.complete_through_ns)? {
             let path = self.partition_series_path(
@@ -1538,6 +1664,16 @@ impl HistorySeriesStore for TqbnHistoryStore {
         kind: HistorySeriesKind,
     ) -> Result<HistorySeriesPurgeReport> {
         self.ensure_writable()?;
+        let _root_gate = self.acquire_exclusive_maintenance_gate()?;
+        self.purge_series_under_exclusive_root_gate(symbol, kind)
+    }
+
+    fn purge_series_under_exclusive_root_gate(
+        &self,
+        symbol: &str,
+        kind: HistorySeriesKind,
+    ) -> Result<HistorySeriesPurgeReport> {
+        self.ensure_writable()?;
         let path = self.series_path(symbol, kind.duration_ns());
         let mut report = HistorySeriesPurgeReport {
             path: path.clone(),
@@ -1558,6 +1694,23 @@ impl HistorySeriesStore for TqbnHistoryStore {
     }
 
     fn purge_series_range(
+        &self,
+        symbol: &str,
+        kind: HistorySeriesKind,
+        range_start_ns: i64,
+        range_end_ns: i64,
+    ) -> Result<HistorySeriesPurgeReport> {
+        self.ensure_writable()?;
+        let _root_gate = self.acquire_exclusive_maintenance_gate()?;
+        self.purge_series_range_under_exclusive_root_gate(
+            symbol,
+            kind,
+            range_start_ns,
+            range_end_ns,
+        )
+    }
+
+    fn purge_series_range_under_exclusive_root_gate(
         &self,
         symbol: &str,
         kind: HistorySeriesKind,
@@ -1597,6 +1750,7 @@ impl HistorySeriesStore for TqbnHistoryStore {
             request.range_end_ns,
         )?;
         Ok(Box::new(TqbnReader {
+            common_partition: None,
             paths,
             path_index: 0,
             symbol: request.symbol,
@@ -1616,6 +1770,12 @@ impl HistorySeriesStore for TqbnHistoryStore {
 impl HistorySeriesReader for TqbnReader {
     fn next_row(&mut self) -> Result<Option<HistorySeriesRow>> {
         loop {
+            if let Some(partition) = self.common_partition.as_mut() {
+                if let Some(row) = partition.next()? {
+                    return Ok(Some(row));
+                }
+                self.common_partition = None;
+            }
             if let Some(row) = self.rows.next() {
                 return Ok(Some(row));
             }
@@ -1656,6 +1816,9 @@ impl HistorySeriesReader for TqbnReader {
                 Arc::clone(&self.telemetry),
             )? {
                 PreparedTqbnPartition::Missing => {}
+                PreparedTqbnPartition::Common(partition) => {
+                    self.common_partition = Some(partition);
+                }
                 PreparedTqbnPartition::Streaming(partition) => {
                     self.partition = Some(partition);
                 }
@@ -1869,6 +2032,16 @@ fn append_segment_to_file(
     path: &Path,
     segment: &HistorySeriesWriteSegment<'_>,
 ) -> Result<HistorySeriesSegmentReport> {
+    if segment.kind == HistorySeriesKind::Tick && (!path.exists() || container::matches(path)?) {
+        return container::write_segment(path, segment, &[]);
+    }
+    append_legacy_segment_to_file(path, segment)
+}
+
+fn append_legacy_segment_to_file(
+    path: &Path,
+    segment: &HistorySeriesWriteSegment<'_>,
+) -> Result<HistorySeriesSegmentReport> {
     let (mut file, first_block_offset) =
         open_tqbn_file_for_append(path, segment.symbol, segment.kind, false)?;
     let mut coverage_index_offset =
@@ -1900,6 +2073,17 @@ fn append_segment_to_file(
 }
 
 fn append_segment_and_coverage_to_file(
+    path: &Path,
+    segment: &HistorySeriesWriteSegment<'_>,
+    coverage: &[HistorySeriesCoverageCommit],
+) -> Result<HistorySeriesSegmentReport> {
+    if segment.kind == HistorySeriesKind::Tick && (!path.exists() || container::matches(path)?) {
+        return container::write_segment(path, segment, coverage);
+    }
+    append_legacy_segment_and_coverage_to_file(path, segment, coverage)
+}
+
+fn append_legacy_segment_and_coverage_to_file(
     path: &Path,
     segment: &HistorySeriesWriteSegment<'_>,
     coverage: &[HistorySeriesCoverageCommit],
@@ -1941,6 +2125,20 @@ fn append_segment_and_coverage_to_file(
 }
 
 fn append_coverage_to_file(path: &Path, commit: &HistorySeriesCoverageCommit) -> Result<()> {
+    if commit.kind == HistorySeriesKind::Tick && (!path.exists() || container::matches(path)?) {
+        return container::update(
+            path,
+            &commit.symbol,
+            &[],
+            std::slice::from_ref(commit),
+            None,
+            false,
+        );
+    }
+    append_legacy_coverage_to_file(path, commit)
+}
+
+fn append_legacy_coverage_to_file(path: &Path, commit: &HistorySeriesCoverageCommit) -> Result<()> {
     let (mut file, first_block_offset) =
         open_tqbn_file_for_append(path, commit.symbol.as_str(), commit.kind, true)?;
     let mut coverage_index_offset =
@@ -1966,6 +2164,9 @@ fn append_provisional_to_file(
     path: &Path,
     commit: &HistorySeriesProvisionalCoverage,
 ) -> Result<()> {
+    if commit.kind == HistorySeriesKind::Tick && (!path.exists() || container::matches(path)?) {
+        return container::update(path, &commit.symbol, &[], &[], Some(commit), false);
+    }
     let (mut file, first_block_offset) =
         open_tqbn_file_for_append(path, commit.symbol.as_str(), commit.kind, true)?;
     let mut coverage_index_offset =
@@ -1986,6 +2187,7 @@ fn open_tqbn_file_for_append(
     kind: HistorySeriesKind,
     allow_legacy: bool,
 ) -> Result<(File, u64)> {
+    ensure_private_tqbn_checkpoint_path(path)?;
     match fs::metadata(path) {
         Ok(metadata) if metadata.len() == 0 => {
             fs::remove_file(path)?;
@@ -2006,8 +2208,68 @@ fn open_tqbn_file_for_append(
             "legacy TQBN is read-only; run tqsdk-cache migrate --apply --backup-dir <DIR> before appending",
         ));
     }
+    detach_hardlinked_tqbn_data(path, &mut file)?;
     file.seek(SeekFrom::End(0))?;
     Ok((file, first_block_offset as u64))
+}
+
+/// Called only while the canonical companion and old data-inode locks are held.
+/// Copy the exact physical bytes before any recovery truncation or append. The
+/// unchanged companion checkpoint remains valid for the copied prefix, and old
+/// opened readers / retained hardlinks continue to reference the original inode.
+fn detach_hardlinked_tqbn_data(path: &Path, input: &mut File) -> Result<()> {
+    crate::cache_file::detach(path, input, true)
+}
+
+fn ensure_private_tqbn_checkpoint(file: &File) -> Result<()> {
+    if tqbn_file_link_count(file)? > 1 {
+        return Err(DataError::InvalidResponse(
+            "hardlinked TQBN checkpoint lock requires offline repair; refusing shared-inode mutation"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_private_tqbn_checkpoint_path(path: &Path) -> Result<()> {
+    match File::open(tqbn_file_lock_path(path)) {
+        Ok(file) => ensure_private_tqbn_checkpoint(&file),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(unix)]
+fn tqbn_file_link_count(file: &File) -> Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(file.metadata()?.nlink())
+}
+
+#[cfg(windows)]
+// The only unsafe seam is the OS handle query; no borrowed buffers escape it.
+#[allow(unsafe_code)]
+fn tqbn_file_link_count(file: &File) -> Result<u64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    // SAFETY: File owns a live handle; the output has the required size and
+    // alignment and is only read after the API reports success.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) } == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: the successful call initialized the complete output struct.
+    Ok(u64::from(
+        unsafe { information.assume_init() }.nNumberOfLinks,
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn tqbn_file_link_count(_file: &File) -> Result<u64> {
+    Err(DataError::InvalidState(
+        "TQBN mutation requires platform hardlink-count support",
+    ))
 }
 
 fn initialize_tqbn_file_atomically(
@@ -2302,6 +2564,7 @@ fn persist_tqbn_tail_checkpoint(
         .truncate(false)
         .write(true)
         .open(tqbn_file_lock_path(path))?;
+    ensure_private_tqbn_checkpoint(&checkpoint_file)?;
     checkpoint_file.set_len(0)?;
     checkpoint_file.seek(SeekFrom::Start(0))?;
     checkpoint_file.write_all(&encoded)?;
@@ -2810,6 +3073,13 @@ fn parse_tqbn_series_file(
     symbol: &str,
     kind: HistorySeriesKind,
 ) -> Result<ParsedTqbnSeries> {
+    if kind == HistorySeriesKind::Tick && container::matches(path)? {
+        return Ok(ParsedTqbnSeries {
+            state: container::scan(path, symbol)?,
+            prefix: None,
+            error: None,
+        });
+    }
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(ParsedTqbnSeries::default()),
@@ -2828,6 +3098,53 @@ fn parse_tqbn_series_file(
         }
     }
     Ok(parsed)
+}
+
+fn parse_tqbn_committed_tick_partition(path: &Path, symbol: &str) -> Result<TqbnSeriesState> {
+    let mut file = File::open(path)?;
+    let (prefix, first_block_offset) =
+        read_and_validate_tqbn_prefix(&mut file, symbol, HistorySeriesKind::Tick)?;
+    let physical_len = file.metadata()?.len();
+    let checkpoint =
+        load_tqbn_tail_checkpoint(path, &mut file, first_block_offset as u64, physical_len)?;
+    let checkpoint_bytes = match fs::metadata(tqbn_file_lock_path(path)) {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.into()),
+    };
+    if checkpoint.is_none()
+        && (checkpoint_bytes != 0 || prefix.schema_version == TQBN_SCHEMA_VERSION)
+    {
+        return Err(DataError::InvalidResponse(
+            "legacy Tick schema 3 migration requires a valid tail checkpoint; schema 2 may omit it"
+                .into(),
+        ));
+    }
+    let snapshot_len = checkpoint.map_or(physical_len, |checkpoint| checkpoint.valid_len);
+    let day = path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        .and_then(|value| NaiveDate::parse_from_str(value, "%Y%m%d").ok())
+        .ok_or(DataError::InvalidState(
+            "invalid legacy Tick partition path",
+        ))?;
+    let (_, start_ns, end_ns) = trading_day_range(day)?;
+    let rows = parse_tqbn_rows_for_range(
+        file,
+        symbol,
+        HistorySeriesKind::Tick,
+        TqbnReadRange { start_ns, end_ns },
+        snapshot_len,
+        None,
+    )?;
+    let checkpoints = parse_tqbn_checkpoint_file(path, symbol, HistorySeriesKind::Tick)?;
+    Ok(TqbnSeriesState {
+        rows,
+        coverage: checkpoints.coverage,
+        provisional: checkpoints.provisional,
+    })
 }
 
 fn prepare_tqbn_partition(
@@ -2849,6 +3166,13 @@ fn prepare_tqbn_partition(
         }
         Err(error) => return Err(error.into()),
     };
+    if kind == HistorySeriesKind::Tick && container::matches(path)? {
+        let index = container::load(&mut file, path, symbol)?;
+        FileExt::unlock(&lock_file)?;
+        return Ok(PreparedTqbnPartition::Common(Box::new(
+            container::Reader::new(file, index, range, telemetry),
+        )));
+    }
     let (_, first_block_offset) = read_and_validate_tqbn_prefix(&mut file, symbol, kind)?;
     let physical_len = file.metadata()?.len();
     let checkpoint =
@@ -3660,6 +3984,11 @@ fn parse_tqbn_checkpoint_file(
         }
         Err(error) => return Err(error.into()),
     };
+    if kind == HistorySeriesKind::Tick && container::matches(path)? {
+        return Ok(container::checkpoints(&container::load(
+            &mut file, path, symbol,
+        )?));
+    }
     let (_, offset) = read_and_validate_tqbn_prefix(&mut file, symbol, kind)?;
     let file_len = file.metadata()?.len();
     let checkpoint = load_tqbn_tail_checkpoint(path, &mut file, offset as u64, file_len)?;
@@ -5200,10 +5529,15 @@ fn scan_tqbn_tree_file(root_dir: &Path, path: PathBuf) -> Result<HistorySeriesCa
 
     match parse_tqbn_series_file(&path, symbol.as_str(), kind) {
         Ok(parsed) => {
-            let schema_version = parsed.prefix.as_ref().map(|prefix| prefix.schema_version);
+            let common = kind == HistorySeriesKind::Tick && container::matches(&path)?;
+            let schema_version = if common {
+                Some(container::SCHEMA_VERSION)
+            } else {
+                parsed.prefix.as_ref().map(|prefix| prefix.schema_version)
+            };
             Ok(HistorySeriesCacheFileReport {
                 id_range: rows_id_range(&parsed.state.rows)?,
-                row_width: row_width(kind),
+                row_width: if common { None } else { row_width(kind) },
                 rows: parsed.state.rows.len(),
                 status: if parsed.error.is_some() {
                     HistorySeriesCacheFileStatus::IncompleteWrite
@@ -5404,10 +5738,16 @@ fn record_removed_tqbn_file(size_bytes: u64, report: &mut HistorySeriesCacheMain
 }
 
 fn compact_tqbn_file(path: &Path, symbol: &str, kind: HistorySeriesKind) -> Result<()> {
-    with_exclusive_tqbn_lock(path, || compact_tqbn_file_locked(path, symbol, kind))
+    with_exclusive_tqbn_lock(path, || {
+        ensure_private_tqbn_checkpoint_path(path)?;
+        compact_tqbn_file_locked(path, symbol, kind)
+    })
 }
 
 fn compact_tqbn_file_locked(path: &Path, symbol: &str, kind: HistorySeriesKind) -> Result<()> {
+    if kind == HistorySeriesKind::Tick && container::matches(path)? {
+        return container::update(path, symbol, &[], &[], None, true);
+    }
     if fs::metadata(path)
         .map(|metadata| metadata.len() == 0)
         .unwrap_or(true)
@@ -6305,6 +6645,8 @@ impl<'a> RecordReader<'a> {
 
 #[cfg(test)]
 mod tests {
+    include!("hardlink_tests.rs");
+
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::sync::{Arc, mpsc};
@@ -6328,12 +6670,13 @@ mod tests {
     };
     use super::{
         TQBN_BLOCK_HEADER_LEN, TQBN_COVERAGE_INDEX_PAYLOAD_LEN, TqbnHistoryStore, TqbnMetadata,
-        TqbnReadTelemetryState, TqbnReader, coverage_record, encode_metadata, history_row_id,
-        history_rows_are_strictly_increasing, load_tqbn_tail_checkpoint, parse_tqbn_coverage_file,
-        plan_tqbn_streaming_blocks, read_and_validate_tqbn_prefix, read_tqbn_block_descriptor_at,
-        read_tqbn_coverage_index_at, rows_for_request, tick_level_depth, tqbn_file_lock_path,
-        trading_day_range, try_parse_tqbn_checkpoint_index_chain_at,
-        try_parse_tqbn_coverage_index_chain, write_coverage_record_bytes,
+        TqbnReadTelemetryState, TqbnReader, append_legacy_segment_to_file, coverage_record,
+        encode_metadata, ensure_parent_dir, history_row_id, history_rows_are_strictly_increasing,
+        load_tqbn_tail_checkpoint, parse_tqbn_coverage_file, plan_tqbn_streaming_blocks,
+        read_and_validate_tqbn_prefix, read_tqbn_block_descriptor_at, read_tqbn_coverage_index_at,
+        rows_for_request, tick_level_depth, tqbn_file_lock_path, trading_day_range,
+        try_parse_tqbn_checkpoint_index_chain_at, try_parse_tqbn_coverage_index_chain,
+        write_coverage_record_bytes,
     };
 
     const SYMBOL: &str = "SHFE.rb2601";
@@ -6456,7 +6799,7 @@ mod tests {
 
     #[test]
     fn tqbn_sparse_tick_block_round_trips_every_snapshot() {
-        let cache = tqbn_cache("sparse_tick_block");
+        let store = tqbn_store("sparse_tick_block");
         let mut rows = Vec::new();
         let mut current = tick5(1, 1_000, f64::NAN, 623.5);
         current.volume = 0;
@@ -6474,16 +6817,18 @@ mod tests {
             rows.push(row);
         }
 
-        cache
-            .write_tick_range(SYMBOL, 1_000, 1_000 + 512 * 500_000_000, &rows)
-            .unwrap();
-
-        let path = cache
-            .root_dir()
-            .join("series")
-            .join("19700101")
-            .join("tick")
-            .join("SHFE.rb2601.tqbn");
+        let path = store.partition_series_path("19700101", SYMBOL, HistorySeriesKind::Tick);
+        ensure_parent_dir(&path).unwrap();
+        append_legacy_segment_to_file(
+            &path,
+            &HistorySeriesWriteSegment {
+                symbol: SYMBOL,
+                kind: HistorySeriesKind::Tick,
+                declared_range_ns: Some((1_000, 1_000 + 512 * 500_000_000)),
+                rows: HistorySeriesWriteRows::Ticks(&rows),
+            },
+        )
+        .unwrap();
         let bytes = std::fs::read(path).unwrap();
         let (_, first_block_offset) = decode_file_prefix(&bytes).unwrap();
         let blocks = decode_blocks(&bytes[first_block_offset..]).unwrap();
@@ -6497,6 +6842,7 @@ mod tests {
             "sparse Tick block must use TickDelta encoding"
         );
 
+        let cache = HistorySeriesCache::from_store(Arc::new(store));
         let actual = cache
             .read_tick_data_series(TickDataSeriesRequest::new(
                 SYMBOL,
@@ -6998,6 +7344,7 @@ mod tests {
         }
         let path = store.partition_series_path("19700101", SYMBOL, kind);
         let mut reader = TqbnReader {
+            common_partition: None,
             paths: vec![path.clone()],
             path_index: 0,
             symbol: SYMBOL.to_string(),
@@ -7029,6 +7376,7 @@ mod tests {
         assert_eq!(telemetry.materialized_rows, 0);
 
         let mut skipped_reader = TqbnReader {
+            common_partition: None,
             paths: vec![path],
             path_index: 0,
             symbol: SYMBOL.to_string(),
@@ -7095,6 +7443,7 @@ mod tests {
 
         let path = store.partition_series_path("19700101", SYMBOL, kind);
         let mut reader = TqbnReader {
+            common_partition: None,
             paths: vec![path],
             path_index: 0,
             symbol: SYMBOL.to_string(),
@@ -7201,6 +7550,7 @@ mod tests {
 
         let path = store.partition_series_path("19700101", SYMBOL, kind);
         let mut reader = TqbnReader {
+            common_partition: None,
             paths: vec![path],
             path_index: 0,
             symbol: SYMBOL.to_string(),
@@ -7256,6 +7606,7 @@ mod tests {
 
         let path = store.partition_series_path("19700101", SYMBOL, kind);
         let mut reader = TqbnReader {
+            common_partition: None,
             paths: vec![path],
             path_index: 0,
             symbol: SYMBOL.to_string(),
@@ -7330,6 +7681,7 @@ mod tests {
 
         let path = store.partition_series_path("19700101", SYMBOL, kind);
         let mut reader = TqbnReader {
+            common_partition: None,
             paths: vec![path],
             path_index: 0,
             symbol: SYMBOL.to_string(),
@@ -7392,6 +7744,7 @@ mod tests {
         }
 
         let mut reader = TqbnReader {
+            common_partition: None,
             paths: vec![
                 store.partition_series_path("19700101", SYMBOL, kind),
                 store.partition_series_path("19700102", SYMBOL, kind),
@@ -7449,6 +7802,7 @@ mod tests {
             .unwrap();
         let path = store.partition_series_path("19700101", SYMBOL, kind);
         let mut reader = TqbnReader {
+            common_partition: None,
             paths: vec![path],
             path_index: 0,
             symbol: SYMBOL.to_string(),
@@ -7509,17 +7863,20 @@ mod tests {
             HistorySeriesRow::Kline(_) => unreachable!("Tick reader returned Kline"),
         })
         .collect::<Vec<_>>();
-        store
-            .write_segment(HistorySeriesWriteSegment {
+        let path = store.partition_series_path("19700101", SYMBOL, kind);
+        ensure_parent_dir(&path).unwrap();
+        append_legacy_segment_to_file(
+            &path,
+            &HistorySeriesWriteSegment {
                 symbol: SYMBOL,
                 kind,
                 declared_range_ns: None,
                 rows: HistorySeriesWriteRows::Ticks(&input),
-            })
-            .unwrap();
-
-        let path = store.partition_series_path("19700101", SYMBOL, kind);
+            },
+        )
+        .unwrap();
         let mut reader = TqbnReader {
+            common_partition: None,
             paths: vec![path],
             path_index: 0,
             symbol: SYMBOL.to_string(),
@@ -8986,7 +9343,9 @@ mod tests {
     }
 
     fn tqbn_store(test_name: &str) -> TqbnHistoryStore {
-        TqbnHistoryStore::new(test_root(test_name)).unwrap()
+        let mut store = TqbnHistoryStore::new(test_root(test_name)).unwrap();
+        store.legacy_new_tick_files = true;
+        store
     }
 
     fn test_root(test_name: &str) -> std::path::PathBuf {

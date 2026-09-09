@@ -162,7 +162,7 @@ fn history_cache_store_scan_reports_tqbn_rows() {
     assert_eq!(file.duration_ns, Some(0));
     assert_eq!(file.id_range, Some((1, 3)));
     assert_eq!(file.rows, 2);
-    assert_eq!(file.schema_version, Some(3));
+    assert_eq!(file.schema_version, Some(4));
     assert!(file.error.is_none());
 }
 
@@ -489,7 +489,9 @@ fn regular_files(root: &Path) -> Vec<PathBuf> {
                 && !path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.ends_with(".tqbn.lock"))
+                    .is_some_and(|name| {
+                        name.ends_with(".tqbn.lock") || name == ".tqsdk-cache-operation.lock"
+                    })
             {
                 files.push(path);
             }

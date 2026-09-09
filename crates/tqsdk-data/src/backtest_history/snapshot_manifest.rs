@@ -17,6 +17,11 @@ use sha2::{Digest, Sha256};
 
 use super::snapshot::{BacktestHistorySnapshotError, map_manifest_error};
 use crate::history_series_cache::tqbn_snapshot_file_sha256_and_requires_zstd;
+use crate::{
+    BACKTEST_TICK_CACHE_FORMAT_ID, BACKTEST_TICK_CACHE_SCHEMA_VERSION, DAILY_KLINE_CACHE_FORMAT_ID,
+    DAILY_KLINE_CACHE_SCHEMA_VERSION, MINUTE_KLINE_CACHE_FORMAT_ID,
+    MINUTE_KLINE_CACHE_SCHEMA_VERSION,
+};
 
 const MANIFEST_VERSION: u32 = 1;
 const SNAPSHOTS_DIR: &str = "snapshots";
@@ -85,7 +90,26 @@ pub fn backtest_history_snapshot_cache_path_requires_placeholder(
     Ok(matches!(
         classify_cache_relative_path(path).map_err(map_manifest_error)?,
         BacktestHistorySnapshotFileDisposition::Rebuild
-    ) && !is_private_fill_staging_path(path))
+    ) && !is_private_fill_staging_path(path)
+        && !is_private_tqbn_cow_path(path))
+}
+
+fn is_private_tqbn_cow_path(path: &Path) -> bool {
+    let Some((symbol, suffix)) = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.rsplit_once(".tqbn.cow-"))
+    else {
+        return false;
+    };
+    let fields = suffix.split('-').collect::<Vec<_>>();
+    !symbol.is_empty()
+        && fields.len() == 3
+        && fields.iter().all(|field| {
+            !field.is_empty()
+                && field.bytes().all(|byte| byte.is_ascii_digit())
+                && field.parse::<u128>().is_ok()
+        })
 }
 
 fn is_private_fill_staging_path(path: &Path) -> bool {
@@ -435,18 +459,18 @@ fn build_manifest_artifact(
         cache_formats: vec![
             CacheFormat {
                 family: "daily".to_string(),
-                format_id: "tqsdk.daily-kline.single-file.v1".to_string(),
-                schema_version: 1,
+                format_id: DAILY_KLINE_CACHE_FORMAT_ID.to_string(),
+                schema_version: DAILY_KLINE_CACHE_SCHEMA_VERSION,
             },
             CacheFormat {
                 family: "minute".to_string(),
-                format_id: "tqsdk.minute-kline.monthly.v5".to_string(),
-                schema_version: 5,
+                format_id: MINUTE_KLINE_CACHE_FORMAT_ID.to_string(),
+                schema_version: MINUTE_KLINE_CACHE_SCHEMA_VERSION,
             },
             CacheFormat {
                 family: "tick".to_string(),
-                format_id: "tqsdk.tqbn.daily.v3".to_string(),
-                schema_version: 3,
+                format_id: BACKTEST_TICK_CACHE_FORMAT_ID.to_string(),
+                schema_version: BACKTEST_TICK_CACHE_SCHEMA_VERSION,
             },
         ],
         metadata_snapshot_hash: metadata_snapshot_hash.clone(),
@@ -546,18 +570,16 @@ fn collect_manifest_input_files(
             role,
             BacktestHistorySnapshotFileRole::TqmkImmutableGeneration
                 | BacktestHistorySnapshotFileRole::TqdkImmutableGeneration
-        ) && crate::kline_append_log::load::<serde_json::Value>(
-            &mut File::open(&path)
-                .map_err(|error| SnapshotManifestError::unavailable(error.to_string()))?,
-        )
-        .map_err(|error| SnapshotManifestError::corrupt(error.to_string()))?
-        .is_some()
+        ) && let Some((feature, compressed)) = cache_file_feature(&path)?
         {
-            required_features.insert("kline-append-v1".to_string());
+            required_features.insert(feature.to_string());
+            if compressed {
+                required_features.insert("tqbn-zstd".to_string());
+            }
         }
         let sha256 = if role == BacktestHistorySnapshotFileRole::TqbnMutableLayout {
-            let (sha256, requires_zstd) = tqbn_snapshot_file_sha256_and_requires_zstd(&path)
-                .map_err(|error| {
+            let (sha256, requires_zstd, requires_history_container) =
+                tqbn_snapshot_file_sha256_and_requires_zstd(&path).map_err(|error| {
                     SnapshotManifestError::corrupt(format!(
                         "snapshot TQBN entry {} cannot be inspected: {error}",
                         path.display()
@@ -565,6 +587,9 @@ fn collect_manifest_input_files(
                 })?;
             if requires_zstd {
                 required_features.insert("tqbn-zstd".to_string());
+            }
+            if requires_history_container {
+                required_features.insert("history-container-v1".to_string());
             }
             sha256
         } else {
@@ -619,6 +644,11 @@ fn classify_cache_relative_path(
         .and_then(|value| value.to_str())
         .ok_or_else(|| SnapshotManifestError::corrupt("snapshot cache path is not UTF-8"))?;
     if is_rebuildable_cache_lock(file_name) {
+        return Ok(BacktestHistorySnapshotFileDisposition::Rebuild);
+    }
+    // A crash before COW publication can leave a private copy. Recognize only
+    // the exact writer-owned name, never an arbitrary unknown file suffix.
+    if is_private_tqbn_cow_path(path) {
         return Ok(BacktestHistorySnapshotFileDisposition::Rebuild);
     }
 
@@ -1171,6 +1201,10 @@ fn validate_manifest(
             .required_features
             .iter()
             .any(|feature| feature == "kline-append-v1"),
+        manifest
+            .required_features
+            .iter()
+            .any(|feature| feature == "history-container-v1"),
     )?;
     validate_identity(manifest, manifest_value)?;
 
@@ -1223,7 +1257,7 @@ fn validate_required_features(features: &[String]) -> Result<(), SnapshotManifes
     )?;
     for feature in features {
         match feature.as_str() {
-            "kline-append-v1" => {}
+            "kline-append-v1" | "history-container-v1" => {}
             "tqbn-zstd" if cfg!(feature = "tqbn-zstd") => {}
             "tqbn-zstd" => {
                 return Err(SnapshotManifestError::incompatible(
@@ -1271,23 +1305,32 @@ fn validate_snapshot_id(manifest: &SnapshotManifest) -> Result<(), SnapshotManif
 }
 
 fn validate_formats(formats: &[CacheFormat]) -> Result<(), SnapshotManifestError> {
-    let expected = [
-        ("daily", "tqsdk.daily-kline.single-file.v1", 1),
-        ("minute", "tqsdk.minute-kline.monthly.v5", 5),
-        ("tick", "tqsdk.tqbn.daily.v3", 3),
-    ];
+    let expected = ["daily", "minute", "tick"];
     if formats.len() != expected.len() {
         return Err(SnapshotManifestError::incompatible(
-            "manifest must declare exactly the tick, minute, and daily cache formats",
+            "manifest must declare exactly the daily, minute, and tick cache formats in that order",
         ));
     }
-    for (format, expected) in formats.iter().zip(expected) {
-        if (
-            format.family.as_str(),
-            format.format_id.as_str(),
-            format.schema_version,
-        ) != expected
-        {
+    for (format, family) in formats.iter().zip(expected) {
+        let identity_supported = match family {
+            "daily" => {
+                format.format_id == DAILY_KLINE_CACHE_FORMAT_ID
+                    && format.schema_version == DAILY_KLINE_CACHE_SCHEMA_VERSION
+            }
+            "minute" => {
+                (format.format_id == MINUTE_KLINE_CACHE_FORMAT_ID
+                    && format.schema_version == MINUTE_KLINE_CACHE_SCHEMA_VERSION)
+                    || (format.format_id == "tqsdk.minute-kline.monthly.v5"
+                        && format.schema_version == 5)
+            }
+            "tick" => {
+                (format.format_id == BACKTEST_TICK_CACHE_FORMAT_ID
+                    && format.schema_version == BACKTEST_TICK_CACHE_SCHEMA_VERSION)
+                    || (format.format_id == "tqsdk.tqbn.daily.v3" && format.schema_version == 3)
+            }
+            _ => false,
+        };
+        if format.family != family || !identity_supported {
             return Err(SnapshotManifestError::incompatible(format!(
                 "unsupported cache format {} {} v{}",
                 format.family, format.format_id, format.schema_version
@@ -1301,6 +1344,7 @@ fn validate_files(
     generation_dir: &Path,
     files: &[ManifestFile],
     allows_kline_append: bool,
+    allows_history_container: bool,
 ) -> Result<(), SnapshotManifestError> {
     let paths = files
         .iter()
@@ -1331,7 +1375,14 @@ fn validate_files(
             file.role.as_str(),
             "tqmk_immutable_generation" | "tqdk_immutable_generation"
         );
-        if append_kline && !allows_kline_append {
+        let common = cache_file_feature(&path)?
+            .is_some_and(|(feature, _)| feature == "history-container-v1");
+        if common && !allows_history_container {
+            return Err(SnapshotManifestError::incompatible(
+                "history file requires history-container-v1",
+            ));
+        }
+        if append_kline && !common && !allows_kline_append {
             return Err(SnapshotManifestError::incompatible(
                 "Kline append file requires kline-append-v1",
             ));
@@ -1741,9 +1792,57 @@ fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
+fn cache_file_feature(path: &Path) -> Result<Option<(&'static str, bool)>, SnapshotManifestError> {
+    let mut file =
+        File::open(path).map_err(|e| SnapshotManifestError::unavailable(e.to_string()))?;
+    let mut magic = [0; 8];
+    let count = file
+        .read(&mut magic)
+        .map_err(|e| SnapshotManifestError::corrupt(e.to_string()))?;
+    if count != magic.len() {
+        return Ok(None);
+    }
+    if &magic == crate::history_container::MAGIC {
+        let index = crate::history_container::load_any::<serde::de::IgnoredAny>(&mut file, None)
+            .map_err(|e| SnapshotManifestError::corrupt(e.to_string()))?;
+        use crate::history_container::SeriesKind;
+        let expected = match path.extension().and_then(|value| value.to_str()) {
+            Some("tqdk") => SeriesKind::Kline {
+                duration_ns: crate::DAILY_KLINE_DURATION_NS,
+            },
+            Some("tqmk") => SeriesKind::Kline {
+                duration_ns: crate::MINUTE_KLINE_DURATION_NS,
+            },
+            Some("tqbn") => SeriesKind::Tick,
+            _ => {
+                return Err(SnapshotManifestError::corrupt(
+                    "common container has no recognized file role",
+                ));
+            }
+        };
+        if index.identity.kind != expected {
+            return Err(SnapshotManifestError::corrupt(
+                "common container kind disagrees with file role",
+            ));
+        }
+        return Ok(Some(("history-container-v1", index.uses_zstd())));
+    }
+    Ok((&magic == b"TQKLOG01").then_some(("kline-append-v1", false)))
+}
+
 fn sha256_file(path: &Path) -> std::io::Result<String> {
     let mut file = File::open(path)?;
-    if matches!(
+    let mut magic = [0; 8];
+    let read = file.read(&mut magic)?;
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(0))?;
+    if read == magic.len() && &magic == crate::history_container::MAGIC {
+        let index = crate::history_container::load_any::<serde::de::IgnoredAny>(&mut file, None)
+            .map_err(std::io::Error::other)?;
+        index
+            .require_clean_tail(&file)
+            .map_err(std::io::Error::other)?;
+        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(0))?;
+    } else if matches!(
         path.extension().and_then(|extension| extension.to_str()),
         Some("tqmk" | "tqdk")
     ) {
@@ -1769,6 +1868,158 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manifest_reader_accepts_mixed_current_and_legacy_cache_formats() {
+        for (minute_format, minute_schema, tick_format, tick_schema) in [
+            (
+                MINUTE_KLINE_CACHE_FORMAT_ID,
+                MINUTE_KLINE_CACHE_SCHEMA_VERSION,
+                "tqsdk.tqbn.daily.v3",
+                3,
+            ),
+            (
+                "tqsdk.minute-kline.monthly.v5",
+                5,
+                BACKTEST_TICK_CACHE_FORMAT_ID,
+                BACKTEST_TICK_CACHE_SCHEMA_VERSION,
+            ),
+        ] {
+            validate_formats(&[
+                CacheFormat {
+                    family: "daily".into(),
+                    format_id: DAILY_KLINE_CACHE_FORMAT_ID.into(),
+                    schema_version: DAILY_KLINE_CACHE_SCHEMA_VERSION,
+                },
+                CacheFormat {
+                    family: "minute".into(),
+                    format_id: minute_format.into(),
+                    schema_version: minute_schema,
+                },
+                CacheFormat {
+                    family: "tick".into(),
+                    format_id: tick_format.into(),
+                    schema_version: tick_schema,
+                },
+            ])
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn common_container_with_wrong_kind_cannot_enter_a_snapshot() {
+        use crate::history_container::{self as storage, Identity, Index, SeriesKind};
+        let root = std::env::temp_dir().join(format!("snapshot-wrong-kind-{}", unique_suffix()));
+        let cache_dir = root.join("cache");
+        let _gate = crate::BacktestTickCache::open(&cache_dir).unwrap();
+        let path = cache_dir.join("daily-kline-v1/SHFE.au2406.tqdk");
+        for kind in [
+            SeriesKind::Tick,
+            SeriesKind::Kline {
+                duration_ns: crate::MINUTE_KLINE_DURATION_NS,
+            },
+        ] {
+            let index = Index::new(
+                Identity {
+                    symbol: "SHFE.au2406".into(),
+                    kind,
+                    partition_scheme: 1,
+                    pack_range: None,
+                    metadata_schema: 1,
+                },
+                vec![serde_json::json!({})],
+            );
+            storage::create(&path, index, &[]).unwrap();
+            assert!(
+                cache_file_feature(&path)
+                    .unwrap_err()
+                    .message
+                    .contains("kind")
+            );
+            let files = vec![ManifestFile {
+                path: "cache/daily-kline-v1/SHFE.au2406.tqdk".into(),
+                role: "tqdk_immutable_generation".into(),
+                size: fs::metadata(&path).unwrap().len(),
+                sha256: sha256_file(&path).unwrap(),
+            }];
+            assert!(
+                validate_files(&root, &files, false, true)
+                    .unwrap_err()
+                    .message
+                    .contains("kind")
+            );
+            let error = BacktestHistorySnapshotManifestBuilder::new(Utc::now())
+                .catalog(false, std::iter::empty::<&str>())
+                .build(&cache_dir)
+                .unwrap_err();
+            assert!(error.to_string().contains("kind"), "{error}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn common_container_requires_its_feature_and_a_clean_commit() {
+        let root =
+            std::env::temp_dir().join(format!("snapshot-common-container-{}", unique_suffix()));
+        let cache = crate::DailyKlineCache::open(root.join("cache")).unwrap();
+        cache
+            .store_final_range(
+                "SHFE.au2406",
+                1,
+                10,
+                &crate::DailyKlineCacheSnapshot::cst_v1(),
+                &[],
+            )
+            .unwrap();
+        let path = cache.symbol_file_path("SHFE.au2406");
+        assert_eq!(
+            cache_file_feature(&path).unwrap(),
+            Some(("history-container-v1", false))
+        );
+        let files = vec![ManifestFile {
+            path: "cache/daily-kline-v1/SHFE.au2406.tqdk".into(),
+            role: "tqdk_immutable_generation".into(),
+            size: fs::metadata(&path).unwrap().len(),
+            sha256: sha256_file(&path).unwrap(),
+        }];
+        assert!(validate_files(&root, &files, true, false).is_err());
+        validate_files(&root, &files, false, true).unwrap();
+        use std::io::Write;
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"uncommitted")
+            .unwrap();
+        assert!(sha256_file(&path).is_err());
+        assert!(validate_files(&root, &files, false, true).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn snapshot_excludes_only_well_formed_tqbn_cow_orphans() {
+        use super::{BacktestHistorySnapshotFileDisposition, classify_cache_relative_path};
+        use std::path::Path;
+        assert!(matches!(
+            classify_cache_relative_path(Path::new(
+                "series/20260901/tick/SHFE.ag.tqbn.cow-12-345-0"
+            )),
+            Ok(BacktestHistorySnapshotFileDisposition::Rebuild)
+        ));
+        assert!(matches!(
+            classify_cache_relative_path(Path::new("series/20260901/tick/SHFE.ag.tqbn")),
+            Ok(BacktestHistorySnapshotFileDisposition::Include(_))
+        ));
+        for name in [
+            "SHFE.ag.tqbn.cow-12",
+            "SHFE.ag.tqbn.cow-12-345-x",
+            "SHFE.ag.tqbn.tmp",
+        ] {
+            assert!(
+                classify_cache_relative_path(Path::new(name)).is_err(),
+                "{name}"
+            );
+        }
+    }
     use super::*;
 
     #[cfg(unix)]
@@ -1786,11 +2037,11 @@ mod tests {
             size: fs::metadata(&path).unwrap().len(),
             sha256: sha256_file(&path).unwrap(),
         }];
-        assert!(validate_files(&root, &files, false).is_err());
-        validate_files(&root, &files, true).unwrap();
+        assert!(validate_files(&root, &files, false, false).is_err());
+        validate_files(&root, &files, true, false).unwrap();
         let alias = root.join("alias");
         fs::hard_link(&path, &alias).unwrap();
-        assert!(validate_files(&root, &files, true).is_err());
+        assert!(validate_files(&root, &files, true, false).is_err());
         fs::remove_file(&alias).unwrap();
         {
             use std::io::Write;
@@ -1805,7 +2056,7 @@ mod tests {
         fs::write(&path, b"legacy raw file").unwrap();
         fs::hard_link(&path, &alias).unwrap();
         assert!(sha256_file(&path).is_err());
-        assert!(validate_files(&root, &files, false).is_err());
+        assert!(validate_files(&root, &files, false, false).is_err());
         fs::remove_dir_all(root).unwrap();
     }
     use std::time::Duration;

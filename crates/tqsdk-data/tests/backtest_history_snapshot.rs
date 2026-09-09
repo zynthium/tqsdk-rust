@@ -5,11 +5,13 @@ use chrono::Utc;
 use fs2::FileExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tqsdk_core::Tick;
 use tqsdk_data::{
     BacktestHistoryFailureReason, BacktestHistoryFinality, BacktestHistoryMetadataCache,
-    BacktestHistoryRequest, BacktestHistorySnapshot, BacktestHistorySnapshotFileDisposition,
-    BacktestHistorySnapshotFileRole, BacktestHistorySnapshotManifestBuilder, BacktestTickCache,
-    MinuteKlineCache, MinuteKlineCacheSnapshot, classify_backtest_history_snapshot_cache_path,
+    BacktestHistoryRequest, BacktestHistoryRows, BacktestHistorySnapshot,
+    BacktestHistorySnapshotFileDisposition, BacktestHistorySnapshotFileRole,
+    BacktestHistorySnapshotManifestBuilder, BacktestTickCache, MinuteKlineCache,
+    MinuteKlineCacheSnapshot, classify_backtest_history_snapshot_cache_path,
 };
 
 #[path = "support/backtest_history.rs"]
@@ -41,6 +43,23 @@ fn minimal_tqbn(block_flags: u8) -> Vec<u8> {
     bytes.extend_from_slice(&0_u64.to_le_bytes());
     bytes.extend_from_slice(&FNV1A_EMPTY.to_le_bytes());
     bytes
+}
+
+fn tqbn_checkpoint(bytes: &[u8]) -> [u8; 32] {
+    const FNV1A_EMPTY: u64 = 0xcbf29ce484222325;
+
+    let tail_hash = bytes[bytes.len().saturating_sub(64)..]
+        .iter()
+        .fold(FNV1A_EMPTY, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+    let mut checkpoint = [0_u8; 32];
+    checkpoint[..4].copy_from_slice(b"TQTC");
+    checkpoint[4] = 2;
+    checkpoint[8..16].copy_from_slice(&(bytes.len() as u64).to_le_bytes());
+    checkpoint[16..24].copy_from_slice(&tail_hash.to_le_bytes());
+    checkpoint[24..32].copy_from_slice(&u64::MAX.to_le_bytes());
+    checkpoint
 }
 
 fn write_snapshot(root: &std::path::Path, catalog_complete: bool, symbols: &[&str]) {
@@ -115,7 +134,7 @@ fn publish_cache_snapshot(
         "manifest_version": 1,
         "created_at": "2026-08-29T00:00:00Z",
         "minimum_reader": "0.1.0",
-        "required_features": ["kline-append-v1"],
+        "required_features": ["history-container-v1"],
         "cache_formats": [
             {"family": "daily", "format_id": "tqsdk.daily-kline.single-file.v1", "schema_version": 1},
             {"family": "minute", "format_id": "tqsdk.minute-kline.monthly.v5", "schema_version": 5},
@@ -236,11 +255,16 @@ fn public_manifest_builder_owns_roles_identity_and_staging_validation() {
     std::fs::create_dir_all(cache.join("minute-kline-v3")).unwrap();
     std::fs::create_dir_all(cache.join("daily-kline-v1")).unwrap();
     std::fs::create_dir_all(cache.join("backtest-metadata-v2/snapshots")).unwrap();
+    let legacy_tick = minimal_tqbn(0);
     std::fs::write(
         cache.join("series/20260829/tick/SHFE.au2612.tqbn"),
-        minimal_tqbn(0x01),
+        &legacy_tick,
     )
     .unwrap();
+    BacktestTickCache::open(&cache)
+        .unwrap()
+        .store_ticks("SHFE.ag2612", DAY_START_NS, DAY_END_NS, std::iter::empty())
+        .unwrap();
     let snapshot = MinuteKlineCacheSnapshot::cst_v1();
     MinuteKlineCache::open(&cache)
         .unwrap()
@@ -265,7 +289,7 @@ fn public_manifest_builder_owns_roles_identity_and_staging_validation() {
     std::fs::write(cache.join(".tqsdk-cache-operation.lock"), b"").unwrap();
     std::fs::write(
         cache.join("series/20260829/tick/SHFE.au2612.tqbn.lock"),
-        b"",
+        tqbn_checkpoint(&legacy_tick),
     )
     .unwrap();
 
@@ -280,10 +304,30 @@ fn public_manifest_builder_owns_roles_identity_and_staging_validation() {
     assert!(artifact.metadata_snapshot_hash().starts_with("sha256:"));
     let manifest: Value = serde_json::from_slice(artifact.manifest_bytes()).unwrap();
     assert_eq!(
-        manifest["required_features"],
-        json!(["kline-append-v1", "tqbn-zstd"])
+        manifest["cache_formats"],
+        json!([
+            {
+                "family": "daily",
+                "format_id": "tqsdk.daily-kline.single-file.v1",
+                "schema_version": 1
+            },
+            {
+                "family": "minute",
+                "format_id": "tqsdk.minute-kline.monthly.v6",
+                "schema_version": 6
+            },
+            {
+                "family": "tick",
+                "format_id": "tqsdk.history-container.tick.v1",
+                "schema_version": 4
+            }
+        ])
     );
-    assert_eq!(manifest["files"].as_array().unwrap().len(), 5);
+    assert_eq!(
+        manifest["required_features"],
+        json!(["history-container-v1"])
+    );
+    assert_eq!(manifest["files"].as_array().unwrap().len(), 7);
     assert!(
         manifest["files"]
             .as_array()
@@ -298,13 +342,25 @@ fn public_manifest_builder_owns_roles_identity_and_staging_validation() {
     std::fs::write(generation.join("manifest.json"), artifact.manifest_bytes()).unwrap();
 
     let opened = BacktestHistorySnapshot::open_generation(&root, &generation);
-    #[cfg(feature = "tqbn-zstd")]
     assert_eq!(opened.unwrap().snapshot_id(), artifact.snapshot_id());
-    #[cfg(not(feature = "tqbn-zstd"))]
-    assert_eq!(
-        opened.unwrap_err().reason(),
-        &BacktestHistoryFailureReason::SnapshotIncompatible
-    );
+    {
+        let staged_tick = BacktestTickCache::open_read_only(generation.join("cache"))
+            .diagnose()
+            .unwrap();
+        assert_eq!(staged_tick.files.len(), 3);
+        assert!(
+            staged_tick
+                .files
+                .iter()
+                .any(|file| file.schema_version == Some(4))
+        );
+        assert!(
+            staged_tick
+                .files
+                .iter()
+                .any(|file| { file.path.ends_with("series/20260829/tick/SHFE.au2612.tqbn") })
+        );
+    }
     assert!(!root.join("CURRENT").exists());
 
     let tqbn = classify_backtest_history_snapshot_cache_path(Path::new(
@@ -333,6 +389,169 @@ fn public_manifest_builder_owns_roles_identity_and_staging_validation() {
     assert_eq!(
         error.reason(),
         &BacktestHistoryFailureReason::SnapshotIncompatible
+    );
+}
+
+#[tokio::test]
+async fn common_tick_only_snapshot_builds_opens_queries_and_rejects_bad_inputs() {
+    let root = temp_dir("common-tick-only");
+    let pending = root.join("snapshots/pending");
+    let cache_dir = pending.join("cache");
+    let symbol = "SHFE.ag2612";
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    BacktestHistoryMetadataCache::open(&cache_dir)
+        .unwrap()
+        .store_snapshot(support::snapshot(
+            symbol,
+            DAY_END_NS,
+            vec![support::segment(symbol, DAY_START_NS, DAY_END_NS)],
+        ))
+        .unwrap();
+    BacktestTickCache::open(&cache_dir)
+        .unwrap()
+        .store_ticks(
+            symbol,
+            CONCRETE_SOURCE_START_NS,
+            DAY_END_NS,
+            [Tick {
+                id: 42,
+                datetime: DAY_START_NS + 1,
+                last_price: 618.75,
+                volume: 7,
+                amount: 4_331.25,
+                open_interest: 99,
+                ..Tick::default()
+            }],
+        )
+        .unwrap();
+
+    let artifact = BacktestHistorySnapshotManifestBuilder::new(Utc::now())
+        .catalog(true, [symbol])
+        .build(&cache_dir)
+        .unwrap();
+    let manifest: Value = serde_json::from_slice(artifact.manifest_bytes()).unwrap();
+    #[cfg(feature = "tqbn-zstd")]
+    assert_eq!(
+        manifest["required_features"],
+        json!(["history-container-v1", "tqbn-zstd"])
+    );
+    #[cfg(not(feature = "tqbn-zstd"))]
+    assert_eq!(
+        manifest["required_features"],
+        json!(["history-container-v1"])
+    );
+
+    let snapshot_id = artifact.snapshot_id().to_string();
+    let generation = root.join("snapshots").join(&snapshot_id);
+    std::fs::rename(&pending, &generation).unwrap();
+    std::fs::write(generation.join("lease.lock"), []).unwrap();
+    std::fs::write(generation.join("manifest.json"), artifact.manifest_bytes()).unwrap();
+    std::fs::write(root.join("CURRENT"), format!("{snapshot_id}\n")).unwrap();
+
+    let snapshot = BacktestHistorySnapshot::open(&root).unwrap();
+    let result = snapshot
+        .query(BacktestHistoryRequest::tick(
+            91,
+            symbol,
+            DAY_START_NS,
+            DAY_END_NS,
+        ))
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let BacktestHistoryRows::Ticks(rows) = result.rows else {
+        panic!("Tick snapshot query must return Tick rows");
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, 42);
+    assert_eq!(rows[0].datetime, DAY_START_NS + 1);
+    assert_eq!(rows[0].last_price, 618.75);
+    assert_eq!(rows[0].volume, 7);
+    assert_eq!(rows[0].amount, 4_331.25);
+    assert_eq!(rows[0].open_interest, 99);
+
+    let missing_feature_root = temp_dir("common-tick-missing-feature");
+    let missing_cache = missing_feature_root.join("cache");
+    std::fs::create_dir_all(&missing_cache).unwrap();
+    BacktestTickCache::open(&missing_cache)
+        .unwrap()
+        .store_ticks(symbol, DAY_START_NS, DAY_END_NS, std::iter::empty())
+        .unwrap();
+    let missing =
+        BacktestHistorySnapshotManifestBuilder::new("2026-08-29T00:00:00Z".parse().unwrap())
+            .catalog(false, std::iter::empty::<&str>())
+            .build(&missing_cache)
+            .unwrap();
+    let mut missing_manifest: Value = serde_json::from_slice(missing.manifest_bytes()).unwrap();
+    missing_manifest["required_features"] = json!([]);
+    let object = missing_manifest.as_object_mut().unwrap();
+    object.remove("snapshot_id");
+    object.remove("identity_sha256");
+    let identity = format!(
+        "sha256:{:x}",
+        Sha256::digest(serde_json::to_vec(&missing_manifest).unwrap())
+    );
+    let missing_snapshot_id = format!("s-20260829-{}", &identity[7..15]);
+    let object = missing_manifest.as_object_mut().unwrap();
+    object.insert(
+        "snapshot_id".to_string(),
+        Value::String(missing_snapshot_id.clone()),
+    );
+    object.insert("identity_sha256".to_string(), Value::String(identity));
+    let missing_manifest_bytes = serde_json::to_vec(&missing_manifest).unwrap();
+    let missing_generation = missing_feature_root
+        .join("staging")
+        .join(&missing_snapshot_id);
+    std::fs::create_dir_all(&missing_generation).unwrap();
+    std::fs::rename(&missing_cache, missing_generation.join("cache")).unwrap();
+    std::fs::write(missing_generation.join("lease.lock"), []).unwrap();
+    std::fs::write(
+        missing_generation.join("manifest.json"),
+        missing_manifest_bytes,
+    )
+    .unwrap();
+    let missing_error =
+        BacktestHistorySnapshot::open_generation(&missing_feature_root, &missing_generation)
+            .unwrap_err();
+    assert_eq!(
+        missing_error.reason(),
+        &BacktestHistoryFailureReason::SnapshotIncompatible,
+        "{missing_error:?}"
+    );
+    assert!(missing_error.to_string().contains("history-container-v1"));
+
+    let dirty_root = temp_dir("common-tick-dirty-tail");
+    let dirty_cache = dirty_root.join("cache");
+    let dirty = BacktestTickCache::open(&dirty_cache).unwrap();
+    dirty
+        .store_ticks(symbol, DAY_START_NS, DAY_END_NS, std::iter::empty())
+        .unwrap();
+    let common_path = dirty
+        .diagnose()
+        .unwrap()
+        .files
+        .into_iter()
+        .find(|file| file.schema_version == Some(4))
+        .unwrap()
+        .path;
+    {
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(common_path)
+            .unwrap()
+            .write_all(b"dirty-tail")
+            .unwrap();
+    }
+    assert_eq!(
+        BacktestHistorySnapshotManifestBuilder::new(Utc::now())
+            .catalog(false, std::iter::empty::<&str>())
+            .build(&dirty_cache)
+            .unwrap_err()
+            .reason(),
+        &BacktestHistoryFailureReason::SnapshotCorrupt
     );
 }
 

@@ -35,7 +35,7 @@ impl KlineCacheMigrationReport {
     }
 }
 
-/// Validate or migrate raw TQDK v1 / TQMK v5 files to the append envelope.
+/// Validate or migrate raw TQDK v1 / TQMK v5 and KLOG files to the common container.
 ///
 /// Takes the exclusive root gate. `backup_dir` must be outside the cache root;
 /// existing backups must match the source byte-for-byte. No network is used.
@@ -197,35 +197,6 @@ pub(crate) fn backup_partition(root: &Path, path: &Path, backup: &Path) -> Resul
         File::open(parent)?.sync_all()?;
     }
     Ok(())
-}
-
-pub(crate) fn replace_legacy<T: Serialize>(
-    path: &Path,
-    summary: T,
-    bytes: &[u8],
-    validate: impl FnOnce(&Path) -> Result<()>,
-) -> Result<()> {
-    let temporary = path.with_extension(format!(
-        "migration-{}-{}.tmp",
-        std::process::id(),
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    ));
-    let result = (|| {
-        crate::kline_append_log::create(&temporary, summary, &[bytes])?;
-        crate::kline_append_log::verify_migrated_payload(&temporary, bytes)?;
-        validate(&temporary)?;
-        fs::rename(&temporary, path)?;
-        File::open(
-            path.parent()
-                .ok_or(DataError::InvalidState("missing partition parent"))?,
-        )?
-        .sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
 }
 
 pub(crate) fn partition_lock(path: &Path, apply: bool) -> Result<Option<File>> {

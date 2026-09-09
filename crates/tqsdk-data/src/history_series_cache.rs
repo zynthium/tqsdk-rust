@@ -13,7 +13,9 @@ mod ranges;
 mod store;
 mod tqbn;
 
-pub(crate) fn tqbn_snapshot_file_sha256_and_requires_zstd(path: &Path) -> Result<(String, bool)> {
+pub(crate) fn tqbn_snapshot_file_sha256_and_requires_zstd(
+    path: &Path,
+) -> Result<(String, bool, bool)> {
     tqbn::snapshot_file_sha256_and_requires_zstd(path)
 }
 
@@ -30,7 +32,7 @@ pub(crate) use store::{
 
 const DEFAULT_CACHE_DIR_ENV: &str = "TQSDK_HISTORY_CACHE_DIR";
 const DEFAULT_CACHE_DIR: &str = ".tqsdk/data_series_1";
-pub const HISTORY_SERIES_CACHE_SCHEMA_VERSION: u32 = 3;
+pub const HISTORY_SERIES_CACHE_SCHEMA_VERSION: u32 = 4;
 const TICK_TAIL_REFRESH_NS: i64 = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -383,6 +385,10 @@ impl HistorySeriesCache {
         self.store.series_exists(symbol, kind)
     }
 
+    pub(crate) fn migrate_tick_series_to_current(&self, symbol: &str) -> Result<()> {
+        self.store.migrate_tick_series_to_current(symbol)
+    }
+
     pub fn kline_coverage(
         &self,
         symbol: &str,
@@ -464,6 +470,14 @@ impl HistorySeriesCache {
         self.purge_series(symbol, HistorySeriesKind::Tick)
     }
 
+    pub(crate) fn purge_tick_series_under_exclusive_root_gate(
+        &self,
+        symbol: &str,
+    ) -> Result<HistorySeriesPurgeReport> {
+        self.store
+            .purge_series_under_exclusive_root_gate(symbol, HistorySeriesKind::Tick)
+    }
+
     pub(crate) fn purge_tick_series_range(
         &self,
         symbol: &str,
@@ -471,6 +485,20 @@ impl HistorySeriesCache {
         range_end_ns: i64,
     ) -> Result<HistorySeriesPurgeReport> {
         self.store.purge_series_range(
+            symbol,
+            HistorySeriesKind::Tick,
+            range_start_ns,
+            range_end_ns,
+        )
+    }
+
+    pub(crate) fn purge_tick_series_range_under_exclusive_root_gate(
+        &self,
+        symbol: &str,
+        range_start_ns: i64,
+        range_end_ns: i64,
+    ) -> Result<HistorySeriesPurgeReport> {
+        self.store.purge_series_range_under_exclusive_root_gate(
             symbol,
             HistorySeriesKind::Tick,
             range_start_ns,

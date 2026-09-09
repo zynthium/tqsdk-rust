@@ -2,7 +2,7 @@ use chrono::{FixedOffset, NaiveDate, TimeZone};
 use tqsdk_core::Tick;
 use tqsdk_data::{
     BacktestTickCache, BacktestTickCacheLockRepairMode, BacktestTickCacheLockRepairStatus,
-    DataError, HistorySeriesCacheFileStatus, TickDataSeriesRequest,
+    DataError, HistorySeriesCache, HistorySeriesCacheFileStatus, TickDataSeriesRequest,
     backtest_tick_trading_day_for_timestamp_ns, backtest_tick_trading_day_range,
 };
 
@@ -323,6 +323,23 @@ fn repair_tick_locks_dry_run_reports_an_invalid_companion_lock() {
 fn operation_lock_allows_parallel_fills_and_excludes_maintenance() {
     let dir = temp_dir("operation-lock");
     let cache = BacktestTickCache::open(&dir).unwrap();
+    let day =
+        backtest_tick_trading_day_range(NaiveDate::from_ymd_opt(2026, 7, 20).unwrap()).unwrap();
+    cache
+        .store_ticks(
+            "SHFE.lock2601",
+            day.start_ns,
+            day.start_ns + 2,
+            [Tick {
+                id: 1,
+                datetime: day.start_ns + 1,
+                ..Tick::default()
+            }],
+        )
+        .unwrap();
+    let file = cache.diagnose().unwrap().files[0].path.clone();
+    let before = std::fs::read(&file).unwrap();
+
     let first_fill = cache.try_acquire_remote_fill_shared_lock().unwrap();
     let second_fill = cache.try_acquire_remote_fill_shared_lock().unwrap();
 
@@ -340,6 +357,99 @@ fn operation_lock_allows_parallel_fills_and_excludes_maintenance() {
     let maintenance = cache.try_acquire_consistency_read_lock().unwrap();
     assert_eq!(maintenance.cache_dir(), dir.as_path());
     assert!(maintenance.path().ends_with(".tqsdk-cache-operation.lock"));
+    let error = cache
+        .store_ticks(
+            "SHFE.lock2601",
+            day.start_ns,
+            day.start_ns + 2,
+            [Tick {
+                id: 1,
+                datetime: day.start_ns + 1,
+                ..Tick::default()
+            }],
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DataError::CacheBusy {
+            operation: "history cache write",
+            ..
+        }
+    ));
+    assert!(matches!(
+        cache.purge_symbol_ticks("SHFE.lock2601").unwrap_err(),
+        DataError::CacheBusy {
+            operation: "history cache maintenance",
+            ..
+        }
+    ));
+    assert!(matches!(
+        cache.compact_symbol_ticks("SHFE.lock2601").unwrap_err(),
+        DataError::CacheBusy {
+            operation: "history cache maintenance",
+            ..
+        }
+    ));
+    let history = HistorySeriesCache::open(&dir).unwrap();
+    assert!(matches!(
+        history.enforce_limits(None, None).unwrap_err(),
+        DataError::CacheBusy {
+            operation: "history cache maintenance",
+            ..
+        }
+    ));
+    assert_eq!(std::fs::read(file).unwrap(), before);
+
+    let report = cache
+        .purge_symbol_ticks_with_lock(&maintenance, "SHFE.lock2601")
+        .unwrap();
+    assert!(report.removed);
+    assert!(report.removed_files > 0);
+}
+
+#[test]
+fn tick_migration_requires_its_root_token_and_rejects_published_roots() {
+    let first_dir = temp_dir("migration-token-a");
+    let second_dir = temp_dir("migration-token-b");
+    let first = BacktestTickCache::open(&first_dir).unwrap();
+    let second = BacktestTickCache::open(&second_dir).unwrap();
+    let second_lock = second.try_acquire_consistency_read_lock().unwrap();
+    assert!(
+        first
+            .migrate_symbol_ticks_to_current(&second_lock, "SHFE.test2601")
+            .is_err()
+    );
+    drop(second_lock);
+
+    std::fs::write(first_dir.join("manifest.json"), b"{}").unwrap();
+    std::fs::write(first_dir.join("lease.lock"), b"").unwrap();
+    let first_lock = first.try_acquire_consistency_read_lock().unwrap();
+    let error = first
+        .validate_tick_migration_source(&first_lock)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("published snapshots are immutable")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tick_migration_preflight_rejects_symlinks_and_unknown_series_objects() {
+    use std::os::unix::fs::symlink;
+
+    let dir = temp_dir("migration-preflight");
+    let cache = BacktestTickCache::open(&dir).unwrap();
+    let series = dir.join("series");
+    let target = dir.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    symlink(&target, series.join("alias")).unwrap();
+    let lock = cache.try_acquire_consistency_read_lock().unwrap();
+    assert!(cache.validate_tick_migration_source(&lock).is_err());
+    std::fs::remove_file(series.join("alias")).unwrap();
+    std::fs::write(series.join("unknown.bin"), b"unknown").unwrap();
+    assert!(cache.validate_tick_migration_source(&lock).is_err());
 }
 
 #[test]

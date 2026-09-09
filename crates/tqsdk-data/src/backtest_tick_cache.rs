@@ -14,6 +14,11 @@ use crate::history_series_cache::{
 };
 use crate::{DataError, HistorySeriesCache, Result, TickDataSeries, TickDataSeriesRequest};
 
+/// Current per-file Tick container identity used by explicit migrations.
+pub const BACKTEST_TICK_CACHE_FORMAT_ID: &str = "tqsdk.history-container.tick.v1";
+/// Current logical Tick storage schema (container framing remains `TQHIST01`).
+pub const BACKTEST_TICK_CACHE_SCHEMA_VERSION: u32 = 4;
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum BacktestCachePolicy {
     Disabled,
@@ -260,7 +265,7 @@ impl BacktestTickCacheOperationLock {
     pub(crate) fn require_exclusive_for(&self, root: &Path) -> Result<()> {
         if !self.exclusive || self.cache_dir.canonicalize()? != root.canonicalize()? {
             return Err(DataError::InvalidState(
-                "migration requires the same cache root's exclusive gate",
+                "operation requires the same cache root's exclusive gate",
             ));
         }
         Ok(())
@@ -836,6 +841,34 @@ impl BacktestTickCache {
         })
     }
 
+    /// Purges one symbol while reusing a caller-held exclusive cache-root gate.
+    #[doc(hidden)]
+    pub fn purge_symbol_ticks_with_lock(
+        &self,
+        lock: &BacktestTickCacheOperationLock,
+        symbol: impl AsRef<str>,
+    ) -> Result<BacktestTickCachePurgeReport> {
+        lock.require_exclusive_for(self.history.root_dir())?;
+        let symbol = symbol.as_ref();
+        if symbol.is_empty() {
+            return Err(DataError::InvalidState(
+                "backtest tick cache symbol must not be empty",
+            ));
+        }
+        let report = self
+            .history
+            .purge_tick_series_under_exclusive_root_gate(symbol)?;
+        let removed = report.removed();
+        Ok(BacktestTickCachePurgeReport {
+            cache_dir: self.history.root_dir().to_path_buf(),
+            symbol: report.symbol,
+            series_path: report.path,
+            removed,
+            removed_files: report.removed_files,
+            removed_bytes: report.removed_bytes,
+        })
+    }
+
     /// Deletes only the TQBN trading-day partitions intersecting the requested range.
     ///
     /// Surviving partitions are never decoded or rewritten. Callers sharing a cache
@@ -866,6 +899,40 @@ impl BacktestTickCache {
         })
     }
 
+    /// Purges intersecting Tick partitions while reusing an exclusive root gate.
+    #[doc(hidden)]
+    pub fn purge_symbol_ticks_in_range_with_lock(
+        &self,
+        lock: &BacktestTickCacheOperationLock,
+        symbol: impl AsRef<str>,
+        range_start_ns: i64,
+        range_end_ns: i64,
+    ) -> Result<BacktestTickCachePurgeReport> {
+        lock.require_exclusive_for(self.history.root_dir())?;
+        let symbol = symbol.as_ref();
+        if symbol.is_empty() {
+            return Err(DataError::InvalidState(
+                "backtest tick cache symbol must not be empty",
+            ));
+        }
+        let report = self
+            .history
+            .purge_tick_series_range_under_exclusive_root_gate(
+                symbol,
+                range_start_ns,
+                range_end_ns,
+            )?;
+        let removed = report.removed();
+        Ok(BacktestTickCachePurgeReport {
+            cache_dir: self.history.root_dir().to_path_buf(),
+            symbol: report.symbol,
+            series_path: report.path,
+            removed,
+            removed_files: report.removed_files,
+            removed_bytes: report.removed_bytes,
+        })
+    }
+
     pub fn compact_symbol_ticks(&self, symbol: impl AsRef<str>) -> Result<()> {
         let symbol = symbol.as_ref();
         if symbol.is_empty() {
@@ -874,6 +941,39 @@ impl BacktestTickCache {
             ));
         }
         self.history.compact_series(symbol, HistorySeriesKind::Tick)
+    }
+
+    /// Rewrites every legacy Tick partition for `symbol` into current format.
+    ///
+    /// The caller must retain a verified external backup until the complete
+    /// cache-root migration has passed post-publication diagnostics.
+    #[doc(hidden)]
+    pub fn validate_tick_migration_source(
+        &self,
+        lock: &BacktestTickCacheOperationLock,
+    ) -> Result<()> {
+        let root = self.history.root_dir();
+        lock.require_exclusive_for(root)?;
+        reject_published_or_aliased_migration_root(root)?;
+        reject_tick_migration_namespace_objects(&root.join("series"))
+    }
+
+    /// Rewrites one symbol after [`Self::validate_tick_migration_source`].
+    #[doc(hidden)]
+    pub fn migrate_symbol_ticks_to_current(
+        &self,
+        lock: &BacktestTickCacheOperationLock,
+        symbol: impl AsRef<str>,
+    ) -> Result<()> {
+        lock.require_exclusive_for(self.history.root_dir())?;
+        reject_published_or_aliased_migration_root(self.history.root_dir())?;
+        let symbol = symbol.as_ref();
+        if symbol.is_empty() {
+            return Err(DataError::InvalidState(
+                "backtest tick cache symbol must not be empty",
+            ));
+        }
+        self.history.migrate_tick_series_to_current(symbol)
     }
 
     /// Compact only Tick partitions intersecting `[range_start_ns, range_end_ns)`.
@@ -1364,6 +1464,61 @@ fn fast_tick_symbol_from_path(path: &Path) -> Option<String> {
     (!encoded.is_empty()).then(|| encoded.replace("%2F", "/"))
 }
 
+fn reject_published_or_aliased_migration_root(root: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(root)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(DataError::Validation(
+            "Tick migration root must be a real private directory".into(),
+        ));
+    }
+    let canonical = root.canonicalize()?;
+    if canonical.join("CURRENT").exists()
+        || canonical.ancestors().any(|directory| {
+            directory.join("manifest.json").is_file() && directory.join("lease.lock").exists()
+        })
+    {
+        return Err(DataError::Validation(
+            "published snapshots are immutable; migrate a private writable clone and republish"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn reject_tick_migration_namespace_objects(path: &Path) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(DataError::Validation(format!(
+            "Tick migration rejects symlink {}",
+            path.display()
+        )));
+    }
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            reject_tick_migration_namespace_objects(&entry?.path())?;
+        }
+        return Ok(());
+    }
+    if !metadata.is_file()
+        || !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.ends_with(".tqbn") || name.ends_with(".tqbn.lock") || name == ".tqbn.lock"
+            })
+    {
+        return Err(DataError::Validation(format!(
+            "Tick migration rejects unknown or non-regular series object {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn fast_tqbn_magic_is_problem(path: &Path, size_bytes: u64) -> Result<bool> {
     if size_bytes == 0 {
         return Ok(false);
@@ -1371,7 +1526,16 @@ fn fast_tqbn_magic_is_problem(path: &Path, size_bytes: u64) -> Result<bool> {
     let mut file = File::open(path)?;
     let mut magic = [0u8; 4];
     match file.read_exact(&mut magic) {
-        Ok(()) => Ok(magic != *b"TQBN"),
+        Ok(()) if magic == *b"TQBN" => Ok(false),
+        Ok(()) if magic.as_slice() == &crate::history_container::MAGIC[..4] => {
+            let mut suffix = [0; 4];
+            match file.read_exact(&mut suffix) {
+                Ok(()) => Ok(suffix.as_slice() != &crate::history_container::MAGIC[4..]),
+                Err(error) if error.kind() == ErrorKind::UnexpectedEof => Ok(true),
+                Err(error) => Err(error.into()),
+            }
+        }
+        Ok(()) => Ok(true),
         Err(error) if error.kind() == ErrorKind::UnexpectedEof => Ok(true),
         Err(error) => Err(error.into()),
     }

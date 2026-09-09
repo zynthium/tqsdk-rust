@@ -5,6 +5,9 @@ use chrono::{TimeZone, Utc};
 use tqsdk_core::Kline;
 use tqsdk_data::{MinuteKlineCache, MinuteKlineCacheDiagnosticStatus, MinuteKlineCacheSnapshot};
 
+#[path = "support/legacy_minute.rs"]
+mod legacy_minute;
+
 const MINUTE_NS: i64 = 60_000_000_000;
 type KlineBits = (i64, i64, u64, u64, u64, u64, i64, i64, i64, Option<i64>);
 
@@ -49,7 +52,7 @@ fn diagnose_distinguishes_readable_v5_and_legacy_v3_month_files() {
     assert!(report.files.iter().any(|file| {
         file.symbol == "SHFE.rb2601"
             && file.status == MinuteKlineCacheDiagnosticStatus::Readable
-            && file.schema_version == Some(5)
+            && file.schema_version == Some(6)
             && file.rows == 1
     }));
     assert!(report.files.iter().any(|file| {
@@ -67,13 +70,28 @@ fn explicit_v4_migration_rewrites_a_month_without_changing_kline_rows() {
     let snapshot = MinuteKlineCacheSnapshot::new(1, "calendar-v1", "session-v1").unwrap();
     let start = utc_ns(2026, 1, 15, 2, 0);
     let end = start + 2 * MINUTE_NS;
-    let expected = vec![kline(1, start, 10.0), kline(2, start + MINUTE_NS, 11.0)];
+    let mut expected = vec![kline(1, start, 10.0), kline(2, start + MINUTE_NS, 11.0)];
+    expected[0].open = -0.0;
+    expected[0].close = f64::from_bits(0x7ff8_0000_0000_0011);
+    expected[0].epoch = Some(i64::MAX);
+    expected[1].epoch = Some(i64::MIN + 1);
     cache
         .store_final_range("SHFE.rb2601", start, end, &snapshot, &expected)
         .unwrap();
 
     let path = cache.month_file_path("SHFE.rb2601", "202601");
-    rewrite_current_month_as_v4(path.as_path());
+    std::fs::write(
+        &path,
+        legacy_minute::raw_month(
+            4,
+            "SHFE.rb2601",
+            "202601",
+            &snapshot,
+            (start, end),
+            &expected,
+        ),
+    )
+    .unwrap();
     let before = cache.diagnose().unwrap();
     assert_eq!(before.files[0].schema_version, Some(4));
     assert_eq!(
@@ -81,17 +99,26 @@ fn explicit_v4_migration_rewrites_a_month_without_changing_kline_rows() {
         MinuteKlineCacheDiagnosticStatus::LegacyUnsupported
     );
 
+    let before_bytes = std::fs::read(&path).unwrap();
     let migration = cache.migrate_legacy_v4().unwrap();
+    let backup = root
+        .join(".kline-append-backups/minute-v4-to-common")
+        .join(path.strip_prefix(&root).unwrap());
+    assert_eq!(std::fs::read(&backup).unwrap(), before_bytes);
     assert_eq!(migration.source_files, 1);
     assert_eq!(migration.rewritten_files, 1);
 
     let after = cache.diagnose().unwrap();
     assert_eq!(after.problem_files, 0);
-    assert_eq!(after.files[0].schema_version, Some(5));
+    assert_eq!(after.files[0].schema_version, Some(6));
     let actual = cache
         .read_range("SHFE.rb2601", start, end, &snapshot)
         .unwrap();
     assert_eq!(kline_bits(&actual), kline_bits(&expected));
+    let published = std::fs::read(&path).unwrap();
+    assert_eq!(cache.migrate_legacy_v4().unwrap().rewritten_files, 0);
+    assert_eq!(std::fs::read(&path).unwrap(), published);
+    assert_eq!(std::fs::read(&backup).unwrap(), before_bytes);
 }
 
 fn legacy_v3_header() -> Vec<u8> {
@@ -127,32 +154,6 @@ fn kline(id: i64, datetime: i64, close: f64) -> Kline {
         close_oi: id,
         ..Kline::default()
     }
-}
-
-fn rewrite_current_month_as_v4(path: &std::path::Path) {
-    let mut bytes = std::fs::read(path).unwrap();
-    if bytes.starts_with(b"TQKLOG01") {
-        let offset = u64::from_le_bytes(bytes[64..72].try_into().unwrap()) as usize;
-        let len = u64::from_le_bytes(bytes[72..80].try_into().unwrap()) as usize;
-        let index: serde_json::Value =
-            serde_json::from_slice(&bytes[offset..offset + len]).unwrap();
-        let segment = &index["segments"][0];
-        let offset = segment["offset"].as_u64().unwrap() as usize;
-        let len = segment["len"].as_u64().unwrap() as usize;
-        bytes = bytes[offset..offset + len].to_vec();
-    }
-    let metadata_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-    let coverage_count = u64::from_le_bytes(bytes[12..20].try_into().unwrap()) as usize;
-    let row_count = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
-    let rows_offset = 36 + metadata_len + 16 * coverage_count;
-    if u16::from_le_bytes(bytes[6..8].try_into().unwrap()) == 1 {
-        let decoded = zstd::bulk::decompress(&bytes[rows_offset..], row_count * 80).unwrap();
-        bytes.truncate(rows_offset);
-        bytes.extend_from_slice(&decoded);
-    }
-    bytes[4..6].copy_from_slice(&4_u16.to_le_bytes());
-    bytes[6..8].copy_from_slice(&0_u16.to_le_bytes());
-    std::fs::write(path, bytes).unwrap();
 }
 
 fn kline_bits(rows: &[Kline]) -> Vec<KlineBits> {

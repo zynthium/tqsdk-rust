@@ -129,11 +129,20 @@ fn new_month_files_use_v5_compression_and_round_trip_every_kline_field() {
     let path = cache.month_file_path("SHFE.rb2601", "202601");
     let report = cache.diagnose().unwrap();
     assert_eq!(report.problem_files, 0);
-    assert_eq!(report.files[0].schema_version, Some(5));
-    assert!(
-        std::fs::metadata(&path).unwrap().len() < 36 + 16 + 80 * u64::try_from(rows.len()).unwrap(),
-        "a repeated month should be smaller than v4's fixed 80-byte rows"
-    );
+    assert_eq!(report.files[0].schema_version, Some(6));
+    let file_bytes = std::fs::metadata(&path).unwrap().len();
+    let raw_row_bytes = 80 * u64::try_from(rows.len()).unwrap();
+    if cfg!(feature = "tqbn-zstd") {
+        assert!(
+            file_bytes < 36 + 16 + raw_row_bytes,
+            "a repeated month should be smaller than v4's fixed 80-byte rows"
+        );
+    } else {
+        assert!(
+            file_bytes >= raw_row_bytes,
+            "uncompressed rows retain their fixed width"
+        );
+    }
 
     let actual = cache
         .read_range("SHFE.rb2601", start, end, &snapshot)

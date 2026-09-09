@@ -21,14 +21,17 @@ futures.workspace = true
 reqwest = { workspace = true, optional = true }
 rusqlite.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 sha1 = "0.10"
 sha2 = "0.10"
 fs2 = "0.4"
 tqsdk-core = { path = "../tqsdk-core", version = "0.1.0", default-features = false }
 tqsdk-session = { path = "../tqsdk-session", version = "0.1.0", default-features = false }
 tokio.workspace = true
-zstd = { version = "0.13", optional = true }
+zstd = { version = "0.13", optional = true, features = ["experimental"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
 
 [dev-dependencies]
 tokio.workspace = true

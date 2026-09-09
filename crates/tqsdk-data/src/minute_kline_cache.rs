@@ -21,14 +21,16 @@ use crate::backtest_tick_cache::{
 use crate::kline_append_log;
 use crate::{DataError, KlineSessionTemplate, Result};
 
+mod container;
+
 /// The only durable Kline period accepted by [`MinuteKlineCache`].
 pub const MINUTE_KLINE_DURATION_NS: i64 = 60_000_000_000;
 
 /// Stable identity for the independently compressed v5 monthly-minute cache format.
-pub const MINUTE_KLINE_CACHE_FORMAT_ID: &str = "tqsdk.minute-kline.monthly.v5";
+pub const MINUTE_KLINE_CACHE_FORMAT_ID: &str = "tqsdk.minute-kline.monthly.v6";
 
 /// Public format version stored in every monthly-minute file.
-pub const MINUTE_KLINE_CACHE_SCHEMA_VERSION: u32 = 5;
+pub const MINUTE_KLINE_CACHE_SCHEMA_VERSION: u32 = 6;
 
 const ROOT_DIR_NAME: &str = "minute-kline-v3";
 const PROVISIONAL_ROOT_DIR_NAME: &str = "minute-kline-provisional-v1";
@@ -386,34 +388,28 @@ impl MinuteKlineCache {
             let path = &entry.path;
             let _lock = crate::kline_cache_migration::partition_lock(path, apply)?;
             let mut input = File::open(path)?;
-            let index = kline_append_log::load::<MonthSummary>(&mut input)?;
-            let scan = if index.is_some() {
-                scan_month_file_unchecked(path)?
+            let current = container::load(&mut input)?.is_some();
+            let month = if current {
+                container::scan(path)?;
+                container::read_full(input, path)?
+            } else if kline_append_log::load::<MonthSummary>(&mut input)?.is_some() {
+                load_legacy_append_file(path)?
             } else {
-                scan_raw_month_file_with_version(path, FILE_VERSION)?
+                let symbol = symbol_from_file_path(path)?;
+                load_legacy_raw_month_file(path, &symbol, &entry.trading_month, FILE_VERSION)?
             };
-            let symbol = symbol_from_file_path(path)?;
-            if scan.metadata.symbol != symbol || scan.metadata.trading_month != entry.trading_month
+            if month.metadata.symbol != symbol_from_file_path(path)?
+                || month.metadata.trading_month != entry.trading_month
             {
                 return Err(format_error(path, "migration path identity mismatch"));
             }
-            let bytes = fs::read(path)?;
-            if let Some(index) = &index {
-                index.require_clean_tail(&input)?;
-            }
-            if apply && index.is_none() {
+            let bytes = usize::try_from(fs::metadata(path)?.len())
+                .map_err(|_| format_error(path, "migration file size overflow"))?;
+            if apply && !current {
                 crate::kline_cache_migration::backup_partition(&self.root_dir, path, backup)?;
-
-                let summary = MonthSummary {
-                    metadata: scan.metadata,
-                    coverage: scan.coverage,
-                    rows: scan.rows,
-                };
-                crate::kline_cache_migration::replace_legacy(path, summary, &bytes, |temporary| {
-                    scan_month_file_unchecked(temporary).map(|_| ())
-                })?;
+                container::migrate(path, &month)?;
             }
-            report.record(path, bytes.len(), index.is_none(), apply);
+            report.record(path, bytes, !current, apply);
         }
         Ok(())
     }
@@ -439,8 +435,8 @@ impl MinuteKlineCache {
                 break;
             };
             let mut input = OpenOptions::new().read(true).write(true).open(&path)?;
-            let index = kline_append_log::require::<MonthSummary>(&mut input)?;
-            kline_append_log::recover(&path, &mut input, &index)?;
+            let index = container::require(&mut input)?;
+            container::recover(&path, &mut input, &index)?;
         }
         Ok(())
     }
@@ -548,7 +544,9 @@ impl MinuteKlineCache {
         })
     }
 
-    /// Re-encode every v4 month into the current v5 format.
+    /// Re-encode every v4 month into the current common-container format.
+    /// Originals are retained under `.kline-append-backups/minute-v4-to-common`;
+    /// each candidate is read back and compared before publication.
     ///
     /// Callers must arrange any desired rollback backup before invoking this
     /// destructive operation. The method validates every v4 input before it
@@ -576,7 +574,7 @@ impl MinuteKlineCache {
         let mut source_bytes = 0_u64;
         for entry in entries {
             match read_month_file_version(entry.path.as_path())? {
-                FILE_VERSION => {}
+                6 => {}
                 4 => {
                     validate_legacy_v4_month_file(entry.path.as_path(), &entry)?;
                     source_bytes = source_bytes.saturating_add(fs::metadata(&entry.path)?.len());
@@ -594,6 +592,8 @@ impl MinuteKlineCache {
         }
 
         let mut rewritten_bytes = 0_u64;
+        let canonical_root = self.root_dir.canonicalize()?;
+        let backup = canonical_root.join(".kline-append-backups/minute-v4-to-common");
         for entry in &legacy {
             let _lock = MonthFileLock::acquire(entry.path.as_path(), self.root_dir.as_path())?;
             let symbol = symbol_from_file_path(entry.path.as_path())?;
@@ -602,7 +602,17 @@ impl MinuteKlineCache {
                 symbol.as_str(),
                 entry.trading_month.as_str(),
             )?;
-            write_month_atomically(entry.path.as_path(), &month)?;
+            let relative = entry
+                .path
+                .strip_prefix(&self.root_dir)
+                .map_err(|_| format_error(&entry.path, "migration path outside cache root"))?;
+            let canonical_path = canonical_root.join(relative);
+            crate::kline_cache_migration::backup_partition(
+                &canonical_root,
+                &canonical_path,
+                &backup,
+            )?;
+            container::migrate(&canonical_path, &month)?;
             rewritten_bytes = rewritten_bytes.saturating_add(fs::metadata(&entry.path)?.len());
         }
 
@@ -1477,7 +1487,7 @@ impl MinuteKlineCache {
         };
         validate_stored_rows(path, trading_month, &delta.rows)?;
         if let Ok(mut input) = OpenOptions::new().read(true).write(true).open(path)
-            && let Some(index) = kline_append_log::load::<MonthSummary>(&mut input)?
+            && let Some(index) = container::load(&mut input)?
             && !index.needs_compaction()
             && index.summary.metadata.symbol == symbol
             && index.summary.metadata.trading_month == trading_month
@@ -1503,13 +1513,7 @@ impl MinuteKlineCache {
                 rows: summary.rows,
                 cached_ranges: summary.coverage.clone(),
             };
-            kline_append_log::append(
-                path,
-                &mut input,
-                index,
-                summary,
-                &encode_month_file(&delta)?,
-            )?;
+            container::append(path, &mut input, index, &delta)?;
             return Ok(report);
         }
         // Rewriting replaces the snapshot header for the whole monthly file.
@@ -1523,17 +1527,6 @@ impl MinuteKlineCache {
             snapshot,
             (i64::MIN, i64::MAX),
         )?;
-        let append_base = existing
-            .as_ref()
-            .filter(|month| {
-                month.metadata.snapshot == *snapshot
-                    && month
-                        .coverage
-                        .last()
-                        .is_none_or(|range| range.1 <= coverage.0)
-            })
-            .map(encode_month_file)
-            .transpose()?;
         let mut rows_by_datetime = existing
             .as_ref()
             .map(|month| {
@@ -1567,15 +1560,7 @@ impl MinuteKlineCache {
             coverage: coverage.clone(),
             rows,
         };
-        if let Some(base) = append_base {
-            kline_append_log::create(
-                path,
-                MonthSummary::from_month(&month),
-                &[&base, &encode_month_file(&delta)?],
-            )?;
-        } else {
-            write_month_atomically(path, &month)?;
-        }
+        write_month_atomically(path, &month)?;
         Ok(MinuteKlineCacheMonthReport {
             trading_month: trading_month.to_string(),
             path: path.to_path_buf(),
@@ -1717,7 +1702,7 @@ pub struct MinuteKlineReader {
     snapshot: MinuteKlineCacheSnapshot,
     paths: Vec<(String, PathBuf)>,
     next_path: usize,
-    current: Option<MonthRowReader>,
+    current: Option<container::RowReader>,
 }
 
 impl MinuteKlineReader {
@@ -1764,7 +1749,7 @@ impl MinuteKlineReader {
                 self.read_only,
             )?;
             let data_file = File::open(path.as_path())?;
-            let reader = MonthRowReader::open(
+            let reader = container::RowReader::open(
                 data_file,
                 self.cache_dir.as_path(),
                 path.as_path(),
@@ -2221,7 +2206,7 @@ fn scan_month_file(
     snapshot: &MinuteKlineCacheSnapshot,
     required_range: (i64, i64),
 ) -> Result<MonthScan> {
-    let scan = kline_append_log::require::<MonthSummary>(&mut File::open(path)?)?
+    let scan = container::require(&mut File::open(path)?)?
         .summary
         .scan(path)?;
     let comparison_ranges = intersecting_ranges(scan.coverage.as_slice(), required_range);
@@ -2238,7 +2223,7 @@ fn scan_month_file(
 }
 
 fn scan_month_file_unchecked(path: &Path) -> Result<MonthScan> {
-    scan_month_file_with_version(path, FILE_VERSION)
+    container::scan(path)
 }
 
 fn scan_month_file_with_version(path: &Path, expected_version: u16) -> Result<MonthScan> {
@@ -2355,10 +2340,10 @@ fn diagnose_month_file(entry: MonthFilePath, size_bytes: u64) -> MinuteKlineCach
         );
         return file;
     }
-    if version != FILE_VERSION {
+    if version != MINUTE_KLINE_CACHE_SCHEMA_VERSION as u16 {
         file.status = MinuteKlineCacheDiagnosticStatus::UnsupportedVersion;
         file.error = Some(format!(
-            "unsupported minute kline cache schema version {version}; expected {FILE_VERSION}"
+            "unsupported minute kline cache schema version {version}; expected {MINUTE_KLINE_CACHE_SCHEMA_VERSION}"
         ));
         return file;
     }
@@ -2391,6 +2376,9 @@ fn diagnose_month_file(entry: MonthFilePath, size_bytes: u64) -> MinuteKlineCach
 }
 
 fn read_month_file_version(path: &Path) -> Result<u16> {
+    if container::load(&mut File::open(path)?)?.is_some() {
+        return Ok(MINUTE_KLINE_CACHE_SCHEMA_VERSION as u16);
+    }
     if kline_append_log::load::<MonthSummary>(&mut File::open(path)?)?.is_some() {
         return Ok(FILE_VERSION);
     }
@@ -2460,26 +2448,43 @@ fn load_month_file(
     snapshot: &MinuteKlineCacheSnapshot,
     required_range: (i64, i64),
 ) -> Result<MonthFile> {
-    let index = kline_append_log::require::<MonthSummary>(&mut File::open(path)?)?;
-
-    let summary = index.summary;
-    let mut reader = MonthRowReader::open(
-        File::open(path)?,
+    let month = container::read_full(File::open(path)?, path)?;
+    validate_expected_metadata(
         cache_dir,
         path,
+        &month.metadata,
         symbol,
         trading_month,
         snapshot,
-        required_range,
+        &intersecting_ranges(&month.coverage, required_range),
+    )?;
+    Ok(month)
+}
+
+/// Only the explicit offline migrator accepts the retired KLOG envelope.
+fn load_legacy_append_file(path: &Path) -> Result<MonthFile> {
+    let mut input = File::open(path)?;
+    let index = kline_append_log::require::<MonthSummary>(&mut input)?;
+    index.require_clean_tail(&input)?;
+    let summary = index.summary;
+    summary.scan(path)?;
+    let mut reader = MonthRowReader::open(
+        input,
+        Path::new(""),
+        path,
+        &summary.metadata.symbol,
+        &summary.metadata.trading_month,
+        &summary.metadata.snapshot,
+        (i64::MIN, i64::MAX),
     )?;
     let mut rows = Vec::new();
     while let Some(row) = reader.next_row()? {
         rows.push(row);
     }
     if rows.len() != summary.rows {
-        return Err(format_error(path, "append row count mismatch"));
+        return Err(format_error(path, "legacy row count mismatch"));
     }
-    validate_stored_rows(path, trading_month, &rows)?;
+    validate_stored_rows(path, &summary.metadata.trading_month, &rows)?;
     Ok(MonthFile {
         metadata: summary.metadata,
         coverage: summary.coverage,
@@ -2506,10 +2511,19 @@ fn validate_legacy_v4_month_file(path: &Path, entry: &MonthFilePath) -> Result<(
 }
 
 fn load_legacy_v4_month_file(path: &Path, symbol: &str, trading_month: &str) -> Result<MonthFile> {
+    load_legacy_raw_month_file(path, symbol, trading_month, 4)
+}
+
+fn load_legacy_raw_month_file(
+    path: &Path,
+    symbol: &str,
+    trading_month: &str,
+    version: u16,
+) -> Result<MonthFile> {
     let file = File::open(path)?;
     let file_len = file.metadata()?.len();
     let mut reader = BufReader::new(file);
-    let (header, metadata_bytes) = read_file_prefix(&mut reader, path, file_len, 4)?;
+    let (header, metadata_bytes) = read_file_prefix(&mut reader, path, file_len, version)?;
     let metadata = decode_metadata(path, metadata_bytes.as_slice())?;
     if metadata.symbol != symbol {
         return Err(format_error(
@@ -2791,13 +2805,10 @@ fn write_month_atomically(path: &Path, month: &MonthFile) -> Result<()> {
         path.parent()
             .ok_or_else(|| format_error(path, "missing parent"))?,
     )?;
-    kline_append_log::create(
-        path,
-        MonthSummary::from_month(month),
-        &[&encode_month_file(month)?],
-    )
+    container::create(path, month)
 }
 
+#[cfg(test)]
 fn encode_month_file(month: &MonthFile) -> Result<Vec<u8>> {
     month.metadata.snapshot.validate()?;
     validate_symbol(month.metadata.symbol.as_str())?;
@@ -2878,6 +2889,7 @@ fn encode_month_file(month: &MonthFile) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(test)]
 fn compress_month_rows(row_bytes: Vec<u8>) -> Result<(u16, Vec<u8>)> {
     #[cfg(feature = "tqbn-zstd")]
     if !row_bytes.is_empty() {
@@ -3035,6 +3047,7 @@ fn read_file_prefix<R: Read>(
     ))
 }
 
+#[cfg(test)]
 fn encode_metadata(metadata: &MonthMetadata) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&metadata.snapshot.version.to_le_bytes());
@@ -3118,6 +3131,7 @@ fn is_snapshot_mismatch(error: &DataError) -> bool {
     )
 }
 
+#[cfg(test)]
 fn encode_string(bytes: &mut Vec<u8>, value: &str) -> Result<()> {
     let len = u16::try_from(value.len()).map_err(|_| {
         DataError::Validation("minute kline cache metadata string exceeds u16 length".to_string())
@@ -3168,6 +3182,7 @@ impl<'a> ByteCursor<'a> {
     }
 }
 
+#[cfg(test)]
 fn encode_coverage(bytes: &mut Vec<u8>, range: (i64, i64)) {
     bytes.extend_from_slice(&range.0.to_le_bytes());
     bytes.extend_from_slice(&range.1.to_le_bytes());
@@ -3180,43 +3195,22 @@ fn decode_coverage(bytes: &[u8]) -> (i64, i64) {
 }
 
 fn encode_kline(bytes: &mut Vec<u8>, row: &Kline) {
-    bytes.extend_from_slice(&row.id.to_le_bytes());
-    bytes.extend_from_slice(&row.datetime.to_le_bytes());
-    bytes.extend_from_slice(&row.open.to_bits().to_le_bytes());
-    bytes.extend_from_slice(&row.high.to_bits().to_le_bytes());
-    bytes.extend_from_slice(&row.low.to_bits().to_le_bytes());
-    bytes.extend_from_slice(&row.close.to_bits().to_le_bytes());
-    bytes.extend_from_slice(&row.volume.to_le_bytes());
-    bytes.extend_from_slice(&row.open_oi.to_le_bytes());
-    bytes.extend_from_slice(&row.close_oi.to_le_bytes());
+    crate::kline_codec::encode_fields(bytes, row);
     bytes.extend_from_slice(&row.epoch.unwrap_or(NONE_EPOCH).to_le_bytes());
 }
 
 fn decode_kline(bytes: &[u8]) -> Kline {
-    Kline {
-        id: read_i64(bytes, 0),
-        datetime: read_i64(bytes, 8),
-        open: f64::from_bits(read_u64(bytes, 16)),
-        high: f64::from_bits(read_u64(bytes, 24)),
-        low: f64::from_bits(read_u64(bytes, 32)),
-        close: f64::from_bits(read_u64(bytes, 40)),
-        volume: read_i64(bytes, 48),
-        open_oi: read_i64(bytes, 56),
-        close_oi: read_i64(bytes, 64),
-        epoch: (read_i64(bytes, 72) != NONE_EPOCH).then(|| read_i64(bytes, 72)),
-    }
+    let epoch = read_i64(bytes, crate::kline_codec::FIELD_BYTES);
+    crate::kline_codec::decode_fields(
+        bytes[..crate::kline_codec::FIELD_BYTES]
+            .try_into()
+            .expect("fixed Kline fields"),
+        (epoch != NONE_EPOCH).then_some(epoch),
+    )
 }
 
 fn read_i64(bytes: &[u8], offset: usize) -> i64 {
     i64::from_le_bytes(
-        bytes[offset..offset + 8]
-            .try_into()
-            .expect("fixed Kline bytes"),
-    )
-}
-
-fn read_u64(bytes: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(
         bytes[offset..offset + 8]
             .try_into()
             .expect("fixed Kline bytes"),
@@ -3563,10 +3557,13 @@ mod tests {
             .write(true)
             .open(&path)
             .unwrap();
-        let index = kline_append_log::load::<MonthSummary>(&mut file)
-            .unwrap()
-            .unwrap();
-        let payload = kline_append_log::read_segment(&mut file, &index.segments[0]).unwrap();
+        let index = container::require(&mut file).unwrap();
+        let payload = encode_month_file(&MonthFile {
+            metadata: index.summary.metadata.clone(),
+            coverage: index.summary.coverage.clone(),
+            rows: vec![],
+        })
+        .unwrap();
         let mut summary = index.summary;
         summary.coverage[0].1 += MINUTE_KLINE_DURATION_NS;
         drop(file);
