@@ -2332,6 +2332,20 @@ async fn refresh_provider_membership(
         }
 
         reporter.planning("retrying bounded provider-unavailable native daily probes");
+        let progress_scopes = selected
+            .iter()
+            .map(|candidate| {
+                let observation = acquisition
+                    .provider_daily_observations
+                    .get(&candidate.symbol)
+                    .expect("retry candidate validated provider-history acquisition");
+                (
+                    candidate.symbol.clone(),
+                    (observation.range_start_ns, observation.range_end_ns),
+                )
+            })
+            .collect::<Vec<_>>();
+        reporter.set_scopes(&progress_scopes);
         let config = provider_membership_refresh_fill_config(&args)?;
         let requests = selected
             .iter()
@@ -2855,6 +2869,12 @@ async fn bootstrap_provider_history_and_fill(
             FillProgressSession::new(args.progress, args.progress_max_bars, "daily-bootstrap");
         let reporter = progress_session.observer();
         reporter.planning("bootstrapping native daily history for provider roster");
+        let bootstrap_symbols = acquisition
+            .contracts
+            .iter()
+            .map(|contract| contract.symbol.clone())
+            .collect::<Vec<_>>();
+        reporter.set_scope(&bootstrap_symbols, (bootstrap_start_ns, bootstrap_end_ns));
         let cancellation = BacktestHistoryFillCancellation::new();
         let signal_task =
             spawn_shutdown_signal_handler(cancellation.clone(), CacheKind::Daily).await?;
@@ -3466,6 +3486,11 @@ async fn fill_historical_universe_plan(
         FillProgressSession::new(args.progress, args.progress_max_bars, kind.as_str());
     let reporter = progress_session.observer();
     reporter.planning("validating pinned historical plan and materializing exact source ranges");
+    let progress_scopes = targets
+        .iter()
+        .map(|target| (target.symbol.clone(), (target.start_ns, target.end_ns)))
+        .collect::<Vec<_>>();
+    reporter.set_scopes(&progress_scopes);
     if progress_calendar.snapshot.is_some() {
         reporter.calendar_ready(progress_calendar.progress_calendar(&requested_days)?);
     } else {

@@ -181,6 +181,10 @@ impl FillProgress {
         self.with_state(|state| state.set_scope(symbols, requested_range));
     }
 
+    pub(crate) fn set_scopes(&self, scopes: &[(String, (i64, i64))]) {
+        self.with_state(|state| state.set_scopes(scopes));
+    }
+
     pub(crate) fn observe_progress(&self, event: &BacktestRemoteFillProgress) {
         self.with_state(|state| state.apply_progress(event));
     }
@@ -444,16 +448,25 @@ impl ProgressState {
     }
 
     fn set_scope(&mut self, symbols: &[String], requested_range: (i64, i64)) {
+        let scopes = symbols
+            .iter()
+            .cloned()
+            .map(|symbol| (symbol, requested_range))
+            .collect::<Vec<_>>();
+        self.set_scopes(&scopes);
+    }
+
+    fn set_scopes(&mut self, scopes: &[(String, (i64, i64))]) {
         if self.history_fill {
             return;
         }
-        for symbol in symbols {
+        for (symbol, requested_range) in scopes {
             let entry = self.symbols.entry(symbol.clone()).or_default();
-            if entry.requested_ranges.is_empty() {
-                entry.requested_ranges.push(requested_range);
+            if !entry.requested_ranges.contains(requested_range) {
+                entry.requested_ranges.push(*requested_range);
             }
-            if entry.missing_ranges.is_empty() {
-                entry.missing_ranges.push(requested_range);
+            if !entry.missing_ranges.contains(requested_range) {
+                entry.missing_ranges.push(*requested_range);
             }
         }
         self.recalculate_days();
@@ -544,6 +557,7 @@ impl ProgressState {
         match event {
             BacktestHistoryFillProgress::Planning { total_batches, .. } => {
                 self.total_batches = *total_batches;
+                self.recalculate_days();
             }
             BacktestHistoryFillProgress::BatchStarted {
                 batch_number,
@@ -1523,31 +1537,25 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
                     global.set_length(snapshot.total_batches as u64);
                     global.set_position(snapshot.completed_batches.len() as u64);
                     global.set_message(format!(
-                    "{} | 覆盖 {covered}/{planned} | 本轮接收 {received}/{missing} | {rows} rows | recent {rate}/s{} | {}",
+                    "{}{} | 覆盖 {covered}/{planned} | 本轮接收 {received}/{missing} | {rows} rows | recent {rate}/s{} | {}",
                         if snapshot.failed { "failed" } else { "running" },
+                        tty_calendar_note(&snapshot),
                         if additional_active == 0 {
                             String::new()
                         } else {
                         format!(" | +{additional_active} active")
                     },
-                    snapshot.durability_summary()
+                    snapshot.durability_summary(),
                     ));
                 }
-                for (symbol, bar) in &symbol_bars {
-                    if !visible.contains(symbol) {
-                        bar.finish_and_clear();
-                    }
-                }
-                symbol_bars.retain(|symbol, _| visible.contains(symbol));
+                remove_hidden_symbol_bars(&multi, &mut symbol_bars, &visible);
                 for symbol in &visible {
-                    let bar = symbol_bars.entry(symbol.clone()).or_insert_with(|| {
-                        let bar = multi.add(ProgressBar::new(0));
-                        bar.set_style(symbol_style());
-                        bar
-                    });
                     let state = &snapshot.symbols[symbol];
                     let (covered, planned, received, missing) =
                         state.day_counts(snapshot.history_fill);
+                    let bar = symbol_bars.entry(symbol.clone()).or_insert_with(|| {
+                        multi.add(new_symbol_bar(symbol, missing as u64, received as u64))
+                    });
                     bar.set_prefix(display_symbol(symbol));
                     bar.set_length(missing as u64);
                     bar.set_position(received as u64);
@@ -1593,7 +1601,7 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
                 multi.remove(&inspection);
             }
             if let Some(global) = &global {
-                global.finish_with_message(completion.summary.clone());
+                finish_tty_global(global, &completion);
             } else {
                 if planning_visible {
                     planning.finish_and_clear();
@@ -1607,6 +1615,49 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
             }
             return;
         }
+    }
+}
+
+fn remove_hidden_symbol_bars(
+    multi: &MultiProgress,
+    symbol_bars: &mut BTreeMap<String, ProgressBar>,
+    visible: &BTreeSet<String>,
+) {
+    let hidden = symbol_bars
+        .keys()
+        .filter(|symbol| !visible.contains(*symbol))
+        .cloned()
+        .collect::<Vec<_>>();
+    for symbol in hidden {
+        if let Some(bar) = symbol_bars.remove(&symbol) {
+            bar.finish_and_clear();
+            multi.remove(&bar);
+        }
+    }
+}
+
+fn new_symbol_bar(symbol: &str, missing: u64, received: u64) -> ProgressBar {
+    let bar = ProgressBar::with_draw_target(Some(missing), ProgressDrawTarget::hidden());
+    bar.set_style(symbol_style());
+    bar.set_prefix(display_symbol(symbol));
+    bar.set_position(received);
+    bar
+}
+
+fn finish_tty_global(global: &ProgressBar, completion: &ProgressCompletion) {
+    let message = format!("{}: {}", completion.status.as_str(), completion.summary);
+    if matches!(completion.status, ProgressTerminalStatus::Complete) {
+        global.finish_with_message(message);
+    } else {
+        global.abandon_with_message(message);
+    }
+}
+
+fn tty_calendar_note(state: &ProgressState) -> &'static str {
+    if state.calendar.is_some() {
+        ""
+    } else {
+        " | 按分区日计数"
     }
 }
 
@@ -1668,13 +1719,15 @@ fn symbol_style() -> ProgressStyle {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::BTreeSet,
+        collections::{BTreeMap, BTreeSet},
         time::{Duration, Instant},
     };
 
     use super::{
-        ProgressCalendar, ProgressMode, ProgressState, RecentRowsRate, ResolvedProgressMode,
-        SymbolProgress, completed_days_through_cursor, days_for_ranges, resolve_mode,
+        ProgressCalendar, ProgressCompletion, ProgressMode, ProgressState, ProgressTerminalStatus,
+        RecentRowsRate, ResolvedProgressMode, SymbolProgress, completed_days_through_cursor,
+        days_for_ranges, finish_tty_global, new_symbol_bar, remove_hidden_symbol_bars,
+        resolve_mode, tty_calendar_note,
     };
     use chrono::NaiveDate;
     use tqsdk::BacktestRemoteFillPhase;
@@ -1706,6 +1759,96 @@ mod tests {
         symbol.observe_durability(&pending);
         symbol.observe_durability(&stale);
         assert_eq!(symbol.durability[&(1, 100)], pending);
+    }
+
+    #[test]
+    fn history_planning_keeps_preloaded_scope_in_coverage_denominator() {
+        let mut state = ProgressState::new(ResolvedProgressMode::Plain, 8);
+        let first_day = NaiveDate::from_ymd_opt(2026, 7, 20).expect("valid first day");
+        let second_day = NaiveDate::from_ymd_opt(2026, 7, 21).expect("valid second day");
+        let first_range = backtest_tick_trading_day_range(first_day).expect("valid first range");
+        let second_range = backtest_tick_trading_day_range(second_day).expect("valid second range");
+        let scopes = vec![
+            (
+                "SHFE.au2608".to_string(),
+                (first_range.start_ns, first_range.end_ns),
+            ),
+            (
+                "SHFE.ag2608".to_string(),
+                (second_range.start_ns, second_range.end_ns),
+            ),
+        ];
+
+        state.set_scopes(&scopes);
+        state.apply_history_progress(&BacktestHistoryFillProgress::Planning {
+            family: BacktestHistoryFillFamily::Daily,
+            requested_symbols: 2,
+            total_batches: 2,
+            symbol_batch_size: 1,
+            symbol_concurrency: 1,
+        });
+        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 0));
+
+        state.apply_history_progress(&BacktestHistoryFillProgress::BatchStarted {
+            family: BacktestHistoryFillFamily::Daily,
+            batch_number: 1,
+            total_batches: 2,
+            requested_range: (first_range.start_ns, first_range.end_ns),
+            pending_batches: 1,
+            active_batches: 1,
+            symbols: vec!["SHFE.au2608".to_string()],
+        });
+        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 0));
+    }
+
+    #[test]
+    fn failed_tty_terminal_preserves_actual_batch_position() {
+        let global = super::ProgressBar::hidden();
+        global.set_length(10);
+        global.set_position(2);
+
+        finish_tty_global(
+            &global,
+            &ProgressCompletion {
+                status: ProgressTerminalStatus::Failed,
+                summary: "fill failed".to_string(),
+            },
+        );
+
+        assert_eq!(global.position(), 2);
+    }
+
+    #[test]
+    fn new_symbol_bar_has_a_valid_initial_denominator() {
+        let bar = new_symbol_bar("SHFE.au2608", 3, 1);
+        assert_eq!(bar.length(), Some(3));
+        assert_eq!(bar.position(), 1);
+    }
+
+    #[test]
+    fn removing_hidden_symbol_bars_removes_them_from_multi_progress() {
+        let multi = super::MultiProgress::with_draw_target(super::ProgressDrawTarget::hidden());
+        let mut symbol_bars = BTreeMap::new();
+        for index in 0..16 {
+            let symbol = format!("SHFE.au{index}");
+            symbol_bars.insert(symbol.clone(), multi.add(new_symbol_bar(&symbol, 1, 0)));
+        }
+
+        remove_hidden_symbol_bars(&multi, &mut symbol_bars, &BTreeSet::new());
+
+        assert!(symbol_bars.is_empty());
+        assert!(!format!("{multi:?}").contains("is_zombie: true"));
+    }
+
+    #[test]
+    fn tty_marks_partition_day_fallback() {
+        let mut state = ProgressState::new(ResolvedProgressMode::Tty, 8);
+        assert_eq!(tty_calendar_note(&state), " | 按分区日计数");
+        state.calendar = Some(ProgressCalendar {
+            source: "test".to_string(),
+            days: Vec::new(),
+        });
+        assert_eq!(tty_calendar_note(&state), "");
     }
 
     #[test]
