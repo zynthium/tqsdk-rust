@@ -134,9 +134,13 @@ Universe Language V2，typed API 接受 `UniverseSpec`。live/facade/relay 会�
 投影 bootstrap closure，只补齐保留 physical contract 与 retained derived view 必需 underlying 的原生
 1d 历史，并以第一条 daily 行作为数据 membership 起点，再在 cache 内部生成内容寻址的 acquisition、
 semantic catalog 和 pinned plan。终态空数据和隔离的 provider-unavailable 候选不进入
-universe；该路径不查询或推断交易所挂牌日期。V2 timeline 默认发布 current V5 artifact；已有 V4
+universe；该路径不查询或推断交易所挂牌日期。首次 proof 先严格校验当前 scoped roster 的本地
+native-daily `[1990-01-01, as_of)` coverage；全部完整时直接从 cache 建 proof，不发 history 请求。
+否则观测完整历史范围；同 scoped roster/metadata 的 all-complete proof 面对更晚 cutoff 只填 suffix，
+已完整的 suffix 同样不发 history 请求。suffix timeout、取消或
+非 timeout 失败不会推进 proof，旧 artifact 保持可用。V2 timeline 默认发布 current V5 artifact；已有 V4
 artifact 须先验证完整 V4/V3 chain 后以 `migrate-universe` 迁移，源文件保持不变。旧
-`--universe-plan` 只作为隐藏兼容入口保留。
+旧的手工 plan 填充入口已移除；历史范围统一通过 `--universe` 编译。
 
 少量 `provider-unavailable` 不需要重新请求全部 native-daily：可用 `tqsdk-cache
 refresh-provider-membership --acquisition-sha256 sha256:... --max-symbols 4` 对 pinned acquisition
@@ -257,9 +261,10 @@ cached range 比较 schema、market、logical symbol、session、交易日和主
 完全相同即可复用旧 coverage，新增日期只作为缺口填充，当前月下一次原子写入时迁移到新 snapshot hash。
 缺少任一 sidecar、session/交易日/映射变化、损坏文件或语义冲突的混合分区仍默认 fail closed，不会自动
 删除、重写或拼接数据。只有
-操作者显式传 `tqsdk-cache fill --kind minute --repair-stale` 时，CLI 才会在 active snapshot 覆盖窗口时，
-删除该窗口内与它冲突的整月分区，再走普通 `remote-on-miss` 补齐；它不适用于 tick 或
-`--dry-run`，普通读取与 fill 仍不会删除数据。
+操作者显式传 `tqsdk-cache fill --kind minute --repair-stale` 时，CLI 才会走受控维护路径：取得
+exclusive fill gate、完成认证预检，且若 active metadata 未完整覆盖 target，必须先从官方 source
+成功刷新并重新规划，才删除冲突整月后走普通 `remote-on-miss` 补齐。刷新、锁等待或取消失败均不删除；
+它不适用于 tick/daily、provisional 或 `--dry-run`，普通读取与 fill 仍不会删除数据。
 
 cache-backed local backtest 当前只支持 futures；`Tq::stock().backtest(...)` 必须显式
 `.disabled_cache()` 并使用官方股票 server-backtest 行情。futures universe selector 不适用于股票，

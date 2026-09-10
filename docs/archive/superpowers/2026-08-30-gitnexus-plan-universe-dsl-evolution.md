@@ -324,7 +324,7 @@ V4 artifact file bytes由独立 fixed-order `HistoricalUniversePlanArtifactWireV
 ```text
 HistoricalPlanWritePolicy::LegacyOnly
 HistoricalPlanWritePolicy::V4WithV3Rollback
-CLI: --historical-plan-write-policy legacy-only|v4-with-v3-rollback
+CLI: the writer-policy selector was later removed; the current writer is fixed.
 ```
 
 固定发布步骤：

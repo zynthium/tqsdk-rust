@@ -110,6 +110,11 @@ timeline(contract:all;except(contract:CFFEX.*,CZCE.ZC,CZCE.CY,DCE.rr,SHFE.wr))
 `contract:all;except(contract:CZCE.RI)` 不请求 RI 的 native-daily；但若保留
 `continuous:CZCE.RI`、`index:CZCE.RI` 或对应 logical symbol，RI 物理合约仍属于其必要 closure。
 
+首次 provider-history proof 先验证 closure 的本地完整 `[1990-01-01, as_of)` coverage；命中时
+直接从 cache 建 proof。ordinary fill 在同 scoped roster/metadata 的 all-complete proof 面对更晚
+cutoff 时只观测 suffix 缺口；任一 drift 或
+suffix failure 都不推进 proof。
+
 ## 集合与排除规则
 
 V2 固定执行：include union → typed exclusions → global filters → final symbol dedupe。子句顺序不影响
@@ -195,6 +200,11 @@ legacy `file:path` 继续由 legacy parser 处理，但新配置应使用外层 
 | `BacktestBuilder::historical_universe_artifact` | wrap v1–v3 | 不适用 | 验证并消费 version-dispatched v1–v5 artifact |
 
 ## 历史 V5 与迁移
+
+V5 的 kind-specific physical target 必须把 source window 截断到 semantic catalog 固定的
+`lifecycle` 终点：`end_ns = min(plan end, lifecycle end)`。这只适用于有物理合约 lifecycle 的
+dependency；`KQ.*` logical series 保持 plan-wide end。该边界进入 execution hash，所以旧 plan
+可继续逐字节重放，新编译结果则作为新的 content-addressed artifact 发布。
 
 V5 artifact 固定 normalized AST、input source identity、acquisition、semantic catalog、calendar、
 proof、可见 membership、physical dependencies、tick/minute/daily targets 与 execution hash。V2

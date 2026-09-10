@@ -9,6 +9,12 @@ legacy-first：既有 `UniverseExpression` / `HistoricalFillUniverseSpec` 语义
 
 ## 核心语义：数据生命周期
 
+编译 V5（以及兼容 V3）kind target 时，物理 source 的请求范围是
+`[max(kind 首行证据, listing start, 用户 start), min(用户 end, semantic catalog 固定的 lifecycle end))`；
+空范围不产生请求。这样已到期合约不会继续向远端探测 post-expiry 的空日。`KQ.*` 等没有单一物理
+lifecycle 的逻辑序列仍使用 plan 的全局终点。已发布 artifact 不会被就地改写；重新编译才发布带新
+target 边界的新 content-addressed plan。
+
 默认历史 universe 不再试图恢复交易所法定挂牌日期。物理合约只有在 provider
 首次产生可观测 native-daily 行后才成为历史 universe 成员：
 
@@ -43,8 +49,10 @@ identity。完整 discovery acquisition 仍保留作审计；legacy `physical:al
 
 ### `provider_history_observed`
 
-稳定 bootstrap roster 的每个成员请求 `[1990-01-01, as_of)` 原生 1d，并持久化
-`HistoricalDailyObservation`：
+首次 bootstrap 先严格检查稳定 roster 每个成员的本地 native-daily
+`[1990-01-01, as_of)` coverage。全部完整时直接从 cache 生成 complete
+`HistoricalDailyObservation`，不建立 history scheduler 请求；任一缺口、损坏或不兼容时，才对每个成员
+请求该完整范围：
 
 - `complete + first_row_ns=Some(...)`：进入数据 membership catalog；
 - `complete + first_row_ns=None`：provider 明确完成空区间，不进入 catalog；
@@ -52,9 +60,20 @@ identity。完整 discovery acquisition 仍保留作审计；legacy `physical:al
   纳秒值随 observation 持久化。
 
 观测表必须与 acquisition roster 精确等键，观测区间必须与 bootstrap 合同一致，所有状态均参与
-acquisition SHA-256。完成探测后再次进行全量 discovery，再投影为相同 bootstrap closure；closure
-内的 roster/metadata 漂移会拒绝升级。被本次 closure 排除的合约不会发 native-daily 请求，也不会
+acquisition SHA-256。执行远端探测后再次进行全量 discovery，再投影为相同 bootstrap closure；closure
+内的 roster/metadata 漂移会拒绝升级。纯本地完整 coverage 只使用本轮已获取的 complete current
+acquisition；下一轮仍会重新发现 roster/metadata。被本次 closure 排除的合约不会发 native-daily 请求，也不会
 影响该 scoped provider-history proof。
+
+普通 `fill --universe 'timeline(...)'` 若找到同 artifact version/source identity/canonical
+scope/roster/metadata 的更早 `provider_history_observed`，且其全部 observation 都是
+`complete`，可把它作为已证明前缀，仅请求 `[old_as_of, new_as_of)` 的本地 coverage 缺口；已完整
+suffix 不建立 history scheduler 请求。成功后仍从当前 acquisition 重新生成完整 observation 表、catalog
+和 plan；这不会放宽 exact reuse，也不会
+修改旧 artifact。`provider_unavailable`、任何 roster/metadata/canonical drift、相同或回退
+cutoff 都不满足前缀条件，继续完整 bootstrap。delta 中任一 timeout、取消或非 timeout 失败
+均 fail closed：不发布新的 provider-history acquisition/catalog/plan/retry receipt，旧 proof
+保持可用。
 
 CLI 强制 daily bootstrap 的 symbol batch size 为 1，使每个 scheduler 终态精确归属于一个候选。
 调用方未显式设置 `--batch-timeout-secs` 时，单候选观察默认使用 15 秒 wall-clock 上限；若显式设置
@@ -179,8 +198,8 @@ tqsdk-cache fill --kind tick|minute|daily \
 `physical:all` 和既有 legacy timeline 继续写 v3。V2 timeline 默认发布 V5，不需要 writer policy。
 `--universe-file` 可重复并在 provider access 前一次性展开，其 identity 进入 V5。
 
-`--universe-plan` 只作为隐藏兼容入口；V4 artifact 先用 `migrate-universe --plan-sha256 <V4_SHA256>`
-迁移，V1–V3 重新编译；`--universe-timeline` 已移除。未传 `--end-day` 时 cutoff 固定为
+手工指定 plan 的 fill 入口已移除；V4 artifact 先用 `migrate-universe --plan-sha256 <V4_SHA256>`
+迁移，V1–V3 重新编译。未传 `--end-day` 时 cutoff 固定为
 本次启动时最新可用闭市边界。dry-run 只审计稳定 provider roster，返回
 `preparation_required`/exit 1，因为生成数据 membership 必须写 native-daily cache。
 

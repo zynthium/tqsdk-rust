@@ -476,7 +476,10 @@ exclusion/capability/file identity、V1–V3 hash compatibility 与 V3 execution
 chain、V4 → V3 projection 等价与 rollback、V5 fixed wire/hash/canonical-byte gate、V4 → V5
 source-preserving migration、complete authoritative 或 provider-history
 acquisition/semantic fact chain/content-addressed durability、daily-origin membership、
-provider-unavailable 的精确 timeout 判定、零完成/比例熔断与旧 complete-observation JSON 兼容、
+provider-unavailable 的精确 timeout 判定、零完成/比例熔断、同 roster/metadata all-complete
+prefix 的最大旧 cutoff 选择、完整本地 coverage 在无旧 proof 时直接建 proof、suffix-only observation
+与 suffix failure 不发布新 proof，及旧
+complete-observation JSON 兼容、
 用户起点优先的 physical/derived tick/minute/daily request floor、
 membership/dependency/kind target resolution、同时间 replay revision、
 facade V5 区间/chain/首可用边界、relay timeline 触网前拒绝与 file-refresh last-known-good，以及 CLI
@@ -614,9 +617,11 @@ repair 或 fail closed；`RemoteOnMiss` 完整命中不得读取 auth。远端 m
 data 必须从专用 session runtime state 清理，同时 final coverage 仍只能在明确 terminal 后发布。
 `verify` 必须使用 metadata-backed snapshot，
 而不是固定 CST 默认值；缺失 sidecar、session/交易日/映射变化、损坏或混合分区仍必须 fail closed。
-显式 `fill --repair-stale` 仅在 active snapshot 覆盖完整窗口时，才 purge 与它冲突的整月分区；该 purge
-必须在同一 root remote-fill lock 和 repair 所需 auth preflight 成功后发生。lock busy 或认证缺失必须保留
-所有分区；tick 与 `--dry-run` 必须拒绝该 destructive flag。
+显式 `fill --repair-stale` 必须在同一 root remote-fill lock 和 repair 所需 auth preflight 成功后工作。
+candidate 的 active snapshot 不完整时，必须先官方 metadata refresh、re-plan 并确认完整 target coverage，
+才 purge 与 refreshed snapshot 冲突的整月分区；refresh failure、lock busy、认证缺失或取消必须保留
+所有分区，取消返回 130。repair receipt 必须记录每个已尝试分区的 symbol、snapshot hash、range 与
+removed files，并在 repair 后的 fill failure report 中保留；tick/daily、provisional 与 `--dry-run` 必须拒绝该 destructive flag。
 metadata tests 还覆盖 remote-on-miss 的短 snapshot 不会降级更宽 active pointer、更宽 snapshot 会升级 active
 pointer、以及 partial range 的 metadata refresh 扩展到完整 CST trading month。
 `daily_kline_cache` 覆盖 v1 单 logical-symbol `.tqdk` 的重叠范围／快照变更 atomic replace（rename 后 parent directory fsync）、

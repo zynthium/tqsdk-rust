@@ -42,12 +42,11 @@ terminal/progress/cancel/report executor 执行目标 kind。
 第一条 daily row 是 provider-history membership 起点；默认路径不采集或推断挂牌日期。
 tick/minute cache 继续独立证明首行和空前缀。首次自动准备需要 cache mutation；`--dry-run`
 只审计 roster 并返回 `preparation_required`/exit 1。V4 仅是迁移输入；隐藏的
-`--historical-plan-write-policy v4-with-v3-rollback` token 只保留旧调用兼容，实际仍发布 V5。
+历史 plan 的写入格式固定为当前版本，实际始终发布 V5。
 
 可重复的 `--universe-file PATH` 是 V2 AST 外部 exact-symbol 来源；current snapshot fill 可单独
 使用，historical fill 必须与 V2 `timeline(...)` 合并。每个文件只读取一次，内容 identity 进入 V5。
-`--universe-plan` 仅为隐藏兼容入口，
-`--universe-timeline` 已移除。
+手工指定 plan 的 fill 入口已移除。
 
 provider roster 成员不保证历史端点会创建 chart。daily bootstrap 强制 symbol batch size 1；调用方
 未配置时单合约 wall-clock 上限为 15 秒。精确 timeout 作为 `provider_unavailable` 审计事实持久化实际
@@ -173,18 +172,19 @@ minute 缓存当前的 format id 是 `tqsdk.minute-kline.monthly.v5`，schema/fi
 symbol、session、交易日和 physical mapping。语义相同的旧 coverage 继续命中，新增尾部日期仍是 miss；
 当前月下一次原子写入才迁移 header。缺少 sidecar、session/交易日/映射变化、损坏文件或语义冲突的混合
 分区仍 fail closed，且不会
-自动 purge、重写、下载或拼接数据。唯一例外是显式的 `fill --kind minute --repair-stale`：active snapshot
-覆盖窗口时，它仅在同一 root remote-fill lock 已取得且 repair 所需认证预检成功后删除与 active snapshot
-冲突的整月分区，随后由同一次 remote-on-miss fill 重建；锁忙或认证缺失时不删除分区。普通 `fill`、
-`inspect`、`verify` 和 cache-backed reader 仍 fail closed。
+自动 purge、重写、下载或拼接数据。唯一例外是显式的 `fill --kind minute --repair-stale`：它仅在同一
+root remote-fill lock、认证预检都成功后工作。若候选分区的 active metadata 未完整覆盖 target，必须先
+从官方 source 成功 refresh metadata、重新规划且确认完整覆盖，才删除与 refreshed snapshot 冲突的整月
+分区，随后由同一次 remote-on-miss fill 重建；metadata refresh、锁忙、认证缺失或取消都不删除分区，
+取消为 exit 130。普通 `fill`、`inspect`、`verify` 和 cache-backed reader 仍 fail closed。
 
 本地 replay 使用三层固定来源：tick 服务 tick 与 `<60s`；canonical 60s minute 服务
 `60s..<1d` 的整数分钟；native server 1d 服务 `1d..=28d` 的整数日。派生周期只在内存中聚合；
 daily miss 必须失败，绝不回退到 minute。`61s`、`90s`、非整数日和大于 `28d` 的周期直接拒绝。
 
 三类 fill 由 `tqsdk-data::BacktestHistoryClient` 的同一调度器执行，CLI 只适配参数和进度。公共默认值
-是 `--symbol-batch-size 1`、`--symbol-concurrency 2`、`--idle-timeout-secs 60`；batch size 与
-concurrency 都只接受 `1..=4`。默认无 batch wall-clock timeout，`--batch-timeout-secs 0` 也表示禁用；
+是 `--symbol-batch-size 1`、`--symbol-concurrency 2`、`--idle-timeout-secs 60`；batch size 只接受
+`1..=4`，concurrency 只接受 `1..=8`。默认无 batch wall-clock timeout，`--batch-timeout-secs 0` 也表示禁用；
 `--lock-wait-secs` 默认不等待，显式值必须大于零。无效值在远端连接前返回 validation error。
 
 ## 区间查询
@@ -298,6 +298,9 @@ closed trading day。显式 `--start-day/--end-day` 仍表达调用者的数据�
   text output 会显示 `local holidays, years YYYY–YYYY`；dry-run remote candidate 还会显示
   `not persisted` 与 candidate hash。
 - `--progress jsonl` 始终写 stderr，schema 为 v2、kind 为 `tqsdk-cache.progress`，并含
+  `coverage`（只含 terminal final coverage）和 `durability.checkpointed_days`。后者只表示已耐久
+  checkpoint 的 scan 前缀，字段 `checkpointed_scope` 固定为
+  `durably_checkpointed_prefixes_not_final_coverage`；不得把零成交日或流式 cursor 当作 final coverage。
 - `repair-locks` 不写 fill report。V3 result 保留 `legacy_partition_locks_*` 和
   `legacy_partition_locks[]` 字段供旧脚本解析，但它们固定为空或零。当前结果使用
   `scanned_files`、`missing_files`、`created_files`、`already_present_files`、

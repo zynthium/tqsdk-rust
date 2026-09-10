@@ -218,6 +218,26 @@ fn v2_timeline_compiler_keeps_logical_provenance_and_kind_specific_boundaries() 
             .start_ns,
         170
     );
+    for targets in [tick, minute, daily] {
+        assert_eq!(
+            targets
+                .iter()
+                .find(|target| target.source_symbol == "SHFE.au2404")
+                .unwrap()
+                .end_ns,
+            400,
+            "physical target must stop at its pinned lifecycle end"
+        );
+        assert_eq!(
+            targets
+                .iter()
+                .find(|target| target.source_symbol == "KQ.i@SHFE.au")
+                .unwrap()
+                .end_ns,
+            500,
+            "derived target must retain plan-wide end"
+        );
+    }
     assert_ne!(
         resolution.resolved_targets_sha256()[&HistoricalDataKind::Tick],
         resolution.resolved_targets_sha256()[&HistoricalDataKind::Minute]
@@ -455,7 +475,7 @@ fn v4_to_v5_migration_verifies_the_full_chain_and_preserves_the_source() {
     assert_eq!(migration, preview);
     assert_eq!(
         migration.current_plan_sha256(),
-        "sha256:1bed0981628430f913cc176c0e14662c72398da8d9d48675f282c927821d9dc0"
+        "sha256:13092892621fc830b07cbe2b0edae98eb7f1b8cc546997dd595e0f94e6c81080"
     );
     assert_eq!(fs::read(&source_path).unwrap(), source_bytes);
     assert!(migration.current_path().is_file());
@@ -482,7 +502,7 @@ fn v4_to_v5_migration_verifies_the_full_chain_and_preserves_the_source() {
     assert_eq!(current.canonical_json_bytes().unwrap(), canonical);
     assert_eq!(
         format!("{:x}", Sha256::digest(&canonical)),
-        "290e0772163372a460e2b369a04f5d49b69ee77d9fe7466bcd0245fdb8deeb5b",
+        "ef596de38ccac94180f51f1d7ae0a0c2977e016ed9f9b858b004cdb03f64ce26",
         "V5 canonical artifact byte SHA-256 changed"
     );
     let uppercase_sha = String::from_utf8(canonical.clone())

@@ -136,6 +136,52 @@ fn cont_only_keeps_physical_sources_hidden_but_dependency_closed() {
 }
 
 #[test]
+fn physical_targets_stop_at_pinned_lifecycle_but_logical_series_keep_plan_end() {
+    let (acquisition, semantic) = fixture();
+    let resolution = compile_historical_universe_resolution(
+        &acquisition,
+        &semantic,
+        &HistoricalFillUniverseSpec::parse("timeline(cont:SHFE.au;index:SHFE.au)").unwrap(),
+        100,
+        500,
+        UniverseBudget::new(20, 40).unwrap(),
+    )
+    .unwrap();
+
+    for kind in [
+        HistoricalDataKind::Tick,
+        HistoricalDataKind::Minute,
+        HistoricalDataKind::Daily,
+    ] {
+        let targets = resolution.targets_for_kind(kind);
+        assert_eq!(
+            targets
+                .iter()
+                .find(|target| target.source_symbol == "SHFE.au2404")
+                .unwrap()
+                .end_ns,
+            400,
+        );
+        assert_eq!(
+            targets
+                .iter()
+                .find(|target| target.source_symbol == "SHFE.au2406")
+                .unwrap()
+                .end_ns,
+            500,
+        );
+        assert_eq!(
+            targets
+                .iter()
+                .find(|target| target.source_symbol == "KQ.i@SHFE.au")
+                .unwrap()
+                .end_ns,
+            500,
+        );
+    }
+}
+
+#[test]
 fn index_only_has_logical_source_without_exposing_physical_members() {
     let (acquisition, semantic) = fixture();
     let resolution = compile_historical_universe_resolution(

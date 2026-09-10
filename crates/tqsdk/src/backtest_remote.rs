@@ -30,7 +30,7 @@ const REMOTE_FILL_BATCH_TIMEOUT: Duration = Duration::ZERO;
 const REMOTE_FILL_SYMBOL_BATCH_SIZE: usize = 1;
 const REMOTE_FILL_SYMBOL_BATCH_SIZE_MAX: usize = 4;
 const REMOTE_FILL_SYMBOL_CONCURRENCY: usize = 2;
-const REMOTE_FILL_SYMBOL_CONCURRENCY_MAX: usize = 4;
+const REMOTE_FILL_SYMBOL_CONCURRENCY_MAX: usize = 8;
 
 /// Typed configuration for remote historical cache fills.
 ///
@@ -2147,7 +2147,8 @@ mod tests {
         assert_eq!(parse_remote_fill_symbol_batch_size(Some("8")), 4);
         assert_eq!(parse_remote_fill_symbol_concurrency(None), 2);
         assert_eq!(parse_remote_fill_symbol_concurrency(Some("0")), 2);
-        assert_eq!(parse_remote_fill_symbol_concurrency(Some("8")), 4);
+        assert_eq!(parse_remote_fill_symbol_concurrency(Some("8")), 8);
+        assert_eq!(parse_remote_fill_symbol_concurrency(Some("9")), 8);
         assert_eq!(
             parse_remote_fill_idle_timeout(Some("0")),
             Duration::from_secs(60)
@@ -2167,7 +2168,7 @@ mod tests {
         assert!(matches!(error, tqsdk_data::DataError::Validation(_)));
 
         let error = data_fill_config(BacktestRemoteFillConfig {
-            symbol_concurrency: 5,
+            symbol_concurrency: 9,
             ..BacktestRemoteFillConfig::default()
         })
         .unwrap_err();

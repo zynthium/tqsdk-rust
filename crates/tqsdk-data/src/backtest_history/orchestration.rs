@@ -23,7 +23,7 @@ use super::{
 const DEFAULT_SYMBOL_BATCH_SIZE: usize = 1;
 const DEFAULT_SYMBOL_CONCURRENCY: usize = 2;
 const MAX_SYMBOL_BATCH_SIZE: usize = 4;
-const MAX_SYMBOL_CONCURRENCY: usize = 4;
+const MAX_SYMBOL_CONCURRENCY: usize = 8;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Cache family materialized by one history-fill request.
@@ -67,7 +67,7 @@ impl BacktestHistoryFillConfig {
         Ok(self)
     }
 
-    /// Sets concurrently active symbol batches. Values outside `1..=4` are rejected.
+    /// Sets concurrently active symbol batches. Values outside `1..=8` are rejected.
     pub fn with_symbol_concurrency(mut self, value: usize) -> Result<Self> {
         validate_bounded_count("symbol_concurrency", value, MAX_SYMBOL_CONCURRENCY)?;
         self.symbol_concurrency = value;

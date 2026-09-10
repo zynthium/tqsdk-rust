@@ -194,13 +194,7 @@ impl FillProgress {
     }
 
     pub(crate) fn observe_durability(&self, event: &tqsdk_data::BacktestHistoryDurabilityEvent) {
-        self.with_state(|state| {
-            state
-                .symbols
-                .entry(event.symbol.clone())
-                .or_default()
-                .observe_durability(&event.progress)
-        });
+        self.with_state(|state| state.apply_durability(event));
     }
 
     pub(crate) fn observe_telemetry(&self, event: &BacktestRemoteFillTelemetry) {
@@ -380,6 +374,7 @@ struct HistoryDayCounts {
     planned: usize,
     missing: usize,
     received: usize,
+    checkpointed: usize,
 }
 
 impl SymbolProgress {
@@ -393,7 +388,7 @@ impl SymbolProgress {
         }
         self.durability.insert(progress.range, progress.clone());
     }
-    fn day_counts(&self, history_fill: bool) -> (usize, usize, usize, usize) {
+    fn day_counts(&self, history_fill: bool) -> (usize, usize, usize, usize, usize) {
         if history_fill {
             let counts = self.history_day_counts.unwrap_or_default();
             (
@@ -401,6 +396,7 @@ impl SymbolProgress {
                 counts.planned,
                 counts.received,
                 counts.missing,
+                counts.checkpointed,
             )
         } else {
             (
@@ -408,6 +404,7 @@ impl SymbolProgress {
                 self.planned_days.len(),
                 self.received_days.len(),
                 self.missing_days.len(),
+                0,
             )
         }
     }
@@ -884,12 +881,29 @@ impl ProgressState {
                 .iter()
                 .map(|((_, start_ns, _), end_ns)| (*start_ns, *end_ns)),
         );
+        let mut checkpointed_ranges = symbol.history_received_ranges.clone();
+        checkpointed_ranges.extend(symbol.durability.values().filter_map(|progress| {
+            progress
+                .redownload_range
+                .map(|(redownload_start_ns, _)| (progress.range.0, redownload_start_ns))
+                .or_else(|| progress.final_coverage.then_some(progress.range))
+        }));
+        let covered = day_count_for_ranges(&symbol.history_received_ranges, calendar);
         symbol.history_day_counts = Some(HistoryDayCounts {
-            covered: day_count_for_ranges(&symbol.history_received_ranges, calendar),
+            covered,
             planned: day_count_for_ranges(&symbol.requested_ranges, calendar),
             missing: day_count_for_ranges(&symbol.missing_ranges, calendar),
             received: day_count_for_ranges(&received_ranges, calendar),
+            checkpointed: day_count_for_ranges(&checkpointed_ranges, calendar).max(covered),
         });
+    }
+
+    fn apply_durability(&mut self, event: &tqsdk_data::BacktestHistoryDurabilityEvent) {
+        self.symbols
+            .entry(event.symbol.clone())
+            .or_default()
+            .observe_durability(&event.progress);
+        self.recalculate_history_symbol_days(&event.symbol);
     }
 
     fn visible_symbols(&self) -> Vec<String> {
@@ -935,19 +949,26 @@ impl ProgressState {
             .collect()
     }
 
-    fn coverage_counts(&self) -> (usize, usize, usize, usize, usize) {
+    fn coverage_counts(&self) -> (usize, usize, usize, usize, usize, usize) {
         let mut covered = 0;
         let mut planned = 0;
         let mut received = 0;
         let mut missing = 0;
+        let mut checkpointed = 0;
         let mut rows = self.history_rows_by_batch.values().copied().sum::<usize>();
         for symbol in self.symbols.values() {
-            let (symbol_covered, symbol_planned, symbol_received, symbol_missing) =
-                symbol.day_counts(self.history_fill);
+            let (
+                symbol_covered,
+                symbol_planned,
+                symbol_received,
+                symbol_missing,
+                symbol_checkpointed,
+            ) = symbol.day_counts(self.history_fill);
             covered += symbol_covered;
             planned += symbol_planned;
             received += symbol_received;
             missing += symbol_missing;
+            checkpointed += symbol_checkpointed;
             if self.history_fill {
                 rows += symbol
                     .rows_by_stream
@@ -961,7 +982,7 @@ impl ProgressState {
                 rows += symbol.rows_by_stream.values().copied().sum::<usize>();
             }
         }
-        (covered, planned, received, missing, rows)
+        (covered, planned, received, missing, checkpointed, rows)
     }
 
     fn display_rows(&self, rows: usize) -> Option<usize> {
@@ -1000,7 +1021,7 @@ impl ProgressState {
     }
 
     fn jsonl_record(&self) -> Value {
-        let (covered, planned, received, missing, rows) = self.coverage_counts();
+        let (covered, planned, received, missing, checkpointed, rows) = self.coverage_counts();
         let display_rows = self.display_rows(rows);
         let (event, status, summary) = match &self.finished {
             Some(completion) => (
@@ -1048,6 +1069,10 @@ impl ProgressState {
             },
             "durability": {
                 "scope": "observed_fill_windows_only",
+                "checkpointed_days": self.history_fill.then_some(checkpointed),
+                "checkpointed_scope": self.history_fill.then_some(
+                    "durably_checkpointed_prefixes_not_final_coverage"
+                ),
                 "known": self.symbols.values().any(|s| !s.durability.is_empty()),
                 "received_rows": self.symbols.values().any(|s| !s.durability.is_empty()).then(|| self.symbols.values().flat_map(|s| s.durability.values()).map(|d| d.received_rows).sum::<usize>()),
                 "committed_rows": self.symbols.values().any(|s| !s.durability.is_empty()).then(|| self.symbols.values().flat_map(|s| s.durability.values()).map(|d| d.committed_rows).sum::<usize>()),
@@ -1079,7 +1104,8 @@ impl ProgressState {
                 .iter()
                 .filter(|(_, state)| state.active || state.error.is_some())
             .map(|(symbol, state)| {
-                let (covered, planned, received, missing) = state.day_counts(self.history_fill);
+                let (covered, planned, received, missing, checkpointed) =
+                    state.day_counts(self.history_fill);
                 json!({
                     "symbol": symbol,
                     "phase": state.phase.map(phase_name).unwrap_or("pending"),
@@ -1089,6 +1115,12 @@ impl ProgressState {
                     "planned": planned,
                     "received": received,
                     "missing": missing,
+                    },
+                    "durability": {
+                    "checkpointed_days": self.history_fill.then_some(checkpointed),
+                    "checkpointed_scope": self.history_fill.then_some(
+                        "durably_checkpointed_prefixes_not_final_coverage"
+                    ),
                     },
                     "rows": self.display_symbol_rows(state),
                     "attempt_retries": state.retries,
@@ -1351,7 +1383,8 @@ fn render_plain(shared: Arc<Mutex<ProgressState>>) {
         {
             rendered_revision = snapshot.revision;
             last_rendered_at = Some(Instant::now());
-            let (covered, planned, received, missing, rows) = snapshot.coverage_counts();
+            let (covered, planned, received, missing, checkpointed, rows) =
+                snapshot.coverage_counts();
             let display_rows = snapshot.display_rows(rows);
             let rows_per_second = display_rows.map(|rows| recent_rate.observe(rows));
             if let Some(inspection) = &snapshot.inspection {
@@ -1368,14 +1401,18 @@ fn render_plain(shared: Arc<Mutex<ProgressState>>) {
             } else if snapshot.plan.is_none() && !snapshot.history_fill {
                 eprintln!("tqsdk-cache: phase=planning message={}", snapshot.planning);
             } else {
+                let checkpointed_progress = snapshot
+                    .history_fill
+                    .then(|| format!(" checkpointed_days={checkpointed}/{planned}"));
                 eprintln!(
-                    "tqsdk-cache: phase=fill durability=[{}] status={} batches={}/{} coverage_days={}/{} received_days={}/{} rows={} recent_rows_per_sec={} calendar={}{}",
+                    "tqsdk-cache: phase=fill durability=[{}] status={} batches={}/{} coverage_days={}/{}{} received_days={}/{} rows={} recent_rows_per_sec={} calendar={}{}",
                     snapshot.durability_summary(),
                     if snapshot.failed { "failed" } else { "running" },
                     snapshot.completed_batches.len(),
                     snapshot.total_batches,
                     covered,
                     planned,
+                    checkpointed_progress.unwrap_or_default(),
                     received,
                     missing,
                     display_rows
@@ -1404,15 +1441,19 @@ fn render_plain(shared: Arc<Mutex<ProgressState>>) {
                         .latest_trading_day
                         .map(|day| day.to_string())
                         .unwrap_or_else(|| "-".to_string());
-                    let (covered, planned, received, missing) =
+                    let (covered, planned, received, missing, checkpointed) =
                         state.day_counts(snapshot.history_fill);
+                    let checkpointed_progress = snapshot
+                        .history_fill
+                        .then(|| format!(" checkpointed_days={checkpointed}/{planned}"));
                     eprintln!(
-                        "tqsdk-cache: phase=symbol symbol={} state={} trading_day={} coverage_days={}/{} received_days={}/{} rows={} attempt_retries={} split_fallback={}{}",
+                        "tqsdk-cache: phase=symbol symbol={} state={} trading_day={} coverage_days={}/{}{} received_days={}/{} rows={} attempt_retries={} split_fallback={}{}",
                         symbol,
                         state.phase.map(phase_name).unwrap_or("pending"),
                         trading_day,
                         covered,
                         planned,
+                        checkpointed_progress.unwrap_or_default(),
                         received,
                         missing,
                         snapshot
@@ -1525,9 +1566,12 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
                     global = Some(bar);
                 }
                 if let Some(global) = &global {
-                    let (covered, planned, received, missing, raw_rows) =
+                    let (covered, planned, received, missing, checkpointed, raw_rows) =
                         snapshot.coverage_counts();
                     let display_rows = snapshot.display_rows(raw_rows);
+                    let checkpointed_progress = snapshot
+                        .history_fill
+                        .then(|| format!(" | 已检查 {checkpointed}/{planned}"));
                     let rows = display_rows
                         .map(|rows| rows.to_string())
                         .unwrap_or_else(|| "n/a".to_string());
@@ -1537,9 +1581,10 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
                     global.set_length(snapshot.total_batches as u64);
                     global.set_position(snapshot.completed_batches.len() as u64);
                     global.set_message(format!(
-                    "{}{} | 覆盖 {covered}/{planned} | 本轮接收 {received}/{missing} | {rows} rows | recent {rate}/s{} | {}",
+                    "{}{} | 覆盖 {covered}/{planned}{} | 本轮接收 {received}/{missing} | {rows} rows | recent {rate}/s{} | {}",
                         if snapshot.failed { "failed" } else { "running" },
                         tty_calendar_note(&snapshot),
+                        checkpointed_progress.unwrap_or_default(),
                         if additional_active == 0 {
                             String::new()
                         } else {
@@ -1551,7 +1596,7 @@ fn render_tty(shared: Arc<Mutex<ProgressState>>) {
                 remove_hidden_symbol_bars(&multi, &mut symbol_bars, &visible);
                 for symbol in &visible {
                     let state = &snapshot.symbols[symbol];
-                    let (covered, planned, received, missing) =
+                    let (covered, planned, received, missing, _checkpointed) =
                         state.day_counts(snapshot.history_fill);
                     let bar = symbol_bars.entry(symbol.clone()).or_insert_with(|| {
                         multi.add(new_symbol_bar(symbol, missing as u64, received as u64))
@@ -1762,6 +1807,47 @@ mod tests {
     }
 
     #[test]
+    fn durability_checkpoint_advances_scan_progress_without_claiming_coverage() {
+        let first_day = NaiveDate::from_ymd_opt(2026, 7, 20).expect("valid first test day");
+        let second_day = NaiveDate::from_ymd_opt(2026, 7, 21).expect("valid second test day");
+        let first_range = backtest_tick_trading_day_range(first_day).expect("valid first range");
+        let second_range = backtest_tick_trading_day_range(second_day).expect("valid second range");
+        let symbol = "SHFE.au2608".to_string();
+        let mut state = ProgressState::new(ResolvedProgressMode::Plain, 8);
+        state.history_fill = true;
+        state.symbols.insert(
+            symbol.clone(),
+            SymbolProgress {
+                requested_ranges: vec![(first_range.start_ns, second_range.end_ns)],
+                missing_ranges: vec![(first_range.start_ns, second_range.end_ns)],
+                ..SymbolProgress::default()
+            },
+        );
+        state.apply_durability(&tqsdk_data::BacktestHistoryDurabilityEvent {
+            request_id: Some(0),
+            symbol: symbol.clone(),
+            progress: tqsdk_data::BacktestHistoryDurabilityProgress {
+                range: (first_range.start_ns, second_range.end_ns),
+                received_rows: 0,
+                committed_rows: 0,
+                staged_rows: 0,
+                redownload_range: Some((second_range.start_ns, second_range.end_ns)),
+                final_coverage: false,
+            },
+        });
+
+        assert_eq!(state.symbols[&symbol].day_counts(true), (0, 2, 0, 2, 1));
+        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 1, 0));
+        let record = state.jsonl_record();
+        assert_eq!(record["coverage"]["covered_days"], 0);
+        assert_eq!(record["durability"]["checkpointed_days"], 1);
+        assert_eq!(
+            record["durability"]["checkpointed_scope"],
+            "durably_checkpointed_prefixes_not_final_coverage"
+        );
+    }
+
+    #[test]
     fn history_planning_keeps_preloaded_scope_in_coverage_denominator() {
         let mut state = ProgressState::new(ResolvedProgressMode::Plain, 8);
         let first_day = NaiveDate::from_ymd_opt(2026, 7, 20).expect("valid first day");
@@ -1787,7 +1873,7 @@ mod tests {
             symbol_batch_size: 1,
             symbol_concurrency: 1,
         });
-        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 0));
+        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 0, 0));
 
         state.apply_history_progress(&BacktestHistoryFillProgress::BatchStarted {
             family: BacktestHistoryFillFamily::Daily,
@@ -1798,7 +1884,7 @@ mod tests {
             active_batches: 1,
             symbols: vec!["SHFE.au2608".to_string()],
         });
-        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 0));
+        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 0, 0));
     }
 
     #[test]
@@ -1895,7 +1981,7 @@ mod tests {
             elapsed: Duration::from_secs(1),
         });
 
-        assert_eq!(state.coverage_counts().4, 37);
+        assert_eq!(state.coverage_counts().5, 37);
         assert_eq!(
             state.symbols[&symbol]
                 .rows_by_stream
@@ -1944,7 +2030,7 @@ mod tests {
             elapsed: Duration::from_secs(1),
         });
 
-        assert_eq!(state.coverage_counts().4, 42);
+        assert_eq!(state.coverage_counts().5, 42);
         assert_eq!(
             state.symbols[&symbol]
                 .rows_by_stream
@@ -1983,8 +2069,8 @@ mod tests {
             elapsed: Duration::from_secs(1),
         });
 
-        assert_eq!(state.symbols[&symbol].day_counts(true), (1, 1, 1, 1));
-        assert_eq!(state.coverage_counts(), (1, 1, 1, 1, 37));
+        assert_eq!(state.symbols[&symbol].day_counts(true), (1, 1, 1, 1, 1));
+        assert_eq!(state.coverage_counts(), (1, 1, 1, 1, 1, 37));
     }
 
     #[test]
@@ -2069,7 +2155,7 @@ mod tests {
             symbols: vec![symbol],
         });
 
-        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 0));
+        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 0, 0));
     }
 
     #[test]
@@ -2098,11 +2184,11 @@ mod tests {
         assert!(state.symbols[&symbol].missing_days.is_empty());
         assert_eq!(
             state.symbols[&symbol].day_counts(true),
-            (0, expected_days, 0, expected_days)
+            (0, expected_days, 0, expected_days, 0)
         );
         assert_eq!(
             state.coverage_counts(),
-            (0, expected_days, 0, expected_days, 0)
+            (0, expected_days, 0, expected_days, 0, 0)
         );
     }
 
@@ -2140,8 +2226,8 @@ mod tests {
             },
         });
 
-        assert_eq!(state.symbols[&symbol].day_counts(true), (0, 2, 0, 2));
-        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 1));
+        assert_eq!(state.symbols[&symbol].day_counts(true), (0, 2, 0, 2, 0));
+        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 0, 1));
 
         state.apply_history_progress(&BacktestHistoryFillProgress::Telemetry {
             family: BacktestHistoryFillFamily::Tick,
@@ -2158,8 +2244,8 @@ mod tests {
             },
         });
 
-        assert_eq!(state.symbols[&symbol].day_counts(true), (0, 2, 1, 2));
-        assert_eq!(state.coverage_counts(), (0, 2, 1, 2, 42));
+        assert_eq!(state.symbols[&symbol].day_counts(true), (0, 2, 1, 2, 0));
+        assert_eq!(state.coverage_counts(), (0, 2, 1, 2, 0, 42));
 
         state.apply_history_progress(&BacktestHistoryFillProgress::Telemetry {
             family: BacktestHistoryFillFamily::Tick,
@@ -2176,8 +2262,8 @@ mod tests {
             },
         });
 
-        assert_eq!(state.symbols[&symbol].day_counts(true), (0, 2, 1, 2));
-        assert_eq!(state.coverage_counts(), (0, 2, 1, 2, 42));
+        assert_eq!(state.symbols[&symbol].day_counts(true), (0, 2, 1, 2, 0));
+        assert_eq!(state.coverage_counts(), (0, 2, 1, 2, 0, 42));
         assert_eq!(state.symbols[&symbol].history_streamed_ranges.len(), 1);
 
         let mut failed_state = state.clone();
@@ -2189,7 +2275,10 @@ mod tests {
             symbols: vec![symbol.clone()],
             error: "provider timeout".to_string(),
         });
-        assert_eq!(failed_state.symbols[&symbol].day_counts(true), (0, 2, 0, 2));
+        assert_eq!(
+            failed_state.symbols[&symbol].day_counts(true),
+            (0, 2, 0, 2, 0)
+        );
         assert!(
             failed_state.symbols[&symbol]
                 .history_streamed_ranges
@@ -2206,7 +2295,7 @@ mod tests {
             elapsed: Duration::from_secs(1),
         });
 
-        assert_eq!(state.symbols[&symbol].day_counts(true), (2, 2, 2, 2));
+        assert_eq!(state.symbols[&symbol].day_counts(true), (2, 2, 2, 2, 2));
         assert!(state.symbols[&symbol].history_streamed_ranges.is_empty());
     }
 
@@ -2250,6 +2339,7 @@ mod tests {
                 0,
                 days_per_symbol * PROVIDER_ROSTER_SIZE,
                 0,
+                0,
             )
         );
     }
@@ -2263,11 +2353,11 @@ mod tests {
         let symbols = vec!["SHFE.au2608".to_string(), "DCE.i2609".to_string()];
 
         state.set_scope(&symbols, (range.start_ns, range.end_ns));
-        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 0));
+        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 0, 0));
 
         // Repeated planning callbacks must not re-expand an already fixed scope.
         state.set_scope(&symbols, (range.start_ns, range.end_ns));
-        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 0));
+        assert_eq!(state.coverage_counts(), (0, 2, 0, 2, 0, 0));
     }
 
     #[test]
@@ -2294,7 +2384,7 @@ mod tests {
             missing_ranges.as_slice(),
         )]);
 
-        assert_eq!(state.coverage_counts(), (1, 2, 0, 1, 0));
+        assert_eq!(state.coverage_counts(), (1, 2, 0, 1, 0, 0));
     }
 
     #[test]
@@ -2310,7 +2400,7 @@ mod tests {
         state.set_scope(std::slice::from_ref(&logical), ranges[0]);
         state.replace_scope_with_plan([(physical.as_str(), ranges.as_slice(), ranges.as_slice())]);
 
-        assert_eq!(state.coverage_counts(), (0, 1, 0, 1, 0));
+        assert_eq!(state.coverage_counts(), (0, 1, 0, 1, 0, 0));
         assert!(!state.symbols.contains_key(&logical));
         assert!(state.symbols.contains_key(&physical));
     }

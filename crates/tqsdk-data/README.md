@@ -110,6 +110,11 @@ fill 必须先释放 shared gate；不可在已有 fill gate 内嵌套调用重�
 
 ## Universe Language V2 与历史 artifact
 
+编译历史 plan 的 physical tick/minute/daily target 会以 semantic catalog 中固定的合约
+`lifecycle` 终点裁剪 `end_ns`；空区间直接省略，因此到期合约不会被 remote fill 继续探测到全局
+as-of。无单一物理 lifecycle 的 `KQ.*` logical source 仍保留 plan-wide end。该范围是 pinned
+execution 的一部分，已发布 artifact 不会被填充过程改写。
+
 `tqsdk-data` 是 Universe 语言和历史 plan 的唯一 owner：
 
 - legacy `UniverseExpression` / `HistoricalFillUniverseSpec` 及其原执行语义保持不变；
@@ -167,7 +172,12 @@ V2 timeline 再根据 normalized AST 投影出 physical bootstrap closure，仅�
 保留 derived view 的必要 underlying 进行 `[1990-01-01, as_of)` native-1d 观测，并升级为
 `provider_history_observed`：第一条
 日线是数据 membership 起点，终态空区间和隔离的 `provider_unavailable` 候选不进入 universe；
-默认路径不读取或推断交易所挂牌日期。tick/minute 从 `max(用户起点, membership 起点)` 发起请求，
+首次 proof 先严格检查当前 scoped roster 的本地 native-1d `[1990-01-01, as_of)` coverage；全部
+完整时直接从 cache 生成 complete observation，否则才观测完整范围。同 scoped roster/metadata 的
+all-complete provider-history acquisition 可作为 ordinary fill 的已证明前缀：更晚 cutoff 只观测
+suffix；已完整 suffix 不发 history 请求，成功后由当前 acquisition 重建完整 proof；timeout、取消、非 timeout 失败或任何 drift
+均不发布新 proof。默认路径不读取或推断交易所挂牌日期。tick/minute 从
+`max(用户起点, membership 起点)` 发起请求，
 实际首行和空前缀仍由各自 cache coverage 记录。`HistoricalUniverseArtifactStore` 内容寻址保存 acquisition、semantic catalog 和
 v3 plan；旧 `authoritative_lifecycle` 路径保持原语义。v3 固定 visible membership、dependency
 closure 和 kind-specific targets。详细合同见
@@ -182,7 +192,7 @@ canary 成功后前进；发现首行或 terminal empty 才发布新的 acquisit
 再负责生成 plan。
 
 同一个 client 是 tick/minute/daily fill scheduling 的唯一 owner：默认 symbol batch size 1、concurrency 2、
-idle timeout 60 秒、无 batch timeout；batch size/concurrency 都只接受 `1..=4`。它统一产生 planning、
+idle timeout 60 秒、无 batch timeout；batch size 只接受 `1..=4`，concurrency 只接受 `1..=8`。它统一产生 planning、
 batch、telemetry、terminal progress，facade 与 CLI 不再各自实现调度。
 Tick 与 sub-minute 规划会把 immutable metadata 中明确标记为非交易日的工作日区间作为本地可证明空区间，
 不创建远端 chart，也不等待 idle timeout；周末不会单独剔除，因为周五夜盘可能属于下一个交易日。

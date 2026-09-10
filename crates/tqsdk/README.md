@@ -89,7 +89,8 @@ synthesis metadata；可在 backtest builder 上用 `.price_tick(...)`、`.instr
 后续大输出格式化不会延长 gate 生命周期。prelude 故意不导出该高级 API。
 
 `BacktestHistoryClient` 也是 tick/minute/daily fill scheduling 的唯一 owner。默认 symbol batch size 1、
-concurrency 2、idle timeout 60 秒、无 batch timeout；batch size/concurrency 只接受 `1..=4`。facade
+concurrency 2、idle timeout 60 秒、无 batch timeout；batch size 只接受 `1..=4`，concurrency 只接受
+`1..=8`。facade
 只把统一 progress/terminal report 适配为既有用户表面。
 
 缓存运维入口保留在同一个 builder 心智里：`.inspect_cache()` / `.purge_cache_symbols()` 是

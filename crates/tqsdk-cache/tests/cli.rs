@@ -693,7 +693,7 @@ fn daily_fill_rejects_scheduler_values_outside_the_shared_bounds() {
         "--end-day",
         "2020-01-03",
         "--symbol-concurrency",
-        "5",
+        "9",
         "--dry-run",
     ]);
 
@@ -705,7 +705,7 @@ fn daily_fill_rejects_scheduler_values_outside_the_shared_bounds() {
         json["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("between 1 and 4")
+            .contains("between 1 and 8")
     );
 }
 
@@ -2700,161 +2700,52 @@ fn default_output_is_human_readable_even_when_stdout_is_captured() {
 }
 
 #[test]
-fn fill_tick_accepts_a_pinned_historical_universe_plan() {
-    let cache_dir = temp_dir("historical-universe-plan");
-    let scope = tqsdk_data::DynamicUniverseScope::all();
-    let plan = tqsdk_data::CatalogSnapshot::new(
-        "fixture-v1",
-        "calendar-sha256:fixture",
-        true,
-        scope.clone(),
-        vec![
-            tqsdk_data::CatalogContract::new(
-                "SHFE.au2406",
-                "SHFE",
-                "au",
-                vec![tqsdk_data::ActiveInterval::new(10, 20).unwrap()],
-            )
-            .unwrap(),
-        ],
-    )
-    .unwrap()
-    .compile_timeline(0, 30, scope, [])
-    .unwrap()
-    .prepare(tqsdk_data::UniverseBudget::new(4, 4).unwrap())
-    .unwrap();
-    BacktestTickCache::open(&cache_dir)
-        .unwrap()
-        .mark_complete("SHFE.au2406", 10, 20, 0, None)
-        .unwrap();
-    let plan_path = cache_dir.join("historical-universe-plan.json");
-    fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
-
-    let output = run_without_auth_json([
-        "--cache-dir",
-        cache_dir.to_str().unwrap(),
-        "fill",
-        "--allow-legacy-universe-plan",
-        "--universe-plan",
-        plan_path.to_str().unwrap(),
-        "--dry-run",
-    ]);
-    assert_eq!(output.status.code(), Some(1));
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let result = v3_result(&json, "fill", "incomplete", 1);
-    assert_eq!(result["plan_sha256"], plan.plan_sha256);
-    assert_eq!(result["symbols_warmed"], 1);
-    assert_eq!(result["requested_days"]["start_day"], "1970-01-01");
-    assert_eq!(result["requested_days"]["end_day"], "1970-01-01");
-
-    let _ = fs::remove_dir_all(cache_dir);
-}
-
-#[test]
-fn fill_daily_accepts_a_pinned_historical_universe_plan() {
-    let cache_dir = temp_dir("historical-universe-daily-plan");
-    let scope = tqsdk_data::DynamicUniverseScope::all();
-    let plan = tqsdk_data::CatalogSnapshot::new(
-        "fixture-v1",
-        "calendar-sha256:fixture",
-        true,
-        scope.clone(),
-        vec![
-            tqsdk_data::CatalogContract::new(
-                "SHFE.au2406",
-                "SHFE",
-                "au",
-                vec![tqsdk_data::ActiveInterval::new(10, 20).unwrap()],
-            )
-            .unwrap(),
-        ],
-    )
-    .unwrap()
-    .compile_timeline(0, 30, scope, [])
-    .unwrap()
-    .prepare(tqsdk_data::UniverseBudget::new(4, 4).unwrap())
-    .unwrap();
-    BacktestTickCache::open(&cache_dir).unwrap();
-    let plan_path = cache_dir.join("historical-universe-plan.json");
-    fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
-
-    let output = run_without_auth_json([
-        "--cache-dir",
-        cache_dir.to_str().unwrap(),
-        "--kind",
-        "daily",
-        "fill",
-        "--allow-legacy-universe-plan",
-        "--universe-plan",
-        plan_path.to_str().unwrap(),
-        "--dry-run",
-    ]);
-    assert_eq!(output.status.code(), Some(1));
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let result = v3_result(&json, "fill", "incomplete", 1);
-    assert_eq!(result["universe_timeline"]["plan_sha256"], plan.plan_sha256);
-    assert_eq!(result["universe_timeline"]["physical_symbols"], 1);
-    let _ = fs::remove_dir_all(cache_dir);
-}
-
-#[test]
-fn fill_minute_accepts_a_pinned_historical_universe_plan() {
-    let cache_dir = temp_dir("historical-universe-minute-plan");
-    let scope = tqsdk_data::DynamicUniverseScope::all();
-    let plan = tqsdk_data::CatalogSnapshot::new(
-        "fixture-v1",
-        "calendar-sha256:fixture",
-        true,
-        scope.clone(),
-        vec![
-            tqsdk_data::CatalogContract::new(
-                "SHFE.au2406",
-                "SHFE",
-                "au",
-                vec![tqsdk_data::ActiveInterval::new(10, 20).unwrap()],
-            )
-            .unwrap(),
-        ],
-    )
-    .unwrap()
-    .compile_timeline(0, 30, scope, [])
-    .unwrap()
-    .prepare(tqsdk_data::UniverseBudget::new(4, 4).unwrap())
-    .unwrap();
-    BacktestTickCache::open(&cache_dir).unwrap();
-    let plan_path = cache_dir.join("historical-universe-plan.json");
-    fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
-
-    let output = run_without_auth_json([
-        "--cache-dir",
-        cache_dir.to_str().unwrap(),
-        "--kind",
-        "minute",
-        "fill",
-        "--allow-legacy-universe-plan",
-        "--universe-plan",
-        plan_path.to_str().unwrap(),
-        "--dry-run",
-    ]);
-    assert_eq!(output.status.code(), Some(1));
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let result = v3_result(&json, "fill", "incomplete", 1);
-    assert_eq!(result["universe_timeline"]["plan_sha256"], plan.plan_sha256);
-    assert_eq!(result["universe_timeline"]["physical_symbols"], 1);
-    let _ = fs::remove_dir_all(cache_dir);
-}
-
-#[test]
-fn historical_universe_plan_is_hidden_and_timeline_is_removed() {
+fn fill_help_exposes_dynamic_universe_input_only() {
     let output = Command::new(env!("CARGO_BIN_EXE_tqsdk-cache"))
         .args(["fill", "--help"])
         .output()
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(!stdout.contains("--universe-plan"));
-    assert!(!stdout.contains("--universe-timeline"));
     assert!(stdout.contains("--universe <EXPRESSION>"));
+}
+
+#[test]
+fn fill_rejects_removed_historical_plan_flags() {
+    for (arguments, flag) in [
+        (
+            &["fill", "--universe-plan", "fixture.json"][..],
+            "--universe-plan",
+        ),
+        (
+            &["fill", "--allow-legacy-universe-plan"][..],
+            "--allow-legacy-universe-plan",
+        ),
+        (
+            &[
+                "fill",
+                "--historical-plan-write-policy",
+                "v4-with-v3-rollback",
+            ][..],
+            "--historical-plan-write-policy",
+        ),
+        (
+            &["fill", "--universe-timeline", "fixture.json"][..],
+            "--universe-timeline",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_tqsdk-cache"))
+            .args(["--output-format", "json"])
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["error"]["code"], "usage");
+        let message = json["error"]["message"].as_str().unwrap();
+        assert!(message.contains(flag));
+        assert!(message.contains("unexpected argument"));
+    }
 }
 
 #[test]
@@ -2938,32 +2829,6 @@ fn universe_v2_timeline_defaults_to_current_writer_before_auth() {
 }
 
 #[test]
-fn universe_v2_timeline_legacy_writer_policy_alias_advances_to_auth_preflight() {
-    let output = run_without_auth_json([
-        "--kind",
-        "minute",
-        "fill",
-        "--universe",
-        "timeline(contract:all)",
-        "--historical-plan-write-policy",
-        "v4-with-v3-rollback",
-        "--start-day",
-        "2020-01-01",
-        "--end-day",
-        "2020-01-02",
-        "--calendar",
-        "off",
-        "--dry-run",
-    ]);
-
-    assert_eq!(output.status.code(), Some(2));
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let message = json["error"]["message"].as_str().unwrap();
-    assert!(message.contains("requires TQ_AUTH_USER and TQ_AUTH_PASS"));
-    assert!(!message.contains("writer is disabled"));
-}
-
-#[test]
 fn universe_v2_timeline_ranking_is_rejected_before_auth() {
     let output = run_without_auth_json([
         "--kind",
@@ -2971,8 +2836,6 @@ fn universe_v2_timeline_ranking_is_rejected_before_auth() {
         "fill",
         "--universe",
         "timeline(main:all)",
-        "--historical-plan-write-policy",
-        "v4-with-v3-rollback",
         "--start-day",
         "2020-01-01",
         "--end-day",
@@ -3009,8 +2872,6 @@ fn universe_file_is_expanded_before_historical_provider_access() {
         "timeline(contract:all)",
         "--universe-file",
         symbols.to_str().unwrap(),
-        "--historical-plan-write-policy",
-        "v4-with-v3-rollback",
         "--start-day",
         "2020-01-01",
         "--end-day",

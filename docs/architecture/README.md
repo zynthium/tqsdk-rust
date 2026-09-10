@@ -262,6 +262,8 @@ minute cache 使用 v6 文件身份，只有远端 terminal 成功后才提交 f
   `RemoteOnMiss` run 自动持有 shared cache-root gate，facade 已持锁时传递同一守卫，避免嵌套自锁
 - Universe Language V2 的 parser、normalized AST、纯 snapshot/timeline compiler、typed exclusion、
   legacy-first dispatcher 和外部 symbol file identity；Universe 只选择 instrument，不选择数据流
+- historical plan 的 physical kind target 以 pinned semantic lifecycle end 截断；`KQ.*` logical
+  target 保持 plan-wide end。该 execution boundary 进入 V5 identity，重新编译才产生新 artifact
 - `HistoricalUniversePlanArtifact` 的受控 flat v1–v5 reader/verifier、content-addressed store 与 V4 → V5
   source-preserving migration；normal writer/read path 使用 private-field、固定-wire V5，不修改旧 public V1–V3 plan
   - `query_his_cont_quotes`
@@ -320,7 +322,10 @@ progress（plain/TTY/JSONL）。新 fill report 统一写 schema v4 与 `cache_k
   `v4-with-v3-rollback` token 仅作隐藏兼容；V4 artifact 先验证完整 V4/V3 chain 后迁移为 V5
 - V2 timeline 在全量 provider discovery 后、native-daily membership bootstrap 前由 `tqsdk-data`
   计算 scoped physical closure；contract exclusion 不产生日线请求，仍保留的 derived view 则保留其
-  underlying。完整 discovery 与 scoped proof 都是 immutable audit artifact
+  underlying。完整 discovery 与 scoped proof 都是 immutable audit artifact。首次 proof 先验证完整
+  本地 native-daily 范围，命中时直接从 cache 建 proof；同 scoped roster/metadata 的 all-complete proof
+  面对更晚 cutoff 仅观测 suffix 缺口。
+  suffix timeout、取消或非 timeout 失败不发布新的 proof chain。
 - 复用 `tqsdk` facade / `tqsdk-data` store，不定义或拥有任何缓存格式、session、状态树、live
   recording loop、回测推进或 relay 服务；不进入 Cargo default-members
 - `tqsdk-relay`

@@ -609,6 +609,7 @@ fn minute_stale_repair_targets_only_months_stale_against_the_active_snapshot() {
         .unwrap()
         .expect("mixed cache snapshots should produce an explicit repair plan");
     assert_eq!(repair.snapshot_hash, outlier.snapshot_hash);
+    assert!(repair.metadata_covers_range);
     assert_eq!(repair.stale_ranges.len(), 2);
     assert!(
         repair

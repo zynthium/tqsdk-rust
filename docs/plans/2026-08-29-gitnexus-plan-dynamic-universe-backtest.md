@@ -17,7 +17,7 @@
 6. At the same instant, membership delta, source/binding state, instrument bootstrap, and market data become one `ReplayStep` commit. `RuntimeReader + UpdateCursor` is the only strategy-visible notification path.
 7. A dynamic source binding is inherited only when explicitly requested. Default data requirement is `Required`; an active symbol may be `WarmingUp`, and a strategy may explicitly require `Ready`. Required means permanent unavailable/invalid source coverage is a prepare failure, not that pre-listing data is invented.
 8. `prepare()` is an offline, deterministic preflight that writes a reusable versioned `HistoricalUniversePlan`, checks `UniverseBudget`, cache coverage, source provenance, catalog/calendar identity and warmup feasibility. Failed preparation may retain validated cache and an incomplete report, but cannot run. V1 explicitly rejects checkpoint/resume.
-9. Static symbols and an existing `--universe` retain their current static semantics; dynamic membership is an additive `--universe-timeline` / plan input, not an overload of `active:all`, `main:all`, `cont:all`, or `index:all`.
+9. Static symbols and an existing `--universe` retain their current static semantics; dynamic membership is compiled into an internal plan, not an overload of `active:all`, `main:all`, `cont:all`, or `index:all`.
 
 ## 3. Current-state evidence and gap
 
@@ -90,7 +90,7 @@ In [`crates/tqsdk/src/lib.rs`](/opt/tqsdk-rust/crates/tqsdk/src/lib.rs:2873), ad
 
 Update the facade contract example (add an `sXX` scenario instead of changing the static warmup example [`api_contract_s45_facade_backtest_cache_warmup.rs`](/opt/tqsdk-rust/crates/tqsdk/examples/api_contract_s45_facade_backtest_cache_warmup.rs:1)) to demonstrate catalog input, budget, preflight report, `CacheOnly` rerun, runtime cursor membership delta, and `Ready` requirement.
 
-In [`crates/tqsdk-cache/src/main.rs`](/opt/tqsdk-rust/crates/tqsdk-cache/src/main.rs:272), retain `--universe` as static. Add an explicit `--universe-timeline <plan-or-catalog>` flow plus `--universe-budget` controls and a dry-run/JSON report that identifies plan/catalog identities, physical source slices, derived provenance, gaps, warmup/readiness, and budget. Reuse data planning/fill paths; do not build a second resolver. Add CLI tests in [`crates/tqsdk-cache/tests/cli.rs`](/opt/tqsdk-rust/crates/tqsdk-cache/tests/cli.rs:1) for static compatibility, plan acceptance, required catalog/budget, rejection of incomplete plan, and JSON determinism.
+In [`crates/tqsdk-cache/src/main.rs`](/opt/tqsdk-rust/crates/tqsdk-cache/src/main.rs:272), `--universe` and the internal plan flow support dry-run/JSON plan/catalog warmup/readiness and planning/fill resolution. CLI tests cover static compatibility, catalog/budget validation, incomplete-plan rejection, and JSON determinism.
 
 ### Step 6 — make the architecture contract explicit
 

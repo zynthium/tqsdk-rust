@@ -28,7 +28,7 @@ fn orchestration_config_rejects_invalid_values_without_clamping() {
     assert_validation(BacktestHistoryFillConfig::default().with_symbol_batch_size(0));
     assert_validation(BacktestHistoryFillConfig::default().with_symbol_batch_size(5));
     assert_validation(BacktestHistoryFillConfig::default().with_symbol_concurrency(0));
-    assert_validation(BacktestHistoryFillConfig::default().with_symbol_concurrency(5));
+    assert_validation(BacktestHistoryFillConfig::default().with_symbol_concurrency(9));
     assert_validation(BacktestHistoryFillConfig::default().with_idle_timeout(Duration::ZERO));
     assert_validation(
         BacktestHistoryFillConfig::default().with_batch_timeout(Some(Duration::ZERO)),
@@ -38,7 +38,7 @@ fn orchestration_config_rejects_invalid_values_without_clamping() {
     let config = BacktestHistoryFillConfig::default()
         .with_symbol_batch_size(4)
         .unwrap()
-        .with_symbol_concurrency(4)
+        .with_symbol_concurrency(8)
         .unwrap()
         .with_idle_timeout(Duration::from_secs(7))
         .unwrap()
@@ -47,7 +47,7 @@ fn orchestration_config_rejects_invalid_values_without_clamping() {
         .with_lock_wait(Some(Duration::from_secs(13)))
         .unwrap();
     assert_eq!(config.symbol_batch_size(), 4);
-    assert_eq!(config.symbol_concurrency(), 4);
+    assert_eq!(config.symbol_concurrency(), 8);
     assert_eq!(config.idle_timeout(), Duration::from_secs(7));
     assert_eq!(config.batch_timeout(), Some(Duration::from_secs(11)));
     assert_eq!(config.lock_wait(), Some(Duration::from_secs(13)));

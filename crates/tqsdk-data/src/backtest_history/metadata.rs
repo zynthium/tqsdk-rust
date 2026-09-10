@@ -114,6 +114,10 @@ pub struct BacktestHistoryMetadataSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MinuteCacheStalePartitionRepairPlan {
     pub snapshot_hash: String,
+    /// Whether the active snapshot proves its physical mapping for the full
+    /// repair range. Callers must refresh and re-plan before deleting when
+    /// this is false.
+    pub metadata_covers_range: bool,
     pub stale_ranges: Vec<(i64, i64)>,
 }
 
@@ -652,8 +656,8 @@ pub fn resolve_minute_cache_metadata_snapshot(
 /// Plans an explicit repair for stale monthly partitions before a subsequent
 /// remote fill. When a persisted snapshot covers the whole requested range,
 /// only partitions that conflict with that snapshot are selected. When none
-/// does, every present partition is selected because the remote metadata
-/// refresh will establish a new authoritative snapshot.
+/// does, every present partition is reported only as a candidate. Callers
+/// must refresh metadata and re-plan before deleting any partition.
 ///
 /// This never writes or removes cache data. Callers must keep the ordinary
 /// fail-closed reader as the default and invoke a destructive purge only after
@@ -680,7 +684,8 @@ pub fn plan_minute_cache_stale_partition_repair(
     let snapshot = minute_cache_snapshot_from_metadata(&active)?;
     let compatibility =
         minute_cache.snapshot_compatibility(logical_symbol, start_ns, end_ns, &snapshot)?;
-    let stale_ranges = if active.covers_range((start_ns, end_ns)) {
+    let metadata_covers_range = active.covers_range((start_ns, end_ns));
+    let stale_ranges = if metadata_covers_range {
         compatibility.mismatched_ranges
     } else {
         compatibility.present_ranges
@@ -690,6 +695,7 @@ pub fn plan_minute_cache_stale_partition_repair(
     }
     Ok(Some(MinuteCacheStalePartitionRepairPlan {
         snapshot_hash: active.snapshot_hash,
+        metadata_covers_range,
         stale_ranges,
     }))
 }

@@ -71,6 +71,6 @@ identity、catalog、calendar、proof、可见 membership、tick/minute/daily ta
 回测必须消费这个已验证 artifact，因而能随时间切换合约且保持可重现。
 
 CLI 的正常入口始终是 `tqsdk-cache fill --universe 'timeline(...)'`。不要要求用户创建 `PLAN.json`，
-也不要在新文档或代码中使用隐藏兼容入口 `--universe-plan` 或已移除的 `--universe-timeline`。旧
+也不要在新文档或代码中使用已移除的手工 plan 兼容入口。旧
 `physical:all` 与旧 timeline 只保留为 legacy v1/v3 兼容输入；V4 artifact 需先通过
 `migrate-universe --plan-sha256 ...` 迁移，V1–V3 应重新编译。

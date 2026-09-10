@@ -308,31 +308,6 @@ struct FillArgs {
     #[arg(long = "universe-file", value_name = "PATH")]
     universe_files: Vec<PathBuf>,
 
-    /// Hidden compatibility override. V2 timelines now publish V5 by default.
-    #[arg(
-        long,
-        default_value_t = tqsdk_data::HistoricalPlanWritePolicy::V4WithV3Rollback,
-        value_name = "POLICY",
-        hide = true
-    )]
-    historical_plan_write_policy: tqsdk_data::HistoricalPlanWritePolicy,
-    /// Legacy compatibility input. New fills prepare plans internally from
-    /// `--universe`.
-    #[arg(
-        long = "universe-plan",
-        value_name = "PATH",
-        conflicts_with = "universe",
-        hide = true
-    )]
-    universe_timeline: Option<PathBuf>,
-    /// Permit an unproven legacy v2 plan. V3 is required by default.
-    #[arg(
-        long,
-        requires = "universe_timeline",
-        hide = true,
-        help = "Permit a legacy v2 universe plan without pinned kind-specific targets"
-    )]
-    allow_legacy_universe_plan: bool,
     #[command(flatten)]
     days: FillDaysArgs,
     /// Resolve and inspect coverage without acquiring a fill lock or requesting remote data.
@@ -1777,9 +1752,6 @@ fn prepare_provider_historical_universe(
                     "historical provider fill requires timeline(...) Universe V2 mode".to_string(),
                 ));
             }
-            args.historical_plan_write_policy
-                .ensure_v2_timeline_enabled()
-                .map_err(|error| CliError::Usage(error.to_string()))?;
             if let Some(selector) = spec.includes().iter().find(|selector| {
                 matches!(
                     selector.view(),
@@ -1950,38 +1922,11 @@ async fn fill_inner(
     market: MarketKind,
     args: FillArgs,
 ) -> Result<CommandOutcome, CliError> {
-    if args.universe_timeline.is_some()
-        && !matches!(kind, CacheKind::Tick | CacheKind::Minute | CacheKind::Daily)
-    {
-        return Err(CliError::Usage(
-            "legacy --universe-plan supports only --kind tick, minute, or daily fill".to_string(),
-        ));
-    }
     if let Some(universe) = args.universe.as_deref()
         && (universe.trim() == "physical:all" || universe.trim().starts_with("timeline("))
     {
         let historical = prepare_provider_historical_universe(&args, universe.trim())?;
         return fill_provider_history_universe(cache_dir, kind, market, args, historical).await;
-    }
-    if let Some(plan_path) = args.universe_timeline.clone() {
-        if !args.universe_files.is_empty() {
-            return Err(CliError::Usage(
-                "legacy --universe-plan cannot be combined with --universe-file".to_string(),
-            ));
-        }
-        return fill_historical_universe_plan(
-            cache_dir,
-            kind,
-            market,
-            args,
-            plan_path,
-            HistoricalUniversePlanExecution {
-                signal_context: None,
-                provisional: None,
-                progress_calendar: None,
-            },
-        )
-        .await;
     }
     let mut args = args;
     prepare_current_fill_universe(&mut args, market).await?;
@@ -2011,9 +1956,20 @@ async fn fill_provider_history_universe(
             "historical --universe supports only --market futures".to_string(),
         ));
     }
-    if !args.symbols.symbols.is_empty() || args.repair_stale || args.daily_slices {
+    if !args.symbols.symbols.is_empty() || args.daily_slices {
         return Err(CliError::Usage(
-            "historical --universe cannot be combined with explicit symbols, repair, or slicing flags"
+            "historical --universe cannot be combined with explicit symbols or slicing flags"
+                .to_string(),
+        ));
+    }
+    if args.repair_stale && kind != CacheKind::Minute {
+        return Err(CliError::Usage(
+            "--repair-stale is supported only for --kind minute fill".to_string(),
+        ));
+    }
+    if args.repair_stale && args.dry_run {
+        return Err(CliError::Usage(
+            "--repair-stale cannot be used with --dry-run because dry-run never removes cache partitions"
                 .to_string(),
         ));
     }
@@ -2107,8 +2063,7 @@ async fn fill_provider_history_universe(
             "language": historical.language(),
             "normalized_ast_sha256": historical.normalized_ast_sha256(),
             "input_sources_sha256": historical.input_sources_sha256(),
-            "write_policy": args.historical_plan_write_policy.to_string(),
-                "proof": "provider_current_observed",
+            "proof": "provider_current_observed",
                 "source_identity": acquisition.source_identity,
                 "scope_exchanges": tqsdk_data::PROVIDER_CURRENT_PHYSICAL_FUTURES_EXCHANGES,
                 "complete_roster": acquisition.complete,
@@ -2845,36 +2800,49 @@ async fn bootstrap_provider_history_and_fill(
             break 'prepared (observed, provider_unavailable, None);
         }
 
-        let bootstrap_start_ns = tqsdk_data::PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS;
+        let observed_prefix =
+            store.find_latest_extendable_provider_history_observed_acquisition(&acquisition)?;
+        let observation_start_ns = tqsdk_data::PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS;
+        let bootstrap_start_ns = observed_prefix
+            .as_ref()
+            .map_or(observation_start_ns, |observed| observed.requested_as_of_ns);
         let bootstrap_end_ns = resolved.window.end_ns;
-        let client = BacktestHistoryClient::builder(canonical_cache_dir.clone())
-            .policy(BacktestHistoryPolicy::RemoteOnMiss)
-            .auth_env()
-            .build()?;
-        let requests = acquisition
-            .contracts
-            .iter()
-            .enumerate()
-            .map(|(index, contract)| {
-                BacktestHistoryRequest::kline(
-                    u64::try_from(index).expect("provider roster count fits request id"),
-                    &contract.symbol,
-                    Duration::from_secs(24 * 60 * 60),
-                    bootstrap_start_ns,
-                    bootstrap_end_ns,
-                )
-            })
-            .collect::<Vec<_>>();
-        let progress_session =
-            FillProgressSession::new(args.progress, args.progress_max_bars, "daily-bootstrap");
-        let reporter = progress_session.observer();
-        reporter.planning("bootstrapping native daily history for provider roster");
         let bootstrap_symbols = acquisition
             .contracts
             .iter()
             .map(|contract| contract.symbol.clone())
             .collect::<Vec<_>>();
-        reporter.set_scope(&bootstrap_symbols, (bootstrap_start_ns, bootstrap_end_ns));
+        // Expiry metadata is a terminal lifecycle fact.  A daily-membership
+        // probe past that boundary can never add a row, so do not turn it into
+        // a cache miss or an idle-timeout-sized remote request.
+        let bootstrap_scope_bounds = provider_history_effective_scopes(
+            acquisition.contracts.as_slice(),
+            bootstrap_start_ns,
+            bootstrap_end_ns,
+        );
+        let cached_missing_scopes =
+            provider_history_missing_scopes(&canonical_cache_dir, &bootstrap_scope_bounds)?;
+        let bootstrap_scopes = provider_history_bootstrap_scopes(
+            observed_prefix.is_some(),
+            cached_missing_scopes,
+            &bootstrap_scope_bounds,
+        );
+        let requests = provider_history_bootstrap_requests(&bootstrap_scopes);
+        let client = BacktestHistoryClient::builder(canonical_cache_dir.clone())
+            .policy(BacktestHistoryPolicy::RemoteOnMiss)
+            .auth_env()
+            .build()?;
+        let progress_session =
+            FillProgressSession::new(args.progress, args.progress_max_bars, "daily-bootstrap");
+        let reporter = progress_session.observer();
+        reporter.planning(if bootstrap_scopes.is_empty() {
+            "native daily history for the current provider roster is already cached"
+        } else if observed_prefix.is_some() {
+            "extending native daily history from a confirmed provider roster prefix"
+        } else {
+            "bootstrapping native daily history for provider roster"
+        });
+        reporter.set_scopes(&bootstrap_scopes);
         let cancellation = BacktestHistoryFillCancellation::new();
         let signal_task =
             spawn_shutdown_signal_handler(cancellation.clone(), CacheKind::Daily).await?;
@@ -2956,23 +2924,45 @@ async fn bootstrap_provider_history_and_fill(
                     .flatten()
             })
             .collect::<BTreeMap<_, _>>();
+        if observed_prefix.is_some() && !provider_unavailable.is_empty() {
+            progress_session.finish(
+                ProgressTerminalStatus::Failed,
+                "native daily history extension timed out; confirmed prefix was retained",
+            );
+            return Err(DataError::InvalidResponse(format!(
+                "provider native-daily extension has {} timed-out candidates; confirmed prefix was not advanced",
+                provider_unavailable.len(),
+            ))
+            .into());
+        }
         let unavailable_circuit_breaker =
-            provider_history_unavailable_limit(bootstrap.symbols().len());
-        let confirmed_complete = bootstrap.completed_symbols();
+            provider_history_unavailable_limit(bootstrap_symbols.len());
+        let confirmed_complete = if observed_prefix.is_some() || bootstrap_scopes.is_empty() {
+            verify_provider_history_cache_coverage(&canonical_cache_dir, &bootstrap_scope_bounds)?;
+            bootstrap_symbols.len()
+        } else {
+            let remote_symbols = bootstrap_scope_bounds
+                .iter()
+                .map(|(symbol, _)| symbol)
+                .collect::<BTreeSet<_>>();
+            bootstrap
+                .completed_symbols()
+                .saturating_add(bootstrap_symbols.len().saturating_sub(remote_symbols.len()))
+        };
         if !provider_history_bootstrap_is_publishable(
             confirmed_complete,
             provider_unavailable.len(),
-            bootstrap.symbols().len(),
+            bootstrap_symbols.len(),
         ) {
             progress_session.finish(
                 ProgressTerminalStatus::Failed,
                 "native daily bootstrap provider-unavailable circuit breaker opened",
             );
             return Err(DataError::InvalidResponse(format!(
-            "provider native-daily bootstrap observed {} unavailable contracts out of {}; limit {}; data-membership artifact was not published",
-            provider_unavailable.len(),
-            bootstrap.symbols().len(),
-            unavailable_circuit_breaker
+                "provider native-daily bootstrap observed {} unavailable contracts out of {}; limit {}; data-membership artifact was not published",
+                provider_unavailable.len(),
+                bootstrap_symbols.len(),
+                unavailable_circuit_breaker
         ))
         .into());
         }
@@ -2987,33 +2977,37 @@ async fn bootstrap_provider_history_and_fill(
         if cancellation.is_stop_requested() {
             return Err(DataError::InvalidState("provider history preparation cancelled").into());
         }
-        let completed_at_ns = chrono::Utc::now().timestamp_nanos_opt().ok_or_else(|| {
-            CliError::Usage("current timestamp exceeds nanosecond range".to_string())
-        })?;
-        let refreshed_discovery =
-            tqsdk_data::session_client_builder_for_futures_discovery(&auth_user, &auth_pass)
-                .build()
-                .map_err(tqsdk::Error::from)?;
-        let refreshed_discovery =
-            tqsdk_data::ProviderCurrentHistoricalCatalogAcquirer::new(refreshed_discovery)
-                .acquire(bootstrap_end_ns, completed_at_ns)
-                .await?;
-        let refreshed = historical.scope_provider_current_bootstrap(&refreshed_discovery)?;
-        if refreshed.acquisition_sha256 != refreshed_discovery.acquisition_sha256 {
-            store.publish_acquisition(&refreshed_discovery)?;
-        }
-        store.publish_acquisition(&refreshed)?;
-        if !refreshed.complete
-            || acquisition.roster_after != refreshed.roster_after
-            || acquisition.contracts != refreshed.contracts
-        {
-            return Err(DataError::Validation(
-            "provider roster or metadata changed during daily bootstrap; retry historical universe fill"
-                .to_string(),
-        )
-        .into());
-        }
-        let acquisition = refreshed;
+        let acquisition = if bootstrap_scopes.is_empty() {
+            acquisition
+        } else {
+            let completed_at_ns = chrono::Utc::now().timestamp_nanos_opt().ok_or_else(|| {
+                CliError::Usage("current timestamp exceeds nanosecond range".to_string())
+            })?;
+            let refreshed_discovery =
+                tqsdk_data::session_client_builder_for_futures_discovery(&auth_user, &auth_pass)
+                    .build()
+                    .map_err(tqsdk::Error::from)?;
+            let refreshed_discovery =
+                tqsdk_data::ProviderCurrentHistoricalCatalogAcquirer::new(refreshed_discovery)
+                    .acquire(bootstrap_end_ns, completed_at_ns)
+                    .await?;
+            let refreshed = historical.scope_provider_current_bootstrap(&refreshed_discovery)?;
+            if refreshed.acquisition_sha256 != refreshed_discovery.acquisition_sha256 {
+                store.publish_acquisition(&refreshed_discovery)?;
+            }
+            store.publish_acquisition(&refreshed)?;
+            if !refreshed.complete
+                || acquisition.roster_after != refreshed.roster_after
+                || acquisition.contracts != refreshed.contracts
+            {
+                return Err(DataError::Validation(
+                    "provider roster or metadata changed during daily bootstrap; retry historical universe fill"
+                        .to_string(),
+                )
+                .into());
+            }
+            refreshed
+        };
 
         let daily_cache = DailyKlineCache::open_read_only(&canonical_cache_dir);
         let mut observations = BTreeMap::new();
@@ -3022,7 +3016,7 @@ async fn bootstrap_provider_history_and_fill(
                 observations.insert(
                     contract.symbol.clone(),
                     tqsdk_data::HistoricalDailyObservation::provider_unavailable(
-                        bootstrap_start_ns,
+                        observation_start_ns,
                         bootstrap_end_ns,
                         *unavailable_after_ns,
                     )?,
@@ -3030,19 +3024,33 @@ async fn bootstrap_provider_history_and_fill(
                 continue;
             }
             let snapshot = daily_cache_snapshot_for_symbol(&canonical_cache_dir, &contract.symbol)?;
-            let origin = daily_cache
-                .read_range(
-                    &contract.symbol,
-                    bootstrap_start_ns,
-                    bootstrap_end_ns,
-                    &snapshot,
-                )?
-                .first()
-                .map(|row| row.datetime);
+            let origin = if let Some(origin) = observed_prefix
+                .as_ref()
+                .and_then(|observed| observed.provider_daily_observations.get(&contract.symbol))
+                .and_then(|observation| observation.first_row_ns)
+            {
+                Some(origin)
+            } else {
+                let observation_end_ns =
+                    provider_history_effective_end_ns(contract, bootstrap_end_ns);
+                if observation_start_ns >= observation_end_ns {
+                    None
+                } else {
+                    daily_cache
+                        .read_range(
+                            &contract.symbol,
+                            observation_start_ns,
+                            observation_end_ns,
+                            &snapshot,
+                        )?
+                        .first()
+                        .map(|row| row.datetime)
+                }
+            };
             observations.insert(
                 contract.symbol.clone(),
                 tqsdk_data::HistoricalDailyObservation::new(
-                    bootstrap_start_ns,
+                    observation_start_ns,
                     bootstrap_end_ns,
                     origin,
                 )?,
@@ -3209,6 +3217,107 @@ fn historical_data_kind(kind: CacheKind) -> tqsdk_data::HistoricalDataKind {
     }
 }
 
+type ProviderHistoryFillScope = (String, (i64, i64));
+
+fn provider_history_effective_end_ns(
+    contract: &tqsdk_data::HistoricalAcquisitionContract,
+    requested_end_ns: i64,
+) -> i64 {
+    contract
+        .expired
+        .then_some(contract.expire_datetime_ns)
+        .flatten()
+        .map_or(requested_end_ns, |expiry_ns| {
+            expiry_ns.min(requested_end_ns)
+        })
+}
+
+fn provider_history_effective_scopes(
+    contracts: &[tqsdk_data::HistoricalAcquisitionContract],
+    start_ns: i64,
+    end_ns: i64,
+) -> Vec<ProviderHistoryFillScope> {
+    contracts
+        .iter()
+        .filter_map(|contract| {
+            let effective_end_ns = provider_history_effective_end_ns(contract, end_ns);
+            (start_ns < effective_end_ns)
+                .then(|| (contract.symbol.clone(), (start_ns, effective_end_ns)))
+        })
+        .collect()
+}
+
+fn provider_history_missing_scopes(
+    cache_dir: &Path,
+    requested_scopes: &[ProviderHistoryFillScope],
+) -> Result<Vec<ProviderHistoryFillScope>, CliError> {
+    let cache = DailyKlineCache::open_read_only(cache_dir);
+    let mut scopes = Vec::new();
+    for (symbol, (start_ns, end_ns)) in requested_scopes {
+        let snapshot = cache
+            .stored_snapshot(symbol)?
+            .unwrap_or_else(tqsdk_data::DailyKlineCacheSnapshot::cst_v1);
+        let coverage = cache.inspect(symbol, *start_ns, *end_ns, &snapshot)?;
+        scopes.extend(
+            coverage
+                .missing_ranges
+                .into_iter()
+                .map(|range| (symbol.clone(), range)),
+        );
+    }
+    Ok(scopes)
+}
+
+fn provider_history_bootstrap_scopes(
+    has_confirmed_prefix: bool,
+    cached_missing_scopes: Vec<ProviderHistoryFillScope>,
+    requested_scopes: &[ProviderHistoryFillScope],
+) -> Vec<ProviderHistoryFillScope> {
+    if has_confirmed_prefix || cached_missing_scopes.is_empty() {
+        return cached_missing_scopes;
+    }
+    requested_scopes.to_vec()
+}
+
+fn provider_history_bootstrap_requests(
+    scopes: &[ProviderHistoryFillScope],
+) -> Vec<BacktestHistoryRequest> {
+    scopes
+        .iter()
+        .enumerate()
+        .map(|(index, (symbol, (start_ns, end_ns)))| {
+            BacktestHistoryRequest::kline(
+                u64::try_from(index).expect("provider roster count fits request id"),
+                symbol,
+                Duration::from_secs(24 * 60 * 60),
+                *start_ns,
+                *end_ns,
+            )
+        })
+        .collect()
+}
+
+fn verify_provider_history_cache_coverage(
+    cache_dir: &Path,
+    requested_scopes: &[ProviderHistoryFillScope],
+) -> Result<(), CliError> {
+    let missing = provider_history_missing_scopes(cache_dir, requested_scopes)?;
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let sample = missing
+        .iter()
+        .map(|(symbol, _)| symbol.as_str())
+        .take(8)
+        .collect::<Vec<_>>()
+        .join(",");
+    Err(DataError::InvalidResponse(format!(
+        "provider native-daily cache remains incomplete for {} ranges (sample: {sample}); provider-history proof was not advanced",
+        missing.len()
+    ))
+    .into())
+}
+
 fn isolated_provider_history_unavailable_after_ns(
     error: Option<&str>,
     config: BacktestHistoryFillConfig,
@@ -3279,7 +3388,6 @@ fn load_historical_universe_fill_plan(
     store: &tqsdk_data::HistoricalUniverseArtifactStore,
     plan_path: &Path,
     kind: tqsdk_data::HistoricalDataKind,
-    allow_legacy: bool,
 ) -> Result<HistoricalUniverseFillPlan, CliError> {
     let bytes = fs::read(plan_path)?;
     let plan_version = serde_json::from_slice::<Value>(&bytes)?
@@ -3326,8 +3434,7 @@ fn load_historical_universe_fill_plan(
         1..=3 => {
             let plan: tqsdk_data::HistoricalUniversePlan = serde_json::from_slice(&bytes)?;
             store.verify_plan_artifact_chain(&plan)?;
-            let (targets, legacy_unproven) =
-                historical_universe_fill_targets(&plan, kind, allow_legacy)?;
+            let (targets, legacy_unproven) = historical_universe_fill_targets(&plan, kind)?;
             Ok(HistoricalUniverseFillPlan {
                 plan_version: plan.plan_version,
                 plan_sha256: plan.plan_sha256,
@@ -3366,7 +3473,6 @@ async fn fill_historical_universe_plan(
         &preflight_store,
         &plan_path,
         historical_data_kind(kind),
-        args.allow_legacy_universe_plan,
     )?;
     let requested_days = TradingDayWindow::from_days(
         backtest_tick_trading_day_for_timestamp_ns(plan.start_ns)?,
@@ -3374,7 +3480,7 @@ async fn fill_historical_universe_plan(
     )?;
     if !matches!(market, MarketKind::Futures) {
         return Err(CliError::Usage(
-            "legacy --universe-plan supports only --market futures".to_string(),
+            "historical universe fill supports only --market futures".to_string(),
         ));
     }
     if !args.symbols.symbols.is_empty()
@@ -3383,12 +3489,30 @@ async fn fill_historical_universe_plan(
         || args.days.last_trading_days.is_some()
         || !matches!(args.days.calendar, CalendarMode::Auto)
         || args.days.refresh_calendar
-        || args.repair_stale
         || args.daily_slices
     {
         return Err(CliError::Usage(
-            "legacy --universe-plan supplies exact source ranges; omit symbol, trading-day, calendar, repair, and slicing flags"
+            "historical universe execution supplies exact source ranges; omit symbol, trading-day, calendar, and slicing flags"
                 .to_string(),
+        ));
+    }
+    if args.repair_stale && kind != CacheKind::Minute {
+        return Err(CliError::Usage(
+            "--repair-stale is supported only for --kind minute fill".to_string(),
+        ));
+    }
+    if args.repair_stale && args.dry_run {
+        return Err(CliError::Usage(
+            "--repair-stale cannot be used with --dry-run because dry-run never removes cache partitions"
+                .to_string(),
+        ));
+    }
+    if args.repair_stale {
+        require_remote_history_fill_auth()?;
+    }
+    if args.repair_stale && provisional.is_some() {
+        return Err(CliError::Usage(
+            "--repair-stale cannot be combined with provisional minute fill".to_string(),
         ));
     }
     if args.include_open_day && (kind != CacheKind::Minute || provisional.is_none()) {
@@ -3420,19 +3544,20 @@ async fn fill_historical_universe_plan(
         )?,
     };
     let (_, canonical_cache_dir) = open_read_only_cache(cache_dir)?;
-    let prefill_session_close_finalized_symbols = if kind == CacheKind::Minute && !args.dry_run {
-        let ranges = targets
-            .iter()
-            .map(|target| (target.symbol.clone(), target.start_ns, target.end_ns))
-            .collect::<Vec<_>>();
-        finalize_pending_closed_minute_ranges(
-            canonical_cache_dir.as_path(),
-            ranges.as_slice(),
-            current_time_ns()?,
-        )?
-    } else {
-        0
-    };
+    let prefill_session_close_finalized_symbols =
+        if kind == CacheKind::Minute && !args.dry_run && !args.repair_stale {
+            let ranges = targets
+                .iter()
+                .map(|target| (target.symbol.clone(), target.start_ns, target.end_ns))
+                .collect::<Vec<_>>();
+            finalize_pending_closed_minute_ranges(
+                canonical_cache_dir.as_path(),
+                ranges.as_slice(),
+                current_time_ns()?,
+            )?
+        } else {
+            0
+        };
     let mut builder =
         BacktestHistoryClient::builder(canonical_cache_dir.clone()).policy(if args.dry_run {
             BacktestHistoryPolicy::CacheOnly
@@ -3506,20 +3631,141 @@ async fn fill_historical_universe_plan(
             (cancellation, signal_task)
         }
     };
-    let progress_callback = reporter.clone();
-    let fill_result = client
-        .clone()
-        .on_fill_durability({
-            let progress = reporter.clone();
-            move |event| progress.observe_durability(&event)
-        })
-        .orchestrate_fill(
-            requests.clone(),
-            history_fill_config(&args)?,
-            cancellation,
-            move |event| progress_callback.observe_history_progress(&event),
+    let fill_config = history_fill_config(&args)?;
+    let stale_repair_report = HistoricalUniverseStaleRepairReportContext {
+        kind,
+        market,
+        cache_dir: canonical_cache_dir.as_path(),
+        requested_days: &requested_days,
+        plan_path: &plan_path,
+        plan: &plan,
+    };
+    let (repair_root_gate, stale_minute_repair_receipt) = if args.repair_stale {
+        reporter.planning(
+            "acquiring canonical-minute remote-fill gate before metadata-safe stale repair",
+        );
+        let Some(root_gate) = acquire_historical_minute_repair_root_gate(
+            canonical_cache_dir.as_path(),
+            fill_config.lock_wait(),
+            &cancellation,
         )
-        .await;
+        .await?
+        else {
+            signal_task.abort();
+            let _ = signal_task.await;
+            progress_session.finish(
+                ProgressTerminalStatus::Interrupted,
+                "historical universe stale-partition repair interrupted before cache mutation",
+            );
+            let value = stale_repair_report.interrupted_value(StaleMinuteRepairReceipt::default());
+            if let Some(path) = &args.report {
+                write_atomically(path, &serde_json::to_vec_pretty(&value)?)?;
+            }
+            return Ok(CommandOutcome {
+                value,
+                exit_code: 130,
+            });
+        };
+        reporter.planning("refreshing incomplete metadata before stale partition repair");
+        let Some(partitions) = prepare_historical_minute_stale_partition_repair(
+            canonical_cache_dir.as_path(),
+            root_gate.as_ref(),
+            targets.as_slice(),
+            &cancellation,
+        )
+        .await?
+        else {
+            signal_task.abort();
+            let _ = signal_task.await;
+            progress_session.finish(
+                ProgressTerminalStatus::Interrupted,
+                "historical universe stale-partition repair interrupted before cache mutation",
+            );
+            let value = stale_repair_report.interrupted_value(StaleMinuteRepairReceipt::default());
+            if let Some(path) = &args.report {
+                write_atomically(path, &serde_json::to_vec_pretty(&value)?)?;
+            }
+            return Ok(CommandOutcome {
+                value,
+                exit_code: 130,
+            });
+        };
+        match apply_historical_minute_stale_partition_repair(
+            canonical_cache_dir.as_path(),
+            root_gate.as_ref(),
+            partitions.as_slice(),
+            &cancellation,
+        ) {
+            Ok(StaleMinuteRepairApply::Complete(receipt)) => {
+                reporter.planning(format!(
+                    "purged {} metadata-verified stale canonical-minute month partitions; filling pinned ranges",
+                    receipt.removed_files,
+                ));
+                (Some(root_gate), Some(receipt))
+            }
+            Ok(StaleMinuteRepairApply::Interrupted(receipt)) => {
+                signal_task.abort();
+                let _ = signal_task.await;
+                progress_session.finish(
+                    ProgressTerminalStatus::Interrupted,
+                    "historical universe stale-partition repair interrupted; repair receipt retained",
+                );
+                let value = stale_repair_report.interrupted_value(receipt);
+                if let Some(path) = &args.report {
+                    write_atomically(path, &serde_json::to_vec_pretty(&value)?)?;
+                }
+                return Ok(CommandOutcome {
+                    value,
+                    exit_code: 130,
+                });
+            }
+            Err(failure) => {
+                signal_task.abort();
+                let _ = signal_task.await;
+                progress_session.finish(
+                    ProgressTerminalStatus::Failed,
+                    "historical universe stale-partition repair failed; repair receipt retained",
+                );
+                if let Some(path) = &args.report {
+                    let value = stale_repair_report
+                        .failure_value(failure.error.to_string(), failure.receipt);
+                    write_atomically(path, &serde_json::to_vec_pretty(&value)?)?;
+                }
+                return Err(failure.error);
+            }
+        }
+    } else {
+        (None, None)
+    };
+    let fill_result = if let Some(root_gate) = repair_root_gate {
+        let progress_callback = reporter.clone();
+        client
+            .clone()
+            .on_fill_durability({
+                let progress = reporter.clone();
+                move |event| progress.observe_durability(&event)
+            })
+            .orchestrate_fill_with_root_gate(
+                requests.clone(),
+                fill_config,
+                cancellation,
+                root_gate,
+                move |event| progress_callback.observe_history_progress(&event),
+            )
+            .await
+    } else {
+        let progress_callback = reporter.clone();
+        client
+            .clone()
+            .on_fill_durability({
+                let progress = reporter.clone();
+                move |event| progress.observe_durability(&event)
+            })
+            .orchestrate_fill(requests.clone(), fill_config, cancellation, move |event| {
+                progress_callback.observe_history_progress(&event)
+            })
+            .await
+    };
     signal_task.abort();
     let _ = signal_task.await;
 
@@ -3541,8 +3787,9 @@ async fn fill_historical_universe_plan(
                     "complete": false,
                     "requested_days": requested_days.clone(),
                     "legacy_unproven": legacy_unproven,
-                    "error": error.to_string(),
-                    "universe_plan": {
+                "error": error.to_string(),
+                "stale_minute_repair": stale_minute_repair_receipt,
+                "universe_plan": {
                         "path": plan_path,
                     "plan_sha256": plan.plan_sha256,
                     "catalog_id": plan.catalog_id,
@@ -3608,7 +3855,7 @@ async fn fill_historical_universe_plan(
             })
         })
         .collect::<Vec<_>>();
-    let universe_timeline = json!({
+    let historical_universe = json!({
         "path": plan_path,
         "plan_version": plan.plan_version,
         "plan_sha256": plan.plan_sha256,
@@ -3617,6 +3864,7 @@ async fn fill_historical_universe_plan(
         "end_ns": plan.end_ns,
         "physical_symbols": requests.len(),
         "target_count": requests.len(),
+        "stale_minute_repair": stale_minute_repair_receipt,
     });
     let value = json!({
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -3637,7 +3885,7 @@ async fn fill_historical_universe_plan(
         "requested_days": requested_days,
         "plan_sha256": plan.plan_sha256,
         "symbols_warmed": requests.len(),
-        "universe_timeline": universe_timeline,
+        "universe_timeline": historical_universe,
         "symbols": symbol_reports,
     });
     if let Some(path) = &args.report {
@@ -3646,10 +3894,280 @@ async fn fill_historical_universe_plan(
     Ok(CommandOutcome { value, exit_code })
 }
 
+fn require_remote_history_fill_auth() -> Result<(), CliError> {
+    let user = std::env::var("TQ_AUTH_USER").map_err(|_| {
+        CliError::Usage(
+            "--repair-stale requires non-empty TQ_AUTH_USER and TQ_AUTH_PASS before cache mutation"
+                .to_string(),
+        )
+    })?;
+    let pass = std::env::var("TQ_AUTH_PASS").map_err(|_| {
+        CliError::Usage(
+            "--repair-stale requires non-empty TQ_AUTH_USER and TQ_AUTH_PASS before cache mutation"
+                .to_string(),
+        )
+    })?;
+    if user.trim().is_empty() || pass.trim().is_empty() {
+        return Err(CliError::Usage(
+            "--repair-stale requires non-empty TQ_AUTH_USER and TQ_AUTH_PASS before cache mutation"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default, Serialize)]
+struct StaleMinuteRepairReceipt {
+    removed_files: usize,
+    partitions: Vec<StaleMinuteRepairPartitionReceipt>,
+}
+
+#[derive(Debug, Serialize)]
+struct StaleMinuteRepairPartitionReceipt {
+    symbol: String,
+    snapshot_hash: String,
+    range: (i64, i64),
+    removed_files: usize,
+}
+
+#[derive(Debug)]
+struct PlannedStaleMinuteRepairPartition {
+    symbol: String,
+    snapshot_hash: String,
+    ranges: Vec<(i64, i64)>,
+}
+
+#[derive(Debug)]
+enum StaleMinuteRepairApply {
+    Complete(StaleMinuteRepairReceipt),
+    Interrupted(StaleMinuteRepairReceipt),
+}
+
+#[derive(Debug)]
+struct StaleMinuteRepairFailure {
+    error: CliError,
+    receipt: StaleMinuteRepairReceipt,
+}
+
+async fn acquire_historical_minute_repair_root_gate(
+    cache_dir: &Path,
+    lock_wait: Option<Duration>,
+    cancellation: &BacktestHistoryFillCancellation,
+) -> Result<Option<Arc<tqsdk_data::BacktestTickCacheOperationLock>>, CliError> {
+    if cancellation.is_stop_requested() {
+        return Ok(None);
+    }
+    let cache = BacktestTickCache::open(cache_dir)?;
+    let try_acquire = || cache.try_acquire_remote_fill_lock().map(Arc::new);
+    let Some(lock_wait) = lock_wait else {
+        return try_acquire().map(Some).map_err(Into::into);
+    };
+    let deadline = tokio::time::Instant::now() + lock_wait;
+    loop {
+        if cancellation.is_stop_requested() {
+            return Ok(None);
+        }
+        match try_acquire() {
+            Ok(root_gate) => return Ok(Some(root_gate)),
+            Err(DataError::CacheBusy { .. }) if tokio::time::Instant::now() < deadline => {
+                let delay = deadline
+                    .saturating_duration_since(tokio::time::Instant::now())
+                    .min(Duration::from_millis(200));
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => {}
+                    () = cancellation.cancelled() => return Ok(None),
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+async fn prepare_historical_minute_stale_partition_repair(
+    cache_dir: &Path,
+    root_gate: &tqsdk_data::BacktestTickCacheOperationLock,
+    targets: &[tqsdk_data::HistoricalUniverseFillTarget],
+    cancellation: &BacktestHistoryFillCancellation,
+) -> Result<Option<Vec<PlannedStaleMinuteRepairPartition>>, CliError> {
+    if !root_gate.is_exclusive() || root_gate.cache_dir() != cache_dir {
+        return Err(DataError::InvalidState(
+            "historical universe stale-partition repair requires this cache root's exclusive gate",
+        )
+        .into());
+    }
+    let maintenance = BacktestHistoryMaintenanceClient::builder(cache_dir.to_path_buf())
+        .auth_env()
+        .build()?;
+    let cached_symbols = MinuteKlineCache::open_read_only(cache_dir)
+        .fast_inventory()?
+        .symbols
+        .into_iter()
+        .filter(|symbol| symbol.files > 0)
+        .map(|symbol| symbol.symbol)
+        .collect::<BTreeSet<_>>();
+    let mut partitions = Vec::new();
+    for target in targets {
+        if cancellation.is_stop_requested() {
+            return Ok(None);
+        }
+        let initial_plan = tqsdk_data::plan_minute_cache_stale_partition_repair(
+            cache_dir,
+            target.symbol.as_str(),
+            target.start_ns,
+            target.end_ns,
+        )?;
+        let needs_metadata_refresh = initial_plan
+            .as_ref()
+            .is_some_and(|plan| !plan.metadata_covers_range)
+            || (initial_plan.is_none() && cached_symbols.contains(target.symbol.as_str()));
+        if needs_metadata_refresh {
+            tokio::select! {
+                result = maintenance.refresh_metadata(
+                    target.symbol.as_str(),
+                    target.start_ns,
+                    target.end_ns,
+                ) => { result?; }
+                () = cancellation.cancelled() => return Ok(None),
+            }
+            if cancellation.is_stop_requested() {
+                return Ok(None);
+            }
+        }
+        let plan = if needs_metadata_refresh {
+            tqsdk_data::plan_minute_cache_stale_partition_repair(
+                cache_dir,
+                target.symbol.as_str(),
+                target.start_ns,
+                target.end_ns,
+            )?
+        } else {
+            initial_plan
+        };
+        let Some(plan) = plan else {
+            continue;
+        };
+        if !plan.metadata_covers_range {
+            return Err(DataError::InvalidState(
+                "stale minute repair refuses deletion until refreshed metadata covers the full target range",
+            )
+            .into());
+        }
+        partitions.push(PlannedStaleMinuteRepairPartition {
+            symbol: target.symbol.clone(),
+            snapshot_hash: plan.snapshot_hash,
+            ranges: plan.stale_ranges,
+        });
+    }
+    Ok(Some(partitions))
+}
+
+fn apply_historical_minute_stale_partition_repair(
+    cache_dir: &Path,
+    root_gate: &tqsdk_data::BacktestTickCacheOperationLock,
+    partitions: &[PlannedStaleMinuteRepairPartition],
+    cancellation: &BacktestHistoryFillCancellation,
+) -> Result<StaleMinuteRepairApply, StaleMinuteRepairFailure> {
+    let mut receipt = StaleMinuteRepairReceipt::default();
+    if !root_gate.is_exclusive() || root_gate.cache_dir() != cache_dir {
+        return Err(StaleMinuteRepairFailure {
+            error: DataError::InvalidState(
+                "historical universe stale-partition repair requires this cache root's exclusive gate",
+            )
+            .into(),
+            receipt,
+        });
+    }
+    let minute_cache = match MinuteKlineCache::open(cache_dir) {
+        Ok(cache) => cache,
+        Err(error) => {
+            return Err(StaleMinuteRepairFailure {
+                error: error.into(),
+                receipt,
+            });
+        }
+    };
+    for partition in partitions {
+        for &(start_ns, end_ns) in &partition.ranges {
+            if cancellation.is_stop_requested() {
+                return Ok(StaleMinuteRepairApply::Interrupted(receipt));
+            }
+            let purge = match minute_cache.purge_range(partition.symbol.as_str(), start_ns, end_ns)
+            {
+                Ok(purge) => purge,
+                Err(error) => {
+                    return Err(StaleMinuteRepairFailure {
+                        error: error.into(),
+                        receipt,
+                    });
+                }
+            };
+            receipt.removed_files = receipt.removed_files.saturating_add(purge.removed_files);
+            receipt.partitions.push(StaleMinuteRepairPartitionReceipt {
+                symbol: partition.symbol.clone(),
+                snapshot_hash: partition.snapshot_hash.clone(),
+                range: (start_ns, end_ns),
+                removed_files: purge.removed_files,
+            });
+        }
+    }
+    if cancellation.is_stop_requested() {
+        Ok(StaleMinuteRepairApply::Interrupted(receipt))
+    } else {
+        Ok(StaleMinuteRepairApply::Complete(receipt))
+    }
+}
+
+struct HistoricalUniverseStaleRepairReportContext<'a> {
+    kind: CacheKind,
+    market: MarketKind,
+    cache_dir: &'a Path,
+    requested_days: &'a TradingDayWindow,
+    plan_path: &'a Path,
+    plan: &'a HistoricalUniverseFillPlan,
+}
+
+impl HistoricalUniverseStaleRepairReportContext<'_> {
+    fn interrupted_value(&self, receipt: StaleMinuteRepairReceipt) -> Value {
+        self.terminal_value("interrupted", None, receipt)
+    }
+
+    fn failure_value(&self, error: String, receipt: StaleMinuteRepairReceipt) -> Value {
+        self.terminal_value("failed", Some(error), receipt)
+    }
+
+    fn terminal_value(
+        &self,
+        status: &str,
+        error: Option<String>,
+        receipt: StaleMinuteRepairReceipt,
+    ) -> Value {
+        json!({
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "command": "fill",
+            "cache_kind": self.kind.as_str(),
+            "market": self.market.as_str(),
+            "cache_dir": self.cache_dir,
+            "status": status,
+            "complete": false,
+            "requested_days": self.requested_days,
+            "error": error,
+            "universe_plan": {
+                "path": self.plan_path,
+                "plan_version": self.plan.plan_version,
+                "plan_sha256": self.plan.plan_sha256,
+                "catalog_id": self.plan.catalog_id,
+                "start_ns": self.plan.start_ns,
+                "end_ns": self.plan.end_ns,
+                "target_count": self.plan.targets.len(),
+            },
+            "stale_minute_repair": receipt,
+        })
+    }
+}
+
 fn historical_universe_fill_targets(
     plan: &tqsdk_data::HistoricalUniversePlan,
     kind: tqsdk_data::HistoricalDataKind,
-    allow_legacy: bool,
 ) -> Result<(Vec<tqsdk_data::HistoricalUniverseFillTarget>, bool), DataError> {
     plan.verify()?;
     match plan.plan_version {
@@ -3676,10 +4194,8 @@ fn historical_universe_fill_targets(
                 false,
             ))
         }
-        2 if allow_legacy => Ok((plan.physical_fill_targets()?, true)),
         2 => Err(DataError::Validation(
-            "legacy historical universe plan v2 is unproven; pass --allow-legacy-universe-plan to opt in"
-                .to_string(),
+            "legacy historical universe plan v2 is no longer supported".to_string(),
         )),
         version => Err(DataError::Validation(format!(
             "historical universe fill requires plan v3; version {version} is unsupported"
@@ -7420,18 +7936,16 @@ mod tests {
         assert_eq!(plan.symbols, vec!["SHFE.test2601"]);
     }
 
-    use std::path::PathBuf;
     use std::time::Duration;
 
     use super::{
         CacheKind, CalendarMode, Cli, Command, FillDaysArgs, MarketKind, MigrateArgs, ProgressMode,
         ProviderMembershipRefreshArgs, current_open_trading_day, fill_historical_universe_plan,
         fill_was_interrupted, finalize_pending_closed_minute_ranges,
-        historical_universe_fill_targets, isolated_provider_history_unavailable_after_ns, migrate,
-        persist_calendar_if_needed, provider_history_bootstrap_fill_config,
-        provider_history_bootstrap_is_publishable, provider_history_unavailable_limit,
-        provider_membership_canary_fill_config, provider_membership_refresh_fill_config,
-        resolve_fill_window,
+        isolated_provider_history_unavailable_after_ns, migrate, persist_calendar_if_needed,
+        provider_history_bootstrap_fill_config, provider_history_bootstrap_is_publishable,
+        provider_history_unavailable_limit, provider_membership_canary_fill_config,
+        provider_membership_refresh_fill_config, resolve_fill_window,
     };
     use chrono::NaiveDate;
     use clap::Parser;
@@ -7638,6 +8152,144 @@ mod tests {
     }
 
     #[test]
+    fn provider_history_bootstrap_schedules_only_missing_cache_ranges() {
+        assert!(super::provider_history_bootstrap_requests(&[]).is_empty());
+
+        let requests = super::provider_history_bootstrap_requests(&[
+            ("DCE.i2609".to_string(), (10, 20)),
+            ("SHFE.au2606".to_string(), (30, 40)),
+        ]);
+        assert_eq!(
+            requests,
+            vec![
+                tqsdk_data::BacktestHistoryRequest::kline(
+                    0,
+                    "DCE.i2609",
+                    Duration::from_secs(24 * 60 * 60),
+                    10,
+                    20,
+                ),
+                tqsdk_data::BacktestHistoryRequest::kline(
+                    1,
+                    "SHFE.au2606",
+                    Duration::from_secs(24 * 60 * 60),
+                    30,
+                    40,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_history_effective_scopes_stop_at_expiry() {
+        let contracts = vec![
+            tqsdk_data::HistoricalAcquisitionContract {
+                symbol: "DCE.i2401".to_string(),
+                exchange_id: "DCE".to_string(),
+                product_id: "i".to_string(),
+                expired: true,
+                expire_datetime_ns: Some(15),
+                authoritative_lifecycle: Vec::new(),
+                first_available_data_ns: std::collections::BTreeMap::new(),
+            },
+            tqsdk_data::HistoricalAcquisitionContract {
+                symbol: "SHFE.au2606".to_string(),
+                exchange_id: "SHFE".to_string(),
+                product_id: "au".to_string(),
+                expired: false,
+                expire_datetime_ns: None,
+                authoritative_lifecycle: Vec::new(),
+                first_available_data_ns: std::collections::BTreeMap::new(),
+            },
+            tqsdk_data::HistoricalAcquisitionContract {
+                symbol: "CZCE.CF2301".to_string(),
+                exchange_id: "CZCE".to_string(),
+                product_id: "CF".to_string(),
+                expired: true,
+                expire_datetime_ns: Some(10),
+                authoritative_lifecycle: Vec::new(),
+                first_available_data_ns: std::collections::BTreeMap::new(),
+            },
+            tqsdk_data::HistoricalAcquisitionContract {
+                symbol: "INE.sc2401".to_string(),
+                exchange_id: "INE".to_string(),
+                product_id: "sc".to_string(),
+                expired: true,
+                expire_datetime_ns: None,
+                authoritative_lifecycle: Vec::new(),
+                first_available_data_ns: std::collections::BTreeMap::new(),
+            },
+        ];
+
+        assert_eq!(
+            super::provider_history_effective_scopes(&contracts, 10, 20),
+            vec![
+                ("DCE.i2401".to_string(), (10, 15)),
+                ("SHFE.au2606".to_string(), (10, 20)),
+                ("INE.sc2401".to_string(), (10, 20)),
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_history_bootstrap_uses_complete_cache_without_prior_proof() {
+        let requested_scopes = vec![
+            ("DCE.i2609".to_string(), (10, 20)),
+            ("SHFE.au2606".to_string(), (10, 20)),
+        ];
+        assert!(
+            super::provider_history_bootstrap_scopes(false, Vec::new(), &requested_scopes)
+                .is_empty()
+        );
+
+        let cached_missing = vec![("DCE.i2609".to_string(), (13, 14))];
+        assert_eq!(
+            super::provider_history_bootstrap_scopes(
+                false,
+                cached_missing.clone(),
+                &requested_scopes,
+            ),
+            requested_scopes
+        );
+        assert_eq!(
+            super::provider_history_bootstrap_scopes(
+                true,
+                cached_missing.clone(),
+                &requested_scopes,
+            ),
+            cached_missing
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_provider_history_extension_finishes_without_remote_work() {
+        let cache_dir = std::env::temp_dir().join(format!(
+            "tqsdk-cache-empty-provider-history-extension-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let client = tqsdk_data::BacktestHistoryClient::builder(&cache_dir)
+            .policy(tqsdk_data::BacktestHistoryPolicy::RemoteOnMiss)
+            .build()
+            .unwrap();
+        let report = client
+            .orchestrate_fill(
+                Vec::<tqsdk_data::BacktestHistoryRequest>::new(),
+                BacktestHistoryFillConfig::default(),
+                tqsdk_data::BacktestHistoryFillCancellation::new(),
+                |_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            report.status(),
+            tqsdk_data::BacktestHistoryFillTerminalStatus::Complete
+        );
+        assert!(report.symbols().is_empty());
+        let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    #[test]
     fn provider_history_unavailable_circuit_breaker_boundaries() {
         let roster_len = 100;
         let limit = provider_history_unavailable_limit(roster_len);
@@ -7668,6 +8320,8 @@ mod tests {
             "2024-01-01",
             "--idle-timeout-secs",
             "180",
+            "--symbol-concurrency",
+            "8",
         ])
         .unwrap();
         let Command::Fill(args) = cli.command else {
@@ -7676,6 +8330,7 @@ mod tests {
 
         let config = provider_history_bootstrap_fill_config(&args).unwrap();
         assert_eq!(config.symbol_batch_size(), 1);
+        assert_eq!(config.symbol_concurrency(), 8);
         assert_eq!(config.idle_timeout(), Duration::from_secs(180));
         assert_eq!(config.batch_timeout(), Some(Duration::from_secs(180)));
     }
@@ -8086,92 +8741,6 @@ mod tests {
         assert!(args.days.refresh_calendar);
     }
 
-    #[test]
-    fn fill_accepts_historical_universe_timeline_path() {
-        let alias_error = Cli::try_parse_from([
-            "tqsdk-cache",
-            "fill",
-            "--universe-timeline",
-            "fixture-plan.json",
-        ])
-        .unwrap_err();
-        assert_eq!(alias_error.kind(), clap::error::ErrorKind::UnknownArgument);
-
-        let cli = Cli::try_parse_from([
-            "tqsdk-cache",
-            "fill",
-            "--universe-plan",
-            "fixture-plan.json",
-        ])
-        .unwrap();
-        let Command::Fill(args) = cli.command else {
-            panic!("expected fill command");
-        };
-        assert_eq!(
-            args.universe_timeline,
-            Some(PathBuf::from("fixture-plan.json"))
-        );
-    }
-
-    #[test]
-    fn legacy_universe_plan_flag_requires_a_plan_path() {
-        let error = Cli::try_parse_from(["tqsdk-cache", "fill", "--allow-legacy-universe-plan"])
-            .unwrap_err();
-        assert_eq!(
-            error.kind(),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
-
-        let cli = Cli::try_parse_from([
-            "tqsdk-cache",
-            "fill",
-            "--universe-plan",
-            "fixture-plan.json",
-            "--allow-legacy-universe-plan",
-        ])
-        .unwrap();
-        let Command::Fill(args) = cli.command else {
-            panic!("expected fill command");
-        };
-        assert!(args.allow_legacy_universe_plan);
-    }
-
-    #[test]
-    fn legacy_v2_targets_require_explicit_opt_in() {
-        let scope = tqsdk_data::DynamicUniverseScope::all();
-        let plan = tqsdk_data::CatalogSnapshot::new(
-            "fixture-v2",
-            "calendar:fixture-v2",
-            true,
-            scope.clone(),
-            vec![
-                tqsdk_data::CatalogContract::new(
-                    "SHFE.au2406",
-                    "SHFE",
-                    "au",
-                    vec![tqsdk_data::ActiveInterval::new(10, 20).unwrap()],
-                )
-                .unwrap(),
-            ],
-        )
-        .unwrap()
-        .compile_timeline(1, 30, scope, [])
-        .unwrap()
-        .prepare(tqsdk_data::UniverseBudget::new(8, 16).unwrap())
-        .unwrap();
-
-        let error =
-            historical_universe_fill_targets(&plan, tqsdk_data::HistoricalDataKind::Minute, false)
-                .unwrap_err();
-        assert!(error.to_string().contains("--allow-legacy-universe-plan"));
-
-        let (targets, legacy_unproven) =
-            historical_universe_fill_targets(&plan, tqsdk_data::HistoricalDataKind::Minute, true)
-                .unwrap();
-        assert!(legacy_unproven);
-        assert_eq!(targets.len(), 1);
-    }
-
     #[tokio::test]
     async fn v3_plan_dry_run_uses_verified_pinned_minute_targets() {
         use std::collections::BTreeMap;
@@ -8238,14 +8807,7 @@ mod tests {
         store.publish_semantic_catalog(&semantic).unwrap();
         let plan_path = store.publish_plan(&plan).unwrap();
 
-        let cli = Cli::try_parse_from([
-            "tqsdk-cache",
-            "fill",
-            "--universe-plan",
-            plan_path.to_str().unwrap(),
-            "--dry-run",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["tqsdk-cache", "fill", "--dry-run"]).unwrap();
         let Command::Fill(args) = cli.command else {
             panic!("expected fill command");
         };

@@ -370,6 +370,19 @@ fn resolve_kind_targets(
         .iter()
         .map(|contract| (contract.symbol.as_str(), contract))
         .collect::<BTreeMap<_, _>>();
+    let lifecycle_ends = semantic
+        .catalog
+        .contracts
+        .iter()
+        .filter_map(|contract| {
+            contract
+                .lifecycle
+                .iter()
+                .map(|interval| interval.end_ns)
+                .max()
+                .map(|end_ns| (contract.physical_symbol.as_str(), end_ns))
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut by_kind = BTreeMap::new();
     for kind in [
         HistoricalDataKind::Tick,
@@ -401,13 +414,18 @@ fn resolve_kind_targets(
                 })?
                 .max(dependency.listing_start_ns)
                 .max(requested_start_ns);
-            if kind_start >= end_ns {
+            let kind_end = lifecycle_ends
+                .get(dependency.source_symbol.as_str())
+                .copied()
+                .unwrap_or(end_ns)
+                .min(end_ns);
+            if kind_start >= kind_end {
                 continue;
             }
             targets.push(HistoricalUniverseKindTarget {
                 source_symbol: dependency.source_symbol.clone(),
                 start_ns: kind_start,
-                end_ns,
+                end_ns: kind_end,
             });
         }
         targets.sort_by(|left, right| left.source_symbol.cmp(&right.source_symbol));

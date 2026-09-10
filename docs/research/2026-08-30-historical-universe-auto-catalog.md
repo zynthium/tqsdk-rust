@@ -4,7 +4,7 @@
 > [Historical Universe Catalog](../architecture/historical-universe-catalog.md) 或
 > [Universe Language](../architecture/universe-language.md)。现行用户入口只使用
 > `--universe 'timeline(contract:all;continuous:all;index:all)'` 并直接发布 V5；文中
-> `physical:all`、`active:all`、`cont:all`、`--universe-timeline` 和 `PLAN.json` 均是历史提案，
+> `physical:all`、`active:all`、`cont:all` 与手工 `PLAN.json` 均是历史提案，
 > 不应复制到新配置或示例。
 
 日期：2026-08-30
@@ -99,7 +99,7 @@
 本仓当前有两条入口：
 
 - `--universe EXPR`：按当前 metadata 解析 selector；
-- `--universe-timeline PLAN.json`：加载 hash-pinned `HistoricalUniversePlan`。
+- 手工 `PLAN.json`：旧的 hash-pinned `HistoricalUniversePlan` 输入方式，现已移除。
 
 当前 `CatalogSnapshot` 要求 `complete=true` 才允许编译动态 plan，这个 fail-closed 方向是正确的。主要风险是：
 
@@ -151,10 +151,10 @@ parser 需要识别括号层级，不能继续对整个表达式直接 `.split('
 普通用户不需要手写 PLAN。程序自动保存 snapshot 和 plan，并在 report 中返回路径与 SHA-256。严格复现时允许：
 
 ```text
---universe 'timeline(active:all)' --universe-plan PLAN.json
+--universe 'timeline(active:all)'
 ```
 
-plan 是执行输入，不是 selector。CLI 必须验证 plan 内的 canonical Universe、scope 和 horizon 与命令一致。现有 `--universe-timeline` 可作为迁移期兼容别名。
+plan 是内部执行输入，不是 selector。CLI 从 `--universe` 编译 plan，并验证 canonical Universe 与 scope horizon。
 
 ## 推荐数据流
 
@@ -270,8 +270,8 @@ tick、minute、daily 共用 `resolve_historical_fill_targets(plan)`，在接触
 4. 增加 `timeline(...)` parser/canonicalizer，保持 current selector 兼容。
 5. 增加内容寻址持久化和 `catalog inspect/discover`。
 6. 接入满足 complete + listing + version/as-of 契约的第一方 source 后，才打开严格自动 timeline snapshot -> plan -> fill。
-7. 增加高级 `--universe-plan`，旧 `--universe-timeline` 作为兼容别名迁移。
+7. 当时曾提出高级手工 plan 输入及兼容别名，现均已移除。
 
 ## 最终判断
 
-`--universe-timeline` 的普通使用可以融合进 `--universe` 的时间化语义，但 PLAN 本身不应被塞进 selector。最佳用户体验是：`physical:all` 立即支持下载所有当前可发现的历史物理数据，`timeline(active:all)` 表达严格动态 membership；两者都由程序内部生成并固定 artifacts，但只有后者在证据不足时 fail closed。
+手工 plan 输入的普通使用可以融合进 `--universe` 的时间化语义，但 PLAN 本身不应被塞进 selector。最佳用户体验是：`physical:all` 立即支持下载所有当前可发现的历史物理数据，`timeline(active:all)` 表达严格动态 membership；两者都由程序内部生成并固定 artifacts，但只有后者在证据不足时 fail closed。

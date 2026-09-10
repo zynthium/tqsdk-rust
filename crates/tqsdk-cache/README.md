@@ -51,7 +51,8 @@ CLI 在兼容位置解析，新示例始终放在子命令之后。
 
 首次运行会稳定查询前后全量 roster 和完整 metadata。V2 `timeline(...)` 随后计算本次物理
 bootstrap closure：仅为保留的 physical contract 及保留 continuous/index/logical view 的必要
-underlying 补齐从 1990-01-01 到 cutoff 的原生 1d 历史。纯
+underlying 检查从 1990-01-01 到 cutoff 的原生 1d coverage；当前 closure 全部本地完整时直接
+从 cache 建 proof，否则才补齐远端历史。纯
 `except(contract:CZCE.RI)` 不请求 RI；若仍保留 RI 的 derived view，则其 physical dependency
 仍会 bootstrap。legacy `physical:all` 和 legacy timeline 保持每个 roster 合约都 bootstrap 的旧行为。
 第一条 native-1d 行形成有效 membership 起点；没有行但
@@ -60,7 +61,11 @@ underlying 补齐从 1990-01-01 到 cutoff 的原生 1d 历史。纯
 execution 直接发布 current V5 plan，再用统一 executor 下载选定 kind。已有 V4 plan 在完整
 V4/V3 chain 验证后可迁移为 V5，source 与 rollback artifact 保留。
 `provider_history_observed` 不读取或推断交易所挂牌日期；到期 metadata 只用于 membership 终点。
-首次全市场 bootstrap 较慢，后续在相同 cache root 上复用已确认 coverage。
+首次全市场 bootstrap 仅在当前 closure 缺少完整 native-daily coverage 时较慢。后续 ordinary `fill`
+若发现同 scoped roster/metadata 的全部 `complete` provider-history proof，只请求上个 confirmed
+cutoff 到新 cutoff 的缺口；已完整 suffix 不进入 scheduler；成功后
+重新发布当前 acquisition/catalog/plan。`provider_unavailable`、roster/metadata drift、回退
+cutoff 或 suffix timeout 不复用前缀，后者不会发布新 proof，旧 artifact 保持可用。
 服务端显式 rows 形成 membership，终态空窗口形成空观测。provider roster 中不创建历史 chart 的
 候选会在 symbol batch size 1 的精确 timeout 后记录为 `provider_unavailable`，保留在 acquisition
 审计中但不进入 universe；后续 acquisition 可以重新观察并升级，当前状态不作为缺少行情的证明。
@@ -100,9 +105,9 @@ tqsdk-cache fill \
 同一 `--universe` 分别运行 `--kind tick`、`minute`、`daily` 即填充三种数据；Universe 不选择
 数据流。不传 `--end-day` 时截止本次启动时的最新已收盘交易日。可重复的
 `--universe-file PATH` 是 V2 外部 exact-symbol 来源。V2 timeline writer 默认发布 V5；
-`--historical-plan-write-policy v4-with-v3-rollback` 仅保留为隐藏兼容 token。旧
-`--universe-plan` 只作为隐藏兼容入口保留；V4 plan 先执行 `migrate-universe --plan-sha256 <V4_SHA256>`，
-V1–V3 plan 重新编译；`--universe-timeline` 已移除。
+历史 plan 的写入格式固定为当前版本，无需 CLI policy token。旧的手工 plan
+填充入口已移除；V4 plan 先执行 `migrate-universe --plan-sha256 <V4_SHA256>`，
+V1–V3 plan 重新编译。
 
 先审计、再写入 V4→V5 mapping：
 
@@ -114,6 +119,15 @@ tqsdk-cache migrate-universe --cache-dir /var/lib/tqsdk/history --plan-sha256 <V
 `preparation_required`/exit 1 报告需要 native-daily cache mutation。
 
 ## Cache family
+
+### Minute stale repair guard
+
+`fill --kind minute --repair-stale` 是显式、仅限 historical timeline plan 的维护路径；它拒绝
+tick/daily、`--dry-run` 和 provisional open-day。命令先取得同一 cache root 的 exclusive fill gate，
+完成 `TQ_AUTH_*` 预检，并只读扫描已有 `.tqmk`。发现候选分区但 active metadata 没有完整覆盖
+target 时，必须从官方 source 成功刷新 metadata、重新规划并确认完整覆盖，才会删除冲突整月。认证、
+metadata refresh、lock wait 失败或取消都不删除分区；取消返回 130。删除后和随后 fill 失败的 JSON
+report 都保留逐 symbol/month、snapshot hash、范围和删除文件数的 repair receipt。
 
 ### TradingTimeline maintenance
 
@@ -186,12 +200,8 @@ tqsdk-cache migrate --cache-dir DIR --kind minute --apply --backup-dir DIR-v5-ba
 会加载月文件绑定的旧 immutable sidecar，并只在实际 cached range 内比较 schema、market、logical symbol、
 session、交易日和 physical mapping。区间语义相同的旧 coverage 直接复用，新增日期保持为缺口；当前月写入
 新数据时才原子迁移 header。缺少 sidecar、session/交易日/映射变化、损坏或语义冲突的混合分区仍默认
-fail closed；CLI 不会为此自动删除、重写或重新下载数据。只有操作者显式传
-`fill --kind minute --repair-stale` 时，CLI 才会在同一次 facade remote-on-miss warmup 中，取得
-root remote-fill lock 并完成认证预检后，删除与覆盖窗口快照冲突的整月分区，再补齐缺口；若没有任何已持久化
-snapshot 覆盖整个请求窗口，则该 flag 会删除窗口内所有已存在的 minute 月分区，让官方 metadata refresh
-建立唯一的目标 snapshot。锁忙或 repair 所需认证缺失时，命令失败且不删除任何分区。该 flag 不支持 tick
-或 `--dry-run`。
+fail closed；CLI 不会为此自动删除、重写或重新下载数据。`fill --kind minute --repair-stale` 的完整
+metadata-before-purge 门控见上节；不完整 snapshot 只能触发官方 refresh 候选，绝不能单独授权删除。
 remote-on-miss metadata 会覆盖涉及的完整 CST trading month；`KQ.*` 逻辑分钟序列还会保留早于月界的原始
 trading-cycle 起点，避免周末或节假日边界被错误收缩。普通物理合约仍按完整 trading month 判断已有 snapshot，
 不会仅因这个无交易前缀重复刷新。短查询生成的 snapshot 不会替换更宽的 active pointer，后续查询会优先复用
@@ -319,7 +329,7 @@ chart；每个 batch 必须收到远端 terminal 成功才写 final coverage，�
 超时或失败 batch 不会标记其未完成范围。
 
 三类 fill 由 `BacktestHistoryClient` 的同一调度器执行。默认 batch size 为 1、symbol concurrency 为 2、
-idle timeout 为 60 秒，batch size 与 concurrency 都只接受 `1..=4`。默认不启用 batch wall-clock
+idle timeout 为 60 秒，batch size 只接受 `1..=4`，concurrency 只接受 `1..=8`。默认不启用 batch wall-clock
 timeout，`--batch-timeout-secs 0` 也表示禁用；`--lock-wait-secs` 默认不等待且显式值必须大于零。
 daily 的 TTY/plain/JSONL 进度与 tick/minute 相同，包含 planning、batch、symbol telemetry 和唯一
 terminal 事件。无效参数在连接远端前返回 validation error。
@@ -622,6 +632,12 @@ closed trading day。显式 `--start-day/--end-day` 的数据窗口仍由 TQBN �
 另一段数据范围。
 
 ## 报告与进度
+
+minute history fill 的 `coverage` 只表示 terminal 后已提交的最终 coverage。流式收到行、零成交
+trading day 的 checkpoint 或网络 scan 尚不能推进它。为避免“数据行数不变”时看似卡死，plain/TTY 会
+额外显示 `checkpointed_days` / `已检查`；JSONL schema-v2 把它放在 `durability.checkpointed_days`，
+并显式标为 `durably_checkpointed_prefixes_not_final_coverage`。它表示已耐久写入且不需重拉的前缀，
+不表示最终覆盖。
 
 进度的 coverage 分母在 universe 解析后固定为用户请求范围；远端 plan 只更新待补缺口，不会让整体或合约总量回退或跳变。未加载交易日历时会明确标注采用 TQBN partition-day 计数。minute 的 remote telemetry 不等于 canonical cache 实际写入行数，因此运行中 rows/rate 显示 `n/a`（JSONL 为 `null`）；只有最终 canonical report 生成后才显示真实 rows。
 

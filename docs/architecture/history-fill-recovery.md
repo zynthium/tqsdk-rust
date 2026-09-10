@@ -39,6 +39,10 @@ JSON 外层校验 SHA-256，浮点数保存 bit pattern；单文件限制 4 MiB�
 
 ## 有限收尾
 
+`fill --kind minute --repair-stale` 在等待 exclusive root gate、刷新 metadata 与逐月 purge 前也检查同一
+cancellation token。尚未开始 purge 的取消不得改动 cache 分区并返回 130；已删除月份必须作为 repair
+receipt 写进 interrupted/failed report，随后不会启动 remote fill。
+
 CLI 第一次 Ctrl+C/SIGTERM/SIGHUP 请求 stop：停止派发批次、下一物理窗口和下一次 source 重试；
 给正在执行的远端窗口最多 5 秒完成提交或保存暂存。超时调用原有立即取消路径；
 第二次信号直接退出 130。5 秒是协作等待期限，不是磁盘 I/O/操作系统退出的硬上限。
@@ -51,6 +55,12 @@ Tick 保留已接收短尾 flush、不提交未完成 coverage 的合同。
 已完成的请求保持 Complete，因收尾未完成的请求标记 Interrupted；完整完成赢得迟到信号竞争。
 
 ## 进度语义
+
+minute history fill 的流式 cursor、收到行与 durability checkpoint 都不是 final coverage。CLI 只能在
+terminal 成功后推进 `coverage`；durability 的 `redownload_range` 前缀可推进独立的
+`checkpointed_days`，包括零成交日，但必须在 plain/TTY 和 JSONL 中明确标为
+`durably_checkpointed_prefixes_not_final_coverage`。因此长时间无新增数据行时，进度仍可显示已完成的
+扫描/持久化工作，而不会把无成交或未终态窗口伪报为 cache coverage。
 
 `BacktestHistoryClient::on_fill_durability(...)` 回调接收独立 `BacktestHistoryDurabilityEvent`；
 facade 通过 `BacktestRemoteFillTelemetry::durability()` 转发物理窗口状态。

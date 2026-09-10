@@ -326,7 +326,7 @@ fn store_reuses_only_exact_provider_history_observation() {
         store
             .find_matching_provider_history_observed_acquisition(&current)
             .unwrap(),
-        Some(observed)
+        Some(observed.clone())
     );
     assert!(
         store
@@ -335,6 +335,94 @@ fn store_reuses_only_exact_provider_history_observation() {
             ))
             .unwrap()
             .is_none()
+    );
+
+    assert_eq!(
+        store
+            .find_latest_extendable_provider_history_observed_acquisition(
+                &provider_current_acquisition(requested_as_of_ns + 1),
+            )
+            .unwrap(),
+        Some(observed)
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn store_extends_only_complete_observations_from_the_latest_prior_cutoff() {
+    let root = std::env::temp_dir().join(format!(
+        "tqsdk-historical-observation-extension-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    if root.exists() {
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    let store = HistoricalUniverseArtifactStore::new(&root);
+    let range_start_ns = tqsdk_data::PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS;
+    let first_cutoff_ns = range_start_ns + 1_000;
+    let first = promote_provider_daily_history(
+        provider_current_acquisition(first_cutoff_ns),
+        &BTreeMap::from([
+            ("SHFE.au2404".to_string(), Some(range_start_ns + 110)),
+            ("SHFE.au2406".to_string(), Some(range_start_ns + 220)),
+        ]),
+    )
+    .unwrap();
+    let latest_cutoff_ns = first_cutoff_ns + 1_000;
+    let latest = promote_provider_daily_history(
+        provider_current_acquisition(latest_cutoff_ns),
+        &BTreeMap::from([
+            ("SHFE.au2404".to_string(), Some(range_start_ns + 110)),
+            ("SHFE.au2406".to_string(), Some(range_start_ns + 220)),
+        ]),
+    )
+    .unwrap();
+    let unavailable_cutoff_ns = latest_cutoff_ns + 1_000;
+    let unavailable = promote_provider_daily_history_observations(
+        provider_current_acquisition(unavailable_cutoff_ns),
+        BTreeMap::from([
+            (
+                "SHFE.au2404".to_string(),
+                HistoricalDailyObservation::new(
+                    range_start_ns,
+                    unavailable_cutoff_ns,
+                    Some(range_start_ns + 110),
+                )
+                .unwrap(),
+            ),
+            (
+                "SHFE.au2406".to_string(),
+                HistoricalDailyObservation::provider_unavailable(
+                    range_start_ns,
+                    unavailable_cutoff_ns,
+                    15_000_000_000,
+                )
+                .unwrap(),
+            ),
+        ]),
+    )
+    .unwrap();
+    store.publish_acquisition(&first).unwrap();
+    store.publish_acquisition(&latest).unwrap();
+    store.publish_acquisition(&unavailable).unwrap();
+
+    assert!(
+        store
+            .find_latest_extendable_provider_history_observed_acquisition(
+                &provider_current_acquisition(first_cutoff_ns),
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .find_latest_extendable_provider_history_observed_acquisition(
+                &provider_current_acquisition(unavailable_cutoff_ns + 1_000),
+            )
+            .unwrap(),
+        Some(latest),
     );
 
     std::fs::remove_dir_all(root).unwrap();

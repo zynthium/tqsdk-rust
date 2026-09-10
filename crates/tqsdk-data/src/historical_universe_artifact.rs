@@ -827,6 +827,47 @@ impl HistoricalCatalogAcquisition {
                 })
     }
 
+    fn can_extend_provider_current_acquisition(&self, current: &Self) -> bool {
+        if self.proof != HistoricalCatalogProof::ProviderHistoryObserved
+            || current.proof != HistoricalCatalogProof::ProviderCurrentObserved
+            || !self.complete
+            || !current.complete
+            || self.format_version != current.format_version
+            || self.source_identity
+                != format!(
+                    "{}+{}",
+                    current.source_identity, PROVIDER_DAILY_HISTORY_SOURCE_IDENTITY
+                )
+            || self.canonical_universe != current.canonical_universe
+            || self.requested_as_of_ns >= current.requested_as_of_ns
+            || self.roster_before != current.roster_before
+            || self.roster_after != current.roster_after
+            || self.contracts.len() != current.contracts.len()
+            || self.provider_daily_observations.len() != self.contracts.len()
+        {
+            return false;
+        }
+
+        self.contracts
+            .iter()
+            .zip(&current.contracts)
+            .all(|(observed, current)| {
+                let mut observed = observed.clone();
+                observed
+                    .first_available_data_ns
+                    .remove(&HistoricalDataKind::Daily);
+                observed == *current
+            })
+            && self
+                .provider_daily_observations
+                .values()
+                .all(|observation| {
+                    observation.status == HistoricalDailyObservationStatus::Complete
+                        && observation.range_start_ns == PROVIDER_DAILY_HISTORY_BOOTSTRAP_START_NS
+                        && observation.range_end_ns == self.requested_as_of_ns
+                })
+    }
+
     /// Promote a bounded subset of prior provider-unavailable observations
     /// against a newly stable provider-current acquisition. All other
     /// observations remain byte-for-byte facts from the prior acquisition.
@@ -1708,6 +1749,77 @@ impl HistoricalUniverseArtifactStore {
                 Some(existing)
                     if (candidate.observed_at_ns, &candidate.acquisition_sha256)
                         > (existing.observed_at_ns, &existing.acquisition_sha256) =>
+                {
+                    matched = Some(candidate);
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(matched)
+    }
+
+    /// Finds the newest complete provider-history observation that can prove a
+    /// stable prefix of a later provider-current acquisition.
+    ///
+    /// Provider-unavailable observations are deliberately excluded: a bounded
+    /// timeout cannot prove the old prefix, so extending it would weaken the
+    /// provider-history proof.
+    #[doc(hidden)]
+    pub fn find_latest_extendable_provider_history_observed_acquisition(
+        &self,
+        current: &HistoricalCatalogAcquisition,
+    ) -> Result<Option<HistoricalCatalogAcquisition>> {
+        current.validate()?;
+        if current.proof != HistoricalCatalogProof::ProviderCurrentObserved || !current.complete {
+            return Ok(None);
+        }
+
+        let directory = self.namespace_dir().join("acquisitions");
+        let metadata = match fs::symlink_metadata(&directory) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Ok(None);
+        }
+
+        let mut matched = None;
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if !file_type.is_file() || file_type.is_symlink() {
+                continue;
+            }
+            let file_name = entry.file_name();
+            let Some(stem) = file_name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            let sha256 = format!("sha256:{stem}");
+            if validate_sha256("artifact sha256", &sha256).is_err() {
+                continue;
+            }
+            let Ok(candidate) = self.load_acquisition(&sha256) else {
+                continue;
+            };
+            if !candidate.can_extend_provider_current_acquisition(current) {
+                continue;
+            }
+            match &matched {
+                None => matched = Some(candidate),
+                Some(existing)
+                    if (
+                        candidate.requested_as_of_ns,
+                        candidate.observed_at_ns,
+                        &candidate.acquisition_sha256,
+                    ) > (
+                        existing.requested_as_of_ns,
+                        existing.observed_at_ns,
+                        &existing.acquisition_sha256,
+                    ) =>
                 {
                     matched = Some(candidate);
                 }

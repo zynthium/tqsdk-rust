@@ -111,7 +111,7 @@ calendar/continuous/ranking ──┼──► plan_sha256 (v3)
 
 - [verified] 新 writer 只发 plan v3；v1/v2 reader 和 `verify()` 保留，已有回测继续可读。
 - [verified] v1 可 verify 不代表可 fill：共享 target resolver 对 v1 返回 typed `execution_ineligible_missing_targets`，而不是改变 v1 hash 或假装零请求成功。
-- [verified] v2 的 bytes/hash/read/verify 语义保持兼容，但 CLI 默认不再把 caller-supplied listing start 当成已证明的 kind target；只有显式 `--allow-legacy-universe-plan` 才执行，并报告 `legacy_unproven=true`。
+- bytes/hash/read/verify for a caller-supplied legacy plan opt-in.
 - [verified] v3 plan 分开保存 `membership_timeline`、`fill_dependencies`、kind-specific exact targets、compiler identity、canonical spec、budgets 和所有 upstream hashes；execution closure 本身也被 identity 和 plan hash 固定。
 - [verified] 每次 load 都重算 canonical body hash，并逐级验证 `plan -> semantic catalog -> acquisition/proof`；unknown version、断链、同 hash 不同 bytes、乱序/重复 canonical content 全部 fail closed。
 
@@ -134,7 +134,7 @@ calendar/continuous/ranking ──┼──► plan_sha256 (v3)
 
 ### 6.6 Artifact persistence
 
-- [inferred] 建议 namespace：`<cache-dir>/historical-universe-v1/{acquisitions,catalogs,plans}/<sha256>.json`；首版不维护隐式 `CURRENT`，CLI 使用本轮精确路径并在报告中返回，pinned run 显式传 `--universe-plan`。
+- namespace：`<cache-dir>/historical-universe-v1/{acquisitions,catalogs,plans}/<sha256>.json`；首版不维护隐式 `CURRENT`，CLI 曾接受 caller-supplied plan。
 - [verified] codec、identity、validator、read-only store primitives 位于 `tqsdk-data`；`tqsdk-cache` 只编排 publish。durability 顺序对齐现有 snapshot contract：同 filesystem temp、file sync、atomic rename、parent sync；同 hash 已存在时全文 byte-identical revalidation，否则 collision/corruption。[history-snapshot-manifest.md](../../docs/architecture/history-snapshot-manifest.md#L150)
 - [verified] root-scoped writer lock；拒绝 symlink parent、跨 filesystem、无法可靠 atomic rename/fsync 的部署。rename 后 parent sync 失败返回 indeterminate；重跑同一 publish 必须 revalidate 后补 sync，不猜测回滚。
 - [verified] 首版 artifact 小且不可变，不做自动 retention/GC；orphan temp 被 reader 忽略，只有未来显式 operator maintenance 才可清理。`--dry-run` 不创建 root/lock/temp，只返回 would-be hashes/paths。[history-snapshot-manifest.md](../../docs/architecture/history-snapshot-manifest.md#L226)
@@ -148,8 +148,8 @@ calendar/continuous/ranking ──┼──► plan_sha256 (v3)
 
 ### 6.8 CLI migration
 
-- [verified] 新主参数是 `--universe-plan PATH`；旧 `--universe-timeline PATH` 实现为同一 clap field 的 visible alias，不能出现两个独立可同时设置的字段。
-- [verified] 兼容调用 `--universe-timeline PLAN --dry-run` 保持工作；新调用可用 `--universe 'timeline(...)' --universe-plan PLAN`，并验证 plan 内 canonical spec、scope、horizon 与命令一致。仅传 plan 时使用 plan 内已 pin 的 spec/horizon。
+- caller-supplied plan `PATH`；旧 timeline path 是其兼容别名。
+- caller-supplied plan 的 dry-run 与 `--universe` 的动态编译路径不同，并验证 spec/horizon。
 - [verified] alias 至少保留一个明确 release 周期；help/README 标为兼容名。JSON/report 保留旧 `universe_timeline` 摘要字段一个版本，并新增 versioned artifact/target identity；若字段语义或必填项改变，提升 unified report schema，不静默改 schema v3。
 
 ## 7. Implementation Sequence
@@ -215,7 +215,7 @@ calendar/continuous/ranking ──┼──► plan_sha256 (v3)
 
 ### Iteration 7 — CLI rollout、真实验证与文档闭环
 
-1. [verified] 上线 `--universe-plan` 和旧 alias；更新 help、root/data/cache README、架构、validation和 facade contract example。
+1. CLI help、root/data/cache README、架构、validation 和文档须移除旧手工 plan 入口。
 2. [verified] 先跑 offline 全矩阵，再用显式环境变量执行真实 daily 全 catalog fill；通过后执行 minute 代表性样本和全部 catalog 的可续跑验证。
 3. [verified] 第二次相同 cutoff 以 CacheOnly/dry-run复查必须 `remote_used=false`、`rows_written=0`、coverage complete；所有失败 symbol有逐项报告而不是只看进程 exit。
 4. [verified] 提交前刷新 GitNexus并运行 `detect-changes --scope all`；partial/truncated/UNKNOWN必须继续查证。
@@ -284,7 +284,7 @@ cargo run -p tqsdk-cache -- \
 # 相同输入复查：不得联网或写新行。
 cargo run -p tqsdk-cache -- \
   --cache-dir <validation-root> --kind minute fill \
-  --universe-plan <resolved-observed-manifest-or-plan> --dry-run
+# obsolete caller-supplied plan invocation removed
 ```
 
 验收脚本必须逐项核对 catalog symbol 数、target 数、skip/failure reason、每种 start basis、最早持久行、coverage end、remote_used 和 rows_written，不能只看 exit code。

@@ -125,7 +125,8 @@ planner、official server-backtest cache fill、single-flight 协调、bounded c
 语义，`tqsdk-wait` 不参与 data fill。
 
 同一个 `BacktestHistoryClient` 也拥有 tick、minute、daily fill scheduling：默认 symbol batch size 1、
-concurrency 2、idle timeout 60 秒、无 batch timeout；batch size/concurrency 都只接受 `1..=4`。
+concurrency 2、idle timeout 60 秒、无 batch timeout；batch size 只接受 `1..=4`，concurrency 只接受
+`1..=8`。
 它统一产生 planning、batch、telemetry、terminal progress，facade 与 CLI 只适配该合同。
 `BacktestHistoryTelemetryEvent` 的 `latest_cursor_ns` 与 `completed_rows` 属于同一 best-effort
 snapshot；producer 只用已接受行推进 cursor，`completed_rows` 跨同一 logical request 的 source
@@ -526,8 +527,10 @@ tqsdk-wait        tqsdk-data
   [Universe Language V2](universe-language.md)。
 - legacy 历史 universe 继续使用独立的 `HistoricalFillUniverseSpec`。V2 historical timeline
   则生成 current `HistoricalUniversePlanV5`，并固定 acquisition、semantic catalog、calendar、
-  visible membership、physical dependencies、kind targets 与 input identity。V4 artifact 可先验证完整
-  V4/V3 rollback chain 后迁移为 V5；迁移保留源文件。`HistoricalUniverseArtifactStore` 提供 normal V5
+  visible membership、physical dependencies、kind targets 与 input identity。physical kind target 的 end
+  以 pinned semantic lifecycle 裁剪，逻辑 `KQ.*` source 保持 plan-wide end；该边界进入 execution
+  identity。V4 artifact 可先验证完整 V4/V3 rollback chain 后迁移为 V5；迁移保留源文件。
+  `HistoricalUniverseArtifactStore` 提供 normal V5
   reader/verifier、受控 flat V1–V5 dispatch 与 content-addressed store；proof、
   provider-data membership 与迁移合同见
   [历史 Universe Catalog](historical-universe-catalog.md)。
