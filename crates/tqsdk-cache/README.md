@@ -6,7 +6,8 @@
 
 首次 Ctrl+C/SIGTERM/SIGHUP 停止新任务，给当前窗口最多 5 秒收尾；再次信号立即退出。
 日线按 32 天片段续填，分钟线独立暂存 terminal 子窗口，重启重拉必要重叠后继续。
-TTY/plain/JSONL 区分 received_rows、committed_rows、staged_rows。
+TTY/plain/JSONL 区分 received_rows、committed_rows、staged_rows。Tick 仅有 source
+telemetry 时，TTY/plain 显示精确 received_rows，另外两项保持 `n/a`，不会把接收行伪报为提交。
 暂存不是完整覆盖；见 [中断与续填合同](../../docs/architecture/history-fill-recovery.md)。
 
 分钟／日线 fill 只接收 KLOG，追加新增 closed range，不重复解码旧 rows。

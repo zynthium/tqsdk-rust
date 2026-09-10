@@ -1003,6 +1003,15 @@ impl ProgressState {
             .values()
             .all(|symbol| symbol.durability.is_empty())
         {
+            let received = self
+                .symbols
+                .values()
+                .flat_map(|symbol| symbol.rows_by_stream.values())
+                .copied()
+                .sum::<usize>();
+            if received > 0 {
+                return format!("received_rows={received} committed_rows=n/a staged_rows=n/a");
+            }
             return "received_rows=n/a committed_rows=n/a staged_rows=n/a".into();
         }
         let windows = self
@@ -1804,6 +1813,45 @@ mod tests {
         symbol.observe_durability(&pending);
         symbol.observe_durability(&stale);
         assert_eq!(symbol.durability[&(1, 100)], pending);
+    }
+
+    #[test]
+    fn source_rows_are_visible_when_tick_durability_is_not_reported() {
+        let mut state = ProgressState::new(ResolvedProgressMode::Plain, 8);
+        state.symbols.insert(
+            "SHFE.au2608".to_string(),
+            SymbolProgress {
+                rows_by_stream: BTreeMap::from([((1, 1, 10, 20), 42)]),
+                ..SymbolProgress::default()
+            },
+        );
+
+        assert_eq!(
+            state.durability_summary(),
+            "received_rows=42 committed_rows=n/a staged_rows=n/a"
+        );
+
+        state
+            .symbols
+            .get_mut("SHFE.au2608")
+            .unwrap()
+            .durability
+            .insert(
+                (10, 20),
+                tqsdk_data::BacktestHistoryDurabilityProgress {
+                    range: (10, 20),
+                    received_rows: 42,
+                    committed_rows: 42,
+                    staged_rows: 0,
+                    final_coverage: true,
+                    redownload_range: None,
+                },
+            );
+
+        assert_eq!(
+            state.durability_summary(),
+            "received_rows=42 committed_rows=42 staged_rows=0"
+        );
     }
 
     #[test]

@@ -68,7 +68,9 @@ facade 通过 `BacktestRemoteFillTelemetry::durability()` 转发物理窗口状�
 必须快速返回、不得重入 cache maintenance；缺省不安装回调。CLI TTY/plain 显示 received_rows、committed_rows、staged_rows；
 JSONL 增加 `durability` 对象和逐窗口 `redownload_range`。范围采用半开纳秒区间。
 
-- received_rows：本窗口当前候选行，可能包含从 journal 恢复的行；不是网络字节数。
+- received_rows：本窗口当前候选行，可能包含从 journal 恢复的行；不是网络字节数。Tick 尚未
+  上报 durability 时，TTY/plain 可显示 streaming telemetry 的精确已接受行数；此时
+  committed_rows/staged_rows 必须保持 `n/a`，JSONL 的 durability 仍为 `known=false`。
 - committed_rows：已写入正式缓存或 provisional checkpoint 的行。
 - final_coverage：仅正式 final 提交为 true，provisional 即使持久化仍为 false。
 - staged_rows：已 fsync 的私有暂存行，不能算完整 coverage。
