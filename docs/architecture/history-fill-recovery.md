@@ -77,7 +77,7 @@ JSONL 增加 `durability` 对象和逐窗口 `redownload_range`。范围采用�
 - redownload_range：重启需重新请求的窗口后缀，包含重叠验证；成功提交后为 null。
 
 这些字段只覆盖本轮观察到的 fill 窗口，不是整个缓存存量。旧字段保留，
-没有 durability 遥测（例如 Tick 旧事件路径）时显示 n/a，JSONL 为 known=false/null，不伪报 0。
+没有 durability 遥测（例如旧 producer 事件路径）时显示 n/a，JSONL 为 known=false/null，不伪报 0。
 不得把旧 `rows`、cursor 或 received_days 当成持久化证据。
 终态窗口不会被迟到的未提交 telemetry 回退；遥测仍为 best-effort，磁盘 coverage 才是恢复依据。
 

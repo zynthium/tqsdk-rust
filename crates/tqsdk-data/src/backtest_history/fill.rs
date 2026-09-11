@@ -1086,6 +1086,7 @@ impl RemoteFillCoordinator {
                                     .map_or(row.datetime, |latest| latest.max(row.datetime)),
                             );
                             pending_rows.push(row);
+                            completed_rows = completed_rows.saturating_add(1);
                             if pending_rows.len() >= TICK_WRITE_BUFFER_ROWS {
                                 self.ensure_not_cancelled(shared)?;
                                 let report = self.append_partial_ticks(
@@ -1094,8 +1095,14 @@ impl RemoteFillCoordinator {
                                     pending_rows.drain(..),
                                 )?;
                                 written_rows = written_rows.saturating_add(report.rows);
+                                self.emit_durability(
+                                    request,
+                                    (completed_rows, written_rows, 0),
+                                    latest_cursor_ns,
+                                    Some(request.range),
+                                    false,
+                                );
                             }
-                            completed_rows = completed_rows.saturating_add(1);
                         }
                     }
                     self.emit_with_cursor(
@@ -1132,6 +1139,13 @@ impl RemoteFillCoordinator {
                 pending_rows.drain(..),
             )?;
             written_rows = written_rows.saturating_add(report.rows);
+            self.emit_durability(
+                request,
+                (completed_rows, written_rows, 0),
+                latest_cursor_ns,
+                Some(request.range),
+                false,
+            );
         }
         consume_result?;
         self.ensure_not_cancelled(shared)?;
@@ -2412,7 +2426,7 @@ mod tests {
         let emitted = Arc::new(AtomicUsize::new(0));
         let discarded_closes = Arc::new(AtomicUsize::new(0));
         let cancellation = Arc::new(AtomicBool::new(false));
-        let coordinator = coordinator(
+        let mut coordinator = coordinator(
             root.clone(),
             Arc::new(RowsThenNeverFactory {
                 opens: Arc::clone(&opens),
@@ -2422,6 +2436,11 @@ mod tests {
             }),
             Arc::new(CountingAuth::new(Arc::new(AtomicUsize::new(0)))),
         );
+        let durability = Arc::new(std::sync::Mutex::new(Vec::new()));
+        Arc::make_mut(&mut coordinator.config).fill_durability = Some(Arc::new({
+            let durability = Arc::clone(&durability);
+            move |event| durability.lock().unwrap().push(event.progress)
+        }));
         let task = tokio::spawn({
             let coordinator = coordinator.clone();
             let cancellation = Arc::clone(&cancellation);
@@ -2473,6 +2492,13 @@ mod tests {
                 .unwrap()
                 .is_complete()
         );
+        let durability = durability.lock().unwrap();
+        let progress = durability.last().expect("partial Tick durability event");
+        assert_eq!(progress.received_rows, 2);
+        assert_eq!(progress.committed_rows, 2);
+        assert_eq!(progress.staged_rows, 0);
+        assert!(!progress.final_coverage);
+        assert_eq!(progress.redownload_range, Some(first_range));
     }
 
     #[tokio::test]
