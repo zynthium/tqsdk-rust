@@ -1,6 +1,8 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::fmt;
+use std::fs;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -30,6 +32,11 @@ const ENV_OUTBOUND_CHANNEL_CAPACITY: &str = "TQSDK_RELAY_OUTBOUND_CHANNEL_CAPACI
 const ENV_OUTBOUND_BYTE_CAPACITY: &str = "TQSDK_RELAY_OUTBOUND_BYTE_CAPACITY";
 const ENV_MARKET_CACHE_MAX_SYMBOLS: &str = "TQSDK_RELAY_MARKET_CACHE_MAX_SYMBOLS";
 const ENV_MARKET_CACHE_MAX_BYTES: &str = "TQSDK_RELAY_MARKET_CACHE_MAX_BYTES";
+const ENV_ROLLING_CACHE_DIR: &str = "TQSDK_RELAY_ROLLING_CACHE_DIR";
+const ENV_ROLLING_CACHE_SESSION_HASH: &str = "TQSDK_RELAY_ROLLING_CACHE_SESSION_HASH";
+const ENV_ROLLING_CACHE_ALGORITHM_VERSION: &str = "TQSDK_RELAY_ROLLING_CACHE_ALGORITHM_VERSION";
+const ENV_HISTORY_ROOT: &str = "TQSDK_RELAY_HISTORY_ROOT";
+const ENV_HISTORY_CACHE_DIR: &str = "TQSDK_RELAY_HISTORY_CACHE_DIR";
 const ENV_DRY_RUN: &str = "TQSDK_RELAY_DRY_RUN";
 const ENV_AUTH_USER: &str = "TQ_AUTH_USER";
 const ENV_AUTH_PASS: &str = "TQ_AUTH_PASS";
@@ -495,6 +502,85 @@ impl RelayResourceLimits {
     }
 }
 
+pub const DEFAULT_ROLLING_CACHE_CAPACITY: usize = 10_000;
+
+/// Durable, process-level rolling market-view cache configuration.
+///
+/// Its root is intentionally disjoint from CacheOnly history roots. It is a
+/// relay restart accelerator, never a canonical history authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollingCacheConfig {
+    root: PathBuf,
+    session_hash: String,
+    aggregation_algorithm_version: u32,
+}
+
+impl RollingCacheConfig {
+    pub fn new(
+        root: impl Into<PathBuf>,
+        session_hash: impl Into<String>,
+        aggregation_algorithm_version: u32,
+    ) -> RelayResult<Self> {
+        let value = Self {
+            root: root.into(),
+            session_hash: session_hash.into(),
+            aggregation_algorithm_version,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    #[must_use]
+    pub fn root(&self) -> &PathBuf {
+        &self.root
+    }
+
+    #[must_use]
+    pub fn capacity(&self) -> NonZeroUsize {
+        NonZeroUsize::new(DEFAULT_ROLLING_CACHE_CAPACITY).expect("constant is nonzero")
+    }
+
+    #[must_use]
+    pub fn session_hash(&self) -> &str {
+        &self.session_hash
+    }
+
+    #[must_use]
+    pub const fn aggregation_algorithm_version(&self) -> u32 {
+        self.aggregation_algorithm_version
+    }
+
+    fn validate(&self) -> RelayResult<()> {
+        if !self.root.is_absolute() {
+            return Err(RelayError::invalid_config(
+                "rolling cache root must be an absolute existing directory",
+            ));
+        }
+        let metadata = fs::symlink_metadata(&self.root).map_err(|error| {
+            RelayError::invalid_config(format!(
+                "rolling cache root {} is unavailable: {error}",
+                self.root.display()
+            ))
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(RelayError::invalid_config(
+                "rolling cache root must be an existing non-symlink directory",
+            ));
+        }
+        if self.session_hash.is_empty() || self.session_hash.len() > 4096 {
+            return Err(RelayError::invalid_config(
+                "rolling cache session hash must be nonempty and bounded",
+            ));
+        }
+        if self.aggregation_algorithm_version == 0 {
+            return Err(RelayError::invalid_config(
+                "rolling cache aggregation algorithm version must be positive",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Additive process-level configuration for Universe V2 sources.
 ///
 /// [`RelayConfig`] keeps its original exhaustive public field set for downstream source
@@ -505,6 +591,7 @@ pub struct RelayRuntimeConfig {
     resource_limits: RelayResourceLimits,
     futures_universe_spec: Option<UniverseSpec>,
     futures_universe_symbol_files: Vec<PathBuf>,
+    rolling_cache: Option<RollingCacheConfig>,
 }
 
 impl fmt::Debug for RelayRuntimeConfig {
@@ -518,6 +605,7 @@ impl fmt::Debug for RelayRuntimeConfig {
                 "futures_universe_symbol_files",
                 &self.futures_universe_symbol_files,
             )
+            .field("rolling_cache", &self.rolling_cache)
             .finish()
     }
 }
@@ -542,6 +630,7 @@ impl RelayRuntimeConfig {
             resource_limits: RelayResourceLimits::defaults(),
             futures_universe_spec: None,
             futures_universe_symbol_files: Vec::new(),
+            rolling_cache: None,
         }
     }
 
@@ -555,6 +644,11 @@ impl RelayRuntimeConfig {
         let outbound_byte_capacity = get(ENV_OUTBOUND_BYTE_CAPACITY);
         let market_cache_max_symbols = get(ENV_MARKET_CACHE_MAX_SYMBOLS);
         let market_cache_max_bytes = get(ENV_MARKET_CACHE_MAX_BYTES);
+        let rolling_cache_dir = get(ENV_ROLLING_CACHE_DIR);
+        let rolling_cache_session_hash = get(ENV_ROLLING_CACHE_SESSION_HASH);
+        let rolling_cache_algorithm_version = get(ENV_ROLLING_CACHE_ALGORITHM_VERSION);
+        let history_root = get(ENV_HISTORY_ROOT);
+        let history_cache_dir = get(ENV_HISTORY_CACHE_DIR);
         let relay = RelayConfig::from_env_vars(|key| {
             if matches!(key, ENV_FUTURES_UNIVERSE | ENV_FUTURES_UNIVERSE_FILES) {
                 None
@@ -581,6 +675,40 @@ impl RelayRuntimeConfig {
         if let Some(universe_files) = universe_files {
             config.futures_universe_symbol_files = std::env::split_paths(&universe_files).collect();
         }
+        match (rolling_cache_dir, rolling_cache_session_hash) {
+            (None, None) => {}
+            (Some(root), Some(session_hash)) => {
+                let algorithm_version = rolling_cache_algorithm_version
+                    .as_deref()
+                    .map(|value| {
+                        parse_positive_usize_env(ENV_ROLLING_CACHE_ALGORITHM_VERSION, value)
+                            .and_then(|value| {
+                                u32::try_from(value).map_err(|_| {
+                                    RelayError::invalid_config(format!(
+                                        "{ENV_ROLLING_CACHE_ALGORITHM_VERSION} exceeds u32"
+                                    ))
+                                })
+                            })
+                    })
+                    .transpose()?
+                    .unwrap_or(1);
+                config.rolling_cache = Some(RollingCacheConfig::new(
+                    root,
+                    session_hash,
+                    algorithm_version,
+                )?);
+            }
+            _ => {
+                return Err(RelayError::invalid_config(format!(
+                    "{ENV_ROLLING_CACHE_DIR} and {ENV_ROLLING_CACHE_SESSION_HASH} must be configured together"
+                )));
+            }
+        }
+        if let Some(rolling) = config.rolling_cache.as_ref() {
+            for history_root in [history_root, history_cache_dir].into_iter().flatten() {
+                reject_overlapping_roots(rolling.root(), PathBuf::from(history_root).as_path())?;
+            }
+        }
         config.validate()?;
         Ok(config)
     }
@@ -593,6 +721,18 @@ impl RelayRuntimeConfig {
     #[must_use]
     pub const fn resource_limits(&self) -> RelayResourceLimits {
         self.resource_limits
+    }
+
+    #[must_use]
+    pub fn rolling_cache(&self) -> Option<&RollingCacheConfig> {
+        self.rolling_cache.as_ref()
+    }
+
+    pub fn with_rolling_cache(mut self, rolling_cache: RollingCacheConfig) -> RelayResult<Self> {
+        rolling_cache.validate()?;
+        self.rolling_cache = Some(rolling_cache);
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn with_resource_limits(
@@ -677,6 +817,9 @@ impl RelayRuntimeConfig {
                 "futures universe spec is a snapshot-only entry point",
             ));
         }
+        if let Some(rolling_cache) = self.rolling_cache.as_ref() {
+            rolling_cache.validate()?;
+        }
         Ok(())
     }
 
@@ -696,6 +839,32 @@ impl RelayRuntimeConfig {
         }
         Ok(())
     }
+}
+
+fn reject_overlapping_roots(
+    rolling_root: &PathBuf,
+    history_root: &std::path::Path,
+) -> RelayResult<()> {
+    let rolling = fs::canonicalize(rolling_root).map_err(|error| {
+        RelayError::invalid_config(format!(
+            "rolling cache root {} cannot be canonicalized: {error}",
+            rolling_root.display()
+        ))
+    })?;
+    let history = fs::canonicalize(history_root).map_err(|error| {
+        RelayError::invalid_config(format!(
+            "history root {} cannot be canonicalized: {error}",
+            history_root.display()
+        ))
+    })?;
+    if rolling == history || rolling.starts_with(&history) || history.starts_with(&rolling) {
+        return Err(RelayError::invalid_config(format!(
+            "rolling cache root {} overlaps history root {}",
+            rolling.display(),
+            history.display()
+        )));
+    }
+    Ok(())
 }
 
 fn upstream_tick_chart_id(symbol: &str, view_width: usize) -> String {

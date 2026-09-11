@@ -7,6 +7,27 @@ use tqsdk_relay::{
 };
 
 #[test]
+fn rolling_cache_is_typed_runtime_config_and_requires_a_safe_root() {
+    let root = std::env::temp_dir().join(format!(
+        "relay-rolling-config-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let rolling = tqsdk_relay::RollingCacheConfig::new(&root, "session-v1", 1).unwrap();
+    let runtime = RelayRuntimeConfig::new(RelayConfig::default())
+        .with_rolling_cache(rolling)
+        .unwrap();
+
+    assert_eq!(runtime.rolling_cache().unwrap().capacity().get(), 10_000);
+    assert!(tqsdk_relay::RollingCacheConfig::new("relative", "session-v1", 1).is_err());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn default_config_is_memory_only_and_local() {
     let config = RelayConfig::default();
 
