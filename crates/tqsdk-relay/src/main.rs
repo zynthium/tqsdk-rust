@@ -4,7 +4,10 @@ use std::sync::{Arc, Mutex};
 
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use tqsdk_relay::{RelayEngine, RelayError, RelayRuntimeConfig, RelayServer, RelayStartupReport};
+use tqsdk_relay::{
+    RelayEngine, RelayError, RelayRuntimeConfig, RelayServer, RelayStartupReport,
+    restore_rolling_cache,
+};
 #[cfg(feature = "server")]
 use tqsdk_relay::{
     resolve_configured_upstream_tick_charts_with_runtime_config,
@@ -51,7 +54,8 @@ async fn run() -> Result<(), RelayError> {
             if let Some(expression) = config.futures_universe_expression.as_ref() {
                 let symbols =
                     tqsdk_relay::universe::resolve_static_symbols_with_expression(expression)?;
-                config.upstream_tick_charts_for_symbols(symbols.iter().map(String::as_str))?
+                runtime_config
+                    .upstream_tick_charts_for_symbols(symbols.iter().map(String::as_str))?
             } else {
                 Vec::new()
             }
@@ -63,11 +67,19 @@ async fn run() -> Result<(), RelayError> {
         return Ok(());
     }
 
-    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only_with_cache_limits(
+    let mut relay_engine = RelayEngine::new_memory_only_with_cache_limits(
         config.tick_ring_capacity,
         config.kline_ring_capacity,
         resource_limits.market_cache,
-    )));
+    );
+    if let Some(rolling_cache) = runtime_config.rolling_cache() {
+        let restored = restore_rolling_cache(&mut relay_engine, rolling_cache)?;
+        eprintln!(
+            "tqsdk-relay restored rolling cache: ticks={} klines={}",
+            restored.tick_rows, restored.kline_rows
+        );
+    }
+    let engine = Arc::new(Mutex::new(relay_engine));
     let startup_charts = Vec::new();
     eprintln!(
         "{}",

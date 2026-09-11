@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 use tqsdk_core::{Kline, Tick};
-use tqsdk_data::{RollingMarketCache, RollingMarketCacheMetadata};
+use tqsdk_data::{RollingMarketCache, RollingMarketCacheKind, RollingMarketCacheMetadata};
 
 use crate::config::RollingCacheConfig;
 use crate::error::{RelayError, RelayResult};
@@ -13,14 +13,17 @@ use crate::error::{RelayError, RelayResult};
 const WRITER_QUEUE_CAPACITY: usize = 2_048;
 
 enum WriteIntent {
+    SourceEpoch(u64),
     Tick(String, Tick),
     Kline(String, i64, Kline),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RollingWriterStatus {
+    pub source_epoch: u64,
     pub enqueued_revision: u64,
     pub durable_revision: u64,
+    pub discontinuities: u64,
     pub degraded: bool,
 }
 
@@ -28,6 +31,7 @@ pub struct RollingWriterStatus {
 pub struct RelayRollingCacheWriter {
     sender: mpsc::Sender<WriteIntent>,
     status: Arc<Mutex<RollingWriterStatus>>,
+    next_source_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl RelayRollingCacheWriter {
@@ -39,8 +43,10 @@ impl RelayRollingCacheWriter {
             config.aggregation_algorithm_version(),
         )
         .map_err(|error| RelayError::invalid_config(error.to_string()))?;
+        let source_epoch_floor = rolling_cache_source_epoch_floor(&cache)?;
         let (sender, mut receiver) = mpsc::channel::<WriteIntent>(WRITER_QUEUE_CAPACITY);
         let status = Arc::new(Mutex::new(RollingWriterStatus::default()));
+        let next_source_epoch = Arc::new(std::sync::atomic::AtomicU64::new(source_epoch_floor));
         let task_status = Arc::clone(&status);
         let capacity = config.capacity().get();
         let metadata_session_hash = config.session_hash().to_owned();
@@ -49,10 +55,20 @@ impl RelayRollingCacheWriter {
             let mut rings = BTreeMap::<String, VecDeque<Tick>>::new();
             let mut kline_rings = BTreeMap::<(String, i64), VecDeque<Kline>>::new();
             let mut revision = 0_u64;
+            let mut source_epoch = source_epoch_floor.saturating_add(1).max(1);
             while let Some(intent) = receiver.recv().await {
                 let WriteIntent::Tick(symbol, tick) = intent else {
                     let WriteIntent::Kline(symbol, duration_ns, row) = intent else {
-                        unreachable!();
+                        let WriteIntent::SourceEpoch(epoch) = intent else {
+                            unreachable!();
+                        };
+                        source_epoch = source_epoch.max(epoch.max(1));
+                        if let Ok(mut status) = task_status.lock() {
+                            status.source_epoch = source_epoch;
+                        } else {
+                            break;
+                        }
+                        continue;
                     };
                     let key = (symbol.clone(), duration_ns);
                     if !kline_rings.contains_key(&key) {
@@ -87,7 +103,7 @@ impl RelayRollingCacheWriter {
                             .expect("configured capacity is nonzero"),
                         metadata_session_hash.clone(),
                         algorithm,
-                        1,
+                        source_epoch,
                         revision,
                         revision,
                         None,
@@ -129,7 +145,7 @@ impl RelayRollingCacheWriter {
                                 .expect("configured capacity is nonzero"),
                             metadata_session_hash.clone(),
                             algorithm,
-                            1,
+                            source_epoch,
                             revision,
                             revision,
                             None,
@@ -153,7 +169,20 @@ impl RelayRollingCacheWriter {
                     rings.insert(symbol.clone(), restored.rows.into());
                 }
                 let ring = rings.entry(symbol.clone()).or_default();
-                ring.push_back(tick);
+                if let Some(existing) = ring.iter_mut().find(|existing| existing.id == tick.id) {
+                    *existing = tick;
+                } else {
+                    let discontinuity = ring
+                        .back()
+                        .is_some_and(|last| tick.id != last.id.saturating_add(1));
+                    if discontinuity {
+                        ring.clear();
+                        if let Ok(mut status) = task_status.lock() {
+                            status.discontinuities = status.discontinuities.saturating_add(1);
+                        }
+                    }
+                    ring.push_back(tick);
+                }
                 while ring.len() > capacity {
                     let _ = ring.pop_front();
                 }
@@ -163,7 +192,7 @@ impl RelayRollingCacheWriter {
                     std::num::NonZeroUsize::new(capacity).expect("configured capacity is nonzero"),
                     metadata_session_hash.clone(),
                     algorithm,
-                    1,
+                    source_epoch,
                     revision,
                     revision,
                     None,
@@ -184,7 +213,26 @@ impl RelayRollingCacheWriter {
                 }
             }
         });
-        Ok(Self { sender, status })
+        Ok(Self {
+            sender,
+            status,
+            next_source_epoch,
+        })
+    }
+
+    pub fn begin_source_epoch(&self) -> RelayResult<()> {
+        let epoch = self
+            .next_source_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1);
+        self.sender
+            .try_send(WriteIntent::SourceEpoch(epoch))
+            .map_err(|error| {
+                if let Ok(mut status) = self.status.lock() {
+                    status.degraded = true;
+                }
+                RelayError::Internal(format!("rolling cache writer unavailable: {error}"))
+            })
     }
 
     pub fn enqueue(&self, ticks: Vec<(String, Tick)>) -> RelayResult<()> {
@@ -233,6 +281,42 @@ impl RelayRollingCacheWriter {
     }
 }
 
+fn rolling_cache_source_epoch_floor(cache: &RollingMarketCache) -> RelayResult<u64> {
+    let mut floor = 0_u64;
+    for entry in cache
+        .entries()
+        .map_err(|error| RelayError::invalid_config(error.to_string()))?
+    {
+        match entry.kind {
+            RollingMarketCacheKind::Tick => {
+                let snapshot = cache
+                    .load_ticks(&entry.symbol)
+                    .map_err(|error| RelayError::invalid_config(error.to_string()))?
+                    .ok_or_else(|| {
+                        RelayError::invalid_config(format!(
+                            "rolling cache entry disappeared during writer startup: {}",
+                            entry.symbol
+                        ))
+                    })?;
+                floor = floor.max(snapshot.metadata.source_epoch);
+            }
+            RollingMarketCacheKind::Kline { duration_ns } => {
+                let snapshot = cache
+                    .load_klines(&entry.symbol, duration_ns)
+                    .map_err(|error| RelayError::invalid_config(error.to_string()))?
+                    .ok_or_else(|| {
+                        RelayError::invalid_config(format!(
+                            "rolling cache entry disappeared during writer startup: {}",
+                            entry.symbol
+                        ))
+                    })?;
+                floor = floor.max(snapshot.metadata.source_epoch);
+            }
+        }
+    }
+    Ok(floor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +334,7 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let config = RollingCacheConfig::new(&root, "session-v1", 1).unwrap();
         let writer = RelayRollingCacheWriter::start(&config).unwrap();
+        writer.begin_source_epoch().unwrap();
         writer
             .enqueue(vec![(
                 "SHFE.au2602".to_owned(),
@@ -275,7 +360,9 @@ mod tests {
             config.aggregation_algorithm_version(),
         )
         .unwrap();
-        let rows = cache.load_ticks("SHFE.au2602").unwrap().unwrap().rows;
+        let snapshot = cache.load_ticks("SHFE.au2602").unwrap().unwrap();
+        assert_eq!(snapshot.metadata.source_epoch, 1);
+        let rows = snapshot.rows;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, 7);
         assert_eq!(rows[0].last_price, 610.5);
@@ -303,6 +390,124 @@ mod tests {
             .unwrap()
             .rows;
         assert_eq!(klines[0].close, 611.0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn tick_gap_rebaselines_persisted_ring() {
+        let root = std::env::temp_dir().join(format!(
+            "relay-rolling-writer-gap-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let config = RollingCacheConfig::new(&root, "session-v1", 1).unwrap();
+        let writer = RelayRollingCacheWriter::start(&config).unwrap();
+        writer.begin_source_epoch().unwrap();
+        writer
+            .enqueue(vec![
+                (
+                    "SHFE.au2602".to_owned(),
+                    Tick {
+                        id: 7,
+                        ..Tick::default()
+                    },
+                ),
+                (
+                    "SHFE.au2602".to_owned(),
+                    Tick {
+                        id: 9,
+                        ..Tick::default()
+                    },
+                ),
+            ])
+            .unwrap();
+        for _ in 0..100 {
+            if writer.status().durable_revision == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let cache = RollingMarketCache::open(
+            &root,
+            config.capacity(),
+            config.session_hash(),
+            config.aggregation_algorithm_version(),
+        )
+        .unwrap();
+        let rows = cache.load_ticks("SHFE.au2602").unwrap().unwrap().rows;
+        assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![9]);
+        assert_eq!(writer.status().discontinuities, 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn source_epoch_advances_across_writer_restart() {
+        let root = std::env::temp_dir().join(format!(
+            "relay-rolling-writer-epoch-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let config = RollingCacheConfig::new(&root, "session-v1", 1).unwrap();
+        let first = RelayRollingCacheWriter::start(&config).unwrap();
+        first.begin_source_epoch().unwrap();
+        first
+            .enqueue(vec![(
+                "SHFE.au2602".to_owned(),
+                Tick {
+                    id: 1,
+                    ..Tick::default()
+                },
+            )])
+            .unwrap();
+        for _ in 0..100 {
+            if first.status().durable_revision == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        drop(first);
+
+        let second = RelayRollingCacheWriter::start(&config).unwrap();
+        second.begin_source_epoch().unwrap();
+        second
+            .enqueue(vec![(
+                "SHFE.au2602".to_owned(),
+                Tick {
+                    id: 2,
+                    ..Tick::default()
+                },
+            )])
+            .unwrap();
+        for _ in 0..100 {
+            if second.status().durable_revision == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let cache = RollingMarketCache::open(
+            &root,
+            config.capacity(),
+            config.session_hash(),
+            config.aggregation_algorithm_version(),
+        )
+        .unwrap();
+        assert_eq!(
+            cache
+                .load_ticks("SHFE.au2602")
+                .unwrap()
+                .unwrap()
+                .metadata
+                .source_epoch,
+            2
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

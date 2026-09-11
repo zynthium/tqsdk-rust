@@ -52,6 +52,11 @@ export type RelayMetrics = {
   upstream_symbols: number;
   downstream_clients: number;
   ticks_ingested: number;
+  rolling_cache_source_epoch?: number;
+  rolling_cache_enqueued_revision?: number;
+  rolling_cache_durable_revision?: number;
+  rolling_cache_discontinuities?: number;
+  rolling_cache_degraded?: boolean;
   quote_subscriptions?: number;
   chart_subscriptions?: number;
   data_stale_after_secs: number;

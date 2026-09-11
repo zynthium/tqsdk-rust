@@ -24,6 +24,13 @@ pub enum RollingMarketCacheKind {
     Kline { duration_ns: i64 },
 }
 
+/// One durable rolling market-view stream discovered under this cache root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollingMarketCacheEntry {
+    pub symbol: String,
+    pub kind: RollingMarketCacheKind,
+}
+
 impl RollingMarketCacheKind {
     fn series_kind(self) -> Result<SeriesKind> {
         match self {
@@ -206,6 +213,67 @@ impl RollingMarketCache {
         )
     }
 
+    /// Lists valid rolling streams already published under this cache root.
+    ///
+    /// Unknown files are ignored so an operator can keep diagnostics beside a
+    /// cache root. Malformed cache-shaped entries fail closed rather than being
+    /// silently overwritten on a later write.
+    pub fn entries(&self) -> Result<Vec<RollingMarketCacheEntry>> {
+        let mut entries = Vec::new();
+        for directory in fs::read_dir(&self.root)? {
+            let directory = directory?;
+            let file_type = directory.file_type()?;
+            if !file_type.is_dir() || file_type.is_symlink() {
+                continue;
+            }
+            let directory_name = directory.file_name();
+            let Some(name) = directory_name.to_str() else {
+                continue;
+            };
+            let Some(symbol) = decode_hex_symbol(name) else {
+                continue;
+            };
+            validate_symbol(&symbol)?;
+            for file in fs::read_dir(directory.path())? {
+                let file = file?;
+                let file_type = file.file_type()?;
+                if !file_type.is_file() || file_type.is_symlink() {
+                    continue;
+                }
+                let file_name = file.file_name();
+                let Some(name) = file_name.to_str() else {
+                    continue;
+                };
+                let kind = if name == "tick.tqbn" {
+                    Some(RollingMarketCacheKind::Tick)
+                } else if let Some(duration) = name
+                    .strip_prefix("kline-")
+                    .and_then(|value| value.strip_suffix(".tqbn"))
+                {
+                    let duration_ns = duration.parse::<i64>().map_err(|_| {
+                        DataError::InvalidState("invalid rolling Kline cache filename")
+                    })?;
+                    Some(RollingMarketCacheKind::Kline { duration_ns })
+                } else {
+                    None
+                };
+                if let Some(kind) = kind {
+                    kind.series_kind()?;
+                    entries.push(RollingMarketCacheEntry {
+                        symbol: symbol.clone(),
+                        kind,
+                    });
+                }
+            }
+        }
+        entries.sort_by(|left, right| {
+            left.symbol
+                .cmp(&right.symbol)
+                .then_with(|| left.kind.file_stem().cmp(&right.kind.file_stem()))
+        });
+        Ok(entries)
+    }
+
     fn replace<R>(
         &self,
         symbol: &str,
@@ -332,6 +400,21 @@ fn hex_symbol(symbol: &str) -> String {
     output
 }
 
+fn decode_hex_symbol(value: &str) -> Option<String> {
+    if value.is_empty() || !value.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
+    for pair in pairs {
+        let high = (pair[0] as char).to_digit(16)?;
+        let low = (pair[1] as char).to_digit(16)?;
+        bytes.push(u8::try_from((high << 4) | low).ok()?);
+    }
+    String::from_utf8(bytes).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,6 +529,38 @@ mod tests {
             cache
                 .replace_ticks("SHFE.au2602", metadata(), &rows)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn lists_tick_and_kline_entries() {
+        let (_directory, cache) = cache();
+        cache
+            .replace_ticks("SHFE.au2602", metadata(), &[Tick::default()])
+            .unwrap();
+        cache
+            .replace_klines(
+                "SHFE.au2602",
+                60_000_000_000,
+                metadata(),
+                &[Kline::default()],
+            )
+            .unwrap();
+
+        assert_eq!(
+            cache.entries().unwrap(),
+            vec![
+                RollingMarketCacheEntry {
+                    symbol: "SHFE.au2602".to_owned(),
+                    kind: RollingMarketCacheKind::Kline {
+                        duration_ns: 60_000_000_000,
+                    },
+                },
+                RollingMarketCacheEntry {
+                    symbol: "SHFE.au2602".to_owned(),
+                    kind: RollingMarketCacheKind::Tick,
+                },
+            ]
         );
     }
 }

@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -20,6 +21,9 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 const DEFAULT_UPSTREAM_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const OFFICIAL_KLINE_TAIL_RECONCILE_INTERVAL: Duration = Duration::from_secs(300);
+const UPSTREAM_IDLE_UNSUBSCRIBE_AFTER: Duration = Duration::from_secs(600);
+const UPSTREAM_IDLE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 pub async fn connect_configured_upstream(
     config: &RelayConfig,
@@ -98,12 +102,73 @@ enum UpstreamPumpExit {
     SourceClosed,
 }
 
+#[derive(Default)]
+struct IdleUpstreamInterests {
+    baseline_symbols: BTreeSet<String>,
+    symbols: BTreeMap<String, Option<Instant>>,
+    kline_sources: BTreeMap<crate::interest::SourceKey, Option<Instant>>,
+}
+
+impl IdleUpstreamInterests {
+    fn with_baseline(symbols: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            baseline_symbols: symbols.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+
+    fn observe_active(
+        &mut self,
+        symbols: Vec<String>,
+        kline_sources: Vec<crate::interest::SourceKey>,
+        now: Instant,
+    ) {
+        let mut active_symbols = symbols.into_iter().collect::<BTreeSet<_>>();
+        active_symbols.extend(self.baseline_symbols.iter().cloned());
+        let active_klines = kline_sources.into_iter().collect::<BTreeSet<_>>();
+        for symbol in &active_symbols {
+            self.symbols.insert(symbol.clone(), None);
+        }
+        for source in &active_klines {
+            self.kline_sources.insert(source.clone(), None);
+        }
+        let expires_at = now + UPSTREAM_IDLE_UNSUBSCRIBE_AFTER;
+        for (symbol, deadline) in &mut self.symbols {
+            if !active_symbols.contains(symbol) && deadline.is_none() {
+                *deadline = Some(expires_at);
+            }
+        }
+        for (source, deadline) in &mut self.kline_sources {
+            if !active_klines.contains(source) && deadline.is_none() {
+                *deadline = Some(expires_at);
+            }
+        }
+    }
+
+    fn expire(&mut self, now: Instant) -> bool {
+        let symbols_before = self.symbols.len();
+        let klines_before = self.kline_sources.len();
+        self.symbols
+            .retain(|_, deadline| deadline.is_none_or(|deadline| deadline > now));
+        self.kline_sources
+            .retain(|_, deadline| deadline.is_none_or(|deadline| deadline > now));
+        self.symbols.len() != symbols_before || self.kline_sources.len() != klines_before
+    }
+
+    fn symbols(&self) -> impl Iterator<Item = &str> {
+        self.symbols.keys().map(String::as_str)
+    }
+
+    fn kline_sources(&self) -> impl Iterator<Item = &crate::interest::SourceKey> {
+        self.kline_sources.keys()
+    }
+}
+
 async fn connect_configured_upstream_for_pump(
     config: &RelayRuntimeConfig,
     server: &RelayServer,
 ) -> RelayResult<Option<ConfiguredUpstream>> {
     let configured = match configured_upstream_tick_charts_with_contracts(config).await {
-        Ok(configured) if configured.charts.is_empty() => return Ok(None),
         Ok(configured) => configured,
         Err(err) => {
             record_universe_refresh_error(server, err.to_string());
@@ -111,12 +176,15 @@ async fn connect_configured_upstream_for_pump(
         }
     };
     let relay = config.relay_config();
-    let mut source = match WebSocketUpstreamTickSource::connect_with_quote_symbols(
-        relay.upstream_market_url.clone(),
-        configured.charts.iter().map(UpstreamTickChart::symbol),
-    )
-    .await
-    {
+    let mut source = match if configured.charts.is_empty() {
+        WebSocketUpstreamTickSource::connect(relay.upstream_market_url.clone()).await
+    } else {
+        WebSocketUpstreamTickSource::connect_with_quote_symbols(
+            relay.upstream_market_url.clone(),
+            configured.charts.iter().map(UpstreamTickChart::symbol),
+        )
+        .await
+    } {
         Ok(source) => source,
         Err(err) => {
             record_universe_refresh_error(server, err.to_string());
@@ -149,9 +217,16 @@ fn commit_configured_upstream(
 async fn configured_upstream_tick_charts(
     config: &RelayRuntimeConfig,
 ) -> RelayResult<Vec<crate::upstream::UpstreamTickChart>> {
-    Ok(configured_upstream_tick_charts_with_contracts(config)
-        .await?
-        .charts)
+    let configured = configured_upstream_tick_charts_with_contracts(config).await?;
+    let mut symbols = configured
+        .contracts
+        .iter()
+        .map(|contract| contract.symbol.as_str())
+        .collect::<Vec<_>>();
+    symbols.extend(config.prewarm_symbols().iter().map(String::as_str));
+    config
+        .relay_config()
+        .upstream_tick_charts_for_symbols(symbols)
 }
 
 async fn configured_upstream_tick_charts_with_contracts(
@@ -248,9 +323,13 @@ async fn configured_upstream_tick_charts_with_contracts(
     }
 
     let contracts = contracts_by_symbol.into_values().collect::<Vec<_>>();
-    let charts = relay.upstream_tick_charts_for_symbols(
-        contracts.iter().map(|contract| contract.symbol.as_str()),
-    )?;
+    let charts = if config.prewarm_symbols().is_empty() {
+        config.relay_config().upstream_tick_charts_for_symbols(
+            contracts.iter().map(|contract| contract.symbol.as_str()),
+        )?
+    } else {
+        config.upstream_tick_charts_for_symbols(std::iter::empty::<&str>())?
+    };
     Ok(ConfiguredTickCharts {
         charts,
         contracts,
@@ -326,6 +405,14 @@ async fn run_upstream_retry_loop(
         match connect_configured_upstream_for_pump(&config, &server).await {
             Ok(Some(mut upstream)) => {
                 commit_configured_upstream(&config, &server, &upstream);
+                if let Some(rolling_writer) = rolling_writer.as_ref() {
+                    if let Err(error) = rolling_writer.begin_source_epoch() {
+                        mark_upstream_degraded(&server);
+                        eprintln!("{error}");
+                        return;
+                    }
+                    record_rolling_writer_status(&server, rolling_writer);
+                }
                 match pump_configured_upstream_until(
                     &config,
                     &server,
@@ -374,6 +461,11 @@ async fn pump_configured_upstream_until(
     let refresh_enabled = config.refreshes_futures_universe();
     let refresh = tokio::time::sleep(next_universe_refresh_delay(config.relay_config()));
     tokio::pin!(refresh);
+    let tail_reconcile = tokio::time::sleep(OFFICIAL_KLINE_TAIL_RECONCILE_INTERVAL);
+    tokio::pin!(tail_reconcile);
+    let mut idle_sweep = tokio::time::interval(UPSTREAM_IDLE_SWEEP_INTERVAL);
+    idle_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut idle_interests = IdleUpstreamInterests::with_baseline(source.tick_chart_symbols());
     server.request_pending_upstream_subscriptions()?;
     loop {
         tokio::select! {
@@ -381,6 +473,9 @@ async fn pump_configured_upstream_until(
             _ = &mut *shutdown => return Ok(UpstreamPumpExit::Shutdown),
             () = &mut refresh, if refresh_enabled => {
                 let refreshed = refresh_configured_upstream(config, server, source).await;
+                if refreshed {
+                    reconcile_idle_upstream_interests(config, server, source, &idle_interests).await?;
+                }
                 let next_delay = if refreshed {
                     next_universe_refresh_delay(config.relay_config())
                 } else {
@@ -388,15 +483,28 @@ async fn pump_configured_upstream_until(
                 };
                 refresh.as_mut().reset(Instant::now() + next_delay);
             }
+            () = &mut tail_reconcile => {
+                source.refresh_official_kline_tails().await?;
+                record_upstream_progress(server, source.take_progress());
+                tail_reconcile
+                    .as_mut()
+                    .reset(Instant::now() + OFFICIAL_KLINE_TAIL_RECONCILE_INTERVAL);
+            }
+            _ = idle_sweep.tick() => {
+                if idle_interests.expire(Instant::now()) {
+                    reconcile_idle_upstream_interests(config, server, source, &idle_interests).await?;
+                }
+            }
             symbols = server.next_upstream_subscription_symbols() => {
                 let Some(symbols) = symbols else {
                     continue;
                 };
                 subscribe_dynamic_upstream_symbols(
-                    config.relay_config(),
+                    config,
                     server,
                     source,
                     symbols,
+                    &mut idle_interests,
                 )
                 .await?;
             }
@@ -404,6 +512,7 @@ async fn pump_configured_upstream_until(
                 if let Some(rolling_writer) = rolling_writer {
                     rolling_writer.enqueue(source.drain_lossless_ticks())?;
                     rolling_writer.enqueue_klines(source.drain_official_klines())?;
+                    record_rolling_writer_status(server, rolling_writer);
                     if source.take_lossless_tick_overflow() {
                         return Err(RelayError::Internal(
                             "rolling cache source queue overflowed".to_owned(),
@@ -467,16 +576,27 @@ async fn refresh_configured_upstream(
 }
 
 async fn subscribe_dynamic_upstream_symbols(
-    config: &RelayConfig,
+    config: &RelayRuntimeConfig,
     server: &RelayServer,
     source: &mut WebSocketUpstreamTickSource,
     _signals: Vec<String>,
+    idle_interests: &mut IdleUpstreamInterests,
 ) -> RelayResult<()> {
     let (symbols, kline_sources) = desired_upstream_chart_interests(server)?;
-    let mut charts = config.upstream_tick_charts_for_symbols(symbols.iter().map(String::as_str))?;
+    idle_interests.observe_active(symbols, kline_sources, Instant::now());
+    reconcile_idle_upstream_interests(config, server, source, idle_interests).await
+}
+
+async fn reconcile_idle_upstream_interests(
+    config: &RelayRuntimeConfig,
+    server: &RelayServer,
+    source: &mut WebSocketUpstreamTickSource,
+    idle_interests: &IdleUpstreamInterests,
+) -> RelayResult<()> {
+    let mut charts = config.upstream_tick_charts_for_symbols(idle_interests.symbols())?;
     charts.extend(
-        kline_sources
-            .into_iter()
+        idle_interests
+            .kline_sources()
             .map(|source_key| {
                 let symbol = source_key
                     .symbols
@@ -536,6 +656,14 @@ fn record_upstream_progress(
     match engine.lock() {
         Ok(mut engine) => engine.record_upstream_progress(progress),
         Err(_) => eprintln!("relay internal error: relay engine lock poisoned"),
+    }
+}
+
+fn record_rolling_writer_status(server: &RelayServer, writer: &RelayRollingCacheWriter) {
+    let engine = server.engine();
+    match engine.lock() {
+        Ok(mut engine) => engine.record_rolling_writer_status(writer.status()),
+        Err(_) => eprintln!("relay internal error: engine lock poisoned"),
     }
 }
 
@@ -632,6 +760,42 @@ mod tests {
 
     use super::*;
     use crate::engine::RelayEngine;
+
+    #[test]
+    fn dynamic_symbols_unsubscribe_after_ten_minutes_idle() {
+        let now = Instant::now();
+        let mut interests = IdleUpstreamInterests::default();
+        interests.observe_active(vec!["SHFE.au2602".to_owned()], Vec::new(), now);
+        interests.observe_active(Vec::new(), Vec::new(), now + Duration::from_secs(1));
+
+        assert_eq!(interests.symbols().collect::<Vec<_>>(), ["SHFE.au2602"]);
+        assert!(!interests.expire(now + Duration::from_secs(600)));
+        assert!(interests.expire(now + Duration::from_secs(601)));
+        assert!(interests.symbols().next().is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_subscribes_only_designated_prewarm_symbols() {
+        let config = RelayRuntimeConfig::new(RelayConfig {
+            futures_universe_expression: Some(
+                crate::universe_expression::UniverseExpression::parse(
+                    "symbol:SHFE.au2602,DCE.m2609",
+                )
+                .unwrap(),
+            ),
+            ..RelayConfig::default()
+        })
+        .with_prewarm_symbols(["DCE.m2609"])
+        .unwrap();
+
+        let charts = configured_upstream_tick_charts_with_contracts(&config)
+            .await
+            .unwrap()
+            .charts;
+
+        assert_eq!(charts.len(), 1);
+        assert_eq!(charts[0].symbol(), "DCE.m2609");
+    }
 
     #[tokio::test]
     async fn failed_replacement_connect_keeps_the_last_committed_universe() {

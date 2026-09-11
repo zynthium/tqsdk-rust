@@ -241,8 +241,8 @@ pub use minute_kline_cache::{
     MinuteKlineReader, trading_month_for_timestamp_ns,
 };
 pub use rolling_market_cache::{
-    ROLLING_MARKET_CACHE_FORMAT_VERSION, RollingMarketCache, RollingMarketCacheKind,
-    RollingMarketCacheMetadata, RollingMarketCacheSnapshot,
+    ROLLING_MARKET_CACHE_FORMAT_VERSION, RollingMarketCache, RollingMarketCacheEntry,
+    RollingMarketCacheKind, RollingMarketCacheMetadata, RollingMarketCacheSnapshot,
 };
 pub use trading_timeline::{
     TradingTimeDirection, TradingTimeline, TradingTimelineBuildRequest,

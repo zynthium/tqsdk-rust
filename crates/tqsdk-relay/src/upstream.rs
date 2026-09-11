@@ -11,7 +11,9 @@ use serde_json::Value;
 use tqsdk_core::OutboundFrame;
 #[cfg(feature = "server")]
 use tqsdk_core::transport::{RawFrame, Transport, WebSocketTransport};
-use tqsdk_core::{Kline, Quote, Tick, TradingStatus};
+#[cfg(feature = "server")]
+use tqsdk_core::{Kline, Tick};
+use tqsdk_core::{Quote, TradingStatus};
 
 #[cfg(feature = "server")]
 const UPSTREAM_IDLE_PEEK_INTERVAL: Duration = Duration::from_secs(1);
@@ -156,6 +158,7 @@ type TickRowCache = BTreeMap<String, BTreeMap<i64, CachedTickRow>>;
 type KlineRowCache = BTreeMap<(String, i64), BTreeMap<i64, Value>>;
 type QuoteCache = BTreeMap<String, Value>;
 const LOSSLESS_TICK_CACHE_ROWS: usize = 10_000;
+#[cfg(feature = "server")]
 const LOSSLESS_TICK_DRAIN_CAPACITY: usize = 2_048;
 
 #[derive(Debug, Clone)]
@@ -190,6 +193,7 @@ impl CachedTickRow {
         })
     }
 
+    #[cfg(feature = "server")]
     fn lossless_tick(&self) -> Option<Tick> {
         serde_json::from_value(self.raw.clone()).ok()
     }
@@ -947,6 +951,31 @@ impl WebSocketUpstreamTickSource {
         Ok(())
     }
 
+    /// Reissues active official-Kline charts without changing subscribed state.
+    /// Provider rows correct tick-synthesized provisional tails.
+    pub(crate) async fn refresh_official_kline_tails(&mut self) -> RelayResult<()> {
+        let charts = self
+            .tick_charts
+            .values()
+            .filter(|chart| chart.duration_ns() > 0)
+            .cloned()
+            .collect::<Vec<_>>();
+        for chart in &charts {
+            self.send_tick_chart_subscription(chart).await?;
+        }
+        if !charts.is_empty() {
+            self.record_subscription_sent();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn tick_chart_symbols(&self) -> Vec<String> {
+        self.tick_charts
+            .values()
+            .flat_map(|chart| chart.symbols().iter().cloned())
+            .collect()
+    }
+
     async fn send_quote_subscription(&mut self, symbols: &BTreeSet<String>) -> RelayResult<()> {
         self.send_json(serde_json::json!({
             "aid": "subscribe_quote",
@@ -1202,6 +1231,11 @@ fn current_unix_secs() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
+#[cfg(feature = "server")]
+fn millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1267,9 +1301,4 @@ mod tests {
         assert_eq!(tick.amount, 4273.5);
         assert_eq!(tick.bid_price1, 610.4);
     }
-}
-
-#[cfg(feature = "server")]
-fn millis_u64(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }

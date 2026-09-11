@@ -23,6 +23,7 @@ mod metrics_http_impl;
 pub mod observability;
 pub mod protocol;
 pub mod pump;
+mod rolling_restore;
 mod rolling_writer;
 #[cfg(feature = "server")]
 pub mod runtime;
@@ -60,6 +61,7 @@ pub use protocol::{
     DownstreamCommand, RelayKlineRow, RelayMarketFrame, RelayTickRow, SetChartCommand,
 };
 pub use pump::{pump_available, pump_once};
+pub use rolling_restore::{RollingCacheRestoreReport, restore_rolling_cache};
 pub use rolling_writer::{RelayRollingCacheWriter, RollingWriterStatus};
 #[cfg(feature = "server")]
 pub use runtime::{

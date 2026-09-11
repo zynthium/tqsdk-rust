@@ -1,5 +1,8 @@
 # tqsdk-rust
 
+Relay 的 10,000 根滚动行情缓存、预热和按需订阅操作合同见
+[Relay rolling market cache](docs/architecture/relay-rolling-cache.md)。
+
 历史缓存统一容器正在工作区展开，尚未部署：daily/Minute/Tick 已接入新容器，真实
 缓存迁移与冷数据重分区尚未完成。不要直接用过渡构建覆盖现有程序；见
 [格式与切换状态](docs/architecture/history-cache-format.md)。

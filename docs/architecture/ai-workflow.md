@@ -34,6 +34,7 @@ TradingTimeline 只使用 V1 每产品单文件原子替换。涉及旧 pre-comp
 | crate 边界或 public API | [`README.md`](README.md)、[`crate-boundaries.md`](crate-boundaries.md) | 对应 `api-*.md`、contract example |
 | runtime / 状态 / cursor / command | [`runtime-core/overview.md`](runtime-core/overview.md) | `runtime-core/*.md`、[`validation.md`](validation.md) |
 | feature、用户入口或验证 | 根 README、目标 crate README | contract example、`validation.md` |
+| Relay rolling cache、预热、上游订阅或 writer durability | [`relay-rolling-cache.md`](relay-rolling-cache.md) | relay README、`validation.md`、upstream/rolling writer tests |
 | durable hard-risk / SQLite authority | [`api-hard-risk.md`](api-hard-risk.md)、[`crate-boundaries.md`](crate-boundaries.md)、目标 crate README | contract example、`validation.md`、migration/recovery tests |
 | Universe DSL、snapshot/timeline 或入口能力 | [`universe-language.md`](universe-language.md) | 受影响 crate README、contract example、`validation.md` |
 | 历史 universe proof、artifact、retry receipt 或 plan 持久化 | [`historical-universe-catalog.md`](historical-universe-catalog.md)、[`universe-language.md`](universe-language.md) | `tqsdk-data`/`tqsdk-cache` README、`validation.md` |

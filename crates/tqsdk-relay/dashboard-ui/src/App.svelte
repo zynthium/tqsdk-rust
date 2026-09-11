@@ -33,7 +33,7 @@
 
   let buckets = $derived(timelineBuckets(timeline, snapshot?.receivedAt ?? Date.now(), 60));
 
-  async function load(signal?: AbortSignal) {
+async function load(signal: AbortSignal) {
     const requestId = sequence + 1;
     sequence = requestId;
     const includeTimelineHistory = !timelineHistoryLoaded;
@@ -91,9 +91,22 @@
     <IntegrityHero {model} />
     <section class="grid items-stretch gap-2 max-[1100px]:grid-cols-1 [grid-template-columns:auto_minmax(0,1fr)]">
       <div class="flex gap-2 max-[1100px]:flex-wrap">
-        <MetricCard label="上游帧流" value={model.frameRate} unit="/s" tone="info" format="rate" icon="⌁" />
-        <MetricCard label="有效事件" value={model.eventRate} unit="/s" tone="accent" format="rate" icon="▥" />
-        <MetricCard label="下游客户端" value={model.metrics.downstream_clients} tone="info" icon="▤" />
+      <MetricCard label="上游帧流" value={model.frameRate} unit="/s" tone="info" format="rate" icon="⌁" />
+      <MetricCard label="有效事件" value={model.eventRate} unit="/s" tone="accent" format="rate" icon="▥" />
+      <MetricCard label="下游客户端" value={model.metrics.downstream_clients} tone="info" icon="▤" />
+      <MetricCard
+        label={`滚动缓存 E${model.metrics.rolling_cache_source_epoch ?? 0}`}
+        value={model.metrics.rolling_cache_durable_revision ?? 0}
+        unit={`/${model.metrics.rolling_cache_enqueued_revision ?? 0}`}
+        tone={model.metrics.rolling_cache_degraded ? 'bad' : 'accent'}
+        icon="▣"
+      />
+      <MetricCard
+        label="缓存重基线"
+        value={model.metrics.rolling_cache_discontinuities ?? 0}
+        tone={model.metrics.rolling_cache_discontinuities ? 'warn' : 'info'}
+        icon="↻"
+      />
       </div>
       <RelayPipeline {model} />
     </section>

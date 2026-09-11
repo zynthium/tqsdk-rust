@@ -39,6 +39,7 @@ minute、native daily 的统一 fill/progress/schema-v4 report，以及三类 in
  exclusion、legacy-first dispatcher、external files、入口能力矩阵和 V5 migration。
 
 - [Relay 内置只读历史查询 ADR](architecture/history-relay.md)：三 crate ownership、隔离、live-cache 即时可见性与 published rollback adapter。
+- [Relay 滚动行情缓存](architecture/relay-rolling-cache.md)：10,000 根独立滚动 tick/Kline、预热、按需订阅、官方尾端对账、恢复与观测。
 - [Relay History HTTP v1](architecture/history-relay-http.md)：严格请求、all-or-nothing JSON、typed error、ETag 与 gzip。
 - [History Snapshot Manifest v1](architecture/history-snapshot-manifest.md)：结构共享、manifest identity、lease、发布/恢复/GC。
 - [Canonical Kline 离线迁移](architecture/kline-cache-migration.md)：mandatory KLOG、外部备份、幂等迁移、停写门禁与回滚。

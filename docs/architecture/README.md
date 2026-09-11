@@ -1,5 +1,8 @@
 # tqsdk-rs 分层内核架构
 
+可选 relay 的独立滚动 tick/Kline 缓存、预热和按需订阅边界见
+[Relay rolling market cache](relay-rolling-cache.md)。
+
 统一历史容器已部署：daily/Minute/Tick 均使用 `TQHIST01`；Tick runtime 仅接受 schema 4。
 默认缓存 generation 迁移已完成；pre-schema-4 Tick 文件 fail closed，回滚旧备份必须配套冻结迁移器。
 Minute 使用 monthly.v6；Tick 热数据按日、封闭月份按月包。当前接入和平台限制见

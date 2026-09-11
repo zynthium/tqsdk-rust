@@ -127,6 +127,24 @@ fn config_loads_outbound_channel_capacity_from_env() {
 }
 
 #[test]
+fn runtime_config_prewarm_symbols_start_upstream_without_universe() {
+    let runtime = RelayRuntimeConfig::from_env_vars(|key| match key {
+        "TQSDK_RELAY_PREWARM_SYMBOLS" => Some(" SHFE.au2602, DCE.m2609,SHFE.au2602 ".to_owned()),
+        _ => None,
+    })
+    .unwrap();
+
+    assert!(runtime.has_upstream_futures_source());
+    assert_eq!(runtime.prewarm_symbols(), ["DCE.m2609", "SHFE.au2602"]);
+    let charts = runtime
+        .upstream_tick_charts_for_symbols(std::iter::empty::<&str>())
+        .unwrap();
+    assert_eq!(charts.len(), 2);
+    assert_eq!(charts[0].symbol(), "DCE.m2609");
+    assert_eq!(charts[1].symbol(), "SHFE.au2602");
+}
+
+#[test]
 fn debug_redacts_upstream_auth_pass() {
     let config = RelayConfig {
         upstream_auth_pass: Some("super-secret-password".to_string()),

@@ -35,6 +35,7 @@ const ENV_MARKET_CACHE_MAX_BYTES: &str = "TQSDK_RELAY_MARKET_CACHE_MAX_BYTES";
 const ENV_ROLLING_CACHE_DIR: &str = "TQSDK_RELAY_ROLLING_CACHE_DIR";
 const ENV_ROLLING_CACHE_SESSION_HASH: &str = "TQSDK_RELAY_ROLLING_CACHE_SESSION_HASH";
 const ENV_ROLLING_CACHE_ALGORITHM_VERSION: &str = "TQSDK_RELAY_ROLLING_CACHE_ALGORITHM_VERSION";
+const ENV_PREWARM_SYMBOLS: &str = "TQSDK_RELAY_PREWARM_SYMBOLS";
 const ENV_HISTORY_ROOT: &str = "TQSDK_RELAY_HISTORY_ROOT";
 const ENV_HISTORY_CACHE_DIR: &str = "TQSDK_RELAY_HISTORY_CACHE_DIR";
 const ENV_DRY_RUN: &str = "TQSDK_RELAY_DRY_RUN";
@@ -591,6 +592,7 @@ pub struct RelayRuntimeConfig {
     resource_limits: RelayResourceLimits,
     futures_universe_spec: Option<UniverseSpec>,
     futures_universe_symbol_files: Vec<PathBuf>,
+    prewarm_symbols: Vec<String>,
     rolling_cache: Option<RollingCacheConfig>,
 }
 
@@ -605,6 +607,7 @@ impl fmt::Debug for RelayRuntimeConfig {
                 "futures_universe_symbol_files",
                 &self.futures_universe_symbol_files,
             )
+            .field("prewarm_symbols", &self.prewarm_symbols)
             .field("rolling_cache", &self.rolling_cache)
             .finish()
     }
@@ -630,6 +633,7 @@ impl RelayRuntimeConfig {
             resource_limits: RelayResourceLimits::defaults(),
             futures_universe_spec: None,
             futures_universe_symbol_files: Vec::new(),
+            prewarm_symbols: Vec::new(),
             rolling_cache: None,
         }
     }
@@ -641,6 +645,7 @@ impl RelayRuntimeConfig {
     pub fn from_env_vars(mut get: impl FnMut(&str) -> Option<String>) -> RelayResult<Self> {
         let universe = get(ENV_FUTURES_UNIVERSE);
         let universe_files = get(ENV_FUTURES_UNIVERSE_FILES);
+        let prewarm_symbols = get(ENV_PREWARM_SYMBOLS);
         let outbound_byte_capacity = get(ENV_OUTBOUND_BYTE_CAPACITY);
         let market_cache_max_symbols = get(ENV_MARKET_CACHE_MAX_SYMBOLS);
         let market_cache_max_bytes = get(ENV_MARKET_CACHE_MAX_BYTES);
@@ -672,6 +677,7 @@ impl RelayRuntimeConfig {
         if let Some(universe) = universe {
             config.set_futures_universe(&universe)?;
         }
+        config.prewarm_symbols = parse_prewarm_symbols(prewarm_symbols.as_deref())?;
         if let Some(universe_files) = universe_files {
             config.futures_universe_symbol_files = std::env::split_paths(&universe_files).collect();
         }
@@ -759,6 +765,37 @@ impl RelayRuntimeConfig {
         &self.futures_universe_symbol_files
     }
 
+    #[must_use]
+    pub fn prewarm_symbols(&self) -> &[String] {
+        &self.prewarm_symbols
+    }
+
+    pub fn with_prewarm_symbols<I, S>(mut self, symbols: I) -> RelayResult<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.prewarm_symbols = normalize_prewarm_symbols(symbols)?;
+        Ok(self)
+    }
+
+    pub fn upstream_tick_charts_for_symbols<I, S>(
+        &self,
+        symbols: I,
+    ) -> RelayResult<Vec<UpstreamTickChart>>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut symbols = symbols
+            .into_iter()
+            .map(|symbol| symbol.as_ref().to_owned())
+            .collect::<Vec<_>>();
+        symbols.extend(self.prewarm_symbols.iter().cloned());
+        self.relay
+            .upstream_tick_charts_for_symbols(symbols.iter().map(String::as_str))
+    }
+
     pub fn with_futures_universe(mut self, expression: impl AsRef<str>) -> RelayResult<Self> {
         self.set_futures_universe(expression.as_ref())?;
         Ok(self)
@@ -797,6 +834,7 @@ impl RelayRuntimeConfig {
         self.relay.has_upstream_futures_source()
             || self.futures_universe_spec.is_some()
             || !self.futures_universe_symbol_files.is_empty()
+            || !self.prewarm_symbols.is_empty()
     }
 
     #[must_use]
@@ -902,6 +940,35 @@ fn parse_positive_usize_env(name: &str, value: &str) -> RelayResult<usize> {
         )));
     }
     Ok(parsed)
+}
+
+fn parse_prewarm_symbols(value: Option<&str>) -> RelayResult<Vec<String>> {
+    value.map_or(Ok(Vec::new()), |value| {
+        normalize_prewarm_symbols(value.split(','))
+    })
+}
+
+fn normalize_prewarm_symbols<I, S>(symbols: I) -> RelayResult<Vec<String>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut normalized = Vec::new();
+    for symbol in symbols {
+        let symbol = symbol.as_ref().trim();
+        if symbol.is_empty() {
+            continue;
+        }
+        if symbol.len() > 4096 || symbol.chars().any(char::is_control) {
+            return Err(RelayError::invalid_config(
+                "prewarm symbol must be nonempty printable and bounded",
+            ));
+        }
+        normalized.push(symbol.to_owned());
+    }
+    normalized.sort();
+    normalized.dedup();
+    Ok(normalized)
 }
 
 fn parse_bool_env(name: &str, value: &str) -> RelayResult<bool> {

@@ -1,5 +1,8 @@
 # tqsdk-relay
 
+滚动行情缓存、预热合约、按需订阅、官方 Kline 尾端对账与 writer 指标见
+[Relay rolling market cache](../../docs/architecture/relay-rolling-cache.md)。
+
 `tqsdk-relay` 是 `tqsdk-rust` 的可选行情中继和内存缓存服务。它位于 SDK 客户端
 与天勤行情 websocket 之间，让多个本地 SDK 进程共享一个上游期货 tick 源，而不是
 各自展开 quote 和 K 线订阅。
@@ -112,7 +115,7 @@ TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1 \
 cargo run -p tqsdk-relay
 ```
 
-`view_width=1` 只要求最小窗口；当前 relay 不允许 `0`，因为上游是否接受完全不取历史尚未作为稳定协议验证。配置 universe 启动阶段只发送 quote，不再为全量 universe 立即发送 tick chart，也不主动发送 trading status 订阅。
+`view_width=1` 只要求最小窗口；当前 relay 不允许 `0`，因为上游是否接受完全不取历史尚未作为稳定协议验证。设置非空 `TQSDK_RELAY_PREWARM_SYMBOLS` 时，启动只为该集合打开 tick chart，其他合约在下游请求后立即补订；未设置时保留既有的 resolved-universe tick-chart 启动行为。两种模式都不会主动发送 trading status 订阅。
 
 如果只需要每个品种的主力和次主力，用 `top:2:all`：
 
@@ -260,6 +263,7 @@ cargo check -p tqsdk-relay --no-default-features --features history
 | --- | --- | --- |
 | `TQSDK_RELAY_FUTURES_UNIVERSE` | 空 | legacy-first universe 字符串。推荐 V2 `contract/main/top/continuous/index/symbol`；`snapshot(...)` 强制 V2，`timeline(...)` 在触网前拒绝。 |
 | `TQSDK_RELAY_FUTURES_UNIVERSE_FILES` | 空 | 平台 path-list 格式的 external exact-symbol files；可与 V2 expression 合并，每次刷新只在全部读取/编译成功后替换上游。 |
+| `TQSDK_RELAY_PREWARM_SYMBOLS` | 空 | 逗号分隔的启动 tick-chart 预热集合；非空时只预热此集合，其他 chart 按下游请求补订；空值保持 legacy universe bootstrap。 |
 | `TQ_AUTH_USER` | 空 | 动态 contract/main/top/continuous/index 发现需要的天勤账号；纯 `symbol:` / external files 不需要。 |
 | `TQ_AUTH_PASS` | 空 | 动态 contract/main/top/continuous/index 发现需要的天勤密码；纯 `symbol:` / external files 不需要。 |
 | `TQSDK_RELAY_DRY_RUN` | `false` | 设置为 `1` / `true` / `yes` / `on` 时执行启动自检并输出 JSON 诊断后退出。 |
@@ -578,8 +582,9 @@ tick 的窗口创建空 K 线，也不会使用本地墙钟强行收 K 线。
   连接不会被主动断开。
 - 产品发现模式依赖 `TQ_AUTH_USER` / `TQ_AUTH_PASS` 做 relay 内部 metadata 查询；这些
   凭证不会下发给下游 SDK 客户端。
-- 当前缓存是内存态。重启 relay 会丢失 tick、quote、K 线物化状态和 dashboard
-  5 分钟热力图历史。
+- 默认缓存仍是内存态。启用 `TQSDK_RELAY_ROLLING_CACHE_DIR` 后，10,000 根 tick 和官方
+  K 线滚动视图会在启动时恢复；quote、非官方 K 线物化状态和 dashboard 5 分钟热力图历史
+  仍只在内存中保存。
 
 ## 开发
 

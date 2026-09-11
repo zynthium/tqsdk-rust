@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use tqsdk_core::{Quote, TradingStatus};
+use tqsdk_core::{Kline, Quote, Tick, TradingStatus};
 
 use crate::bootstrap::{BootstrapQueue, BootstrapRequest};
 use crate::cache::{MarketCache, MarketCacheLimits, MarketCacheWriteReport};
@@ -24,6 +24,7 @@ use crate::observability::{
     RelaySourceStatus,
 };
 use crate::protocol::{DownstreamCommand, RelayKlineRow, RelayMarketFrame, RelayTickRow};
+use crate::rolling_writer::RollingWriterStatus;
 use crate::symbol_metrics::{
     SymbolMetricsQuery, SymbolMetricsSnapshot, SymbolTelemetryStore, parse_quote_datetime_ns,
 };
@@ -132,6 +133,7 @@ pub struct RelayEngine {
     bootstrap: BootstrapQueue,
     klines: HashMap<KlineSourceKey, KlineSynthesis>,
     completed_klines: BTreeMap<KlineSourceKey, VecDeque<RelayKlineRow>>,
+    persisted_official_klines: BTreeMap<KlineSourceKey, VecDeque<RelayKlineRow>>,
     official_kline_sources: BTreeSet<KlineSourceKey>,
     symbol_metrics: SymbolTelemetryStore,
     upstream_status: RelaySourceStatus,
@@ -148,6 +150,7 @@ pub struct RelayEngine {
     ticks_ingested: u64,
     cache_evicted_symbols: u64,
     cache_admission_drops: u64,
+    rolling_writer_status: RollingWriterStatus,
     upstream_symbols: usize,
     upstream_base_symbols: BTreeSet<String>,
     upstream_subscribed_symbols: BTreeSet<String>,
@@ -176,6 +179,7 @@ impl RelayEngine {
             bootstrap: BootstrapQueue::new(4, Duration::from_millis(250)),
             klines: HashMap::new(),
             completed_klines: BTreeMap::new(),
+            persisted_official_klines: BTreeMap::new(),
             official_kline_sources: BTreeSet::new(),
             symbol_metrics: SymbolTelemetryStore::default(),
             upstream_status: RelaySourceStatus::Connecting,
@@ -192,6 +196,7 @@ impl RelayEngine {
             ticks_ingested: 0,
             cache_evicted_symbols: 0,
             cache_admission_drops: 0,
+            rolling_writer_status: RollingWriterStatus::default(),
             upstream_symbols: 0,
             upstream_base_symbols: BTreeSet::new(),
             upstream_subscribed_symbols: BTreeSet::new(),
@@ -356,6 +361,13 @@ impl RelayEngine {
             .filter(|source| source.duration_ns == duration_ns)
             .collect::<Vec<_>>();
         let mut frames = Vec::new();
+        self.record_persisted_official_kline(
+            &KlineSourceKey {
+                duration_ns,
+                symbol: symbol.to_owned(),
+            },
+            &row,
+        );
         for source in sources {
             let key = KlineSourceKey::new(&source, symbol);
             self.official_kline_sources.insert(key.clone());
@@ -385,6 +397,36 @@ impl RelayEngine {
             }
         }
         Ok(frames)
+    }
+
+    /// Restores durable lossless ticks before downstream clients connect.
+    pub fn restore_rolling_ticks(&mut self, symbol: &str, rows: &[Tick]) {
+        for row in rows {
+            let report = self.cache.push_tick(symbol, relay_tick_from_core(row));
+            self.record_cache_write(report);
+        }
+    }
+
+    /// Restores durable official Klines before downstream clients connect.
+    pub fn restore_official_rolling_klines(
+        &mut self,
+        symbol: &str,
+        duration_ns: i64,
+        rows: &[Kline],
+    ) -> RelayResult<()> {
+        if duration_ns <= 0 {
+            return Err(crate::error::RelayError::invalid_protocol(
+                "restored official Kline duration must be positive",
+            ));
+        }
+        let key = KlineSourceKey {
+            duration_ns,
+            symbol: symbol.to_owned(),
+        };
+        for row in rows {
+            self.record_persisted_official_kline(&key, &relay_kline_from_core(row));
+        }
+        Ok(())
     }
 
     pub fn ingest_trading_status(
@@ -437,6 +479,10 @@ impl RelayEngine {
         if !report.stored {
             self.cache_admission_drops = self.cache_admission_drops.saturating_add(1);
         }
+    }
+
+    pub fn record_rolling_writer_status(&mut self, status: RollingWriterStatus) {
+        self.rolling_writer_status = status;
     }
 
     pub fn remove_client(&mut self, client_id: ClientId) {
@@ -968,6 +1014,11 @@ impl RelayEngine {
             market_cache_max_retained_bytes: self.cache.limits().max_retained_bytes,
             market_cache_evicted_symbols: self.cache_evicted_symbols,
             market_cache_admission_drops: self.cache_admission_drops,
+            rolling_cache_source_epoch: self.rolling_writer_status.source_epoch,
+            rolling_cache_enqueued_revision: self.rolling_writer_status.enqueued_revision,
+            rolling_cache_durable_revision: self.rolling_writer_status.durable_revision,
+            rolling_cache_discontinuities: self.rolling_writer_status.discontinuities,
+            rolling_cache_degraded: self.rolling_writer_status.degraded,
             bootstrap_pending: self.bootstrap.len(),
             bootstrap_inflight: self.bootstrap.inflight(),
             upstream_stage: self.upstream_stage,
@@ -1194,6 +1245,11 @@ impl RelayEngine {
         let mut frames = Vec::new();
         for symbol in &source.symbols {
             let key = KlineSourceKey::new(source, symbol);
+            if let Some(rows) = self.persisted_official_klines.get(&key).cloned() {
+                self.official_kline_sources.insert(key.clone());
+                self.klines.remove(&key);
+                self.completed_klines.insert(key.clone(), rows);
+            }
             if !self.klines.contains_key(&key) {
                 let Some(ticks) = self.cache.tick_ring(symbol) else {
                     continue;
@@ -1250,6 +1306,22 @@ impl RelayEngine {
         let kline_capacity = self.cache.kline_capacity();
         let rows = self.completed_klines.entry(key.clone()).or_default();
         if rows.back().is_some_and(|last| last.id == row.id) {
+            return;
+        }
+        rows.push_back(row.clone());
+        while rows.len() > kline_capacity {
+            let _ = rows.pop_front();
+        }
+    }
+
+    fn record_persisted_official_kline(&mut self, key: &KlineSourceKey, row: &RelayKlineRow) {
+        let kline_capacity = self.cache.kline_capacity();
+        let rows = self
+            .persisted_official_klines
+            .entry(key.clone())
+            .or_default();
+        if let Some(existing) = rows.iter_mut().find(|existing| existing.id == row.id) {
+            *existing = row.clone();
             return;
         }
         rows.push_back(row.clone());
@@ -1444,6 +1516,30 @@ fn quote_to_synthetic_tick(quote: &Quote) -> Option<RelayTickRow> {
     })
 }
 
+fn relay_tick_from_core(row: &Tick) -> RelayTickRow {
+    RelayTickRow {
+        id: row.id,
+        datetime: row.datetime,
+        last_price: row.last_price,
+        volume: row.volume,
+        open_interest: row.open_interest,
+    }
+}
+
+fn relay_kline_from_core(row: &Kline) -> RelayKlineRow {
+    RelayKlineRow {
+        id: row.id,
+        datetime: row.datetime,
+        open: row.open,
+        high: row.high,
+        low: row.low,
+        close: row.close,
+        volume: row.volume,
+        open_oi: row.open_oi,
+        close_oi: row.close_oi,
+    }
+}
+
 fn invalid_row_error_symbol(message: &str) -> Option<&str> {
     message.split_once(" row ").map(|(symbol, _)| symbol)
 }
@@ -1534,6 +1630,63 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().any(|row| row.datetime == 60));
         assert!(rows.iter().any(|row| row.datetime == 120));
+    }
+
+    #[test]
+    fn rolling_writer_status_is_exposed_in_metrics_and_dashboard() {
+        let mut engine = RelayEngine::new_memory_only(16, 4);
+        engine.record_rolling_writer_status(RollingWriterStatus {
+            source_epoch: 3,
+            enqueued_revision: 9,
+            durable_revision: 8,
+            discontinuities: 1,
+            degraded: true,
+        });
+
+        let metrics = engine.metrics_snapshot();
+        assert_eq!(metrics.rolling_cache_source_epoch, 3);
+        assert_eq!(metrics.rolling_cache_enqueued_revision, 9);
+        assert_eq!(metrics.rolling_cache_durable_revision, 8);
+        assert_eq!(metrics.rolling_cache_discontinuities, 1);
+        assert!(metrics.rolling_cache_degraded);
+        assert!(
+            engine
+                .dashboard_snapshot_at(1_000, &SymbolMetricsQuery::default())
+                .metrics
+                .rolling_cache_degraded
+        );
+    }
+
+    #[test]
+    fn restored_official_klines_are_preferred_over_tick_synthesis() {
+        let mut engine = RelayEngine::new_memory_only(16, 4);
+        engine
+            .restore_official_rolling_klines(
+                "SHFE.au2602",
+                60,
+                &[Kline {
+                    id: 7,
+                    datetime: 60,
+                    open: 600.0,
+                    high: 602.0,
+                    low: 599.0,
+                    close: 601.0,
+                    volume: 10,
+                    open_oi: 20,
+                    close_oi: 21,
+                    ..Kline::default()
+                }],
+            )
+            .unwrap();
+
+        let frames = engine
+            .handle_command(ClientId::new(1), chart("SHFE.au2602"))
+            .unwrap();
+
+        assert!(frames.is_empty());
+        assert!(engine.klines.is_empty());
+        assert_eq!(engine.completed_klines.values().next().unwrap()[0].id, 7);
+        assert_eq!(engine.official_kline_sources.len(), 1);
     }
 
     #[test]

@@ -567,12 +567,11 @@ fn tick(id: i64, datetime: i64, price: f64) -> RelayTickRow {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn relay_configured_upstream_reconciles_removed_downstream_chart() {
+async fn relay_configured_upstream_retains_removed_downstream_chart_during_idle_grace() {
     use websocket_support::TestWebSocketServer;
 
     let (added_tx, added_rx) = std::sync::mpsc::channel();
     let (remove_tx, remove_rx) = std::sync::mpsc::channel();
-    let (removed_tx, removed_rx) = std::sync::mpsc::channel();
     let upstream = TestWebSocketServer::spawn(move |mut socket| {
         expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         expect_subscribe_quote(&mut socket, "DCE.m2609,SHFE.au2602");
@@ -582,18 +581,7 @@ async fn relay_configured_upstream_reconciles_removed_downstream_chart() {
         added_tx.send(()).unwrap();
 
         remove_rx.recv().unwrap();
-        expect_subscribe_quote(&mut socket, "SHFE.au2602");
-        expect_peek_message(&mut socket);
-        let deletion = recv_text_json(&mut socket, "set_chart deletion");
-        assert_eq!(deletion["aid"], "set_chart");
-        assert!(
-            deletion["chart_id"]
-                .as_str()
-                .is_some_and(|id| !id.is_empty())
-        );
-        assert_eq!(deletion["ins_list"], "");
-        expect_peek_message(&mut socket);
-        removed_tx.send(()).unwrap();
+        // The former chart remains upstream for the 10-minute idle grace.
         socket.send_close().unwrap();
     })
     .unwrap();
@@ -643,10 +631,10 @@ async fn relay_configured_upstream_reconciles_removed_downstream_chart() {
         .to_string(),
     )
     .await;
-    wait_for_dynamic_subscription(removed_rx).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(
         engine.lock().unwrap().metrics_snapshot().upstream_symbols,
-        1
+        2
     );
 
     stream.shutdown().await.unwrap();
@@ -655,11 +643,10 @@ async fn relay_configured_upstream_reconciles_removed_downstream_chart() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn relay_configured_upstream_reconciles_client_disconnect() {
+async fn relay_configured_upstream_retains_disconnected_chart_during_idle_grace() {
     use websocket_support::TestWebSocketServer;
 
     let (added_tx, added_rx) = std::sync::mpsc::channel();
-    let (removed_tx, removed_rx) = std::sync::mpsc::channel();
     let upstream = TestWebSocketServer::spawn(move |mut socket| {
         expect_initial_universe_subscriptions(&mut socket, "SHFE.au2602");
         expect_subscribe_quote(&mut socket, "DCE.m2609,SHFE.au2602");
@@ -668,18 +655,7 @@ async fn relay_configured_upstream_reconciles_client_disconnect() {
         expect_peek_message(&mut socket);
         added_tx.send(()).unwrap();
 
-        expect_subscribe_quote(&mut socket, "SHFE.au2602");
-        expect_peek_message(&mut socket);
-        let deletion = recv_text_json(&mut socket, "set_chart deletion after disconnect");
-        assert_eq!(deletion["aid"], "set_chart");
-        assert!(
-            deletion["chart_id"]
-                .as_str()
-                .is_some_and(|id| !id.is_empty())
-        );
-        assert_eq!(deletion["ins_list"], "");
-        expect_peek_message(&mut socket);
-        removed_tx.send(()).unwrap();
+        // The disconnected chart remains upstream for the 10-minute idle grace.
         socket.send_close().unwrap();
     })
     .unwrap();
@@ -720,10 +696,10 @@ async fn relay_configured_upstream_reconciles_client_disconnect() {
 
     stream.shutdown().await.unwrap();
     server_task.await.unwrap();
-    wait_for_dynamic_subscription(removed_rx).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(
         engine.lock().unwrap().metrics_snapshot().upstream_symbols,
-        1
+        2
     );
     upstream.join();
 }
