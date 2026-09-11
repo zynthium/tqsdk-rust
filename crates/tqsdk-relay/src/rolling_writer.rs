@@ -10,7 +10,8 @@ use tqsdk_data::{RollingMarketCache, RollingMarketCacheKind, RollingMarketCacheM
 use crate::config::RollingCacheConfig;
 use crate::error::{RelayError, RelayResult};
 
-const WRITER_QUEUE_CAPACITY: usize = 2_048;
+/// Holds one complete 10,000-row upstream bootstrap plus reconnect slack.
+const WRITER_QUEUE_CAPACITY: usize = 12_000;
 
 enum WriteIntent {
     SourceEpoch(u64),
@@ -36,6 +37,13 @@ pub struct RelayRollingCacheWriter {
 
 impl RelayRollingCacheWriter {
     pub fn start(config: &RollingCacheConfig) -> RelayResult<Self> {
+        Self::start_with_queue_capacity(config, WRITER_QUEUE_CAPACITY)
+    }
+
+    fn start_with_queue_capacity(
+        config: &RollingCacheConfig,
+        queue_capacity: usize,
+    ) -> RelayResult<Self> {
         let cache = RollingMarketCache::open(
             config.root().clone(),
             config.capacity(),
@@ -44,7 +52,7 @@ impl RelayRollingCacheWriter {
         )
         .map_err(|error| RelayError::invalid_config(error.to_string()))?;
         let source_epoch_floor = rolling_cache_source_epoch_floor(&cache)?;
-        let (sender, mut receiver) = mpsc::channel::<WriteIntent>(WRITER_QUEUE_CAPACITY);
+        let (sender, mut receiver) = mpsc::channel::<WriteIntent>(queue_capacity);
         let status = Arc::new(Mutex::new(RollingWriterStatus::default()));
         let next_source_epoch = Arc::new(std::sync::atomic::AtomicU64::new(source_epoch_floor));
         let task_status = Arc::clone(&status);
@@ -225,26 +233,15 @@ impl RelayRollingCacheWriter {
             .next_source_epoch
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             .saturating_add(1);
-        self.sender
-            .try_send(WriteIntent::SourceEpoch(epoch))
-            .map_err(|error| {
-                if let Ok(mut status) = self.status.lock() {
-                    status.degraded = true;
-                }
-                RelayError::Internal(format!("rolling cache writer unavailable: {error}"))
-            })
+        let _ = self.try_enqueue(WriteIntent::SourceEpoch(epoch));
+        Ok(())
     }
 
     pub fn enqueue(&self, ticks: Vec<(String, Tick)>) -> RelayResult<()> {
         for tick in ticks {
-            self.sender
-                .try_send(WriteIntent::Tick(tick.0, tick.1))
-                .map_err(|error| {
-                    if let Ok(mut status) = self.status.lock() {
-                        status.degraded = true;
-                    }
-                    RelayError::Internal(format!("rolling cache writer unavailable: {error}"))
-                })?;
+            if !self.try_enqueue(WriteIntent::Tick(tick.0, tick.1)) {
+                break;
+            }
             if let Ok(mut status) = self.status.lock() {
                 status.enqueued_revision = status.enqueued_revision.saturating_add(1);
             }
@@ -254,14 +251,9 @@ impl RelayRollingCacheWriter {
 
     pub fn enqueue_klines(&self, klines: Vec<(String, i64, Kline)>) -> RelayResult<()> {
         for (symbol, duration_ns, row) in klines {
-            self.sender
-                .try_send(WriteIntent::Kline(symbol, duration_ns, row))
-                .map_err(|error| {
-                    if let Ok(mut status) = self.status.lock() {
-                        status.degraded = true;
-                    }
-                    RelayError::Internal(format!("rolling cache writer unavailable: {error}"))
-                })?;
+            if !self.try_enqueue(WriteIntent::Kline(symbol, duration_ns, row)) {
+                break;
+            }
             if let Ok(mut status) = self.status.lock() {
                 status.enqueued_revision = status.enqueued_revision.saturating_add(1);
             }
@@ -278,6 +270,16 @@ impl RelayRollingCacheWriter {
                 degraded: true,
                 ..RollingWriterStatus::default()
             })
+    }
+
+    fn try_enqueue(&self, intent: WriteIntent) -> bool {
+        if self.sender.try_send(intent).is_ok() {
+            return true;
+        }
+        if let Ok(mut status) = self.status.lock() {
+            status.degraded = true;
+        }
+        false
     }
 }
 
@@ -441,6 +443,92 @@ mod tests {
         let rows = cache.load_ticks("SHFE.au2602").unwrap().unwrap().rows;
         assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![9]);
         assert_eq!(writer.status().discontinuities, 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn saturated_writer_drops_cache_rows_without_failing_market_pump() {
+        let root = std::env::temp_dir().join(format!(
+            "relay-rolling-writer-saturated-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let config = RollingCacheConfig::new(&root, "session-v1", 1).unwrap();
+        let writer = RelayRollingCacheWriter::start_with_queue_capacity(&config, 1).unwrap();
+
+        assert!(
+            writer
+                .enqueue(vec![
+                    (
+                        "SHFE.au2602".to_owned(),
+                        Tick {
+                            id: 1,
+                            ..Tick::default()
+                        },
+                    ),
+                    (
+                        "SHFE.au2602".to_owned(),
+                        Tick {
+                            id: 2,
+                            ..Tick::default()
+                        },
+                    ),
+                ])
+                .is_ok()
+        );
+        assert!(writer.status().degraded);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn saturated_writer_drops_epoch_barrier_without_stopping_reconnect() {
+        let root = std::env::temp_dir().join(format!(
+            "relay-rolling-writer-saturated-epoch-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let config = RollingCacheConfig::new(&root, "session-v1", 1).unwrap();
+        let writer = RelayRollingCacheWriter::start_with_queue_capacity(&config, 1).unwrap();
+
+        writer.begin_source_epoch().unwrap();
+        assert!(writer.begin_source_epoch().is_ok());
+        assert!(writer.status().degraded);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn default_writer_accepts_one_complete_rolling_window() {
+        let root = std::env::temp_dir().join(format!(
+            "relay-rolling-writer-window-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let config = RollingCacheConfig::new(&root, "session-v1", 1).unwrap();
+        let writer = RelayRollingCacheWriter::start(&config).unwrap();
+        let rows = (0..10_000)
+            .map(|id| {
+                (
+                    "SHFE.au2602".to_owned(),
+                    Tick {
+                        id,
+                        ..Tick::default()
+                    },
+                )
+            })
+            .collect();
+
+        writer.enqueue(rows).unwrap();
+        assert_eq!(writer.status().enqueued_revision, 10_000);
+        assert!(!writer.status().degraded);
         let _ = std::fs::remove_dir_all(root);
     }
 

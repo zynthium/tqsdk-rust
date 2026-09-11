@@ -21,11 +21,12 @@ the CacheOnly history store and never shares a root with it.
   tick and official-Kline charts are removed upstream.
 - Active official-Kline charts are reissued every 300 seconds. Returned rows
   merge into the bounded official tail and supersede provisional local rows.
-- Writer input is bounded. Queue overflow or a malformed durable entry marks
-  the writer degraded; operators must not treat that cache as a warm baseline.
-  A tick ID discontinuity rebaselines its persisted ring rather than joining
-  two unknown sequences.
-  Source epochs increase across reconnect and process restart.
+- Writer input is bounded to one complete 10,000-row bootstrap plus reconnect
+  slack. Queue overflow drops only cache rows and marks the writer degraded; it
+  never interrupts official upstream forwarding, and operators must not treat
+  that cache as a warm baseline. A tick ID discontinuity rebaselines its
+  persisted ring rather than joining two unknown sequences. Source epochs
+  increase across reconnect and process restart.
 
 ## Operations
 
