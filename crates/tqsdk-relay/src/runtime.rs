@@ -403,6 +403,7 @@ async fn pump_configured_upstream_until(
             update = source.next_update() => {
                 if let Some(rolling_writer) = rolling_writer {
                     rolling_writer.enqueue(source.drain_lossless_ticks())?;
+                    rolling_writer.enqueue_klines(source.drain_official_klines())?;
                     if source.take_lossless_tick_overflow() {
                         return Err(RelayError::Internal(
                             "rolling cache source queue overflowed".to_owned(),

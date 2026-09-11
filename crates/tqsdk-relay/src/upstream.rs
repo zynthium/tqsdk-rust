@@ -11,7 +11,7 @@ use serde_json::Value;
 use tqsdk_core::OutboundFrame;
 #[cfg(feature = "server")]
 use tqsdk_core::transport::{RawFrame, Transport, WebSocketTransport};
-use tqsdk_core::{Quote, Tick, TradingStatus};
+use tqsdk_core::{Kline, Quote, Tick, TradingStatus};
 
 #[cfg(feature = "server")]
 const UPSTREAM_IDLE_PEEK_INTERVAL: Duration = Duration::from_secs(1);
@@ -757,6 +757,7 @@ pub struct WebSocketUpstreamTickSource {
     buffered: VecDeque<UpstreamMarketEvent>,
     tick_row_cache: TickRowCache,
     lossless_ticks: VecDeque<(String, Tick)>,
+    official_klines: VecDeque<(String, i64, Kline)>,
     lossless_tick_overflow: bool,
     kline_row_cache: KlineRowCache,
     quote_cache: QuoteCache,
@@ -785,6 +786,7 @@ impl WebSocketUpstreamTickSource {
             buffered: VecDeque::new(),
             tick_row_cache: TickRowCache::default(),
             lossless_ticks: VecDeque::new(),
+            official_klines: VecDeque::new(),
             lossless_tick_overflow: false,
             kline_row_cache: KlineRowCache::default(),
             quote_cache: QuoteCache::default(),
@@ -861,6 +863,10 @@ impl WebSocketUpstreamTickSource {
     #[must_use]
     pub fn take_lossless_tick_overflow(&mut self) -> bool {
         std::mem::take(&mut self.lossless_tick_overflow)
+    }
+
+    pub fn drain_official_klines(&mut self) -> Vec<(String, i64, Kline)> {
+        self.official_klines.drain(..).collect()
     }
 
     pub async fn subscribe_tick_charts(&mut self, charts: &[UpstreamTickChart]) -> RelayResult<()> {
@@ -1078,6 +1084,28 @@ impl WebSocketUpstreamTickSource {
                         .push_back((tick.symbol.clone(), lossless));
                 }
             }
+        }
+        for kline in report.klines() {
+            if self.official_klines.len() >= LOSSLESS_TICK_DRAIN_CAPACITY {
+                self.lossless_tick_overflow = true;
+                continue;
+            }
+            self.official_klines.push_back((
+                kline.symbol.clone(),
+                kline.duration_ns,
+                Kline {
+                    id: kline.row.id,
+                    datetime: kline.row.datetime,
+                    open: kline.row.open,
+                    high: kline.row.high,
+                    low: kline.row.low,
+                    close: kline.row.close,
+                    volume: kline.row.volume,
+                    open_oi: kline.row.open_oi,
+                    close_oi: kline.row.close_oi,
+                    epoch: None,
+                },
+            ));
         }
         Ok(report)
     }
