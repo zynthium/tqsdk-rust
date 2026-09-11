@@ -23,6 +23,7 @@ mod metrics_http_impl;
 pub mod observability;
 pub mod protocol;
 pub mod pump;
+mod rolling_writer;
 #[cfg(feature = "server")]
 pub mod runtime;
 #[cfg(feature = "server")]
@@ -59,6 +60,7 @@ pub use protocol::{
     DownstreamCommand, RelayKlineRow, RelayMarketFrame, RelayTickRow, SetChartCommand,
 };
 pub use pump::{pump_available, pump_once};
+pub use rolling_writer::{RelayRollingCacheWriter, RollingWriterStatus};
 #[cfg(feature = "server")]
 pub use runtime::{
     connect_configured_upstream, connect_configured_upstream_with_runtime_config,

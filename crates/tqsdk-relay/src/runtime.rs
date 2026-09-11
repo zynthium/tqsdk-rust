@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config::{RelayConfig, RelayRuntimeConfig};
 use crate::error::RelayError;
 use crate::error::RelayResult;
+use crate::rolling_writer::RelayRollingCacheWriter;
 use crate::server::RelayServer;
 #[cfg(feature = "metadata")]
 use crate::universe::SessionFuturesUniverseResolver;
@@ -302,10 +303,14 @@ pub async fn spawn_configured_upstream_pump_with_runtime_config_and_retry_interv
     if !config.has_upstream_futures_source() {
         return Ok(None);
     }
+    let rolling_writer = config
+        .rolling_cache()
+        .map(RelayRollingCacheWriter::start)
+        .transpose()?;
     let config = config.clone();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     tokio::spawn(async move {
-        run_upstream_retry_loop(config, server, retry_interval, shutdown_rx).await;
+        run_upstream_retry_loop(config, server, retry_interval, shutdown_rx, rolling_writer).await;
     });
     Ok(Some(shutdown_tx))
 }
@@ -315,6 +320,7 @@ async fn run_upstream_retry_loop(
     server: RelayServer,
     retry_interval: Duration,
     mut shutdown: oneshot::Receiver<()>,
+    rolling_writer: Option<RelayRollingCacheWriter>,
 ) {
     loop {
         match connect_configured_upstream_for_pump(&config, &server).await {
@@ -326,6 +332,7 @@ async fn run_upstream_retry_loop(
                     &mut upstream.source,
                     retry_interval,
                     &mut shutdown,
+                    rolling_writer.as_ref(),
                 )
                 .await
                 {
@@ -362,6 +369,7 @@ async fn pump_configured_upstream_until(
     source: &mut WebSocketUpstreamTickSource,
     retry_interval: Duration,
     shutdown: &mut oneshot::Receiver<()>,
+    rolling_writer: Option<&RelayRollingCacheWriter>,
 ) -> RelayResult<UpstreamPumpExit> {
     let refresh_enabled = config.refreshes_futures_universe();
     let refresh = tokio::time::sleep(next_universe_refresh_delay(config.relay_config()));
@@ -393,6 +401,14 @@ async fn pump_configured_upstream_until(
                 .await?;
             }
             update = source.next_update() => {
+                if let Some(rolling_writer) = rolling_writer {
+                    rolling_writer.enqueue(source.drain_lossless_ticks())?;
+                    if source.take_lossless_tick_overflow() {
+                        return Err(RelayError::Internal(
+                            "rolling cache source queue overflowed".to_owned(),
+                        ));
+                    }
+                }
                 let progress = source.take_progress();
                 let invalid_rows = source.take_invalid_tick_rows();
                 let invalid_rows_by_symbol = source.take_invalid_tick_rows_by_symbol();

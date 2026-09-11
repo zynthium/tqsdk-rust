@@ -11,7 +11,7 @@ use serde_json::Value;
 use tqsdk_core::OutboundFrame;
 #[cfg(feature = "server")]
 use tqsdk_core::transport::{RawFrame, Transport, WebSocketTransport};
-use tqsdk_core::{Quote, TradingStatus};
+use tqsdk_core::{Quote, Tick, TradingStatus};
 
 #[cfg(feature = "server")]
 const UPSTREAM_IDLE_PEEK_INTERVAL: Duration = Duration::from_secs(1);
@@ -155,17 +155,32 @@ pub type UpstreamTickDecodeReport = UpstreamMarketDecodeReport;
 type TickRowCache = BTreeMap<String, BTreeMap<i64, CachedTickRow>>;
 type KlineRowCache = BTreeMap<(String, i64), BTreeMap<i64, Value>>;
 type QuoteCache = BTreeMap<String, Value>;
+const LOSSLESS_TICK_CACHE_ROWS: usize = 10_000;
+const LOSSLESS_TICK_DRAIN_CAPACITY: usize = 2_048;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone)]
 struct CachedTickRow {
     datetime: Option<i64>,
     last_price: Option<f64>,
     volume: Option<i64>,
     open_interest: Option<i64>,
+    raw: Value,
+}
+
+impl Default for CachedTickRow {
+    fn default() -> Self {
+        Self {
+            datetime: None,
+            last_price: None,
+            volume: None,
+            open_interest: None,
+            raw: Value::Object(serde_json::Map::new()),
+        }
+    }
 }
 
 impl CachedTickRow {
-    fn complete(self, id: i64) -> Option<RelayTickRow> {
+    fn complete(&self, id: i64) -> Option<RelayTickRow> {
         Some(RelayTickRow {
             id,
             datetime: self.datetime?,
@@ -173,6 +188,10 @@ impl CachedTickRow {
             volume: self.volume?,
             open_interest: self.open_interest?,
         })
+    }
+
+    fn lossless_tick(&self) -> Option<Tick> {
+        serde_json::from_value(self.raw.clone()).ok()
     }
 }
 
@@ -511,13 +530,23 @@ fn decode_tick_row_with_cache(
 ) -> RelayResult<Option<RelayTickRow>> {
     let id = tick_row_id(row_id, row)?;
     let symbol_cache = cache.entry(symbol.to_string()).or_default();
-    let mut cached = symbol_cache.get(&id).copied().unwrap_or_default();
+    let mut cached = symbol_cache.get(&id).cloned().unwrap_or_default();
     merge_i64_patch(&mut cached.datetime, row, "datetime")?;
     merge_f64_patch(&mut cached.last_price, row, "last_price")?;
     merge_i64_patch(&mut cached.volume, row, "volume")?;
     merge_i64_patch(&mut cached.open_interest, row, "open_interest")?;
+    merge_diff(&mut cached.raw, row);
+    cached
+        .raw
+        .as_object_mut()
+        .expect("cached tick rows are objects")
+        .entry("id".to_owned())
+        .or_insert_with(|| Value::from(id));
     symbol_cache.insert(id, cached);
-    Ok(cached.complete(id))
+    while symbol_cache.len() > LOSSLESS_TICK_CACHE_ROWS {
+        let _ = symbol_cache.pop_first();
+    }
+    Ok(symbol_cache.get(&id).and_then(|cached| cached.complete(id)))
 }
 
 fn tick_row_id(row_id: &str, row: &Value) -> RelayResult<i64> {
@@ -727,6 +756,8 @@ pub struct WebSocketUpstreamTickSource {
     transport: WebSocketTransport,
     buffered: VecDeque<UpstreamMarketEvent>,
     tick_row_cache: TickRowCache,
+    lossless_ticks: VecDeque<(String, Tick)>,
+    lossless_tick_overflow: bool,
     kline_row_cache: KlineRowCache,
     quote_cache: QuoteCache,
     /// Quote-only upstream interest configured at connection time.
@@ -753,6 +784,8 @@ impl WebSocketUpstreamTickSource {
             transport,
             buffered: VecDeque::new(),
             tick_row_cache: TickRowCache::default(),
+            lossless_ticks: VecDeque::new(),
+            lossless_tick_overflow: false,
             kline_row_cache: KlineRowCache::default(),
             quote_cache: QuoteCache::default(),
             quote_symbols: BTreeSet::new(),
@@ -816,6 +849,18 @@ impl WebSocketUpstreamTickSource {
         self.quote_symbols.extend(symbols);
         let charts = self.tick_charts.values().cloned().collect::<Vec<_>>();
         self.reconcile_tick_charts(&charts).await
+    }
+
+    /// Returns complete, DIFF-merged upstream ticks since the previous drain.
+    /// These rows are suitable for the relay rolling cache, unlike the public
+    /// five-field downstream tick projection.
+    pub fn drain_lossless_ticks(&mut self) -> Vec<(String, Tick)> {
+        self.lossless_ticks.drain(..).collect()
+    }
+
+    #[must_use]
+    pub fn take_lossless_tick_overflow(&mut self) -> bool {
+        std::mem::take(&mut self.lossless_tick_overflow)
     }
 
     pub async fn subscribe_tick_charts(&mut self, charts: &[UpstreamTickChart]) -> RelayResult<()> {
@@ -1013,12 +1058,28 @@ impl WebSocketUpstreamTickSource {
     }
 
     fn decode_market_report(&mut self, value: Value) -> RelayResult<UpstreamMarketDecodeReport> {
-        decode_upstream_market_report_with_cache(
+        let report = decode_upstream_market_report_with_cache(
             value,
             &mut self.tick_row_cache,
             &mut self.kline_row_cache,
             &mut self.quote_cache,
-        )
+        )?;
+        for tick in report.ticks() {
+            if let Some(lossless) = self
+                .tick_row_cache
+                .get(&tick.symbol)
+                .and_then(|rows| rows.get(&tick.row.id))
+                .and_then(CachedTickRow::lossless_tick)
+            {
+                if self.lossless_ticks.len() >= LOSSLESS_TICK_DRAIN_CAPACITY {
+                    self.lossless_tick_overflow = true;
+                } else {
+                    self.lossless_ticks
+                        .push_back((tick.symbol.clone(), lossless));
+                }
+            }
+        }
+        Ok(report)
     }
 
     fn record_transport_connected(&mut self) {
@@ -1153,6 +1214,30 @@ mod tests {
         assert_eq!(patch.klines()[0].row.high, 3.0);
         assert_eq!(patch.klines()[0].row.close, 2.5);
         assert_eq!(patch.klines()[0].row.volume, 9);
+    }
+
+    #[test]
+    fn cached_tick_retains_full_row_for_rolling_persistence() {
+        let mut cache = TickRowCache::default();
+        let row = json!({
+            "datetime": 100,
+            "last_price": 610.5,
+            "average": 610.25,
+            "volume": 7,
+            "amount": 4273.5,
+            "open_interest": 9,
+            "bid_price1": 610.4,
+            "ask_price1": 610.6
+        });
+        let projected = decode_tick_row_with_cache(&mut cache, "SHFE.au2602", "7", &row)
+            .unwrap()
+            .unwrap();
+        assert_eq!(projected.last_price, 610.5);
+        let tick = cache["SHFE.au2602"][&7].lossless_tick().unwrap();
+        assert_eq!(tick.id, 7);
+        assert_eq!(tick.average, 610.25);
+        assert_eq!(tick.amount, 4273.5);
+        assert_eq!(tick.bid_price1, 610.4);
     }
 }
 
