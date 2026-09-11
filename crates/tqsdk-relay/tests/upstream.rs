@@ -48,6 +48,34 @@ fn expect_subscribe_quote(socket: &mut websocket_support::TestWebSocketConnectio
     );
 }
 
+#[test]
+fn decode_upstream_market_report_extracts_official_kline_rows() {
+    let report = decode_upstream_market_report(json!({
+        "aid": "rtn_data",
+        "data": [{
+            "klines": {
+                "SHFE.au2602": {
+                    "60000000000": {"data": {"42": {
+                        "id": 42,
+                        "datetime": 1_700_000_000_000_000_000i64,
+                        "open": 610.0,
+                        "high": 612.0,
+                        "low": 609.0,
+                        "close": 611.0,
+                        "volume": 12,
+                        "open_oi": 100,
+                        "close_oi": 101
+                    }}}
+                }
+            }
+        }]
+    }))
+    .unwrap();
+    assert_eq!(report.klines().len(), 1);
+    assert_eq!(report.klines()[0].duration_ns, 60_000_000_000);
+    assert_eq!(report.klines()[0].row.close, 611.0);
+}
+
 fn expect_initial_universe_subscriptions(
     socket: &mut websocket_support::TestWebSocketConnection,
     ins_list: &str,

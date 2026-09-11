@@ -53,6 +53,9 @@ fn ingest_event(
 ) -> RelayResult<Vec<DownstreamFrame>> {
     match event {
         UpstreamMarketEvent::Tick(tick) => engine.ingest_tick(tick.symbol, tick.row),
+        UpstreamMarketEvent::Kline(kline) => {
+            engine.ingest_official_kline(kline.symbol, kline.duration_ns, kline.row)
+        }
         UpstreamMarketEvent::Quote(quote) => engine.ingest_quote(quote.symbol, quote.quote),
         UpstreamMarketEvent::TradingStatus(status) => {
             let status = *status;

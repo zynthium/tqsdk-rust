@@ -177,6 +177,12 @@ impl InterestRegistry {
             .unwrap_or_default()
     }
 
+    /// Exact active chart sources, independent of individual client ids.
+    #[must_use]
+    pub fn sources(&self) -> Vec<SourceKey> {
+        self.chart_clients_by_source.keys().cloned().collect()
+    }
+
     /// Borrows source identities for relay kline fan-out without cloning each
     /// `SourceKey` on every tick.
     #[must_use]

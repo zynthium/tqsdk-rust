@@ -455,23 +455,60 @@ async fn subscribe_dynamic_upstream_symbols(
     source: &mut WebSocketUpstreamTickSource,
     _signals: Vec<String>,
 ) -> RelayResult<()> {
-    let symbols = desired_upstream_subscription_symbols(server)?;
-    let charts = config.upstream_tick_charts_for_symbols(symbols.iter().map(String::as_str))?;
+    let (symbols, kline_sources) = desired_upstream_chart_interests(server)?;
+    let mut charts = config.upstream_tick_charts_for_symbols(symbols.iter().map(String::as_str))?;
+    charts.extend(
+        kline_sources
+            .into_iter()
+            .map(|source_key| {
+                let symbol = source_key
+                    .symbols
+                    .first()
+                    .expect("single-symbol source was filtered")
+                    .as_str();
+                UpstreamTickChart::new_with_duration(
+                    upstream_kline_chart_id(symbol, source_key.duration_ns, source_key.view_width),
+                    [symbol],
+                    source_key.duration_ns,
+                    source_key.view_width,
+                )
+            })
+            .collect::<RelayResult<Vec<_>>>()?,
+    );
     source.reconcile_tick_charts(&charts).await?;
     record_upstream_progress(server, source.take_progress());
     record_dynamic_upstream_subscription_reconciled(server, &charts);
     Ok(())
 }
 
-fn desired_upstream_subscription_symbols(server: &RelayServer) -> RelayResult<Vec<String>> {
+fn desired_upstream_chart_interests(
+    server: &RelayServer,
+) -> RelayResult<(Vec<String>, Vec<crate::interest::SourceKey>)> {
     let engine = server.engine();
     let engine = engine
         .lock()
         .map_err(|_| RelayError::Internal("relay engine lock poisoned".to_string()))?;
-    Ok(engine
-        .desired_upstream_tick_chart_symbols()
-        .into_iter()
-        .collect())
+    Ok((
+        engine
+            .desired_upstream_tick_chart_symbols()
+            .into_iter()
+            .collect(),
+        engine.desired_upstream_kline_sources(),
+    ))
+}
+
+fn upstream_kline_chart_id(symbol: &str, duration_ns: i64, view_width: usize) -> String {
+    let symbol = symbol
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("relay-upstream-kline-{symbol}-{duration_ns}-{view_width}")
 }
 
 fn record_upstream_progress(

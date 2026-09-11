@@ -132,6 +132,7 @@ pub struct RelayEngine {
     bootstrap: BootstrapQueue,
     klines: HashMap<KlineSourceKey, KlineSynthesis>,
     completed_klines: BTreeMap<KlineSourceKey, VecDeque<RelayKlineRow>>,
+    official_kline_sources: BTreeSet<KlineSourceKey>,
     symbol_metrics: SymbolTelemetryStore,
     upstream_status: RelaySourceStatus,
     upstream_stage: RelaySourceStage,
@@ -175,6 +176,7 @@ impl RelayEngine {
             bootstrap: BootstrapQueue::new(4, Duration::from_millis(250)),
             klines: HashMap::new(),
             completed_klines: BTreeMap::new(),
+            official_kline_sources: BTreeSet::new(),
             symbol_metrics: SymbolTelemetryStore::default(),
             upstream_status: RelaySourceStatus::Connecting,
             upstream_stage: RelaySourceStage::Connecting,
@@ -329,6 +331,58 @@ impl RelayEngine {
         let mut frames = self.quote_frames(symbol);
         if let Some(row) = synthetic_tick {
             frames.extend(self.kline_frames(symbol, row)?);
+        }
+        Ok(frames)
+    }
+
+    /// Routes an official upstream Kline. Once one is observed for a source,
+    /// local tick synthesis stops producing competing rows for that source.
+    pub fn ingest_official_kline(
+        &mut self,
+        symbol: impl AsRef<str>,
+        duration_ns: i64,
+        row: RelayKlineRow,
+    ) -> RelayResult<Vec<DownstreamFrame>> {
+        let symbol = symbol.as_ref();
+        if duration_ns <= 0 {
+            return Err(crate::error::RelayError::invalid_protocol(
+                "official Kline duration must be positive",
+            ));
+        }
+        let sources = self
+            .interests
+            .sources_for_symbol(symbol)
+            .into_iter()
+            .filter(|source| source.duration_ns == duration_ns)
+            .collect::<Vec<_>>();
+        let mut frames = Vec::new();
+        for source in sources {
+            let key = KlineSourceKey::new(&source, symbol);
+            self.official_kline_sources.insert(key.clone());
+            self.klines.remove(&key);
+            let rows = self.completed_klines.entry(key).or_default();
+            if let Some(existing) = rows.iter_mut().find(|existing| existing.id == row.id) {
+                *existing = row.clone();
+            } else {
+                rows.push_back(row.clone());
+                while rows.len() > self.cache.kline_capacity() {
+                    let _ = rows.pop_front();
+                }
+            }
+            let payload = Arc::new(
+                RelayMarketFrame::rtn_data(vec![RelayMarketFrame::kline_update(
+                    symbol,
+                    duration_ns,
+                    row.clone(),
+                )])
+                .into_value(),
+            );
+            for subscription in self.interests.chart_subscriptions(&source) {
+                frames.push(DownstreamFrame::shared(
+                    subscription.client_id,
+                    Arc::clone(&payload),
+                ));
+            }
         }
         Ok(frames)
     }
@@ -807,6 +861,17 @@ impl RelayEngine {
         desired
     }
 
+    /// Active downstream Kline sources eligible for official upstream charts.
+    /// Tick charts remain managed separately for quote and true-tick delivery.
+    #[must_use]
+    pub fn desired_upstream_kline_sources(&self) -> Vec<SourceKey> {
+        self.interests
+            .sources()
+            .into_iter()
+            .filter(|source| source.duration_ns > 0 && source.symbols.len() == 1)
+            .collect()
+    }
+
     #[must_use]
     pub fn bootstrap_pending_len(&self) -> usize {
         self.bootstrap.len()
@@ -1059,6 +1124,9 @@ impl RelayEngine {
                 .first()
                 .expect("non-empty duration group from source insertion");
             let key = KlineSourceKey::new(source, symbol);
+            if self.official_kline_sources.contains(&key) {
+                continue;
+            }
             let completed_rows = {
                 let synthesizer = self
                     .klines

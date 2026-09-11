@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::error::{RelayError, RelayResult};
-use crate::protocol::RelayTickRow;
+use crate::protocol::{RelayKlineRow, RelayTickRow};
 use serde_json::Value;
 #[cfg(feature = "server")]
 use tqsdk_core::OutboundFrame;
@@ -28,6 +28,13 @@ pub struct UpstreamQuote {
     pub quote: Quote,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpstreamKline {
+    pub symbol: String,
+    pub duration_ns: i64,
+    pub row: RelayKlineRow,
+}
+
 #[derive(Debug, Clone)]
 pub struct UpstreamTradingStatus {
     pub symbol: String,
@@ -37,6 +44,7 @@ pub struct UpstreamTradingStatus {
 #[derive(Debug, Clone)]
 pub enum UpstreamMarketEvent {
     Tick(UpstreamTick),
+    Kline(UpstreamKline),
     Quote(Box<UpstreamQuote>),
     TradingStatus(Box<UpstreamTradingStatus>),
 }
@@ -73,6 +81,7 @@ impl UpstreamSourceProgress {
 #[derive(Debug, Clone)]
 pub struct UpstreamMarketDecodeReport {
     ticks: Vec<UpstreamTick>,
+    klines: Vec<UpstreamKline>,
     quotes: Vec<UpstreamQuote>,
     trading_statuses: Vec<UpstreamTradingStatus>,
     invalid_rows: u64,
@@ -89,6 +98,11 @@ impl UpstreamMarketDecodeReport {
     #[must_use]
     pub fn quotes(&self) -> &[UpstreamQuote] {
         &self.quotes
+    }
+
+    #[must_use]
+    pub fn klines(&self) -> &[UpstreamKline] {
+        &self.klines
     }
 
     #[must_use]
@@ -121,6 +135,7 @@ impl UpstreamMarketDecodeReport {
         self.ticks
             .into_iter()
             .map(UpstreamMarketEvent::Tick)
+            .chain(self.klines.into_iter().map(UpstreamMarketEvent::Kline))
             .chain(
                 self.quotes
                     .into_iter()
@@ -227,6 +242,7 @@ fn decode_upstream_market_report_inner(
     if frame.get("aid").and_then(Value::as_str) != Some("rtn_data") {
         return Ok(UpstreamMarketDecodeReport {
             ticks: Vec::new(),
+            klines: Vec::new(),
             quotes: Vec::new(),
             trading_statuses: Vec::new(),
             invalid_rows: 0,
@@ -237,6 +253,7 @@ fn decode_upstream_market_report_inner(
     let Some(data) = frame.get("data").and_then(Value::as_array) else {
         return Ok(UpstreamMarketDecodeReport {
             ticks: Vec::new(),
+            klines: Vec::new(),
             quotes: Vec::new(),
             trading_statuses: Vec::new(),
             invalid_rows: 0,
@@ -245,6 +262,7 @@ fn decode_upstream_market_report_inner(
         });
     };
     let mut ticks = Vec::new();
+    let mut klines = Vec::new();
     let mut quotes = Vec::new();
     let mut trading_statuses = Vec::new();
     let mut invalid_rows = 0_u64;
@@ -274,6 +292,43 @@ fn decode_upstream_market_report_inner(
                             *invalid_rows_by_symbol.entry(symbol.clone()).or_default() += 1;
                             last_invalid_row_error =
                                 Some(format!("{symbol} row {row_id}: {error}"));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(symbols) = fragment.get("klines").and_then(Value::as_object) {
+            for (symbol, durations) in symbols {
+                let Some(durations) = durations.as_object() else {
+                    continue;
+                };
+                for (duration_text, series) in durations {
+                    let Ok(duration_ns) = duration_text.parse::<i64>() else {
+                        continue;
+                    };
+                    if duration_ns <= 0 {
+                        continue;
+                    }
+                    let Some(rows) = series.get("data").and_then(Value::as_object) else {
+                        continue;
+                    };
+                    let mut sorted_rows: Vec<_> = rows.iter().collect();
+                    sorted_rows
+                        .sort_by_key(|(row_id, _)| row_id.parse::<i64>().unwrap_or(i64::MAX));
+                    for (row_id, row) in sorted_rows {
+                        match decode_kline_row(row_id, row) {
+                            Ok(row) => klines.push(UpstreamKline {
+                                symbol: symbol.clone(),
+                                duration_ns,
+                                row,
+                            }),
+                            Err(error) => {
+                                invalid_rows = invalid_rows.saturating_add(1);
+                                *invalid_rows_by_symbol.entry(symbol.clone()).or_default() += 1;
+                                last_invalid_row_error = Some(format!(
+                                    "{symbol} kline {duration_ns} row {row_id}: {error}"
+                                ));
+                            }
                         }
                     }
                 }
@@ -310,6 +365,7 @@ fn decode_upstream_market_report_inner(
     }
     Ok(UpstreamMarketDecodeReport {
         ticks,
+        klines,
         quotes,
         trading_statuses,
         invalid_rows,
@@ -372,6 +428,20 @@ fn merge_diff(target: &mut Value, patch: &Value) {
             target_object.insert(key.clone(), value.clone());
         }
     }
+}
+
+fn decode_kline_row(row_id: &str, row: &Value) -> RelayResult<RelayKlineRow> {
+    Ok(RelayKlineRow {
+        id: tick_row_id(row_id, row)?,
+        datetime: required_i64(row, "datetime")?,
+        open: required_f64(row, "open")?,
+        high: required_f64(row, "high")?,
+        low: required_f64(row, "low")?,
+        close: required_f64(row, "close")?,
+        volume: required_i64(row, "volume")?,
+        open_oi: required_i64(row, "open_oi")?,
+        close_oi: required_i64(row, "close_oi")?,
+    })
 }
 
 fn decode_tick_row(row_id: &str, row: &Value) -> RelayResult<RelayTickRow> {
@@ -445,6 +515,7 @@ fn required_f64(row: &Value, field: &'static str) -> RelayResult<f64> {
 pub struct UpstreamTickChart {
     chart_id: String,
     symbols: Vec<String>,
+    duration_ns: i64,
     view_width: usize,
 }
 
@@ -458,15 +529,28 @@ impl UpstreamTickChart {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
+        Self::new_with_duration(chart_id, symbols, 0, view_width)
+    }
+
+    pub fn new_with_duration<I, S>(
+        chart_id: impl Into<String>,
+        symbols: I,
+        duration_ns: i64,
+        view_width: usize,
+    ) -> RelayResult<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
         let chart_id = chart_id.into();
         if chart_id.trim().is_empty() {
             return Err(RelayError::invalid_config(
                 "upstream tick chart_id must not be empty",
             ));
         }
-        if view_width == 0 {
+        if duration_ns < 0 || view_width == 0 {
             return Err(RelayError::invalid_config(
-                "upstream tick view_width must be greater than zero",
+                "upstream chart duration must be nonnegative and view_width must be greater than zero",
             ));
         }
         let mut symbols: Vec<String> = symbols
@@ -484,6 +568,7 @@ impl UpstreamTickChart {
         Ok(Self {
             chart_id,
             symbols,
+            duration_ns,
             view_width,
         })
     }
@@ -515,7 +600,7 @@ impl UpstreamTickChart {
 
     #[must_use]
     pub const fn duration_ns(&self) -> i64 {
-        0
+        self.duration_ns
     }
 
     #[must_use]
@@ -557,6 +642,10 @@ pub struct FakeUpstreamTickSource {
 impl FakeUpstreamTickSource {
     pub fn push(&mut self, tick: UpstreamTick) {
         self.events.push_back(UpstreamMarketEvent::Tick(tick));
+    }
+
+    pub fn push_kline(&mut self, kline: UpstreamKline) {
+        self.events.push_back(UpstreamMarketEvent::Kline(kline));
     }
 
     pub fn push_quote(&mut self, quote: UpstreamQuote) {
