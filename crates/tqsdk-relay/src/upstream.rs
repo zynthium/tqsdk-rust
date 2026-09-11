@@ -153,6 +153,7 @@ impl UpstreamMarketDecodeReport {
 pub type UpstreamTickDecodeReport = UpstreamMarketDecodeReport;
 
 type TickRowCache = BTreeMap<String, BTreeMap<i64, CachedTickRow>>;
+type KlineRowCache = BTreeMap<(String, i64), BTreeMap<i64, Value>>;
 type QuoteCache = BTreeMap<String, Value>;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -222,21 +223,28 @@ pub fn decode_upstream_tick_report(frame: Value) -> RelayResult<UpstreamTickDeco
 }
 
 pub fn decode_upstream_market_report(frame: Value) -> RelayResult<UpstreamMarketDecodeReport> {
-    decode_upstream_market_report_inner(frame, None, None)
+    decode_upstream_market_report_inner(frame, None, None, None)
 }
 
 #[cfg(feature = "server")]
 fn decode_upstream_market_report_with_cache(
     frame: Value,
     tick_row_cache: &mut TickRowCache,
+    kline_row_cache: &mut KlineRowCache,
     quote_cache: &mut QuoteCache,
 ) -> RelayResult<UpstreamMarketDecodeReport> {
-    decode_upstream_market_report_inner(frame, Some(tick_row_cache), Some(quote_cache))
+    decode_upstream_market_report_inner(
+        frame,
+        Some(tick_row_cache),
+        Some(kline_row_cache),
+        Some(quote_cache),
+    )
 }
 
 fn decode_upstream_market_report_inner(
     frame: Value,
     mut tick_row_cache: Option<&mut TickRowCache>,
+    mut kline_row_cache: Option<&mut KlineRowCache>,
     mut quote_cache: Option<&mut QuoteCache>,
 ) -> RelayResult<UpstreamMarketDecodeReport> {
     if frame.get("aid").and_then(Value::as_str) != Some("rtn_data") {
@@ -316,12 +324,19 @@ fn decode_upstream_market_report_inner(
                     sorted_rows
                         .sort_by_key(|(row_id, _)| row_id.parse::<i64>().unwrap_or(i64::MAX));
                     for (row_id, row) in sorted_rows {
-                        match decode_kline_row(row_id, row) {
-                            Ok(row) => klines.push(UpstreamKline {
+                        let decoded = match &mut kline_row_cache {
+                            Some(cache) => {
+                                decode_kline_row_with_cache(cache, symbol, duration_ns, row_id, row)
+                            }
+                            None => decode_kline_row(row_id, row).map(Some),
+                        };
+                        match decoded {
+                            Ok(Some(row)) => klines.push(UpstreamKline {
                                 symbol: symbol.clone(),
                                 duration_ns,
                                 row,
                             }),
+                            Ok(None) => {}
                             Err(error) => {
                                 invalid_rows = invalid_rows.saturating_add(1);
                                 *invalid_rows_by_symbol.entry(symbol.clone()).or_default() += 1;
@@ -428,6 +443,39 @@ fn merge_diff(target: &mut Value, patch: &Value) {
             target_object.insert(key.clone(), value.clone());
         }
     }
+}
+
+fn decode_kline_row_with_cache(
+    cache: &mut KlineRowCache,
+    symbol: &str,
+    duration_ns: i64,
+    row_id: &str,
+    patch: &Value,
+) -> RelayResult<Option<RelayKlineRow>> {
+    let id = tick_row_id(row_id, patch)?;
+    if patch.is_null() {
+        if let Some(rows) = cache.get_mut(&(symbol.to_owned(), duration_ns)) {
+            rows.remove(&id);
+        }
+        return Ok(None);
+    }
+    if !patch.is_object() {
+        return Err(crate::error::RelayError::invalid_protocol(
+            "upstream Kline row must be an object or null",
+        ));
+    }
+    let cached = cache
+        .entry((symbol.to_owned(), duration_ns))
+        .or_default()
+        .entry(id)
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    merge_diff(cached, patch);
+    cached
+        .as_object_mut()
+        .expect("cached Kline rows are objects")
+        .entry("id".to_owned())
+        .or_insert_with(|| Value::from(id));
+    decode_kline_row(row_id, cached).map(Some)
 }
 
 fn decode_kline_row(row_id: &str, row: &Value) -> RelayResult<RelayKlineRow> {
@@ -679,6 +727,7 @@ pub struct WebSocketUpstreamTickSource {
     transport: WebSocketTransport,
     buffered: VecDeque<UpstreamMarketEvent>,
     tick_row_cache: TickRowCache,
+    kline_row_cache: KlineRowCache,
     quote_cache: QuoteCache,
     /// Quote-only upstream interest configured at connection time.
     quote_symbols: BTreeSet<String>,
@@ -704,6 +753,7 @@ impl WebSocketUpstreamTickSource {
             transport,
             buffered: VecDeque::new(),
             tick_row_cache: TickRowCache::default(),
+            kline_row_cache: KlineRowCache::default(),
             quote_cache: QuoteCache::default(),
             quote_symbols: BTreeSet::new(),
             subscribed_quote_symbols: BTreeSet::new(),
@@ -966,6 +1016,7 @@ impl WebSocketUpstreamTickSource {
         decode_upstream_market_report_with_cache(
             value,
             &mut self.tick_row_cache,
+            &mut self.kline_row_cache,
             &mut self.quote_cache,
         )
     }
@@ -1060,6 +1111,49 @@ fn current_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn cached_kline_patch_keeps_unchanged_official_fields() {
+        let mut ticks = TickRowCache::default();
+        let mut klines = KlineRowCache::default();
+        let mut quotes = QuoteCache::default();
+        let first = decode_upstream_market_report_with_cache(
+            json!({"aid":"rtn_data","data":[{"klines":{"SHFE.au2602":{"60000000000":{"data":{"7":{
+                "datetime": 100,
+                "open": 1.0,
+                "high": 3.0,
+                "low": 0.5,
+                "close": 2.0,
+                "volume": 4,
+                "open_oi": 5,
+                "close_oi": 6
+            }}}}}}]}),
+            &mut ticks,
+            &mut klines,
+            &mut quotes,
+        )
+        .unwrap();
+        assert_eq!(first.klines()[0].row.close, 2.0);
+
+        let patch = decode_upstream_market_report_with_cache(
+            json!({"aid":"rtn_data","data":[{"klines":{"SHFE.au2602":{"60000000000":{"data":{"7":{"close":2.5,"volume":9}}}}}}]}),
+            &mut ticks,
+            &mut klines,
+            &mut quotes,
+        )
+        .unwrap();
+        assert_eq!(patch.klines().len(), 1);
+        assert_eq!(patch.klines()[0].row.open, 1.0);
+        assert_eq!(patch.klines()[0].row.high, 3.0);
+        assert_eq!(patch.klines()[0].row.close, 2.5);
+        assert_eq!(patch.klines()[0].row.volume, 9);
+    }
 }
 
 #[cfg(feature = "server")]
