@@ -534,18 +534,25 @@ fn decode_tick_row_with_cache(
 ) -> RelayResult<Option<RelayTickRow>> {
     let id = tick_row_id(row_id, row)?;
     let symbol_cache = cache.entry(symbol.to_string()).or_default();
+    if row.is_null() {
+        symbol_cache.remove(&id);
+        return Ok(None);
+    }
+    if !row.is_object() {
+        return Err(RelayError::invalid_protocol(
+            "upstream tick row must be an object or null",
+        ));
+    }
     let mut cached = symbol_cache.get(&id).cloned().unwrap_or_default();
     merge_i64_patch(&mut cached.datetime, row, "datetime")?;
     merge_f64_patch(&mut cached.last_price, row, "last_price")?;
     merge_i64_patch(&mut cached.volume, row, "volume")?;
     merge_i64_patch(&mut cached.open_interest, row, "open_interest")?;
     merge_diff(&mut cached.raw, row);
-    cached
-        .raw
-        .as_object_mut()
-        .expect("cached tick rows are objects")
-        .entry("id".to_owned())
-        .or_insert_with(|| Value::from(id));
+    if let Some(raw) = cached.raw.as_object_mut() {
+        raw.entry("id".to_owned())
+            .or_insert_with(|| Value::from(id));
+    }
     symbol_cache.insert(id, cached);
     while symbol_cache.len() > LOSSLESS_TICK_CACHE_ROWS {
         let _ = symbol_cache.pop_first();
@@ -1300,5 +1307,39 @@ mod tests {
         assert_eq!(tick.average, 610.25);
         assert_eq!(tick.amount, 4273.5);
         assert_eq!(tick.bid_price1, 610.4);
+    }
+
+    #[test]
+    fn cached_tick_deletion_removes_row_before_a_later_snapshot() {
+        let mut cache = TickRowCache::default();
+        let first = json!({
+            "datetime": 100,
+            "last_price": 610.5,
+            "volume": 7,
+            "open_interest": 9
+        });
+        assert!(
+            decode_tick_row_with_cache(&mut cache, "SHFE.au2602", "7", &first)
+                .unwrap()
+                .is_some()
+        );
+
+        assert_eq!(
+            decode_tick_row_with_cache(&mut cache, "SHFE.au2602", "7", &Value::Null).unwrap(),
+            None
+        );
+        assert!(!cache["SHFE.au2602"].contains_key(&7));
+
+        let replacement = json!({
+            "datetime": 200,
+            "last_price": 611.0,
+            "volume": 8,
+            "open_interest": 10
+        });
+        let projected = decode_tick_row_with_cache(&mut cache, "SHFE.au2602", "7", &replacement)
+            .unwrap()
+            .unwrap();
+        assert_eq!(projected.datetime, 200);
+        assert_eq!(projected.last_price, 611.0);
     }
 }
