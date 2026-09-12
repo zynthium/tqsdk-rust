@@ -298,6 +298,45 @@ fn relay_engine_synthesizes_klines_from_quote_updates() {
 }
 
 #[test]
+fn relay_engine_keeps_quote_synthetic_ids_out_of_real_tick_ring() {
+    let mut engine = RelayEngine::new_memory_only(16, 16);
+
+    engine
+        .ingest_tick("SHFE.au2602", tick(7, 1_780_985_399_000_000_000, 610.0))
+        .unwrap();
+    engine
+        .ingest_quote_at(
+            "SHFE.au2602",
+            quote("SHFE.au2602", "2026-06-17 13:56:00.000000", 611.0),
+            1_780_985_400_000,
+        )
+        .unwrap();
+
+    let replay = engine
+        .handle_command(ClientId::new(1), tick_chart_command("real-ticks", 8))
+        .unwrap();
+    let ticks = replay
+        .iter()
+        .find_map(|frame| frame.payload["data"][0]["ticks"].get("SHFE.au2602"))
+        .expect("tick chart should replay its real serial rows");
+    let ids = ticks["data"]
+        .as_object()
+        .expect("tick data should be an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, vec!["7"]);
+    assert_eq!(ticks["last_id"], 7);
+    let chart = replay
+        .iter()
+        .find_map(|frame| frame.payload["data"][0]["charts"].get("real-ticks"))
+        .expect("tick replay should mark the chart ready");
+    assert_eq!(chart["left_id"], 7);
+    assert_eq!(chart["right_id"], 7);
+}
+
+#[test]
 fn relay_engine_tracks_bootstrap_request_without_subscribing_remote_kline_immediately() {
     let mut engine = RelayEngine::new_memory_only(16, 16);
     let client = ClientId::new(1);

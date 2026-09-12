@@ -51,34 +51,16 @@ impl TickHandle {
 
     pub fn has_rows(&self) -> crate::error::Result<bool> {
         let guard = self.reader.reader().read_market_state();
-        let Some((left_id, right_id)) = chart_bounds(&guard, self.chart_id.as_str()) else {
-            return Ok(false);
-        };
-
-        for id in left_id..=right_id {
-            if self.decode_row_from_guard(&guard, id)?.is_some() {
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
+        Ok(!self.row_ids_from_guard(&guard, None).is_empty())
     }
 
     pub fn window(&self) -> crate::error::Result<TickWindow> {
         let guard = self.reader.reader().read_market_state();
         let mut rows = Vec::new();
 
-        if let Some((left_id, right_id)) = chart_bounds(&guard, self.chart_id.as_str()) {
-            for id in left_id..=right_id {
-                let id_key = id.to_string();
-                if let Some(row) = guard.decode_path::<Tick>(&[
-                    "ticks",
-                    self.symbol.as_str(),
-                    "data",
-                    id_key.as_str(),
-                ])? {
-                    rows.push(row);
-                }
+        for id in self.row_ids_from_guard(&guard, None) {
+            if let Some(row) = self.decode_row_from_guard(&guard, id)? {
+                rows.push(row);
             }
         }
 
@@ -108,21 +90,17 @@ impl TickHandle {
 
     pub fn last(&self) -> crate::error::Result<Option<Tick>> {
         let guard = self.reader.reader().read_market_state();
-        let Some((_, right_id)) = chart_bounds(&guard, self.chart_id.as_str()) else {
+        let Some(id) = self.row_ids_from_guard(&guard, None).last().copied() else {
             return Ok(None);
         };
 
-        self.decode_row_from_guard(&guard, right_id)
+        self.decode_row_from_guard(&guard, id)
     }
 
     pub fn rows_since(&self, last_seen_id: i64) -> crate::error::Result<Vec<Tick>> {
         let guard = self.reader.reader().read_market_state();
-        let Some((left_id, right_id)) = chart_bounds(&guard, self.chart_id.as_str()) else {
-            return Ok(Vec::new());
-        };
-        let start_id = left_id.max(last_seen_id.saturating_add(1));
         let mut rows = Vec::new();
-        for id in start_id..=right_id {
+        for id in self.row_ids_from_guard(&guard, Some(last_seen_id)) {
             if let Some(row) = self.decode_row_from_guard(&guard, id)? {
                 rows.push(row);
             }
@@ -141,9 +119,11 @@ impl TickHandle {
         }
 
         let guard = self.reader.reader().read_market_state();
+        let visible_ids = self.row_ids_from_guard(&guard, None);
         let mut rows = Vec::new();
         for id in changed_ids {
-            if !id_in_chart_bounds(&guard, self.chart_id.as_str(), id) {
+            if !id_in_chart_bounds(&guard, self.chart_id.as_str(), id) || !visible_ids.contains(&id)
+            {
                 continue;
             }
             if let Some(row) = self.decode_row_from_guard(&guard, id)? {
@@ -151,6 +131,39 @@ impl TickHandle {
             }
         }
         Ok(rows)
+    }
+
+    fn row_ids_from_guard(
+        &self,
+        guard: &MarketStateReadGuard<'_>,
+        after: Option<i64>,
+    ) -> BTreeSet<i64> {
+        let Some((left_id, right_id)) = chart_bounds(guard, self.chart_id.as_str()) else {
+            return BTreeSet::new();
+        };
+        let Some(data) = guard
+            .get_path(&["ticks", self.symbol.as_str(), "data"])
+            .and_then(|value| value.as_object())
+        else {
+            return BTreeSet::new();
+        };
+
+        let mut ids = BTreeSet::new();
+        for key in data.keys() {
+            let Ok(id) = key.parse::<i64>() else {
+                continue;
+            };
+            if id < left_id || id > right_id || after.is_some_and(|last_seen_id| id <= last_seen_id)
+            {
+                continue;
+            }
+
+            ids.insert(id);
+            if ids.len() > self.view_width {
+                ids.pop_first();
+            }
+        }
+        ids
     }
 
     fn changed_row_ids(&self, step: &WaitStep) -> BTreeSet<i64> {

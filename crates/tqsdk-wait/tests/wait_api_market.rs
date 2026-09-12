@@ -1067,6 +1067,35 @@ async fn tick_handle_exposes_last_rows_since_and_changed_rows() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn tick_handle_enumerates_sparse_keys_and_caps_rows_by_view_width() {
+    let mut api = support::seeded_api();
+    support::seed_sparse_tick_chart(&mut api, "SHFE.au2602", 2);
+    let ticks = api.tick("SHFE.au2602", 2).await.unwrap();
+    api.step().await.unwrap().expect("sparse tick chart commit");
+
+    let expected = vec![8, 1_781_675_760_000_000_000_i64];
+    assert_eq!(
+        ticks
+            .rows()
+            .unwrap()
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(ticks.last().unwrap().unwrap().id, expected[1]);
+    assert_eq!(
+        ticks
+            .rows_since(7)
+            .unwrap()
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn tick_handle_validates_length_and_clamps_large_length() {
     let mut api = support::seeded_api();
 

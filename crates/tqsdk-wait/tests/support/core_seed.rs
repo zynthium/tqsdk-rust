@@ -471,6 +471,68 @@ pub fn seed_ready_tick_chart(api: &mut TqApi, symbol: &str, view_width: usize) {
 }
 
 #[allow(dead_code)]
+pub fn seed_sparse_tick_chart(api: &mut TqApi, symbol: &str, view_width: usize) {
+    let chart_id = format!("wait-tick-{}-{view_width}", sanitize_chart_token(symbol));
+    let synthetic_id = 1_781_675_760_000_000_000_i64;
+    let commit = api
+        .session()
+        .handle()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".to_string(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({
+                    "aid": "rtn_data",
+                    "data": [{
+                        "charts": {
+                            chart_id: {
+                                "state": {
+                                    "ins_list": symbol,
+                                    "duration": 0,
+                                },
+                                "left_id": 7,
+                                "right_id": synthetic_id,
+                                "more_data": false,
+                                "ready": true,
+                            }
+                        },
+                        "ticks": {
+                            symbol: {
+                                "data": {
+                                    "7": {
+                                        "datetime": 1_781_675_759_000_000_000_i64,
+                                        "last_price": 610.0,
+                                        "volume": 10,
+                                        "open_interest": 100,
+                                    },
+                                    "8": {
+                                        "datetime": 1_781_675_759_500_000_000_i64,
+                                        "last_price": 610.5,
+                                        "volume": 11,
+                                        "open_interest": 101,
+                                    },
+                                    synthetic_id.to_string(): {
+                                        "datetime": synthetic_id,
+                                        "last_price": 611.0,
+                                        "volume": 12,
+                                        "open_interest": 102,
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                })),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap()
+        .expect("seed sparse tick chart should produce a commit");
+
+    WaitTestDriver::push_deferred_commit(api, commit);
+}
+
+#[allow(dead_code)]
 pub fn seed_ready_empty_tick_chart(api: &mut TqApi, symbol: &str, view_width: usize) {
     let chart_id = format!("wait-tick-{}-{view_width}", sanitize_chart_token(symbol));
     let commit = api

@@ -343,10 +343,6 @@ impl RelayEngine {
         self.symbol_metrics
             .record_quote_at(symbol, &quote, receive_unix_millis);
         let synthetic_tick = quote_to_synthetic_tick(&quote);
-        if let Some(row) = synthetic_tick.clone() {
-            let tick_cache_report = self.cache.push_tick(symbol, row.clone());
-            self.record_cache_write(tick_cache_report);
-        }
         let quote_cache_report = self.cache.push_quote(symbol, quote);
         self.record_cache_write(quote_cache_report);
         let mut frames = self.quote_frames(symbol);
