@@ -411,6 +411,40 @@ impl RelayEngine {
         Ok(frames)
     }
 
+    /// Fans out a complete upstream Kline serial frame without overflowing a
+    /// downstream client's bounded mailbox one row at a time.
+    pub fn ingest_official_klines<I>(&mut self, rows: I) -> RelayResult<Vec<DownstreamFrame>>
+    where
+        I: IntoIterator<Item = (String, i64, RelayKlineRow)>,
+    {
+        let mut payloads_by_client = BTreeMap::<ClientId, Vec<Value>>::new();
+
+        for (symbol, duration_ns, row) in rows {
+            for frame in self.ingest_official_kline(symbol.as_str(), duration_ns, row)? {
+                let data = frame
+                    .payload
+                    .get("data")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| {
+                        crate::error::RelayError::invalid_protocol(
+                            "official Kline frame missing rtn_data payload",
+                        )
+                    })?;
+                payloads_by_client
+                    .entry(frame.client_id)
+                    .or_default()
+                    .extend(data.iter().cloned());
+            }
+        }
+
+        Ok(payloads_by_client
+            .into_iter()
+            .map(|(client_id, data)| {
+                DownstreamFrame::new(client_id, RelayMarketFrame::RtnData(data).into_value())
+            })
+            .collect())
+    }
+
     /// Restores durable lossless ticks before downstream clients connect.
     pub fn restore_rolling_ticks(&mut self, symbol: &str, rows: &[Tick]) {
         for row in rows {

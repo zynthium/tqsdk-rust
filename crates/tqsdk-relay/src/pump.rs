@@ -43,6 +43,10 @@ fn ingest_update(
 ) -> RelayResult<Vec<DownstreamFrame>> {
     match update {
         UpstreamSourceUpdate::Event(event) => ingest_event(engine, event),
+        UpstreamSourceUpdate::Klines(rows) => engine.ingest_official_klines(
+            rows.into_iter()
+                .map(|row| (row.symbol, row.duration_ns, row.row)),
+        ),
         UpstreamSourceUpdate::Progress => Ok(Vec::new()),
     }
 }

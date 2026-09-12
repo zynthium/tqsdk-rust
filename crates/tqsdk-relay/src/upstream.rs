@@ -54,6 +54,11 @@ pub enum UpstreamMarketEvent {
 #[derive(Debug, Clone)]
 pub enum UpstreamSourceUpdate {
     Event(UpstreamMarketEvent),
+    /// Complete official Kline rows decoded from one upstream WebSocket frame.
+    ///
+    /// Initial serial snapshots contain many rows. Preserve that frame boundary
+    /// so the relay can fan the rows out without overflowing a client mailbox.
+    Klines(Vec<UpstreamKline>),
     Progress,
 }
 
@@ -160,6 +165,8 @@ type QuoteCache = BTreeMap<String, Value>;
 const LOSSLESS_TICK_CACHE_ROWS: usize = 10_000;
 #[cfg(feature = "server")]
 const LOSSLESS_TICK_DRAIN_CAPACITY: usize = 2_048;
+#[cfg(feature = "server")]
+const MAX_UPSTREAM_KLINE_BATCH_ROWS: usize = 1_000;
 
 #[derive(Debug, Clone)]
 struct CachedTickRow {
@@ -765,7 +772,7 @@ impl UpstreamTickSource for FakeUpstreamTickSource {
 #[cfg(feature = "server")]
 pub struct WebSocketUpstreamTickSource {
     transport: WebSocketTransport,
-    buffered: VecDeque<UpstreamMarketEvent>,
+    buffered: VecDeque<UpstreamSourceUpdate>,
     tick_row_cache: TickRowCache,
     lossless_ticks: VecDeque<(String, Tick)>,
     official_klines: VecDeque<(String, i64, Kline)>,
@@ -1185,8 +1192,16 @@ impl UpstreamTickSource for WebSocketUpstreamTickSource {
 
     async fn next_event(&mut self) -> Option<UpstreamMarketEvent> {
         while let Some(update) = self.next_update().await {
-            if let UpstreamSourceUpdate::Event(event) = update {
-                return Some(event);
+            match update {
+                UpstreamSourceUpdate::Event(event) => return Some(event),
+                UpstreamSourceUpdate::Klines(rows) => {
+                    for row in rows.into_iter().rev() {
+                        self.buffered.push_front(UpstreamSourceUpdate::Event(
+                            UpstreamMarketEvent::Kline(row),
+                        ));
+                    }
+                }
+                UpstreamSourceUpdate::Progress => {}
             }
         }
         None
@@ -1194,8 +1209,8 @@ impl UpstreamTickSource for WebSocketUpstreamTickSource {
 
     async fn next_update(&mut self) -> Option<UpstreamSourceUpdate> {
         loop {
-            if let Some(event) = self.buffered.pop_front() {
-                return Some(UpstreamSourceUpdate::Event(event));
+            if let Some(update) = self.buffered.pop_front() {
+                return Some(update);
             }
             if self.closed {
                 return None;
@@ -1205,7 +1220,7 @@ impl UpstreamTickSource for WebSocketUpstreamTickSource {
                     return Some(UpstreamSourceUpdate::Progress);
                 }
                 Ok(Some(events)) => {
-                    self.buffered.extend(events);
+                    self.buffered.extend(updates_from_events(events));
                 }
                 Ok(None) | Err(_) => {
                     self.closed = true;
@@ -1232,6 +1247,39 @@ impl UpstreamTickSource for WebSocketUpstreamTickSource {
 }
 
 #[cfg(feature = "server")]
+fn updates_from_events(events: Vec<UpstreamMarketEvent>) -> Vec<UpstreamSourceUpdate> {
+    let mut updates = Vec::new();
+    let mut klines = Vec::new();
+
+    for event in events {
+        match event {
+            UpstreamMarketEvent::Kline(kline) => klines.push(kline),
+            event => {
+                push_kline_updates(&mut updates, &mut klines);
+                updates.push(UpstreamSourceUpdate::Event(event));
+            }
+        }
+    }
+    push_kline_updates(&mut updates, &mut klines);
+    updates
+}
+
+#[cfg(feature = "server")]
+fn push_kline_updates(updates: &mut Vec<UpstreamSourceUpdate>, klines: &mut Vec<UpstreamKline>) {
+    let rows = std::mem::take(klines);
+    if rows.len() == 1 {
+        if let Some(row) = rows.into_iter().next() {
+            updates.push(UpstreamSourceUpdate::Event(UpstreamMarketEvent::Kline(row)));
+        }
+        return;
+    }
+
+    for rows in rows.chunks(MAX_UPSTREAM_KLINE_BATCH_ROWS) {
+        updates.push(UpstreamSourceUpdate::Klines(rows.to_vec()));
+    }
+}
+
+#[cfg(feature = "server")]
 fn current_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1247,6 +1295,34 @@ fn millis_u64(duration: Duration) -> u64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn splits_large_official_kline_frame_into_bounded_updates() {
+        let events = (0..=MAX_UPSTREAM_KLINE_BATCH_ROWS).map(|id| {
+            UpstreamMarketEvent::Kline(UpstreamKline {
+                symbol: "SHFE.au2602".to_string(),
+                duration_ns: 60_000_000_000,
+                row: RelayKlineRow {
+                    id: i64::try_from(id).unwrap(),
+                    datetime: i64::try_from(id).unwrap() * 60_000_000_000,
+                    open: 610.0,
+                    high: 611.0,
+                    low: 609.0,
+                    close: 610.5,
+                    volume: 1,
+                    open_oi: 1_000,
+                    close_oi: 1_001,
+                },
+            })
+        });
+
+        let updates = updates_from_events(events.collect());
+        assert!(
+            matches!(updates[0], UpstreamSourceUpdate::Klines(ref rows) if rows.len() == MAX_UPSTREAM_KLINE_BATCH_ROWS)
+        );
+        assert!(matches!(updates[1], UpstreamSourceUpdate::Klines(ref rows) if rows.len() == 1));
+    }
 
     #[test]
     fn cached_kline_patch_keeps_unchanged_official_fields() {

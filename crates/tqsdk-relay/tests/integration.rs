@@ -2,7 +2,7 @@ use serde_json::Value;
 use tqsdk_core::Quote;
 use tqsdk_relay::{
     ClientId, DownstreamCommand, DownstreamFrame, FakeUpstreamTickSource, RelayEngine,
-    RelayTickRow, SetChartCommand, SourceKey, UpstreamTick, UpstreamTickSource,
+    RelayKlineRow, RelayTickRow, SetChartCommand, SourceKey, UpstreamTick, UpstreamTickSource,
 };
 
 fn data_patches(frames: &[DownstreamFrame]) -> impl Iterator<Item = &Value> {
@@ -750,6 +750,56 @@ fn relay_engine_batches_one_thousand_cached_klines_into_one_frame() {
         .expect("batched replay should finish with chart bounds");
     assert_eq!(chart["charts"]["large-history"]["left_id"], 999);
     assert_eq!(chart["charts"]["large-history"]["right_id"], 999);
+    assert!(
+        serde_json::to_vec(frames[0].payload.as_ref())
+            .unwrap()
+            .len()
+            < 1024 * 1024
+    );
+}
+
+#[test]
+fn relay_engine_batches_one_thousand_upstream_klines_into_one_frame() {
+    let mut engine = RelayEngine::new_memory_only(1_001, 1_000);
+    let client = ClientId::new(1);
+    engine
+        .handle_command(
+            client,
+            chart_command_for_with_view_width("upstream-history", vec!["SHFE.au2602"], 1_000),
+        )
+        .unwrap();
+
+    let frames = engine
+        .ingest_official_klines((0..1_000).map(|id| {
+            (
+                "SHFE.au2602".to_string(),
+                60_000_000_000,
+                RelayKlineRow {
+                    id,
+                    datetime: id * 60_000_000_000,
+                    open: 610.0 + id as f64,
+                    high: 611.0 + id as f64,
+                    low: 609.0 + id as f64,
+                    close: 610.5 + id as f64,
+                    volume: id,
+                    open_oi: 1_000 + id,
+                    close_oi: 1_001 + id,
+                },
+            )
+        }))
+        .unwrap();
+
+    assert_eq!(frames.len(), 1);
+    assert_eq!(
+        data_patches(&frames)
+            .filter(|patch| {
+                patch["klines"]["SHFE.au2602"]["60000000000"]["data"]
+                    .as_object()
+                    .is_some()
+            })
+            .count(),
+        1_000
+    );
     assert!(
         serde_json::to_vec(frames[0].payload.as_ref())
             .unwrap()
