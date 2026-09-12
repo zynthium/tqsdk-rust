@@ -25,6 +25,24 @@ fn tick_ring_retains_latest_rows_per_symbol() {
 }
 
 #[test]
+fn tick_ring_coalesces_sparse_patches_and_resets_on_new_id_epoch() {
+    let mut cache = MarketCache::new(4, 16);
+    cache.push_tick("SHFE.au2602", tick(1, 610.0));
+    cache.push_tick("SHFE.au2602", tick(2, 611.0));
+    cache.push_tick("SHFE.au2602", tick(2, 612.0));
+
+    assert_eq!(
+        cache.ticks("SHFE.au2602"),
+        vec![tick(1, 610.0), tick(2, 612.0)]
+    );
+
+    let mut new_epoch = tick(1, 609.0);
+    new_epoch.datetime = 1_713_660_000_000_001_000;
+    cache.push_tick("SHFE.au2602", new_epoch.clone());
+    assert_eq!(cache.ticks("SHFE.au2602"), vec![new_epoch]);
+}
+
+#[test]
 fn quote_snapshot_is_derived_from_latest_tick() {
     let mut cache = MarketCache::new(4, 16);
 

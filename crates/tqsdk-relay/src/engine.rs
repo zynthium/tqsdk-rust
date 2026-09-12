@@ -31,6 +31,7 @@ use crate::symbol_metrics::{
 use crate::universe::FuturesContract;
 
 const DEFAULT_RELAY_EVENT_LEDGER_LIMIT: usize = 128;
+const MAX_DOWNSTREAM_TICK_VIEW_WIDTH: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -252,6 +253,16 @@ impl RelayEngine {
                         delete_chart_payload(&command.chart_id),
                     )]);
                 }
+                if command.duration_ns == 0 && command.symbols.len() != 1 {
+                    return Err(crate::error::RelayError::invalid_protocol(
+                        "tick chart requires exactly one symbol",
+                    ));
+                }
+                if command.duration_ns == 0 && command.view_width > MAX_DOWNSTREAM_TICK_VIEW_WIDTH {
+                    return Err(crate::error::RelayError::invalid_protocol(format!(
+                        "tick chart view_width exceeds {MAX_DOWNSTREAM_TICK_VIEW_WIDTH}",
+                    )));
+                }
                 let replay_subscription = ChartSubscription::new(
                     client_id,
                     command.chart_id.clone(),
@@ -265,7 +276,11 @@ impl RelayEngine {
                     end_id: i64::MAX,
                 });
                 self.queue_missing_upstream_symbols_for_source(&source);
-                self.replay_cached_kline_frames(&replay_subscription, &source)
+                if source.duration_ns == 0 {
+                    Ok(self.replay_cached_tick_frames(&replay_subscription, &source))
+                } else {
+                    self.replay_cached_kline_frames(&replay_subscription, &source)
+                }
             }
             DownstreamCommand::PeekMessage => Ok(Vec::new()),
         }
@@ -303,6 +318,7 @@ impl RelayEngine {
         let cache_report = self.cache.push_tick(symbol, row.clone());
         self.record_cache_write(cache_report);
         let mut frames = self.quote_frames(symbol);
+        frames.extend(self.tick_chart_frames(symbol, &row));
         frames.extend(self.kline_frames(symbol, row)?);
         Ok(frames)
     }
@@ -1223,7 +1239,7 @@ impl RelayEngine {
                         {
                             frames.push(DownstreamFrame::new(
                                 subscription.client_id,
-                                chart_payload(&subscription, source, completed.id),
+                                chart_payload(&subscription, source, completed.id, completed.id),
                             ));
                         }
                     }
@@ -1231,6 +1247,97 @@ impl RelayEngine {
             }
         }
         Ok(frames)
+    }
+
+    fn tick_chart_frames(&self, symbol: &str, row: &RelayTickRow) -> Vec<DownstreamFrame> {
+        let Some(sources) = self.interests.sources_for_symbol_ref(symbol) else {
+            return Vec::new();
+        };
+        if !sources.iter().any(|source| source.duration_ns == 0) {
+            return Vec::new();
+        }
+
+        let payload = Arc::new(
+            RelayMarketFrame::rtn_data(vec![RelayMarketFrame::tick_update(symbol, row.clone())])
+                .into_value(),
+        );
+        let mut clients = BTreeSet::new();
+        let mut chart_frames = Vec::new();
+        for source in sources.iter().filter(|source| source.duration_ns == 0) {
+            let (left_id, right_id) = self.tick_window_bounds(symbol, source.view_width);
+            for subscription in self.interests.chart_subscriptions(source) {
+                clients.insert(subscription.client_id);
+                if subscription
+                    .symbols
+                    .first()
+                    .is_some_and(|primary| primary == symbol)
+                {
+                    chart_frames.push(DownstreamFrame::new(
+                        subscription.client_id,
+                        chart_payload(&subscription, source, left_id, right_id),
+                    ));
+                }
+            }
+        }
+
+        let mut frames = clients
+            .into_iter()
+            .map(|client_id| DownstreamFrame::shared(client_id, Arc::clone(&payload)))
+            .collect::<Vec<_>>();
+        frames.extend(chart_frames);
+        frames
+    }
+
+    fn replay_cached_tick_frames(
+        &self,
+        subscription: &ChartSubscription,
+        source: &SourceKey,
+    ) -> Vec<DownstreamFrame> {
+        let mut frames = Vec::new();
+        for symbol in &subscription.symbols {
+            let rows = self.cache.tick_ring(symbol);
+            let start = rows
+                .map(VecDeque::len)
+                .unwrap_or_default()
+                .saturating_sub(source.view_width);
+            let mut replayed = false;
+            if let Some(rows) = rows
+                && let Some(payload) = tick_rows_payload(symbol, rows.iter().skip(start))
+            {
+                replayed = true;
+                frames.push(DownstreamFrame::new(subscription.client_id, payload));
+            }
+            if !replayed {
+                frames.push(DownstreamFrame::new(
+                    subscription.client_id,
+                    empty_tick_payload(symbol),
+                ));
+            }
+        }
+
+        let primary = subscription
+            .symbols
+            .first()
+            .expect("non-empty chart subscription");
+        let (left_id, right_id) = self.tick_window_bounds(primary, source.view_width);
+        frames.push(DownstreamFrame::new(
+            subscription.client_id,
+            chart_payload(subscription, source, left_id, right_id),
+        ));
+        frames
+    }
+
+    fn tick_window_bounds(&self, symbol: &str, view_width: usize) -> (i64, i64) {
+        let Some(rows) = self.cache.tick_ring(symbol) else {
+            return (-1, -1);
+        };
+        let visible = rows.len().min(view_width);
+        if visible == 0 {
+            return (-1, -1);
+        }
+        let left_id = rows.get(rows.len() - visible).map_or(-1, |row| row.id);
+        let right_id = rows.back().map_or(-1, |row| row.id);
+        (left_id, right_id)
     }
 
     fn replay_cached_kline_frames(
@@ -1293,7 +1400,7 @@ impl RelayEngine {
                     {
                         frames.push(DownstreamFrame::new(
                             subscription.client_id,
-                            chart_payload(subscription, source, completed.id),
+                            chart_payload(subscription, source, completed.id, completed.id),
                         ));
                     }
                 }
@@ -1424,7 +1531,12 @@ impl RelayEngine {
     }
 }
 
-fn chart_payload(subscription: &ChartSubscription, source: &SourceKey, right_id: i64) -> Value {
+fn chart_payload(
+    subscription: &ChartSubscription,
+    source: &SourceKey,
+    left_id: i64,
+    right_id: i64,
+) -> Value {
     let ins_list = subscription.symbols.join(",");
     json!({
         "aid": "rtn_data",
@@ -1439,7 +1551,7 @@ fn chart_payload(subscription: &ChartSubscription, source: &SourceKey, right_id:
                             "duration": source.duration_ns,
                             "view_width": source.view_width
                         },
-                        "left_id": right_id,
+                        "left_id": left_id,
                         "right_id": right_id,
                         "more_data": false,
                         "ready": true
@@ -1448,6 +1560,57 @@ fn chart_payload(subscription: &ChartSubscription, source: &SourceKey, right_id:
             }
         ]
     })
+}
+
+fn empty_tick_payload(symbol: &str) -> Value {
+    json!({
+        "aid": "rtn_data",
+        "data": [
+            {
+                "ticks": {
+                    symbol: {
+                        "last_id": -1,
+                        "data": {}
+                    }
+                }
+            }
+        ]
+    })
+}
+
+fn tick_rows_payload<'a>(
+    symbol: &str,
+    rows: impl Iterator<Item = &'a RelayTickRow>,
+) -> Option<Value> {
+    let mut data = serde_json::Map::new();
+    let mut last_id = None;
+    for row in rows {
+        last_id = Some(row.id);
+        data.insert(
+            row.id.to_string(),
+            json!({
+                "id": row.id,
+                "datetime": row.datetime,
+                "last_price": row.last_price,
+                "volume": row.volume,
+                "open_interest": row.open_interest
+            }),
+        );
+    }
+    let last_id = last_id?;
+    Some(json!({
+        "aid": "rtn_data",
+        "data": [
+            {
+                "ticks": {
+                    symbol: {
+                        "last_id": last_id,
+                        "data": data
+                    }
+                }
+            }
+        ]
+    }))
 }
 
 fn delete_chart_payload(chart_id: &str) -> Value {

@@ -53,9 +53,9 @@ relay 不改变 SDK 运行时模型：
 | 启动自检 | `TQSDK_RELAY_DRY_RUN=1` 会解析配置、解析或发现上游合约集合、输出 JSON 诊断后退出，不绑定下游或 metrics 监听，也不连接上游 market websocket。 |
 | HTTP 观测 | `metrics_listen` 提供 `/health` 和 `/metrics` JSON 端点；库 API 也暴露 health、metrics 和 source status 快照。 |
 
-duration 为 `0` 的下游 tick chart 兼容不是 V1 已完成的主要能力面：relay 会摄入并
-缓存上游 tick，也会用上游 quote 补首样本和 quote 快照；已经验证的实时下游分发当前
-聚焦 quote 和正周期 K 线。
+duration 为 `0` 的下游 tick chart 会从内存 ring 回放并实时 fan-out；当前与
+`tqsdk-wait` 一致，只接受单合约且 `view_width <= 10000`。多合约 tick chart 因缺少
+可靠 binding 语义会明确拒绝。
 
 ## 快速开始
 
@@ -551,7 +551,7 @@ frame/event 计数，不推断上游补历史百分比。
 | --- | --- |
 | `subscribe_quote` | 为客户端注册 quote 订阅，并发送由最新 tick 派生的 quote update；缺失合约会立即触发上游动态补订。 |
 | 正 `duration` 的 `set_chart` | 注册 K 线 chart 订阅，记录 bootstrap 请求；缺失合约会立即触发上游动态补订；如果 tick ring 已有可完成窗口，会先回放冷启动 K 线，随后在 tick 跨入后续窗口时发送新完成的合成 K 线。 |
-| `duration <= 0` 的 `set_chart` | 会解析和注册，缺失合约会立即触发上游动态补订，但 duration 为 `0` 的实时 tick chart 分发尚未在 V1 服务面完成。 |
+| `duration = 0` 的 `set_chart` | 注册单合约 tick chart（`view_width <= 10000`），从内存 tick ring 尾部回放 `ticks.{symbol}.data.{id}`，并按实际窗口输出 `charts.{chart_id}` 的 `left_id` / `right_id` / `ready` / `more_data`；后续 `ingest_tick()` 向全部匹配订阅实时 fan-out。tick `volume` 保持上游日内累计原始单位。 |
 | `peek_message` | 作为兼容命令接受，不执行额外动作。 |
 
 ### K 线合成

@@ -437,7 +437,7 @@ pub fn seed_ready_tick_chart(api: &mut TqApi, symbol: &str, view_width: usize) {
                                         "ask_volume1": 3,
                                         "bid_price1": 618.4,
                                         "bid_volume1": 6,
-                                        "volume": 15,
+                                        "volume": 66_094_985,
                                         "amount": 9277.5,
                                         "open_interest": 102
                                     },

@@ -209,6 +209,118 @@ async fn relay_dispatches_ingested_tick_frames_to_connected_downstream_client() 
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn relay_websocket_replays_and_streams_tick_chart() {
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+    for id in 1..=3 {
+        let mut row = tick(id, id * 1_000, 610.0 + id as f64);
+        row.volume = 66_094_980 + id;
+        assert!(
+            engine
+                .lock()
+                .unwrap()
+                .ingest_tick("SHFE.au2602", row)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    let server = RelayServer::new(engine.clone());
+    let dispatcher = server.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        server.serve_once(listener).await.unwrap();
+    });
+
+    let mut stream = connect_ws(addr).await;
+    send_masked_text(
+        &mut stream,
+        json!({
+            "aid": "set_chart",
+            "chart_id": "tick-chart",
+            "ins_list": "SHFE.au2602",
+            "duration": 0,
+            "view_width": 2
+        })
+        .to_string(),
+    )
+    .await;
+
+    send_peek_message(&mut stream).await;
+    let replay: serde_json::Value =
+        serde_json::from_str(&read_unmasked_text(&mut stream).await).unwrap();
+    let ticks = &replay["data"][0]["ticks"]["SHFE.au2602"];
+    assert_eq!(ticks["last_id"], 3);
+    assert_eq!(ticks["data"].as_object().unwrap().len(), 2);
+    assert!(ticks["data"].get("2").is_some());
+    assert!(ticks["data"].get("3").is_some());
+
+    send_peek_message(&mut stream).await;
+    let chart: serde_json::Value =
+        serde_json::from_str(&read_unmasked_text(&mut stream).await).unwrap();
+    assert_eq!(chart["data"][0]["charts"]["tick-chart"]["left_id"], 2);
+    assert_eq!(chart["data"][0]["charts"]["tick-chart"]["right_id"], 3);
+    assert_eq!(chart["data"][0]["charts"]["tick-chart"]["ready"], true);
+
+    let mut live = tick(4, 4_000, 614.0);
+    live.volume = 66_094_984;
+    let frames = engine
+        .lock()
+        .unwrap()
+        .ingest_tick("SHFE.au2602", live)
+        .unwrap();
+    assert_eq!(dispatcher.dispatch_frames(frames).unwrap(), 2);
+
+    send_peek_message(&mut stream).await;
+    let payload: serde_json::Value =
+        serde_json::from_str(&read_unmasked_text(&mut stream).await).unwrap();
+    assert_eq!(
+        payload["data"][0]["ticks"]["SHFE.au2602"]["data"]["4"]["volume"],
+        66_094_984
+    );
+    send_peek_message(&mut stream).await;
+    let chart: serde_json::Value =
+        serde_json::from_str(&read_unmasked_text(&mut stream).await).unwrap();
+    assert_eq!(chart["data"][0]["charts"]["tick-chart"]["left_id"], 3);
+    assert_eq!(chart["data"][0]["charts"]["tick-chart"]["right_id"], 4);
+    assert_eq!(chart["data"][0]["charts"]["tick-chart"]["more_data"], false);
+
+    stream.shutdown().await.unwrap();
+    server_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn relay_websocket_rejects_oversized_tick_chart_before_replay() {
+    let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
+    let server = RelayServer::new(engine);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move { server.serve_once(listener).await });
+
+    let mut stream = connect_ws(addr).await;
+    send_masked_text(
+        &mut stream,
+        json!({
+            "aid": "set_chart",
+            "chart_id": "oversized-tick",
+            "ins_list": "SHFE.au2602",
+            "duration": 0,
+            "view_width": 10_001
+        })
+        .to_string(),
+    )
+    .await;
+
+    let error = tokio::time::timeout(Duration::from_secs(1), server_task)
+        .await
+        .expect("relay should reject oversized tick chart promptly")
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("view_width exceeds 10000"));
+    drop(stream);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn relay_waits_for_downstream_peek_before_sending_market_frame() {
     let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
     let server = RelayServer::new(engine.clone());

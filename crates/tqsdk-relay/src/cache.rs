@@ -177,7 +177,32 @@ impl MarketCache {
             .ticks
             .entry(symbol.clone())
             .or_insert_with(|| VecDeque::with_capacity(tick_capacity));
-        ring.push_back(row.clone());
+        if ring
+            .back()
+            .is_some_and(|existing| row.id <= existing.id && row.datetime > existing.datetime)
+        {
+            // A newer tick with a non-increasing id starts a new upstream id epoch.
+            ring.clear();
+        }
+        match ring.back().map(|existing| existing.id.cmp(&row.id)) {
+            Some(std::cmp::Ordering::Equal) => {
+                // Upstream sparse patches may repeat the current tick id.
+                *ring.back_mut().expect("tick ring has a back row") = row.clone();
+            }
+            Some(std::cmp::Ordering::Greater) => {
+                if let Some(existing) = ring.iter_mut().rev().find(|existing| existing.id == row.id)
+                {
+                    *existing = row.clone();
+                } else {
+                    let position = ring
+                        .iter()
+                        .position(|existing| existing.id > row.id)
+                        .unwrap_or(ring.len());
+                    ring.insert(position, row.clone());
+                }
+            }
+            Some(std::cmp::Ordering::Less) | None => ring.push_back(row.clone()),
+        }
         while ring.len() > self.tick_capacity {
             ring.pop_front();
         }

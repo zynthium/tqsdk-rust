@@ -1012,6 +1012,25 @@ async fn tick_handle_reads_bounded_window_without_api_argument_after_step() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn tick_handle_reads_relay_bounds_and_raw_cumulative_volume() {
+    let mut api = support::seeded_api();
+    support::seed_ready_tick_chart(&mut api, "SHFE.au2602", 32);
+
+    let ticks = api.tick("SHFE.au2602", 32).await.unwrap();
+    api.step()
+        .await
+        .unwrap()
+        .expect("relay tick chart commit should produce a step");
+
+    let window = ticks.window().unwrap();
+    assert_eq!(
+        window.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![200, 201]
+    );
+    assert_eq!(window.last().unwrap().volume, 66_094_985);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn tick_handle_exposes_last_rows_since_and_changed_rows() {
     let mut api = support::seeded_api();
 
