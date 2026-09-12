@@ -1,8 +1,15 @@
+use serde_json::Value;
 use tqsdk_core::Quote;
 use tqsdk_relay::{
-    ClientId, DownstreamCommand, FakeUpstreamTickSource, RelayEngine, RelayTickRow,
-    SetChartCommand, SourceKey, UpstreamTick, UpstreamTickSource,
+    ClientId, DownstreamCommand, DownstreamFrame, FakeUpstreamTickSource, RelayEngine,
+    RelayTickRow, SetChartCommand, SourceKey, UpstreamTick, UpstreamTickSource,
 };
+
+fn data_patches(frames: &[DownstreamFrame]) -> impl Iterator<Item = &Value> {
+    frames
+        .iter()
+        .flat_map(|frame| frame.payload["data"].as_array().into_iter().flatten())
+}
 
 fn tick(id: i64, datetime: i64, price: f64) -> RelayTickRow {
     RelayTickRow {
@@ -30,11 +37,19 @@ fn chart_command(chart_id: &str) -> DownstreamCommand {
 }
 
 fn chart_command_for(chart_id: &str, symbols: Vec<&str>) -> DownstreamCommand {
+    chart_command_for_with_view_width(chart_id, symbols, 64)
+}
+
+fn chart_command_for_with_view_width(
+    chart_id: &str,
+    symbols: Vec<&str>,
+    view_width: usize,
+) -> DownstreamCommand {
     DownstreamCommand::SetChart(SetChartCommand {
         chart_id: chart_id.to_string(),
         symbols: symbols.into_iter().map(str::to_string).collect(),
         duration_ns: 60_000_000_000,
-        view_width: 64,
+        view_width,
         left_kline_id: None,
         focus_datetime_ns: None,
         focus_position: None,
@@ -428,29 +443,24 @@ fn relay_engine_replays_tick_ring_for_new_kline_chart_subscription() {
     let frames = engine
         .handle_command(client, chart_command("client-chart"))
         .unwrap();
+    assert_eq!(frames.len(), 1);
 
-    let kline_frame = frames
-        .iter()
-        .find(|frame| frame.payload["data"][0].get("klines").is_some())
+    let kline_patch = data_patches(&frames)
+        .find(|patch| patch.get("klines").is_some())
         .expect("cold start should emit completed kline from cached ticks");
-    assert_eq!(kline_frame.client_id, client);
     assert_eq!(
-        kline_frame.payload["data"][0]["klines"]["SHFE.au2602"]["60000000000"]["data"]["0"]["datetime"],
+        kline_patch["klines"]["SHFE.au2602"]["60000000000"]["data"]["0"]["datetime"],
         0
     );
     assert_eq!(
-        kline_frame.payload["data"][0]["klines"]["SHFE.au2602"]["60000000000"]["data"]["0"]["close"],
+        kline_patch["klines"]["SHFE.au2602"]["60000000000"]["data"]["0"]["close"],
         612.0
     );
 
-    let chart_frame = frames
-        .iter()
-        .find(|frame| frame.payload["data"][0].get("charts").is_some())
+    let chart_patch = data_patches(&frames)
+        .find(|patch| patch.get("charts").is_some())
         .expect("cold start should mark downstream chart ready");
-    assert_eq!(
-        chart_frame.payload["data"][0]["charts"]["client-chart"]["right_id"],
-        0
-    );
+    assert_eq!(chart_patch["charts"]["client-chart"]["right_id"], 0);
 }
 
 #[test]
@@ -685,28 +695,66 @@ fn relay_engine_replays_cached_multi_symbol_klines_with_binding() {
             chart_command_for("multi-chart", vec!["SHFE.au2602", "DCE.m2609"]),
         )
         .unwrap();
+    assert_eq!(frames.len(), 1);
 
     assert!(
-        frames.iter().any(|frame| {
-            frame.payload["data"][0]["klines"]["SHFE.au2602"]["60000000000"]["data"]["0"]["close"]
-                == 610.0
+        data_patches(&frames).any(|patch| {
+            patch["klines"]["SHFE.au2602"]["60000000000"]["data"]["0"]["close"] == 610.0
         }),
         "primary cached kline should be replayed"
     );
     assert!(
-        frames.iter().any(|frame| {
-            frame.payload["data"][0]["klines"]["DCE.m2609"]["60000000000"]["data"]["0"]["close"]
-                == 3300.0
+        data_patches(&frames).any(|patch| {
+            patch["klines"]["DCE.m2609"]["60000000000"]["data"]["0"]["close"] == 3300.0
         }),
         "secondary cached kline should be replayed"
     );
     assert!(
-        frames.iter().any(|frame| {
-            frame.payload["data"][0]["klines"]["SHFE.au2602"]["60000000000"]["binding"]["DCE.m2609"]
-                ["0"]
-                == 0
+        data_patches(&frames).any(|patch| {
+            patch["klines"]["SHFE.au2602"]["60000000000"]["binding"]["DCE.m2609"]["0"] == 0
         }),
         "cached replay should include primary-to-secondary binding"
+    );
+}
+
+#[test]
+fn relay_engine_batches_one_thousand_cached_klines_into_one_frame() {
+    let mut engine = RelayEngine::new_memory_only(1_001, 1_000);
+    for id in 0..=1_000 {
+        engine
+            .ingest_tick(
+                "SHFE.au2602",
+                tick(id, id * 60_000_000_000, 610.0 + id as f64),
+            )
+            .unwrap();
+    }
+
+    let frames = engine
+        .handle_command(
+            ClientId::new(1),
+            chart_command_for_with_view_width("large-history", vec!["SHFE.au2602"], 1_000),
+        )
+        .unwrap();
+
+    assert_eq!(frames.len(), 1);
+    let kline_count = data_patches(&frames)
+        .filter(|patch| {
+            patch["klines"]["SHFE.au2602"]["60000000000"]["data"]
+                .as_object()
+                .is_some()
+        })
+        .count();
+    assert_eq!(kline_count, 1_000);
+    let chart = data_patches(&frames)
+        .last()
+        .expect("batched replay should finish with chart bounds");
+    assert_eq!(chart["charts"]["large-history"]["left_id"], 999);
+    assert_eq!(chart["charts"]["large-history"]["right_id"], 999);
+    assert!(
+        serde_json::to_vec(frames[0].payload.as_ref())
+            .unwrap()
+            .len()
+            < 1024 * 1024
     );
 }
 

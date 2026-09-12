@@ -1345,7 +1345,9 @@ impl RelayEngine {
             return Ok(Vec::new());
         }
 
-        let mut frames = Vec::new();
+        let mut kline_updates = Vec::new();
+        let mut binding_updates = Vec::new();
+        let mut last_primary_completed_id = None;
         for symbol in &source.symbols {
             let key = KlineSourceKey::new(source, symbol);
             if let Some(rows) = self.persisted_official_klines.get(&key).cloned() {
@@ -1374,16 +1376,12 @@ impl RelayEngine {
 
             if let Some(completed_rows) = self.completed_klines.get(&key) {
                 for completed in completed_rows {
-                    frames.push(DownstreamFrame::new(
-                        subscription.client_id,
-                        RelayMarketFrame::rtn_data(vec![RelayMarketFrame::kline_update(
-                            symbol,
-                            source.duration_ns,
-                            completed.clone(),
-                        )])
-                        .into_value(),
+                    kline_updates.push(RelayMarketFrame::kline_update(
+                        symbol,
+                        source.duration_ns,
+                        completed.clone(),
                     ));
-                    frames.extend(self.binding_frames_for_completed(
+                    binding_updates.extend(self.binding_updates_for_completed(
                         source,
                         subscription,
                         symbol,
@@ -1394,15 +1392,42 @@ impl RelayEngine {
                         .first()
                         .is_some_and(|primary| primary == symbol)
                     {
-                        frames.push(DownstreamFrame::new(
-                            subscription.client_id,
-                            chart_payload(subscription, source, completed.id, completed.id),
-                        ));
+                        last_primary_completed_id = Some(completed.id);
                     }
                 }
             }
         }
-        Ok(frames)
+        kline_updates.extend(binding_updates);
+        if let Some(last_id) = last_primary_completed_id {
+            kline_updates.push(chart_frame(subscription, source, last_id, last_id));
+        }
+        if kline_updates.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![DownstreamFrame::new(
+            subscription.client_id,
+            RelayMarketFrame::rtn_data(kline_updates).into_value(),
+        )])
+    }
+
+    fn binding_updates_for_completed(
+        &self,
+        source: &SourceKey,
+        subscription: &ChartSubscription,
+        completed_symbol: &str,
+        completed: &RelayKlineRow,
+    ) -> Vec<RelayMarketFrame> {
+        self.binding_frames_for_completed(source, subscription, completed_symbol, completed)
+            .into_iter()
+            .filter_map(|frame| {
+                frame
+                    .payload
+                    .get("data")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .map(RelayMarketFrame::RtnData)
+            })
+            .collect()
     }
 
     fn record_completed_kline(&mut self, key: &KlineSourceKey, row: &RelayKlineRow) {
@@ -1525,6 +1550,21 @@ impl RelayEngine {
                     && chart_symbols.contains(symbol))
         });
     }
+}
+
+fn chart_frame(
+    subscription: &ChartSubscription,
+    source: &SourceKey,
+    left_id: i64,
+    right_id: i64,
+) -> RelayMarketFrame {
+    let payload = chart_payload(subscription, source, left_id, right_id);
+    let data = payload
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    RelayMarketFrame::RtnData(data)
 }
 
 fn chart_payload(
