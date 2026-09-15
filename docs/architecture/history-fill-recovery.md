@@ -1,7 +1,39 @@
 # Fill 中断与续填
 
 本合同属于 `tqsdk-data` 的历史获取/持久化边界；CLI 仅设置信号收尾期限和显示进度。
-不修改 core/session 的状态树、commit/cursor、交易或报文合同。
+不改变状态树结构、commit/cursor、交易或报文语义；远端准入新增零预算自动重连语义及
+session builder 的显式策略入口。
+
+## 远端准入与认证
+
+官方历史 source 的首次认证/建连在进程内共享至少 1 秒的起始间隔，覆盖不同 client 和 cache root。
+准入锁保持到建立连接完成；创建 source 或排队 chart 命令不代表已经访问远端。
+等待可取消；不预订未来槽位。已裁剪 DIFF 的 session 仍必须销毁，不能为了减少连接而回池。
+此限制不是跨进程配额，也不是服务端允许速率的保证。初始 socket/TLS 建连仍有底层最多
+3 次尝试，这些尝试全部处于同一准入锁内；3 个 source attempt 最多产生 9 次初始 socket 尝试。
+fill 专用 session 配置 `ReconnectPolicy::max_attempts = Some(0)`，收包、flush 和 peek
+失败不再隐式重连；Closed 状态仍写入统一 runtime，由 fill 决定是否重新准入。
+
+同一 fill client 观察到认证错误、权限拒绝或 HTTP/WebSocket 401、403、429 后，
+后续 source 建连失败，不再访问远端；已运行的其他 source 可收尾。排除原因后须新建 client。
+地址发现 401/403 会失效对应 token；纯 WebSocket bearer 拒绝后的同进程恢复需显式刷新
+认证或等待缓存失效。CLI 重新运行会建立新进程。
+暂时性 transport/timeout 错误最多尝试 3 次，等待 2 秒、4 秒，各附加 0–1 秒随机抖动；
+不会因错误文本包含 token、endpoint 等词就重试。
+
+仅没有 trade target 的 backtest session 在 `tqsdk-session` 内复用认证 token。
+缓存按完整凭证和认证 provider 配置隔离，进程内最多 16 项；JWT 缺少有效 exp 不缓存，
+提前 30 秒失效，单项最多保留 300 秒。并发成功 miss 合并；失败后等待者仍可重试，
+fill 准入限制这些尝试的启动频率。显式刷新强制替换缓存。
+token 不落盘、不进入诊断；普通 live 认证不使用该缓存。
+回测 token 和地址发现 HTTP 发送仅一次，5xx、发送/读取失败及非法 JSON 为暂时性错误，
+由 fill 负责重试预算；4xx 认证/授权错误不重试。
+
+### 验证远端准入
+
+`cargo test -p tqsdk-data backtest_history::fill --lib` 覆盖节流、取消、熔断、错误分类和续填。
+`cargo test -p tqsdk-session tq_auth --lib` 使用本机 mock HTTP 覆盖并发 token 复用、
+凭证隔离、有效期与显式刷新，不使用真实账号。
 
 ## 提交与恢复粒度
 

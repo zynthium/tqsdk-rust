@@ -1,5 +1,8 @@
 # `tqsdk-core`
 
+`ReconnectPolicy::max_attempts = Some(0)` 禁用自动重连，记录统一 `Closed` 状态并返回
+Transport 错误，供上层统一控制重试。默认 `None` 仍无限恢复；初始 socket 的有界尝试独立。
+
 面向天勤 / TQSDK 官方服务交互的低层异步 runtime substrate。
 
 这是 Rust 重写版 TQSDK 的 V1 核心基座，目标用户不是普通终端研究人员，而是对性能、稳定性和抽象边界有明确要求的上层 SDK / facade / 工具开发者。

@@ -29,6 +29,7 @@ pub struct SessionClientBuilder {
     market_target: MarketSessionTarget,
     trade_targets: Vec<TradeSessionTarget>,
     commit_log_retention: Option<(usize, usize)>,
+    reconnect_policy: tqsdk_core::ReconnectPolicy,
 }
 
 impl SessionClientBuilder {
@@ -50,7 +51,24 @@ impl SessionClientBuilder {
             market_target: MarketSessionTarget::stock_live(),
             trade_targets: Vec::new(),
             commit_log_retention: None,
+            reconnect_policy: tqsdk_core::ReconnectPolicy::default(),
         }
+    }
+
+    /// Configures automatic session recovery. A zero attempt limit disables it.
+    ///
+    /// ```
+    /// let builder = tqsdk_session::SessionClientBuilder::new("user", "pass")
+    ///     .futures_backtest_market()
+    ///     .reconnect_policy(tqsdk_session::ReconnectPolicy {
+    ///         max_attempts: Some(0),
+    ///         ..Default::default()
+    ///     });
+    /// ```
+    #[must_use]
+    pub fn reconnect_policy(mut self, policy: crate::ReconnectPolicy) -> Self {
+        self.reconnect_policy = policy;
+        self
     }
 
     /// Overrides the hard retained runtime commit count for this session.
@@ -249,6 +267,7 @@ impl SessionClientBuilder {
             market_target,
             trade_targets,
             commit_log_retention,
+            reconnect_policy,
         } = self;
         validate_trade_targets(&trade_targets)?;
         let mut adapters = AdapterRegistry::new();
@@ -268,7 +287,8 @@ impl SessionClientBuilder {
             query_enabled,
             market_target,
             &trade_targets,
-        );
+        )
+        .with_reconnect(reconnect_policy);
         #[cfg(feature = "services")]
         let context = SessionClientContext::new_with_service_endpoints(
             auth_user,

@@ -1,5 +1,8 @@
 # tqsdk-rs 分层内核架构
 
+历史 fill 使用进程内连接准入、拒绝后熔断及回测专用短期 token 缓存；职责和限制见
+[Fill 远端准入](history-fill-recovery.md#远端准入与认证)。
+
 可选 relay 的独立滚动 tick/Kline 缓存、预热和按需订阅边界见
 [Relay rolling market cache](relay-rolling-cache.md)。
 

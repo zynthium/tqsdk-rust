@@ -1,5 +1,9 @@
 # AI 工作流与架构守则
 
+历史 fill 的进程内远端准入归 `tqsdk-data`，回测 token 复用归 `tqsdk-session`。
+不得移除裁剪后禁止 session 复用的 DIFF 约束；见 [Fill 恢复合同](history-fill-recovery.md#远端准入与认证)。
+零预算自动重连仍由 core 记录统一 Closed/reconnect 状态；session 的 flush/peek 不得绕过预算。
+
 统一历史容器 P1 正在工作区展开：daily/Minute 使用 `TQHIST01`，Tick 还未切换。
 实现状态、迁移和平台持久性限制见 [格式过渡合同](history-cache-format.md)。
 保持真实缓存与已安装 P0 程序不动，直到三类接入、迁移证明及部署验收完成；不得仅凭

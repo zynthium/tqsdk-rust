@@ -1,5 +1,12 @@
 # `tqsdk-session`
 
+`SessionClientBuilder::reconnect_policy(...)` 可指定自动恢复策略；`max_attempts: Some(0)`
+禁用收包、flush 和 peek 失败后的隐式恢复，让调用方统一处理重试。
+
+无 trade target 的 backtest session 共享进程内有界 token 缓存，按完整凭证隔离，
+遵守 JWT 有效期并最多保留 5 分钟；显式刷新强制重新认证，普通 live 路径不使用缓存。
+见 [回测认证合同](../../docs/architecture/history-fill-recovery.md#远端准入与认证)。
+
 共享的 session / direct-query 薄层。
 
 这个 crate 负责把会话生命周期、route 驱动、schema / metadata / direct query 这类和具体 facade 无关的能力先抽出来，作为 `tqsdk-wait` 和调用方自建消费层的共同底座。

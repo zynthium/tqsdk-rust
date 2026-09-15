@@ -1,5 +1,9 @@
 # `tqsdk-data`
 
+官方历史填充 source 使用进程内至少 1 秒的连接启动间隔；认证拒绝或限流后阻止同一 client
+继续连接，暂时性错误最多尝试 3 次并退避。裁剪过的 DIFF session 不回池。
+见 [远端准入与认证](../../docs/architecture/history-fill-recovery.md#远端准入与认证)。
+
 TQBN 追加前会保护已有共享 data inode：Unix / Windows 多链接数据先写时复制，单链接保持直接追加；
 多链接 companion checkpoint 则拒绝写入，要求停机修复，不能通过替换锁文件拆分锁域。
 见 [共享 inode 合同](../../docs/architecture/history-cache-format.md#tqbn-共享-inode-写保护)。

@@ -110,6 +110,7 @@ pub struct ReconnectPolicy {
     /// Maximum reconnect attempts before closing the session.
     ///
     /// `None` means the runtime keeps retrying until reconnect succeeds.
+    /// `Some(0)` disables automatic recovery and closes on a reconnect trigger.
     pub max_attempts: Option<u32>,
 }
 

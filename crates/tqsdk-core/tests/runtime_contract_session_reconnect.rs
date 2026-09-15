@@ -696,6 +696,76 @@ fn session_runtime_closes_session_when_reconnect_attempts_are_exhausted() {
 }
 
 #[test]
+fn zero_reconnect_budget_closes_without_authentication_or_connection() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct CountingAuth(AtomicUsize);
+    impl AuthProvider for CountingAuth {
+        async fn authenticate(&self) -> CoreResult<AuthContext> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            TestAuthProvider.authenticate().await
+        }
+    }
+    struct CountingResolver(AtomicUsize);
+    impl SessionTopologyResolver for CountingResolver {
+        fn resolve_topology<'a>(
+            &'a self,
+            auth: &'a AuthContext,
+            config: &'a SessionConfig,
+            domains: &'a [ProtocolDomain],
+        ) -> BoxFuture<'a, SessionTopology> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            MarketTopologyResolver.resolve_topology(auth, config, domains)
+        }
+    }
+    block_on(async {
+        let handle = runtime_with_default_adapters();
+        let runtime = SessionRuntime::new(handle.clone(), SessionBootstrap::new());
+        let connector = ControlledConnector::with_outcomes(vec![ConnectOutcome::Connected(
+            RecvBehavior::Frame(RawFrame::Close),
+        )]);
+        let config = session_config().with_reconnect(ReconnectPolicy::new(
+            Duration::ZERO,
+            Duration::ZERO,
+            Some(0),
+        ));
+        let auth = CountingAuth(AtomicUsize::new(0));
+        let resolver = CountingResolver(AtomicUsize::new(0));
+        let adapters = adapter_registry();
+        let mut run = runtime
+            .establish(&auth, &resolver, &connector, &config, &adapters)
+            .await
+            .unwrap();
+        let error = runtime
+            .drive_route_once(
+                &mut run,
+                "market",
+                vec![],
+                CommitScope::RealtimeUpdate,
+                SessionRuntimeDeps::new(&auth, &resolver, &connector, &config, &adapters),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), tqsdk_core::ContractErrorKind::Transport);
+        assert_eq!(auth.0.load(Ordering::SeqCst), 1);
+        assert_eq!(resolver.0.load(Ordering::SeqCst), 1);
+        assert_eq!(connector.connected_labels().len(), 1);
+        let snapshot = handle.latest_snapshot();
+        assert_eq!(
+            snapshot.get(["system", "session", "lifecycle", "phase"]),
+            Some(&json!("closed"))
+        );
+        assert_eq!(
+            snapshot.get(["system", "session", "reconnect", "attempt"]),
+            Some(&json!(0))
+        );
+        assert_eq!(
+            snapshot.get(["system", "session", "reconnect", "exhausted"]),
+            Some(&json!(true))
+        );
+    });
+}
+
+#[test]
 fn session_runtime_applies_reconnect_backoff_before_retrying_recovery() {
     run_on_tokio(async {
         let handle = runtime_with_default_adapters();

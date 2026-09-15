@@ -235,6 +235,15 @@ async fn recover_run(
     io: &mut SessionIoState,
     runtime: &SessionRuntime,
 ) -> crate::error::Result<()> {
+    if io.config.reconnect.max_attempts == Some(0) {
+        let handle = runtime.handle();
+        handle.record_session_reconnect(0, 0, Some(0), true, None, vec![])?;
+        handle.record_session_phase(tqsdk_core::SessionPhase::Closed, None, vec![])?;
+        return Err(tqsdk_core::ContractError::transport(
+            "automatic session reconnect is disabled",
+        )
+        .into());
+    }
     let run = runtime
         .recover(
             io.auth_provider.as_ref(),
@@ -331,12 +340,28 @@ impl SessionClient {
                     .unwrap_or_else(|| "https://auth.shinnytech.com".to_string()),
             ),
         );
-        let auth_provider: SharedAuthProvider = provider.clone();
+        let backtest_only = market_target.backtest && trade_targets.is_empty();
+        let fresh_auth_provider: SharedAuthProvider = if backtest_only {
+            Arc::new(crate::tq_auth::BacktestAuthProvider(
+                provider.as_ref().clone(),
+                false,
+            ))
+        } else {
+            provider.clone()
+        };
+        let auth_provider: SharedAuthProvider = if backtest_only {
+            Arc::new(crate::tq_auth::BacktestAuthProvider(
+                provider.as_ref().clone(),
+                true,
+            ))
+        } else {
+            provider.clone()
+        };
         let topology_resolver: SharedTopologyResolver = provider;
         let route_connector: SharedRouteConnector = Arc::new(DefaultRouteConnector::default());
         let http_executor: SharedRouteExecutor = Arc::new(ReqwestHttpExecutor::new()?);
         let internal_executor: SharedRouteExecutor =
-            Arc::new(SessionInternalExecutor::new(auth_provider.clone()));
+            Arc::new(SessionInternalExecutor::new(fresh_auth_provider));
         let replay_executor: SharedRouteExecutor = Arc::new(SessionReplayExecutor);
         let mut adapters = AdapterRegistry::new();
         adapters.register_default_adapters();

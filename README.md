@@ -1,5 +1,9 @@
 # tqsdk-rust
 
+`tqsdk-cache fill` 已加入进程内远端准入、回测 token 复用与拒绝后熔断。
+底层调用方可通过 `tqsdk_session::SessionClientBuilder::reconnect_policy` 选择自动恢复预算；
+边界见 [Fill 远端准入](docs/architecture/history-fill-recovery.md#远端准入与认证)。
+
 Relay 的 10,000 根滚动行情缓存、预热和按需订阅操作合同见
 [Relay rolling market cache](docs/architecture/relay-rolling-cache.md)。
 

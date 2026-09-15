@@ -1,5 +1,10 @@
 # 验收标准与测试矩阵
 
+历史连接节流、认证复用与拒绝后熔断须通过 [远端准入验证](history-fill-recovery.md#验证远端准入)，
+并保持分页裁剪、失败 attempt 隔离和干净 session 回池回归通过。
+`cargo test -p tqsdk-core --test runtime_contract_session_reconnect` 验证零预算无网络恢复、
+统一 Closed/reconnect 状态；session 单测覆盖 builder 透传及 flush/peek 禁止恢复。
+
 Tick schema 4 当前格式：默认 root 的迁移后深验必须满足 `legacy_files=0`、
 `pack_source_files=0`、`pending_month_packs=0`、`problem_files=0`。另运行
 `cargo test -p tqsdk-data --test backtest_tick_cache_ops pre_schema4_tick_files_fail_closed_without_mutation`，

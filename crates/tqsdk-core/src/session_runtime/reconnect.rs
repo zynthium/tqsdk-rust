@@ -27,11 +27,23 @@ impl SessionRuntime {
         deps: SessionRuntimeDeps<'_>,
     ) -> Result<RecoveryOutcome> {
         let mut commits = Vec::new();
-        let max_attempts = deps
-            .config
-            .reconnect
-            .max_attempts
-            .map(|attempts| attempts.max(1));
+        let max_attempts = deps.config.reconnect.max_attempts;
+        if max_attempts == Some(0) {
+            let details = Some(json!({"route": route_label, "reason": "reconnect-disabled"}));
+            self.handle.record_session_reconnect(
+                0,
+                0,
+                Some(0),
+                true,
+                details.clone(),
+                caused_by.clone(),
+            )?;
+            self.handle
+                .record_session_phase(SessionPhase::Closed, details, caused_by)?;
+            return Err(crate::ContractError::transport(
+                "automatic session reconnect is disabled",
+            ));
+        }
         let mut attempt = 1_u32;
 
         loop {

@@ -121,6 +121,9 @@ impl ServerHistorySource for RestartSource {
                 return Ok(Some(event));
             }
             if let Some(error) = self.failure.take() {
+                if error == "temporary transport failure" {
+                    return Err(DataError::Session(tqsdk_core::ContractError::transport(error).into()));
+                }
                 return Err(DataError::InvalidResponse(error.into()));
             }
             Ok(None)

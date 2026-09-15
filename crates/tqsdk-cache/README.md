@@ -1,5 +1,9 @@
 # `tqsdk-cache`
 
+`fill` 自动限制进程内远端 source 打开频率并复用有效回测 token；认证拒绝或限流后停止
+该 client 的后续远端打开。排除原因后重新运行。多进程不共享配额；详见
+[远端准入与认证](../../docs/architecture/history-fill-recovery.md#远端准入与认证)。
+
 > 当前 runtime 已退役 Tick v2/v3 fallback：普通读写遇到旧格式会 fail closed。
 > Tick `migrate` 只封存 schema 4 的闭月日分区；DryRun 若报告 `legacy_files > 0`，
 > 必须先用冻结的 pre-v4 迁移器处理，不能由当前二进制原地转换。

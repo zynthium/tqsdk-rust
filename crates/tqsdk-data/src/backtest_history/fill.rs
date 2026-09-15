@@ -55,6 +55,9 @@ const CROSS_PROCESS_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
 const EXTERNAL_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const REMOTE_FILL_RETRY_ATTEMPTS: usize = 3;
 
+#[path = "fill_admission.rs"]
+mod admission;
+
 static NEXT_CHART_ID: AtomicU64 = AtomicU64::new(1);
 
 type ServerHistorySourceFuture<'a> =
@@ -423,6 +426,7 @@ struct IdleServerHistorySession {
 
 #[cfg(all(feature = "live", feature = "services"))]
 struct ServerHistorySessionPool {
+    admission: admission::FillAdmission,
     permits: Arc<Semaphore>,
     idle: Mutex<Vec<IdleServerHistorySession>>,
     #[cfg(test)]
@@ -434,6 +438,7 @@ impl ServerHistorySessionPool {
     fn new(max_sessions: usize) -> Self {
         Self {
             permits: Arc::new(Semaphore::new(max_sessions)),
+            admission: admission::FillAdmission::default(),
             idle: Mutex::new(Vec::with_capacity(max_sessions)),
             #[cfg(test)]
             created_sessions: AtomicUsize::new(0),
@@ -465,6 +470,10 @@ impl ServerHistorySessionPool {
                     credentials.pass.clone(),
                 )
                 .futures_backtest_market()
+                .reconnect_policy(tqsdk_core::ReconnectPolicy {
+                    max_attempts: Some(0),
+                    ..Default::default()
+                })
                 .commit_log_retention(SERVER_HISTORY_COMMIT_LOG_RETENTION)
                 .build()?;
                 #[cfg(test)]
@@ -536,12 +545,16 @@ impl ServerHistorySourceFactory for SessionServerHistorySourceFactory {
                 .collect();
             let stream =
                 tqsdk_session::ServerBacktestHistoryStream::open(lease.session().clone(), request)
-                    .await?;
+                    .await
+                    .map_err(DataError::from);
+            self.pool.admission.observe(&stream);
+            let stream = stream?;
             Ok(Box::new(SessionServerHistorySource {
                 stream: Some(stream),
                 lease: Some(lease),
                 chart_kinds,
                 state_pruned: false,
+                admitted: false,
             }) as Box<dyn ServerHistorySource>)
         })
     }
@@ -553,16 +566,37 @@ struct SessionServerHistorySource {
     lease: Option<ServerHistorySessionLease>,
     chart_kinds: BTreeMap<String, ServerBacktestHistoryKind>,
     state_pruned: bool,
+    admitted: bool,
 }
 
 #[cfg(all(feature = "live", feature = "services"))]
 impl ServerHistorySource for SessionServerHistorySource {
     fn next_event<'a>(&'a mut self) -> ServerHistorySourceFuture<'a> {
         Box::pin(async move {
+            // Opening a chart only queues commands. Gate the actual lazy
+            // authentication/connection, not allocation of the source object.
+            if !self.admitted {
+                let lease = self.lease.as_ref().ok_or(DataError::InvalidState(
+                    "server-history source was already closed",
+                ))?;
+                let _admission = lease.pool.admission.enter().await?;
+                let established = lease
+                    .session()
+                    .ensure_established()
+                    .await
+                    .map_err(DataError::from);
+                lease.pool.admission.observe(&established);
+                established?;
+                self.admitted = true;
+            }
             let stream = self.stream.as_mut().ok_or(DataError::InvalidState(
                 "server-history source was already closed",
             ))?;
-            let event = stream.next_event(None).await.map_err(DataError::from)?;
+            let event = stream.next_event(None).await.map_err(DataError::from);
+            if let Some(lease) = &self.lease {
+                lease.pool.admission.observe(&event);
+            }
+            let event = event?;
             if let (Some(event), Some(lease)) = (&event, &self.lease) {
                 self.state_pruned |=
                     prune_consumed_server_history_page(lease.session(), &self.chart_kinds, event)?;
@@ -2050,29 +2084,32 @@ fn escape_path_component(value: &str) -> String {
 }
 
 fn is_retryable(error: &DataError) -> bool {
-    let message = error.to_string().to_ascii_lowercase();
-    [
-        "connection",
-        "connect",
-        "timeout",
-        "timed out",
-        "token",
-        "endpoint",
-        "temporar",
-        "transport",
-        "dns",
-    ]
-    .iter()
-    .any(|needle| message.contains(needle))
+    if admission::server_refused(error) {
+        return false;
+    }
+    match error {
+        DataError::Session(error) => error.is_retryable(),
+        DataError::Timeout(_) => true,
+        DataError::Io(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::Interrupted
+        ),
+        _ => false,
+    }
 }
 
 fn retry_delay(attempt: usize) -> Duration {
-    Duration::from_millis(
-        u64::try_from(attempt)
-            .unwrap_or(u64::MAX)
-            .saturating_mul(250)
-            .min(2_000),
-    )
+    use std::hash::{BuildHasher, Hasher};
+    let jitter = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish()
+        % 1_001;
+    Duration::from_secs(2_u64.saturating_pow(attempt.min(5) as u32)) + Duration::from_millis(jitter)
 }
 
 #[cfg(test)]
@@ -2832,6 +2869,7 @@ mod tests {
             stream: Some(stream),
             lease: Some(lease),
             state_pruned: false,
+            admitted: false,
             chart_kinds: BTreeMap::from([(
                 "ticks-au".to_string(),
                 ServerBacktestHistoryKind::Tick,
@@ -2951,6 +2989,7 @@ mod tests {
             stream: Some(stream),
             lease: Some(lease),
             state_pruned: false,
+            admitted: false,
             chart_kinds: BTreeMap::from([(
                 "ticks-au".to_string(),
                 ServerBacktestHistoryKind::Tick,

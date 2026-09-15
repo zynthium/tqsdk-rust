@@ -123,7 +123,10 @@ pub struct ReconnectPolicy {
 }
 ```
 
-`max_attempts = Some(n)` 表示连续重连失败达到 `n` 次后进入 `Closed`；
+`max_attempts = Some(n)`（`n > 0`）表示连续重连失败达到 `n` 次后进入 `Closed`；
+`Some(0)` 禁用自动恢复：重连触发时记录 attempt=0、exhausted=true 和 `Closed`，
+不再次调用 auth/resolver/connector，并返回可重试的 Transport 错误。Session facade 的
+flush/peek 发送失败也遵循此开关。显式 runtime recovery 与初始 socket 建连预算不受此开关影响。
 `max_attempts = None` 是默认策略，表示持续按 backoff 重试直到重连成功。
 该值会进入统一状态树的 `system.session.reconnect.max_attempts`：有限次数写入数字，
 无限重试写入 JSON `null`，由上层 facade 直接按 `Option<u32>` 解读。

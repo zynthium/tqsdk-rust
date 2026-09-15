@@ -72,4 +72,4 @@ pub use order_intent::{
 pub use recovery::{StartupRecoverySpec, StartupRecoveryStatus};
 #[cfg(all(feature = "services", feature = "tq-auth"))]
 pub use replay_service::{ServerReplayBuilder, ServerReplaySession};
-pub use tqsdk_core::RetryHint;
+pub use tqsdk_core::{ReconnectPolicy, RetryHint};

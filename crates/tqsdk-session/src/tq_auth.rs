@@ -2,6 +2,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+mod token_cache;
+pub(crate) use token_cache::BacktestAuthProvider;
+
 use crate::response_body::{
     AUTH_RESPONSE_BODY_LIMIT, read_limited_response_bytes, response_body_preview,
 };
@@ -150,10 +153,14 @@ impl TqAuthProvider {
     }
 
     async fn request_access_token(&self) -> Result<String> {
+        self.request_access_token_with_retry(true).await
+    }
+
+    async fn request_access_token_with_retry(&self, retry: bool) -> Result<String> {
         self.run_http(async {
             let client = self.build_http_client(None)?;
             let token_url = self.token_url();
-            let response = send_http_request_with_retry(|| {
+            let request = || {
                 client
                     .post(&token_url)
                     .form(&[
@@ -165,10 +172,25 @@ impl TqAuthProvider {
                     ])
                     .header(USER_AGENT, DEFAULT_USER_AGENT)
                     .header(ACCEPT, "application/json")
-            })
-            .await
-            .map_err(|err| ContractError::auth(format_reqwest_error("token request", err)))?;
-            let payload = self.read_json_response(response, "token request").await?;
+            };
+            let response = if retry {
+                send_http_request_with_retry(request).await
+            } else {
+                request().send().await
+            }
+            .map_err(|err| {
+                let message = format_reqwest_error("token request", err);
+                if retry {
+                    ContractError::auth(message)
+                } else {
+                    ContractError::transport(message)
+                }
+            })?;
+            let payload = if retry {
+                self.read_json_response(response, "token request").await?
+            } else {
+                token_cache::read_backtest_response(response, "token request").await?
+            };
             let access_token = payload
                 .get("access_token")
                 .and_then(Value::as_str)
@@ -245,15 +267,29 @@ impl TqAuthProvider {
                 ("stock", stock.to_string()),
                 ("backtest", backtest.to_string()),
             ];
-            let response =
-                send_http_request_with_retry(|| client.get(&self.name_service_url).query(&query))
-                    .await
-                    .map_err(|err| {
-                        ContractError::auth(format_reqwest_error("market endpoint request", err))
-                    })?;
-            let payload = self
-                .read_json_response(response, "market endpoint request")
-                .await?;
+            let request = || client.get(&self.name_service_url).query(&query);
+            let response = if backtest {
+                request().send().await
+            } else {
+                send_http_request_with_retry(request).await
+            }
+            .map_err(|err| {
+                let message = format_reqwest_error("market endpoint request", err);
+                if backtest {
+                    ContractError::transport(message)
+                } else {
+                    ContractError::auth(message)
+                }
+            })?;
+            let payload = if backtest {
+                if matches!(response.status().as_u16(), 401 | 403) {
+                    token_cache::invalidate(self).await;
+                }
+                token_cache::read_backtest_response(response, "market endpoint request").await?
+            } else {
+                self.read_json_response(response, "market endpoint request")
+                    .await?
+            };
             let md_url = payload
                 .get("mdurl")
                 .and_then(Value::as_str)

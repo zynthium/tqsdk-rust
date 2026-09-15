@@ -90,6 +90,107 @@ struct QueueTransport {
     recv_queue: Arc<Mutex<VecDeque<RawFrame>>>,
 }
 
+#[tokio::test]
+async fn disabled_reconnect_does_not_recover_flush_or_peek_failures() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct FailingSend;
+    impl Transport for FailingSend {
+        async fn connect(&mut self) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn recv(&mut self) -> CoreResult<RawFrame> {
+            Ok(RawFrame::Pong)
+        }
+        async fn send(&mut self, _: OutboundFrame) -> CoreResult<()> {
+            Err(tqsdk_core::ContractError::transport(
+                "injected send failure",
+            ))
+        }
+        async fn close(&mut self) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+    struct CountingConnector(AtomicUsize);
+    impl SessionRouteConnector for CountingConnector {
+        fn connect_route<'a>(&'a self, _: &'a SessionRoute) -> DynRouteConnectFuture<'a> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(Box::new(FailingSend) as Box<dyn DynTransport>) })
+        }
+    }
+    for flush_command in [false, true] {
+        let handle = runtime_with_default_adapters();
+        let topology = SessionTopology::default().with_route(SessionRoute {
+            label: "market".into(),
+            target: SessionTarget::Shared,
+            domains: vec![ProtocolDomain::Market],
+            endpoint: SessionRouteEndpoint::WebSocket {
+                url: "wss://market.example".into(),
+                connect: Default::default(),
+            },
+        });
+        let auth: SharedAuthProvider = Arc::new(TestAuthProvider::default());
+        let connector = Arc::new(CountingConnector(AtomicUsize::new(0)));
+        let client = test_live_client_with_components(
+            handle.clone(),
+            topology.clone(),
+            SessionIoComponents {
+                auth_provider: Arc::clone(&auth),
+                topology_resolver: Arc::new(StaticTopologyResolver { topology }),
+                route_connector: connector.clone(),
+                http_executor: Arc::new(RecordingExecutor::default()),
+                internal_executor: Arc::new(SessionInternalExecutor::new(auth)),
+                replay_executor: Arc::new(SessionReplayExecutor),
+            },
+        );
+        client
+            .io
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .config
+            .reconnect
+            .max_attempts = Some(0);
+        if flush_command {
+            client.subscribe_quotes(["SHFE.au2602"]).await.unwrap();
+        }
+        let error = client.drive_route_once(None).await.unwrap_err();
+        assert!(error.is_retryable());
+        assert_eq!(connector.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            handle
+                .latest_snapshot()
+                .get(["system", "session", "lifecycle", "phase"]),
+            Some(&json!("closed"))
+        );
+    }
+}
+
+#[cfg(feature = "live")]
+#[tokio::test]
+async fn builder_preserves_explicit_zero_reconnect_budget() {
+    let client = crate::SessionClientBuilder::new("test-user", "test-pass")
+        .futures_backtest_market()
+        .reconnect_policy(tqsdk_core::ReconnectPolicy {
+            max_attempts: Some(0),
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    assert_eq!(
+        client
+            .io
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .config
+            .reconnect
+            .max_attempts,
+        Some(0)
+    );
+}
+
 impl QueueTransport {
     fn with_frame(frame: RawFrame) -> Self {
         let transport = Self::default();
