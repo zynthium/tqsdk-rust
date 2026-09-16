@@ -24,8 +24,8 @@
 - direct service helper（交易日历、结算价、排名、EDB）也要求当前已经处于 Tokio runtime 中
 
 HTTP auth / direct-query client 使用 HTTP/1.1，并遵循标准 `HTTP_PROXY` / `HTTPS_PROXY` /
-`ALL_PROXY` / `NO_PROXY` 环境变量。设置 `TQSDK_HTTP_NO_PROXY=1` 可强制这些 HTTP client
-直连；其他值不改变标准代理行为。少数网络环境下如果 Rust resolver 对官方域名解析不稳定，
+`ALL_PROXY` / `NO_PROXY` 环境变量。设置 `TQSDK_HTTP_NO_PROXY=1` 可强制 SDK 的 HTTP 与
+WebSocket client 直连；其他值不改变标准代理行为。少数网络环境下如果 Rust resolver 对官方域名解析不稳定，
 可显式注入直连 DNS 结果：
 
 ```bash
@@ -34,8 +34,9 @@ export TQSDK_DIRECT_RESOLVE_API_SHINNYTECH_COM=<api-ip>
 export TQSDK_DIRECT_RESOLVE_FILES_SHINNYTECH_COM=<files-ip>
 ```
 
-这些变量只覆盖对应 host 的 reqwest 直连解析结果，不影响 WebSocket route 选择；走代理时
-目标域名通常由代理解析。IP 应按运行环境实际解析结果设置。代理可能看到目标域名；企业 MITM
+这些变量只覆盖对应 host 的 HTTP 直连解析结果。HTTP 与 WebSocket 都遵循同一组标准代理
+变量；WebSocket 通过 HTTP CONNECT 代理建立，`NO_PROXY` 的 host/domain 规则会绕过代理。走
+代理时目标域名由代理解析。IP 应按运行环境实际解析结果设置。代理可能看到目标域名；企业 MITM
 代理若被系统信任，还可看到 TLS 内请求内容，敏感环境应使用可信代理或
 `TQSDK_HTTP_NO_PROXY=1`。
 

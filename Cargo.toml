@@ -38,7 +38,8 @@ futures = "0.3"
 include_dir = "0.7"
 libloading = "0.8"
 mac_address = "1.1"
-reqwest = { version = "0.12", default-features = false, features = ["brotli", "gzip", "json", "rustls-tls", "stream"] }
+percent-encoding = "2.3"
+reqwest = { version = "0.12", default-features = false, features = ["brotli", "gzip", "json", "rustls-tls", "rustls-tls-native-roots", "stream"] }
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -46,7 +47,11 @@ sha1 = "0.10"
 sha2 = "0.10"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["codec"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 url = "2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-native-certs = "0.8"
+webpki-roots = "1"
 yawc = { version = "0.3.3", features = ["zlib"] }
 flate2 = "1"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }

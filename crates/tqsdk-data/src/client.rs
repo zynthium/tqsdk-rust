@@ -64,7 +64,12 @@ const DIRECT_HTTPS_HOSTS: &[(&str, &str)] = &[
 
 #[cfg(feature = "services")]
 fn direct_reqwest_client() -> reqwest::Client {
-    let mut builder = reqwest::Client::builder().no_proxy().http1_only();
+    let mut builder = reqwest::Client::builder().http1_only();
+    let force_no_proxy =
+        std::env::var_os("TQSDK_HTTP_NO_PROXY").as_deref() == Some(std::ffi::OsStr::new("1"));
+    if force_no_proxy {
+        builder = builder.no_proxy();
+    }
     for (host, env_name) in DIRECT_HTTPS_HOSTS {
         if let Some(addrs) = resolve_https_host(host, env_name) {
             builder = builder.resolve_to_addrs(host, &addrs);
