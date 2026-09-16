@@ -2,15 +2,13 @@ use std::time::Duration;
 
 use chrono::{Days, NaiveDate};
 use reqwest::StatusCode;
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::Value;
 use tqsdk_core::{AuthContext, SymbolRanking};
 use url::Url;
 
 use crate::client::SessionClient;
 use crate::error::{Result, SessionFacadeError};
-
-const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.8.1";
 
 pub(super) fn split_symbol(symbol: &str) -> (&str, &str) {
     symbol
@@ -72,8 +70,7 @@ pub(super) async fn fetch_public_json_get(client: &SessionClient, url: &str) -> 
     let response = client
         .service_http()
         .get(url)
-        .header(ACCEPT, HeaderValue::from_static("application/json"))
-        .header(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT))
+        .headers(crate::http_client::default_json_headers())
         .timeout(Duration::from_secs(30))
         .send()
         .await
@@ -145,9 +142,7 @@ async fn fetch_json(
 }
 
 fn auth_headers(auth: &AuthContext) -> Result<HeaderMap> {
-    let mut headers = HeaderMap::new();
-    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-    headers.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
+    let mut headers = crate::http_client::default_json_headers();
     let authorization =
         HeaderValue::from_str(&format!("Bearer {}", auth.access_token())).map_err(|error| {
             SessionFacadeError::from(tqsdk_core::ContractError::auth(format!(
@@ -298,11 +293,11 @@ mod tests {
         );
         assert_eq!(
             headers
-                .get(USER_AGENT)
+                .get(reqwest::header::USER_AGENT)
                 .expect("user agent header should exist")
                 .to_str()
                 .expect("user agent header should be valid"),
-            DEFAULT_USER_AGENT
+            crate::http_client::DEFAULT_USER_AGENT
         );
     }
 }

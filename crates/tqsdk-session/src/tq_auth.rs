@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod token_cache;
 pub(crate) use token_cache::BacktestAuthProvider;
@@ -10,7 +11,7 @@ use crate::response_body::{
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::Value;
 
 use crate::tqkq::TqKqAccountConfig;
@@ -25,9 +26,10 @@ const DEFAULT_NAME_SERVICE_URL: &str = "https://api.shinnytech.com/ns";
 const DEFAULT_BROKER_BASE_URL: &str = "https://files.shinnytech.com";
 // Keep the wire identity aligned with the supported official SDK. Legacy trade
 // gateways use this during connection admission, not merely for diagnostics.
-const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.10.2";
 const HTTP_SEND_ATTEMPTS: usize = 6;
 const HTTP_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
+
+static RETRY_JITTER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 // These are ShinnyTech's public OAuth2 client identifiers, not user
 // credentials. User passwords and access tokens still come from the runtime
 // authentication flow; if the platform rotates this public client, a builder
@@ -203,8 +205,7 @@ impl TqAuthProvider {
                         ("username", self.credentials.username.as_str()),
                         ("password", self.credentials.password.as_str()),
                     ])
-                    .header(USER_AGENT, DEFAULT_USER_AGENT)
-                    .header(ACCEPT, "application/json")
+                    .headers(crate::http_client::default_json_headers())
             };
             let response = if retry {
                 send_http_request_with_retry(request).await
@@ -235,9 +236,7 @@ impl TqAuthProvider {
     }
 
     pub(crate) fn auth_headers(&self, auth: &AuthContext) -> Result<HeaderMap> {
-        let mut headers = HeaderMap::new();
-        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-        headers.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
+        let mut headers = crate::http_client::default_json_headers();
         let authz = HeaderValue::from_str(&format!("Bearer {}", auth.access_token()))
             .map_err(|err| ContractError::auth(format!("invalid authorization header: {err}")))?;
         headers.insert(AUTHORIZATION, authz);
@@ -248,7 +247,7 @@ impl TqAuthProvider {
         WebSocketConnectOptions::default()
             .with_header("Authorization", format!("Bearer {}", auth.access_token()))
             .with_header("Accept", "application/json")
-            .with_header("User-Agent", DEFAULT_USER_AGENT)
+            .with_header("User-Agent", crate::http_client::DEFAULT_USER_AGENT)
             // Legacy trade gateways reject lowercase `upgrade`, despite RFC 6455
             // defining this header token as case-insensitive.
             .with_header("Connection", "Upgrade")
@@ -427,12 +426,33 @@ async fn send_http_request_with_retry(
         match request().send().await {
             Ok(response) => return Ok(response),
             Err(error) if attempt < HTTP_SEND_ATTEMPTS && is_retryable_http_send_error(&error) => {
-                tokio::time::sleep(HTTP_RETRY_BASE_DELAY.saturating_mul(attempt as u32)).await;
+                let upper_bound = HTTP_RETRY_BASE_DELAY.saturating_mul(attempt as u32);
+                tokio::time::sleep(jittered_retry_delay(upper_bound, attempt)).await;
                 attempt += 1;
             }
             Err(error) => return Err(error),
         }
     }
+}
+
+/// De-correlate transient authentication retries without exceeding the prior
+/// per-attempt delay ceiling.
+fn jittered_retry_delay(upper_bound: Duration, attempt: usize) -> Duration {
+    let upper_bound_nanos = u64::try_from(upper_bound.as_nanos()).unwrap_or(u64::MAX);
+    if upper_bound_nanos == 0 {
+        return Duration::ZERO;
+    }
+
+    let sequence = RETRY_JITTER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let clock = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+        });
+    let seed = sequence ^ clock ^ (attempt as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let mixed = seed ^ (seed >> 30);
+    let delay_nanos = 1 + mixed.wrapping_mul(0xbf58_476d_1ce4_e5b9) % upper_bound_nanos;
+    Duration::from_nanos(delay_nanos)
 }
 
 fn is_retryable_http_send_error(error: &reqwest::Error) -> bool {
@@ -654,6 +674,20 @@ impl SessionTopologyResolver for TqAuthProvider {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn jittered_retry_delay_stays_within_the_previous_delay_ceiling() {
+        let upper_bound = std::time::Duration::from_millis(250);
+        for attempt in 1..=8 {
+            let delay = super::jittered_retry_delay(upper_bound, attempt);
+            assert!(!delay.is_zero());
+            assert!(delay <= upper_bound);
+        }
+        assert_eq!(
+            super::jittered_retry_delay(std::time::Duration::ZERO, 1),
+            std::time::Duration::ZERO
+        );
+    }
+
     use std::io::{Read, Write};
 
     use super::{PasswordCredentials, TqAuthProvider};

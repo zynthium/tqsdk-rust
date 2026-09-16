@@ -40,6 +40,11 @@ export TQSDK_DIRECT_RESOLVE_FILES_SHINNYTECH_COM=<files-ip>
 代理若被系统信任，还可看到 TLS 内请求内容，敏感环境应使用可信代理或
 `TQSDK_HTTP_NO_PROXY=1`。
 
+所有 auth、service、HTTP query 与 WebSocket 握手使用同一兼容 `User-Agent`
+（`tqsdk-python 3.10.2`）；不要伪装浏览器、轮换出口或覆盖身份。临时网络失败的初始
+auth/WebSocket 重试会在既有等待上界内加入抖动，避免多个进程同步重连；认证失败、代理认证
+失败和 HTTP 拒绝仍不会被 transport 层盲目重试。
+
 ## 依赖方式
 
 Cargo 包名是 `tqsdk-session`，代码里的 crate 路径是 `tqsdk_session`。

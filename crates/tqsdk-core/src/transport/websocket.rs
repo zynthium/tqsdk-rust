@@ -1,6 +1,7 @@
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use futures::SinkExt;
@@ -26,6 +27,8 @@ const WEBSOCKET_CONNECT_ATTEMPTS: usize = 3;
 const WEBSOCKET_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(15);
 const WEBSOCKET_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(250);
 const PROXY_RESPONSE_LIMIT: usize = 16 * 1024;
+
+static RETRY_JITTER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 type ProxyWebSocket = WebSocket<MaybeTlsStream<Box<dyn AsyncStream>>>;
 
@@ -168,7 +171,7 @@ impl WebSocketTransport {
                 }
             }
             if attempt < attempts {
-                tokio::time::sleep(retry_delay).await;
+                tokio::time::sleep(jittered_retry_delay(retry_delay, attempt)).await;
             }
         }
 
@@ -238,6 +241,28 @@ impl WebSocketTransport {
 
         Ok(())
     }
+}
+
+/// De-correlate retries without extending the caller-selected retry ceiling.
+///
+/// The seed need not be cryptographically random: its sole purpose is to keep
+/// simultaneously failing SDK processes from reconnecting in lockstep.
+fn jittered_retry_delay(upper_bound: Duration, attempt: usize) -> Duration {
+    let upper_bound_nanos = u64::try_from(upper_bound.as_nanos()).unwrap_or(u64::MAX);
+    if upper_bound_nanos == 0 {
+        return Duration::ZERO;
+    }
+
+    let sequence = RETRY_JITTER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let clock = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+        });
+    let seed = sequence ^ clock ^ (attempt as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let mixed = seed ^ (seed >> 30);
+    let delay_nanos = 1 + mixed.wrapping_mul(0xbf58_476d_1ce4_e5b9) % upper_bound_nanos;
+    Duration::from_nanos(delay_nanos)
 }
 
 async fn connect_websocket_stream(
@@ -516,6 +541,20 @@ fn require_tokio_runtime() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn jittered_retry_delay_stays_within_the_requested_ceiling() {
+        let upper_bound = Duration::from_millis(250);
+        for attempt in 1..=8 {
+            let delay = super::jittered_retry_delay(upper_bound, attempt);
+            assert!(!delay.is_zero());
+            assert!(delay <= upper_bound);
+        }
+        assert_eq!(
+            super::jittered_retry_delay(Duration::ZERO, 1),
+            Duration::ZERO
+        );
+    }
+
     #[tokio::test]
     async fn handshake_status_is_typed_and_never_retried_inside_transport() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

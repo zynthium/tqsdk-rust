@@ -316,7 +316,7 @@ V1 的验收不应看 facade 好不好用，而应看 contract 是否完整。
 | replay step commit | 一次 replay step 产生多对象变化 | 形成单轮或可解释多轮 commit，归属对应 `CommandId` | replay 因果统一 |
 | query response commit | GraphQL / HTTP 查询返回结果 | 结果写入 `query/*`，形成可见 commit | query 结果进入 snapshot |
 | session error commit | auth 失效或 transport 异常 | session 错误进入 `system/*` 并形成 commit | system 错误统一可见 |
-| websocket 初始建连黑洞 | TCP 已接入但 TLS/WebSocket 握手不返回 | 单次尝试按时取消，最多重试 3 次后返回脱敏 transport error | 初始瞬时故障有界恢复，不改变 session reconnect 状态机 |
+| websocket 初始建连黑洞 | TCP 已接入但 TLS/WebSocket 握手不返回 | 单次尝试按时取消，最多重试 3 次；重试在既有等待上界内带抖动，耗尽后返回脱敏 transport error | 初始瞬时故障有界恢复，不改变 session reconnect 状态机 |
 | cursor isolation | 两个 cursor 从不同 revision 开始消费 | 各自独立推进 | cursor 独立性 |
 | single-adapter input ownership | 一个输入只被一个 adapter 接受 | 可消费输入且产出与借用式解码相同的 mutation | 输入所有权不改变 commit 语义 |
 | multi-adapter observation | 一个输入被多个 adapter 观察 | 保持借用式 fan-out，只通过 mutation/commit 对外可见 | adapter 无提交权 |

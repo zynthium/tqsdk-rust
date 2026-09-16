@@ -3,6 +3,15 @@
 use std::ffi::OsStr;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 
+use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
+
+/// Wire identity required by legacy Tianqin gateways during admission.
+///
+/// Every HTTP and WebSocket path uses this compatibility identity. It is not
+/// user-configurable: arbitrary identity overrides make traffic harder for an
+/// upstream operator to attribute and support.
+pub(crate) const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.10.2";
+
 const HTTP_NO_PROXY_ENV: &str = "TQSDK_HTTP_NO_PROXY";
 
 const DIRECT_HTTPS_HOSTS: &[(&str, &str)] = &[
@@ -31,6 +40,13 @@ pub(crate) fn direct_reqwest_client_builder() -> reqwest::ClientBuilder {
         }
     }
     builder
+}
+
+pub(crate) fn default_json_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    headers.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
+    headers
 }
 
 fn force_no_proxy(value: Option<&OsStr>) -> bool {
@@ -71,5 +87,18 @@ mod tests {
         assert!(!super::force_no_proxy(None));
         assert!(!super::force_no_proxy(Some(OsStr::new("true"))));
         assert!(!super::force_no_proxy(Some(OsStr::new("0"))));
+    }
+
+    #[test]
+    fn default_json_headers_use_the_single_compatibility_identity() {
+        let headers = super::default_json_headers();
+        assert_eq!(
+            headers.get(reqwest::header::ACCEPT).unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            headers.get(reqwest::header::USER_AGENT).unwrap(),
+            super::DEFAULT_USER_AGENT
+        );
     }
 }

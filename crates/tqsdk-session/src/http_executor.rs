@@ -1,6 +1,6 @@
 use std::{future::Future, pin::Pin, time::Duration};
 
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::CONTENT_TYPE;
 use serde_json::{Value, json};
 use url::Url;
 
@@ -12,8 +12,6 @@ use tqsdk_core::{
     ContractError, HttpMethod, InputPayload, IoEvent, OutboundDispatch, OutboundRequest,
     ProtocolDomain, Result, RuntimeInput, SessionRoute, SessionRouteEndpoint,
 };
-
-const DEFAULT_USER_AGENT: &str = "tqsdk-python 3.8.1";
 
 /// Low-level reqwest-backed executor for pending HTTP routes such as query and
 /// schema refresh requests.
@@ -36,12 +34,8 @@ impl ReqwestHttpExecutor {
     }
 
     fn build_client() -> Result<reqwest::Client> {
-        let mut headers = HeaderMap::new();
-        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-        headers.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
-
         crate::http_client::direct_reqwest_client_builder()
-            .default_headers(headers)
+            .default_headers(crate::http_client::default_json_headers())
             .gzip(true)
             .brotli(true)
             .timeout(Duration::from_secs(30))
