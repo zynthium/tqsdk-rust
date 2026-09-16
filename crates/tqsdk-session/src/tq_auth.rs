@@ -118,6 +118,35 @@ impl TqAuthProvider {
             .map_err(|err| ContractError::auth(format!("failed to build auth client: {err}")))
     }
 
+    fn backtest_http_client(&self) -> Result<reqwest::Client> {
+        // Pools contain no default credentials. Keep pools runtime-local: a
+        // completed Tokio runtime cannot drive its old keep-alive connections.
+        static CLIENTS: std::sync::OnceLock<
+            std::sync::Mutex<Vec<(tokio::runtime::Id, reqwest::Client)>>,
+        > = std::sync::OnceLock::new();
+        let runtime = tokio::runtime::Handle::current().id();
+        let mut clients = CLIENTS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((_, client)) = clients.iter().find(|(id, _)| *id == runtime) {
+            return Ok(client.clone());
+        }
+        let client = crate::http_client::direct_reqwest_client_builder()
+            .gzip(true)
+            .brotli(true)
+            .timeout(Duration::from_secs(30))
+            .pool_idle_timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(2)
+            .build()
+            .map_err(|_| ContractError::transport("failed to build backtest HTTP client"))?;
+        if clients.len() == 8 {
+            clients.remove(0);
+        }
+        clients.push((runtime, client.clone()));
+        Ok(client)
+    }
+
     async fn run_http<F, T>(&self, future: F) -> Result<T>
     where
         F: Future<Output = Result<T>> + Send,
@@ -158,7 +187,11 @@ impl TqAuthProvider {
 
     async fn request_access_token_with_retry(&self, retry: bool) -> Result<String> {
         self.run_http(async {
-            let client = self.build_http_client(None)?;
+            let client = if retry {
+                self.build_http_client(None)?
+            } else {
+                self.backtest_http_client()?
+            };
             let token_url = self.token_url();
             let request = || {
                 client
@@ -189,7 +222,7 @@ impl TqAuthProvider {
             let payload = if retry {
                 self.read_json_response(response, "token request").await?
             } else {
-                token_cache::read_backtest_response(response, "token request").await?
+                token_cache::read_backtest_token_response(response).await?
             };
             let access_token = payload
                 .get("access_token")
@@ -262,12 +295,22 @@ impl TqAuthProvider {
         backtest: bool,
     ) -> Result<String> {
         self.run_http(async {
-            let client = self.build_http_client(Some(self.auth_headers(auth)?))?;
+            let client = if backtest {
+                self.backtest_http_client()?
+            } else {
+                self.build_http_client(None)?
+            };
             let query = [
                 ("stock", stock.to_string()),
                 ("backtest", backtest.to_string()),
             ];
-            let request = || client.get(&self.name_service_url).query(&query);
+            let headers = self.auth_headers(auth)?;
+            let request = || {
+                client
+                    .get(&self.name_service_url)
+                    .headers(headers.clone())
+                    .query(&query)
+            };
             let response = if backtest {
                 request().send().await
             } else {

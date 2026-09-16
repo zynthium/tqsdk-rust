@@ -1,5 +1,18 @@
 # 验收标准与测试矩阵
 
+历史连接优化的本地门禁：
+
+```bash
+cargo test -p tqsdk-core -p tqsdk-session -p tqsdk-data -p tqsdk-cache
+cargo clippy -p tqsdk-core -p tqsdk-session -p tqsdk-data -p tqsdk-cache --all-targets -- -D warnings
+cargo check --examples
+cargo check -p tqsdk-session -p tqsdk-data --no-default-features
+```
+
+覆盖源连接额度饱和与复用、超预算裁剪、共享冷却、HTTP keep-alive 与认证隔离、握手拒绝不重试、
+CLI 全局锁释放。4 MiB 是 JSON 编码保留阈值，不是 RSS 上限；生产吞吐、RSS 和服务端安全速率
+需要单独授权的 live 验收。
+
 历史连接节流、认证复用与拒绝后熔断须通过 [远端准入验证](history-fill-recovery.md#验证远端准入)，
 并保持分页裁剪、失败 attempt 隔离和干净 session 回池回归通过。
 `cargo test -p tqsdk-core --test runtime_contract_session_reconnect` 验证零预算无网络恢复、

@@ -59,6 +59,29 @@ type SharedTopologyResolver = Arc<dyn SessionTopologyResolver>;
 type SharedRouteConnector = Arc<dyn SessionRouteConnector>;
 type SharedRouteExecutor = Arc<dyn RouteRequestExecutor>;
 
+#[cfg(feature = "live")]
+struct InitialConnectRouteConnector(std::num::NonZeroUsize);
+
+#[cfg(feature = "live")]
+impl SessionRouteConnector for InitialConnectRouteConnector {
+    fn connect_route<'a>(
+        &'a self,
+        route: &'a tqsdk_core::SessionRoute,
+    ) -> tqsdk_core::internal::DynRouteConnectFuture<'a> {
+        Box::pin(async move {
+            use tqsdk_core::Transport;
+            if let SessionRouteEndpoint::WebSocket { url, connect } = &route.endpoint {
+                let mut transport = tqsdk_core::transport::WebSocketTransport::new(url.clone())
+                    .with_connect_options(connect.clone())
+                    .with_connect_attempts(self.0);
+                transport.connect().await?;
+                return Ok(Box::new(transport) as Box<dyn tqsdk_core::internal::DynTransport>);
+            }
+            DefaultRouteConnector::default().connect_route(route).await
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SessionClientContext {
     #[cfg(feature = "live")]
@@ -317,6 +340,24 @@ pub struct SessionClient {
 }
 
 impl SessionClient {
+    pub(crate) fn with_websocket_connect_attempts(
+        self,
+        attempts: Option<std::num::NonZeroUsize>,
+    ) -> Self {
+        #[cfg(feature = "live")]
+        if let Some(attempts) = attempts
+            && let Some(io) = &self.io
+        {
+            // Called only by the builder, before this client is shared.
+            io.try_lock()
+                .expect("new session has no concurrent owner")
+                .route_connector = Arc::new(InitialConnectRouteConnector(attempts));
+        }
+        #[cfg(not(feature = "live"))]
+        let _ = attempts;
+        self
+    }
+
     #[cfg(feature = "live")]
     pub(crate) fn new_live(
         handle: RuntimeHandle,

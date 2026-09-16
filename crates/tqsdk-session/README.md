@@ -1,5 +1,9 @@
 # `tqsdk-session`
 
+`SessionClientBuilder::websocket_connect_attempts(NonZeroUsize)` 独立配置初始 WebSocket 尝试，
+默认 3 次。backtest 认证/地址发现按 Tokio runtime 复用 HTTP 连接，Authorization 保持请求级隔离；
+结构化 HTTP 状态与兼容口径见 [Fill 合同](../../docs/architecture/history-fill-recovery.md)。
+
 `SessionClientBuilder::reconnect_policy(...)` 可指定自动恢复策略；`max_attempts: Some(0)`
 禁用收包、flush 和 peek 失败后的隐式恢复，让调用方统一处理重试。
 

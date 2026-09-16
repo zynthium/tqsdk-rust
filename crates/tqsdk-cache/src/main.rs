@@ -35,6 +35,7 @@ use tqsdk_data::{
 };
 use tqsdk_session::SessionClientBuilder;
 
+mod fill_guard;
 mod progress;
 mod query;
 mod snapshot;
@@ -1906,6 +1907,26 @@ async fn fill(
     {
         return Err(CliError::Usage("fill timeline catalog must contain only reviewed rules; use timeline without --apply to audit drafts".into()));
     }
+    let mut args = args;
+    history_fill_config(&args)?;
+    let waiting = tokio::time::Instant::now();
+    // Without both credentials every remote CLI path fails locally. Keep
+    // cache-only reads, dry-runs and missing-credential diagnostics independent.
+    let remote_credentials = ["TQ_AUTH_USER", "TQ_AUTH_PASS"]
+        .into_iter()
+        .all(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()));
+    let dynamic_universe = args.universe.as_deref().is_some_and(|value| {
+        tqsdk_data::UniverseExpression::parse(value)
+            .map_or(true, |expression| !expression.is_static_symbol_only())
+    });
+    let _remote_fill_guard = if remote_credentials && (!args.dry_run || dynamic_universe) {
+        Some(fill_guard::acquire(args.lock_wait_secs.or(Some(30))).await?)
+    } else {
+        None
+    };
+    args.lock_wait_secs = args
+        .lock_wait_secs
+        .map(|seconds| seconds.saturating_sub(waiting.elapsed().as_secs()));
     let mut outcome = fill_inner(cache_dir, kind, market, args).await?;
     if let Some(catalog) = timeline_catalog
         && !dry_run

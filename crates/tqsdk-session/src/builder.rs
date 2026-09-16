@@ -30,9 +30,24 @@ pub struct SessionClientBuilder {
     trade_targets: Vec<TradeSessionTarget>,
     commit_log_retention: Option<(usize, usize)>,
     reconnect_policy: tqsdk_core::ReconnectPolicy,
+    websocket_connect_attempts: Option<std::num::NonZeroUsize>,
 }
 
 impl SessionClientBuilder {
+    /// Sets initial WebSocket attempts independently of reconnect policy.
+    /// Fill callers use one attempt and own their outer retry budget.
+    ///
+    /// ```
+    /// use std::num::NonZeroUsize;
+    /// let builder = tqsdk_session::SessionClientBuilder::new("user", "password")
+    ///     .websocket_connect_attempts(NonZeroUsize::new(1).unwrap());
+    /// ```
+    #[must_use]
+    pub fn websocket_connect_attempts(mut self, attempts: std::num::NonZeroUsize) -> Self {
+        self.websocket_connect_attempts = Some(attempts);
+        self
+    }
+
     #[must_use]
     pub fn new(auth_user: impl Into<String>, auth_pass: impl Into<String>) -> Self {
         let endpoints = EndpointConfig::from_env();
@@ -52,6 +67,7 @@ impl SessionClientBuilder {
             trade_targets: Vec::new(),
             commit_log_retention: None,
             reconnect_policy: tqsdk_core::ReconnectPolicy::default(),
+            websocket_connect_attempts: None,
         }
     }
 
@@ -268,6 +284,7 @@ impl SessionClientBuilder {
             trade_targets,
             commit_log_retention,
             reconnect_policy,
+            websocket_connect_attempts,
         } = self;
         validate_trade_targets(&trade_targets)?;
         let mut adapters = AdapterRegistry::new();
@@ -299,6 +316,7 @@ impl SessionClientBuilder {
         #[cfg(not(feature = "services"))]
         let context = SessionClientContext::new(auth_user, auth_pass, endpoints);
         SessionClient::new_live(handle, context, config, trade_targets)
+            .map(|client| client.with_websocket_connect_attempts(websocket_connect_attempts))
     }
 }
 

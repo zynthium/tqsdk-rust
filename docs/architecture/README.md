@@ -1,5 +1,9 @@
 # tqsdk-rs 分层内核架构
 
+历史 fill 的硬连接额度、有界 DIFF 复用、同凭证拒绝/冷却和 CLI 跨进程准入见
+[Fill 连接合同](history-fill-recovery.md)。core 的结构化 HTTP 状态与 session 初始握手配置
+属于本轮 public API 更新；不改变 runtime commit/revision/cursor 或默认重连语义。
+
 历史 fill 使用进程内连接准入、拒绝后熔断及回测专用短期 token 缓存；职责和限制见
 [Fill 远端准入](history-fill-recovery.md#远端准入与认证)。
 
@@ -144,10 +148,10 @@ helper 不是 facade、runtime 或 public API；它隔离 SDK 地址空间中的
   `TQSDK_HISTORY_CACHE_DIR` 覆盖）；默认 `RemoteOnMiss` 先复用本地 TQBN daily
   tick cache、独立 canonical final-60s monthly cache 与 native final-1d single-file cache，缺失时由 `tqsdk-data`
     `BacktestHistoryClient` 通过官方 server-side backtest stream 填充对应输入并驱动本地 `TqSim`。
-    一个 client 最多保留 logical concurrency 个 clean source lanes；Tick 每日 coverage checkpoint 与
-    minute bounded window 保持不变。同一 chart 的分页保持 session；本地裁剪过 DIFF 状态的 lane
-    不得回池，即使 terminal/cleanup 成功也销毁，避免后续 slice 丢失重叠数据。
-    pool 饱和时 overflow 不等待且不回池；取消、协议/传输或 cleanup 失败也丢弃 lane。
+  默认 history source factory 在进程内共享最多 2 条远端连接（active + idle），不随 logical concurrency 扩大。
+  额度不足先释放 series fill lease 再等待，不创建 overflow。Tick 每日 checkpoint 与 minute bounded window 不变。
+  同一 chart 的分页保持 session；4 MiB JSON 保留预算内的完整 DIFF 可跨 slice 复用。
+  裁剪后、取消、协议/传输或 cleanup 失败的 session 不得回池。
 minute cache 使用 v6 文件身份，只有远端 terminal 成功后才提交 final coverage；`KQ.m@...`
     使用 data 持久化的 calendar/session/physical-segment metadata sidecar 解析为 dated
     concrete-contract tick ranges，因而与具体合约共用物理 cache、coverage 和远端补缺请求。

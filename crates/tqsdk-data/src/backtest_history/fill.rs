@@ -373,7 +373,11 @@ pub(crate) trait ServerHistorySourceFactory: Send + Sync {
 pub(crate) fn default_server_history_source_factory(
     max_sessions: usize,
 ) -> Arc<dyn ServerHistorySourceFactory> {
-    Arc::new(SessionServerHistorySourceFactory::new(max_sessions))
+    let _ = max_sessions;
+    static POOL: OnceLock<Arc<ServerHistorySessionPool>> = OnceLock::new();
+    Arc::new(SessionServerHistorySourceFactory {
+        pool: Arc::clone(POOL.get_or_init(|| Arc::new(ServerHistorySessionPool::new(2)))),
+    })
 }
 
 #[cfg(not(all(feature = "live", feature = "services")))]
@@ -412,21 +416,27 @@ impl SessionServerHistorySourceFactory {
 }
 
 #[cfg(all(feature = "live", feature = "services"))]
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
 struct ServerHistorySessionCredentials {
     user: String,
     pass: String,
+    auth_url: Option<String>,
+    market_url: Option<String>,
 }
 
 #[cfg(all(feature = "live", feature = "services"))]
 struct IdleServerHistorySession {
     credentials: ServerHistorySessionCredentials,
     session: tqsdk_session::SessionClient,
+    runtime: tokio::runtime::Id,
+    used: usize,
+    idle_since: tokio::time::Instant,
+    established: bool,
 }
 
 #[cfg(all(feature = "live", feature = "services"))]
 struct ServerHistorySessionPool {
-    admission: admission::FillAdmission,
+    admissions: Mutex<BTreeMap<ServerHistorySessionCredentials, Arc<admission::FillAdmission>>>,
     permits: Arc<Semaphore>,
     idle: Mutex<Vec<IdleServerHistorySession>>,
     #[cfg(test)]
@@ -438,26 +448,58 @@ impl ServerHistorySessionPool {
     fn new(max_sessions: usize) -> Self {
         Self {
             permits: Arc::new(Semaphore::new(max_sessions)),
-            admission: admission::FillAdmission::default(),
+            admissions: Mutex::new(BTreeMap::new()),
             idle: Mutex::new(Vec::with_capacity(max_sessions)),
             #[cfg(test)]
             created_sessions: AtomicUsize::new(0),
         }
     }
 
-    fn acquire(
+    async fn acquire(
         self: &Arc<Self>,
         credentials: BacktestHistoryCredentials,
     ) -> Result<ServerHistorySessionLease> {
-        let permit = Arc::clone(&self.permits).try_acquire_owned().ok();
         let (user, pass) = credentials.into_parts();
-        let credentials = ServerHistorySessionCredentials { user, pass };
+        let builder = tqsdk_session::SessionClientBuilder::new(user.clone(), pass.clone());
+        let credentials = ServerHistorySessionCredentials {
+            user,
+            pass,
+            auth_url: builder.endpoints().auth_url.clone(),
+            market_url: builder.endpoints().market_url.clone(),
+        };
+        let admission = {
+            let mut admissions = self.admissions.lock().unwrap_or_else(|p| p.into_inner());
+            if admissions.len() >= 16 && !admissions.contains_key(&credentials) {
+                admissions.retain(|_, admission| {
+                    Arc::strong_count(admission) > 1 || admission.check().is_err()
+                });
+            }
+            if admissions.len() >= 16 && !admissions.contains_key(&credentials) {
+                return Err(DataError::Validation(
+                    "remote fill credential budget exhausted".into(),
+                ));
+            }
+            Arc::clone(admissions.entry(credentials.clone()).or_default())
+        };
+        admission.check()?;
+        let permit = Some(Arc::clone(&self.permits).try_acquire_owned().map_err(|_| {
+            DataError::CacheBusy {
+                cache_dir: PathBuf::new(),
+                operation: "remote history connection budget",
+            }
+        })?);
+        admission.check()?;
+        let runtime = tokio::runtime::Handle::current().id();
         let idle = if permit.is_some() {
             let mut idle = self
                 .idle
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            idle.retain(|entry| entry.credentials == credentials);
+            idle.retain(|entry| {
+                entry.credentials == credentials
+                    && entry.runtime == runtime
+                    && entry.idle_since.elapsed() < Duration::from_secs(30)
+            });
             idle.pop()
         } else {
             None
@@ -465,22 +507,27 @@ impl ServerHistorySessionPool {
         let entry = match idle {
             Some(entry) => entry,
             None => {
-                let session = tqsdk_session::SessionClientBuilder::new(
-                    credentials.user.clone(),
-                    credentials.pass.clone(),
-                )
-                .futures_backtest_market()
-                .reconnect_policy(tqsdk_core::ReconnectPolicy {
-                    max_attempts: Some(0),
-                    ..Default::default()
-                })
-                .commit_log_retention(SERVER_HISTORY_COMMIT_LOG_RETENTION)
-                .build()?;
+                let session = builder
+                    .futures_backtest_market()
+                    .websocket_connect_attempts(std::num::NonZeroUsize::new(1).expect("nonzero"))
+                    .reconnect_policy(tqsdk_core::ReconnectPolicy {
+                        max_attempts: Some(0),
+                        ..Default::default()
+                    })
+                    .commit_log_retention_limits(
+                        SERVER_HISTORY_COMMIT_LOG_RETENTION,
+                        4 * 1024 * 1024,
+                    )
+                    .build()?;
                 #[cfg(test)]
                 self.created_sessions.fetch_add(1, Ordering::AcqRel);
                 IdleServerHistorySession {
                     credentials,
                     session,
+                    runtime,
+                    used: 0,
+                    idle_since: tokio::time::Instant::now(),
+                    established: false,
                 }
             }
         };
@@ -488,6 +535,7 @@ impl ServerHistorySessionPool {
             pool: Arc::clone(self),
             entry: Some(entry),
             permit,
+            admission,
         })
     }
 }
@@ -497,6 +545,7 @@ struct ServerHistorySessionLease {
     pool: Arc<ServerHistorySessionPool>,
     entry: Option<IdleServerHistorySession>,
     permit: Option<OwnedSemaphorePermit>,
+    admission: Arc<admission::FillAdmission>,
 }
 
 #[cfg(all(feature = "live", feature = "services"))]
@@ -511,13 +560,39 @@ impl ServerHistorySessionLease {
 
     fn recycle(mut self) {
         if self.permit.is_some()
-            && let Some(entry) = self.entry.take()
+            && let Some(mut entry) = self.entry.take()
         {
-            self.pool
-                .idle
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(entry);
+            entry.used += 1;
+            if entry.used >= 64 {
+                return;
+            }
+            entry.idle_since = tokio::time::Instant::now();
+            let was_empty = {
+                let mut idle = self.pool.idle.lock().unwrap_or_else(|p| p.into_inner());
+                let was_empty = idle.is_empty();
+                idle.push(entry);
+                was_empty
+            };
+            if was_empty {
+                let pool = Arc::clone(&self.pool);
+                tokio::spawn(async move {
+                    loop {
+                        let deadline = {
+                            let mut idle = pool.idle.lock().unwrap_or_else(|p| p.into_inner());
+                            idle.retain(|entry| {
+                                entry.idle_since.elapsed() < Duration::from_secs(30)
+                            });
+                            idle.iter()
+                                .map(|entry| entry.idle_since + Duration::from_secs(30))
+                                .min()
+                        };
+                        let Some(deadline) = deadline else {
+                            break;
+                        };
+                        tokio::time::sleep_until(deadline).await;
+                    }
+                });
+            }
         }
     }
 }
@@ -537,7 +612,7 @@ impl ServerHistorySourceFactory for SessionServerHistorySourceFactory {
                     "cache fill sources require exactly one history chart".to_string(),
                 ));
             }
-            let lease = self.pool.acquire(credentials)?;
+            let lease = self.pool.acquire(credentials).await?;
             let chart_kinds = request
                 .charts
                 .iter()
@@ -547,7 +622,7 @@ impl ServerHistorySourceFactory for SessionServerHistorySourceFactory {
                 tqsdk_session::ServerBacktestHistoryStream::open(lease.session().clone(), request)
                     .await
                     .map_err(DataError::from);
-            self.pool.admission.observe(&stream);
+            lease.admission.observe(&stream);
             let stream = stream?;
             Ok(Box::new(SessionServerHistorySource {
                 stream: Some(stream),
@@ -576,17 +651,27 @@ impl ServerHistorySource for SessionServerHistorySource {
             // Opening a chart only queues commands. Gate the actual lazy
             // authentication/connection, not allocation of the source object.
             if !self.admitted {
-                let lease = self.lease.as_ref().ok_or(DataError::InvalidState(
+                let lease = self.lease.as_mut().ok_or(DataError::InvalidState(
                     "server-history source was already closed",
                 ))?;
-                let _admission = lease.pool.admission.enter().await?;
+                let already_established =
+                    lease.entry.as_ref().is_some_and(|entry| entry.established);
+                lease.admission.check()?;
+                let _admission = if already_established {
+                    None
+                } else {
+                    Some(lease.admission.enter().await?)
+                };
                 let established = lease
                     .session()
                     .ensure_established()
                     .await
                     .map_err(DataError::from);
-                lease.pool.admission.observe(&established);
+                lease.admission.observe(&established);
                 established?;
+                if let Some(entry) = &mut lease.entry {
+                    entry.established = true;
+                }
                 self.admitted = true;
             }
             let stream = self.stream.as_mut().ok_or(DataError::InvalidState(
@@ -594,10 +679,12 @@ impl ServerHistorySource for SessionServerHistorySource {
             ))?;
             let event = stream.next_event(None).await.map_err(DataError::from);
             if let Some(lease) = &self.lease {
-                lease.pool.admission.observe(&event);
+                lease.admission.observe(&event);
             }
             let event = event?;
-            if let (Some(event), Some(lease)) = (&event, &self.lease) {
+            if let (Some(event), Some(lease)) = (&event, &self.lease)
+                && (self.state_pruned || !server_history_state_fits(lease.session()))
+            {
                 self.state_pruned |=
                     prune_consumed_server_history_page(lease.session(), &self.chart_kinds, event)?;
             }
@@ -613,7 +700,17 @@ impl ServerHistorySource for SessionServerHistorySource {
             };
             // The peer still remembers locally pruned DIFF rows. A later request
             // may revisit them, so only unmodified connections can be recycled.
-            if reusable && !self.state_pruned && cleanup_result.is_ok() {
+            if let Some(lease) = &self.lease {
+                lease.admission.observe(&cleanup_result);
+            }
+            if reusable
+                && !self.state_pruned
+                && cleanup_result.is_ok()
+                && self
+                    .lease
+                    .as_ref()
+                    .is_some_and(|lease| server_history_state_fits(lease.session()))
+            {
                 if let Some(lease) = self.lease.take() {
                     lease.recycle();
                 }
@@ -623,6 +720,34 @@ impl ServerHistorySource for SessionServerHistorySource {
             cleanup_result
         })
     }
+}
+
+#[cfg(all(feature = "live", feature = "services"))]
+fn server_history_state_fits(session: &tqsdk_session::SessionClient) -> bool {
+    struct Budget(usize);
+    impl std::io::Write for Budget {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_sub(bytes.len())
+                .ok_or_else(|| std::io::Error::other("history state retention budget exceeded"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let reader = session.reader();
+    let market = reader.read_market_state();
+    let mut budget = Budget(4 * 1024 * 1024);
+    for name in ["ticks", "klines", "charts", "quotes"] {
+        if let Some(value) = market.get_path(&[name])
+            && serde_json::to_writer(&mut budget, value).is_err()
+        {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(all(feature = "live", feature = "services"))]
@@ -1052,7 +1177,26 @@ impl RemoteFillCoordinator {
                     if self.missing_ranges(request)?.is_empty() {
                         return Ok(0);
                     }
-                    return self.fill_under_lease(request, shared).await;
+                    let result = self.fill_under_lease(request, shared).await;
+                    drop(_lease);
+                    if matches!(
+                        &result,
+                        Err(DataError::CacheBusy {
+                            operation: "remote history connection budget",
+                            ..
+                        })
+                    ) {
+                        self.emit(
+                            request,
+                            BacktestHistoryPhase::WaitForFill,
+                            0,
+                            "waiting for remote history connection budget",
+                        );
+                        self.sleep_or_shared_cancel(shared, CROSS_PROCESS_RECHECK_INTERVAL)
+                            .await?;
+                    } else {
+                        return result;
+                    }
                 }
                 None => {
                     self.emit(
@@ -2791,18 +2935,22 @@ mod tests {
             "SHFE.au2608",
         )
         .server_request();
-        let mut overflow = tokio::time::timeout(
+        let overflow = tokio::time::timeout(
             Duration::from_millis(100),
             factory.open(
                 BacktestHistoryCredentials::new("test-user", "test-pass"),
                 overflow_request,
             ),
         )
-        .await
-        .expect("pool overflow must not wait while a reusable lane is active")
-        .unwrap();
-        assert_eq!(factory.created_session_count(), 2);
-        overflow.close(true).await.unwrap();
+        .await;
+        assert!(matches!(
+            overflow.unwrap(),
+            Err(DataError::CacheBusy {
+                operation: "remote history connection budget",
+                ..
+            })
+        ));
+        assert_eq!(factory.created_session_count(), 1);
         assert_eq!(factory.idle_session_count(), 0);
         second.close(false).await.unwrap();
 
@@ -2822,13 +2970,74 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(factory.created_session_count(), 3);
+        assert_eq!(factory.created_session_count(), 2);
         third.close(false).await.unwrap();
     }
 
     #[cfg(all(feature = "live", feature = "services"))]
+    #[tokio::test]
+    async fn separate_default_clients_share_two_connection_slots() {
+        let first_client = default_server_history_source_factory(32);
+        let second_client = default_server_history_source_factory(32);
+        let request = || {
+            BacktestHistoryFillRequest::tick(
+                "SHFE.au2608",
+                (1_000, 2_000),
+                None,
+                Some(1),
+                "SHFE.au2608",
+            )
+            .server_request()
+        };
+        let credentials = || BacktestHistoryCredentials::new("shared-pool-test", "test-only");
+        let mut first = first_client.open(credentials(), request()).await.unwrap();
+        let mut second = second_client.open(credentials(), request()).await.unwrap();
+        assert!(matches!(
+            second_client.open(credentials(), request()).await,
+            Err(DataError::CacheBusy {
+                operation: "remote history connection budget",
+                ..
+            })
+        ));
+        first.close(true).await.unwrap();
+        let mut third = second_client.open(credentials(), request()).await.unwrap();
+        third.close(false).await.unwrap();
+        second.close(false).await.unwrap();
+    }
+
+    #[cfg(all(feature = "live", feature = "services"))]
+    #[tokio::test]
+    async fn recreated_clients_do_not_bypass_credential_refusal() {
+        for rejection in [
+            tqsdk_core::ContractError::HttpStatus {
+                status: 403,
+                retry_after_secs: None,
+            },
+            tqsdk_core::ContractError::auth("token request rejected with HTTP 400"),
+        ] {
+            let pool = Arc::new(ServerHistorySessionPool::new(1));
+            let credentials = || BacktestHistoryCredentials::new("refused-test", "test-only");
+            let lease = pool.acquire(credentials()).await.unwrap();
+            lease
+                .admission
+                .observe::<()>(&Err(DataError::Session(rejection.into())));
+            drop(lease);
+            assert!(matches!(
+                pool.acquire(credentials()).await,
+                Err(DataError::PermissionDenied(_))
+            ));
+            assert_eq!(pool.created_sessions.load(Ordering::Acquire), 1);
+            assert!(
+                pool.acquire(BacktestHistoryCredentials::new("another-test", "test-only"))
+                    .await
+                    .is_ok()
+            );
+        }
+    }
+
+    #[cfg(all(feature = "live", feature = "services"))]
     #[tokio::test(flavor = "current_thread")]
-    async fn session_source_prunes_consumed_tick_page_from_runtime_state() {
+    async fn session_source_retains_small_pages_for_the_next_slice() {
         use serde_json::json;
         use tqsdk_core::{
             AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
@@ -2856,12 +3065,19 @@ mod tests {
         let pool = Arc::new(ServerHistorySessionPool::new(1));
         let lease = ServerHistorySessionLease {
             pool: Arc::clone(&pool),
+            admission: Arc::default(),
             entry: Some(IdleServerHistorySession {
                 credentials: ServerHistorySessionCredentials {
                     user: "test-user".to_string(),
                     pass: "test-pass".to_string(),
+                    auth_url: tqsdk_core::EndpointConfig::from_env().auth_url,
+                    market_url: tqsdk_core::EndpointConfig::from_env().market_url,
                 },
                 session: session.clone(),
+                runtime: tokio::runtime::Handle::current().id(),
+                used: 0,
+                idle_since: tokio::time::Instant::now(),
+                established: false,
             }),
             permit: Some(Arc::clone(&pool.permits).try_acquire_owned().unwrap()),
         };
@@ -2928,6 +3144,210 @@ mod tests {
                 .reader()
                 .read_market_state()
                 .get_path(&["ticks", "SHFE.au2608", "data", "1"])
+                .is_some(),
+            "retained prefix must remain available to the next slice"
+        );
+        assert!(
+            session
+                .reader()
+                .read_market_state()
+                .get_path(&["ticks", "SHFE.au2608", "data", "2"])
+                .is_some(),
+            "the continuation overlap must remain available"
+        );
+        source.close(true).await.unwrap();
+        assert!(
+            pool.idle.lock().unwrap().len() == 1,
+            "an unmodified bounded DIFF session must be recycled"
+        );
+        let lease = pool
+            .acquire(BacktestHistoryCredentials::new("test-user", "test-pass"))
+            .await
+            .unwrap();
+        assert!(
+            lease
+                .session()
+                .reader()
+                .read_market_state()
+                .get_path(&["ticks", "SHFE.au2608", "data", "1"])
+                .is_some(),
+            "the next slice retains the peer's old overlapping row"
+        );
+        let next_request = ServerBacktestHistoryRequest {
+            market_kind: ServerBacktestMarketKind::Futures,
+            start_ns: 1_000,
+            end_ns: 3_000,
+            charts: vec![ServerBacktestHistoryChart {
+                chart_id: "ticks-next".into(),
+                symbol: "SHFE.au2608".into(),
+                kind: ServerBacktestHistoryKind::Tick,
+            }],
+        };
+        let stream =
+            tqsdk_session::ServerBacktestHistoryStream::open(lease.session().clone(), next_request)
+                .await
+                .unwrap();
+        let mut second = SessionServerHistorySource {
+            stream: Some(stream),
+            lease: Some(lease),
+            state_pruned: false,
+            admitted: false,
+            chart_kinds: BTreeMap::from([("ticks-next".into(), ServerBacktestHistoryKind::Tick)]),
+        };
+        session.handle().ingest(RuntimeInput::Io(IoEvent {
+            route: "market".into(), domains: vec![ProtocolDomain::Market],
+            payload: InputPayload::Json(json!({"aid":"rtn_data", "data":[{
+                "mdhis_more_data": false,
+                "charts":{"ticks-next":{
+                    "state":{"aid":"set_chart", "chart_id":"ticks-next", "ins_list":"SHFE.au2608",
+                        "duration":0, "view_width":10_000, "focus_datetime":1_000, "focus_position":0},
+                    "left_id":1, "right_id":3, "ready":true, "more_data":false
+                }},
+                "ticks":{"SHFE.au2608":{"last_id":2,"data":{"1":{"last_price":7.0}}}}
+            }]})),
+        }), vec![], CommitScope::RealtimeUpdate).unwrap();
+        let event = second.next_event().await.unwrap().unwrap();
+        let ServerBacktestHistoryEvent::Ticks { rows, .. } = event else {
+            panic!("expected overlapping ticks");
+        };
+        assert_eq!(
+            rows[0].datetime, 1_001,
+            "omitted datetime survives DIFF reuse"
+        );
+        assert_eq!(
+            rows[0].last_price, 7.0,
+            "new fields merge into the retained row"
+        );
+        second.close(false).await.unwrap();
+    }
+
+    #[cfg(all(feature = "live", feature = "services"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_source_prunes_consumed_tick_page_from_runtime_state() {
+        use serde_json::json;
+        use tqsdk_core::{
+            AdapterRegistry, CommitScope, InputPayload, IoEvent, ProtocolDomain, RuntimeHandle,
+            RuntimeInput,
+        };
+        use tqsdk_session::testing::ManualSession;
+
+        let mut adapters = AdapterRegistry::new();
+        adapters.register_default_adapters();
+        let manual = ManualSession::from_runtime(RuntimeHandle::with_adapters(adapters));
+        let session = manual.client_clone();
+        let request = ServerBacktestHistoryRequest {
+            market_kind: ServerBacktestMarketKind::Futures,
+            start_ns: 1_000,
+            end_ns: 2_000,
+            charts: vec![ServerBacktestHistoryChart {
+                chart_id: "ticks-au".to_string(),
+                symbol: "SHFE.au2608".to_string(),
+                kind: ServerBacktestHistoryKind::Tick,
+            }],
+        };
+        let stream = tqsdk_session::ServerBacktestHistoryStream::open(session.clone(), request)
+            .await
+            .unwrap();
+        let pool = Arc::new(ServerHistorySessionPool::new(1));
+        let lease = ServerHistorySessionLease {
+            pool: Arc::clone(&pool),
+            admission: Arc::default(),
+            entry: Some(IdleServerHistorySession {
+                credentials: ServerHistorySessionCredentials {
+                    user: "test-user".to_string(),
+                    pass: "test-pass".to_string(),
+                    auth_url: tqsdk_core::EndpointConfig::from_env().auth_url,
+                    market_url: tqsdk_core::EndpointConfig::from_env().market_url,
+                },
+                session: session.clone(),
+                runtime: tokio::runtime::Handle::current().id(),
+                used: 0,
+                idle_since: tokio::time::Instant::now(),
+                established: false,
+            }),
+            permit: Some(Arc::clone(&pool.permits).try_acquire_owned().unwrap()),
+        };
+        let mut source = SessionServerHistorySource {
+            stream: Some(stream),
+            lease: Some(lease),
+            state_pruned: false,
+            admitted: false,
+            chart_kinds: BTreeMap::from([(
+                "ticks-au".to_string(),
+                ServerBacktestHistoryKind::Tick,
+            )]),
+        };
+        let _ = manual.drain_dispatches().unwrap();
+
+        session
+            .handle()
+            .ingest(
+                RuntimeInput::Io(IoEvent {
+                    route: "market".to_string(),
+                    domains: vec![ProtocolDomain::Market],
+                    payload: InputPayload::Json(json!({
+                        "aid": "rtn_data",
+                        "data": [{
+                            "mdhis_more_data": false,
+                            "charts": {
+                                "ticks-au": {
+                                    "state": {
+                                        "aid": "set_chart",
+                                        "chart_id": "ticks-au",
+                                        "ins_list": "SHFE.au2608",
+                                        "duration": 0,
+                                        "view_width": 10_000,
+                                        "focus_datetime": 1_000,
+                                        "focus_position": 0
+                                    },
+                                    "left_id": 1,
+                                    "right_id": 3,
+                                    "ready": true,
+                                    "more_data": false
+                                }
+                            },
+                            "ticks": {
+                                "SHFE.au2608": {
+                                    "last_id": 2,
+                                    "data": {
+                                        "1": {"id": 1, "datetime": 1_001},
+                                        "2": {"id": 2, "datetime": 1_002}
+                                    }
+                                }
+                            }
+                        }]
+                    })),
+                }),
+                vec![],
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap();
+
+        assert!(server_history_state_fits(&session));
+        session
+            .handle()
+            .ingest_presorted_market_mutations(
+                [NormalizedMutation {
+                    path: StatePath::new(["quotes", "retention-budget"]),
+                    object: None,
+                    fields: vec![FieldMutation {
+                        field: "padding".into(),
+                        value: json!("x".repeat(4 * 1024 * 1024)),
+                    }],
+                    source: MutationSource::MarketDiff,
+                }],
+                vec![],
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap();
+        assert!(!server_history_state_fits(&session));
+        let event = source.next_event().await.unwrap().unwrap();
+        assert!(matches!(event, ServerBacktestHistoryEvent::Ticks { .. }));
+        assert!(
+            session
+                .reader()
+                .read_market_state()
+                .get_path(&["ticks", "SHFE.au2608", "data", "1"])
                 .is_none(),
             "consumed prefix must not remain in session state"
         );
@@ -2976,12 +3396,19 @@ mod tests {
         let pool = Arc::new(ServerHistorySessionPool::new(1));
         let lease = ServerHistorySessionLease {
             pool,
+            admission: Arc::default(),
             entry: Some(IdleServerHistorySession {
                 credentials: ServerHistorySessionCredentials {
                     user: "test-user".to_string(),
                     pass: "test-pass".to_string(),
+                    auth_url: tqsdk_core::EndpointConfig::from_env().auth_url,
+                    market_url: tqsdk_core::EndpointConfig::from_env().market_url,
                 },
                 session: session.clone(),
+                runtime: tokio::runtime::Handle::current().id(),
+                used: 0,
+                idle_since: tokio::time::Instant::now(),
+                established: false,
             }),
             permit: None,
         };
@@ -3040,6 +3467,24 @@ mod tests {
             )
             .unwrap();
 
+        assert!(server_history_state_fits(&session));
+        session
+            .handle()
+            .ingest_presorted_market_mutations(
+                [NormalizedMutation {
+                    path: StatePath::new(["quotes", "retention-budget"]),
+                    object: None,
+                    fields: vec![FieldMutation {
+                        field: "padding".into(),
+                        value: json!("x".repeat(4 * 1024 * 1024)),
+                    }],
+                    source: MutationSource::MarketDiff,
+                }],
+                vec![],
+                CommitScope::RealtimeUpdate,
+            )
+            .unwrap();
+        assert!(!server_history_state_fits(&session));
         let event = source.next_event().await.unwrap().unwrap();
         assert!(matches!(
             event,

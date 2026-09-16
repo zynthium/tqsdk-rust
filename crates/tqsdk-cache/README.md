@@ -1,8 +1,12 @@
 # `tqsdk-cache`
 
-`fill` 自动限制进程内远端 source 打开频率并复用有效回测 token；认证拒绝或限流后停止
-该 client 的后续远端打开。排除原因后重新运行。多进程不共享配额；详见
-[远端准入与认证](../../docs/architecture/history-fill-recovery.md#远端准入与认证)。
+同用户可能访问远端的 CLI fill 跨 cache root 串行执行，默认最多等全局锁 30 秒，争用超时返回 exit 75（`cache_busy`）；
+`--lock-wait-secs` 可覆盖等待预算，并扣除全局锁等待后再等待 root lock。无凭证和静态 dry-run 不取此锁。
+历史 source 在进程内最多 2 个 WebSocket，复用有界且未裁剪的 DIFF session；
+详见 [Fill 连接合同](../../docs/architecture/history-fill-recovery.md)。
+
+`fill` 复用有效回测 token 和有界的干净 session；认证拒绝停止同凭证后续打开，
+429 使用共享冷却。跨进程 CLI 启动串行化与进程内 source 额度的边界详见
 
 > 当前 runtime 已退役 Tick v2/v3 fallback：普通读写遇到旧格式会 fail closed。
 > Tick `migrate` 只封存 schema 4 的闭月日分区；DryRun 若报告 `legacy_files > 0`，

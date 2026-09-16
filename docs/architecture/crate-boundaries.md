@@ -410,10 +410,10 @@ projection 仅保留给 V4 验证与迁移，不参与 normal V5 write path。�
   authoritative generation catalog 和 lease-bearing read-only snapshot handle；这些 primitive
   同时供 `tqsdk-cache` publisher 与 relay 的本地 CacheOnly HTTP adapter 使用，但不拥有 HTTP
   admission、JSON/gzip policy 或 daemon lifecycle
-- RemoteOnMiss source-lane 调度：最多保留 logical concurrency 个 clean lanes，顺序 slice 可复用
-  session；只有 terminal 与 chart cleanup 都成功才回池，pool overflow、取消和错误直接销毁且不在
-  series lease 内等待。data 不实现 session protocol，只组合
-  `tqsdk-session::ServerBacktestHistoryStream`
+- RemoteOnMiss source-lane 调度：进程内最多 2 个 WebSocket（含空闲连接），额度不足时先释放
+  series lease，再等待重试。只有 terminal、chart cleanup 成功且未裁剪 DIFF 的有界 session
+  才回池；取消、错误和已裁剪状态都销毁。data 不实现 session protocol，只组合
+  `tqsdk-session::ServerBacktestHistoryStream`；详见 [Fill 连接合同](history-fill-recovery.md)。
 - `LiveTickCacheWriter` 这类纯数据层 live tick row writer：只接收已解码 tick rows，按连续
   tick id 推进 coverage；可合并连续单 tick push，并通过 `flush()` / Drop 提交短尾，但不拥有
   session、订阅、wait loop、timer task 或后台进程

@@ -1,39 +1,63 @@
 # Fill 中断与续填
 
-本合同属于 `tqsdk-data` 的历史获取/持久化边界；CLI 仅设置信号收尾期限和显示进度。
-不改变状态树结构、commit/cursor、交易或报文语义；远端准入新增零预算自动重连语义及
-session builder 的显式策略入口。
+本合同属于 `tqsdk-data` 的历史获取/持久化边界；CLI 负责跨进程启动串行化、信号收尾期限和显示进度。
+连接调度与 DIFF 保留策略归 data；初始握手配置、认证和 HTTP 复用归 session；
+core 提供通用连接尝试预算与结构化 HTTP 状态。不改变状态树结构、commit/cursor 或交易语义。
 
 ## 远端准入与认证
 
-官方历史 source 的首次认证/建连在进程内共享至少 1 秒的起始间隔，覆盖不同 client 和 cache root。
-准入锁保持到建立连接完成；创建 source 或排队 chart 命令不代表已经访问远端。
-等待可取消；不预订未来槽位。已裁剪 DIFF 的 session 仍必须销毁，不能为了减少连接而回池。
-此限制不是跨进程配额，也不是服务端允许速率的保证。初始 socket/TLS 建连仍有底层最多
-3 次尝试，这些尝试全部处于同一准入锁内；3 个 source attempt 最多产生 9 次初始 socket 尝试。
-fill 专用 session 配置 `ReconnectPolicy::max_attempts = Some(0)`，收包、flush 和 peek
-失败不再隐式重连；Closed 状态仍写入统一 runtime，由 fill 决定是否重新准入。
+官方历史 source 在进程内共享最多 2 个 WebSocket（包含空闲连接），独立于 client、
+cache root 和 logical concurrency。池满不创建 overflow 连接；fill 先释放 series lease，
+再可取消地等待额度，重新检查 coverage 后续填。额度等待不消耗远端 retry attempt。
+等待采用 250 ms 轮询，不保证 FIFO 或等待时间上界；持续热任务可能延迟其他任务取得额度。
 
-同一 fill client 观察到认证错误、权限拒绝或 HTTP/WebSocket 401、403、429 后，
-后续 source 建连失败，不再访问远端；已运行的其他 source 可收尾。排除原因后须新建 client。
-地址发现 401/403 会失效对应 token；纯 WebSocket bearer 拒绝后的同进程恢复需显式刷新
-认证或等待缓存失效。CLI 重新运行会建立新进程。
-暂时性 transport/timeout 错误最多尝试 3 次，等待 2 秒、4 秒，各附加 0–1 秒随机抖动；
-不会因错误文本包含 token、endpoint 等词就重试。
+首次认证/建连共享至少 1 秒的起始间隔，准入锁保持到建立完成；干净的已建立连接
+不重复申请建连时间槽。fill 显式设置 `websocket_connect_attempts(NonZeroUsize::new(1).unwrap())`
+与 `ReconnectPolicy::max_attempts = Some(0)`，每个外层 attempt 只尝试一次 socket。
+普通 session 的初始默认 3 次尝试和自动重连策略保持独立。
 
-仅没有 trade target 的 backtest session 在 `tqsdk-session` 内复用认证 token。
-缓存按完整凭证和认证 provider 配置隔离，进程内最多 16 项；JWT 缺少有效 exp 不缓存，
-提前 30 秒失效，单项最多保留 300 秒。并发成功 miss 合并；失败后等待者仍可重试，
-fill 准入限制这些尝试的启动频率。显式刷新强制替换缓存。
-token 不落盘、不进入诊断；普通 live 认证不使用该缓存。
-回测 token 和地址发现 HTTP 发送仅一次，5xx、发送/读取失败及非法 JSON 为暂时性错误，
-由 fill 负责重试预算；4xx 认证/授权错误不重试。
+只有 terminal、chart cleanup 成功且未裁剪过 DIFF 的 session 才回池。每次消费检查
+ticks/klines/charts/quotes 的合计 JSON 编码体积，超过 4 MiB 后沿用原裁剪路径，并在
+source 关闭时销毁；不能让已裁剪 session 被后续 slice 复用。检查不分配完整 JSON 副本。
+4 MiB 是保留策略阈值，不是 heap/RSS 硬上限；单个入站页及 Value/map 有额外开销。
+commit log 同时限制为 8 项和 4 MiB。干净 session 最多复用 64 个 source，
+空闲最多 30 秒；跨 Tokio runtime、不同完整凭证或认证/行情端点不会复用 socket。Tick、Minute、Daily
+的切片、checkpoint、terminal 和 final coverage 规则不变。
 
-### 验证远端准入
+同凭证和端点的拒绝状态跨 client/cache root 共享。认证/权限或 401/403 拒绝后，本进程不再
+用该凭证创建 source。token 端点的其他 4xx（如 400 invalid_grant，429 除外）也归为认证拒绝；
+行情地址发现的其他 4xx 保持 HTTP 错误，不误判为凭证拒绝。
+429 停止当前 source，后续调用在至少 60 秒的共享冷却期内
+fail closed；HTTP `Retry-After` 的秒数或日期可延长冷却期。WebSocket 依赖只保留状态码，
+不能读取其 Retry-After，故使用 60 秒下限。其他暂时性错误最多尝试 3 次，
+等待 2 秒、4 秒，各附加 0–1 秒随机抖动。legacy 字符串错误仍保留保守拒绝识别。
 
-`cargo test -p tqsdk-data backtest_history::fill --lib` 覆盖节流、取消、熔断、错误分类和续填。
-`cargo test -p tqsdk-session tq_auth --lib` 使用本机 mock HTTP 覆盖并发 token 复用、
-凭证隔离、有效期与显式刷新，不使用真实账号。
+拒绝记录最多保留 16 组完整凭证；容量满时先淘汰未使用且未拒绝的条目，全部占用时
+返回本地 Validation，不能伪装成服务端权限错误。token 缓存仍仅作用于无 trade target
+的 backtest session：按完整凭证/认证端点隔离，最多 16 项，提前 30 秒失效，
+单项最多保留 300 秒。token 不落盘、不进入诊断。地址发现 401/403 会失效 token。
+backtest 认证和地址发现共享当前 Tokio runtime 的 HTTP 连接池（最多保留 8 个 runtime
+的池，每 host 最多 2 个空闲连接、30 秒空闲期）；Authorization 在请求级设置。
+地址发现结果没有新增缓存，避免猜测服务端有效期。
+
+CLI 在同一用户可能访问远端的 fill 之间持有跨 cache root 的全局文件锁。无凭证及静态
+dry-run 不取锁；带凭证的动态 universe dry-run 仍须准入。
+Unix 锁为 `/tmp/tqsdk-cache-fill-<euid>.lock`，检查 owner、0600、单链接并拒绝符号链接；
+Windows 使用用户 LOCALAPPDATA。默认最多等全局锁 30 秒，争用超时返回 `cache_busy`/exit 75，
+`--lock-wait-secs` 可覆盖等待时间，耗时从显式的后续 root-lock 等待预算中扣除。
+这是同用户 CLI 串行化，不是跨机器/不同用户/任意 SDK 调用的账号级配额；
+冷却和 token 仍只在进程内，不能通过频繁重启来绕过服务端拒绝。
+
+`ContractError::HttpStatus { status, retry_after_secs }` 保留 HTTP/握手状态而不包含
+敏感 response body。401/403 的 kind 为 Auth；429/5xx 为 Http，只有 5xx 提供自动
+backoff hint。此公开枚举新增 variant，外部穷举匹配需要适配。
+本地默认值不是服务端承诺的安全阈值。
+
+### 验收
+
+使用本机 mock HTTP/WebSocket 和 ManualSession 验证：连接额度饱和不溢出、
+取消后可继续获取、共享拒绝/冷却、单次握手及状态码、HTTP keep-alive 与请求级认证隔离、
+小页保留/复用和超阈值裁剪/销毁。不得以静态配置或单元测试代替生产限流与吞吐验收。
 
 ## 提交与恢复粒度
 

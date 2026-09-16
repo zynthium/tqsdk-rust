@@ -1,5 +1,12 @@
 # Session、Auth 与 Runtime Contract
 
+初始 socket 尝试次数可通过 `WebSocketTransport::with_connect_attempts(NonZeroUsize)` 显式选择；
+session builder 提供 `websocket_connect_attempts(...)`。默认仍为 3 次，独立于 ReconnectPolicy。
+HTTP 握手失败立即返回 `ContractError::HttpStatus { status, retry_after_secs: None }`，不在 transport
+内重复握手。HTTP 认证响应保留 Retry-After；401/403 kind 为 Auth，429/5xx 为 Http。
+新增公开错误 variant 需要外部穷举匹配适配；通用 retry hint 仅允许 5xx backoff。
+
+
 ## 放在哪一层
 以下能力都属于 `tqsdk-runtime-core`：
 
@@ -46,7 +53,7 @@ pub trait Transport {
 ```
 
 默认 `WebSocketTransport` 对一次 route 建立使用最多 3 次 socket/TLS 尝试，单次
-最长 15 秒。该有界保护用于吸收初始建连的瞬时黑洞；只有预算耗尽后才向
+最长 15 秒。该有界保护用于吸收初始建连的瞬时黑洞；网络重试预算耗尽后才向
 `SessionRuntime` 返回 transport error。错误诊断只包含 endpoint `host:port`，不包含
 URL path、query 或 userinfo。它不改变下面的 session-level `ReconnectPolicy`：后者仍
 负责已建立 session 断线后的重建、退避、状态树投影和 attempt 计数。

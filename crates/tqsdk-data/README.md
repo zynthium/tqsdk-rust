@@ -1,5 +1,10 @@
 # `tqsdk-data`
 
+历史 source 进程内共享最多 2 个 WebSocket（含空闲连接）。池满时 fill 释放 series lease 后等待，
+不创建 overflow。未裁剪 DIFF 在 4 MiB JSON 保留阈值内可复用，超阈值后继续裁剪并在关闭时销毁。
+同凭证共享拒绝/429 冷却；Tick/Minute/Daily 的 terminal、checkpoint 和 coverage 语义不变。
+详见 [Fill 连接合同](../../docs/architecture/history-fill-recovery.md)。
+
 官方历史填充 source 使用进程内至少 1 秒的连接启动间隔；认证拒绝或限流后阻止同一 client
 继续连接，暂时性错误最多尝试 3 次并退避。裁剪过的 DIFF session 不回池。
 见 [远端准入与认证](../../docs/architecture/history-fill-recovery.md#远端准入与认证)。
@@ -246,13 +251,13 @@ storage orchestration 是 async，但 TQBN 解压/解码仍由有界 `spawn_bloc
 实际缺口再以 `cache family × cache symbol` 的跨进程 lease 串行化，等待者重查 coverage 后复用 owner
 结果。Tick fill 按 trading day 顺序消费并以 8192 rows 缓冲；取消会 flush 已接受短尾但不提交未 terminal
 coverage。fill-only materialization 不回读刚写入的 cache，物理写入计数在 shared fill 中只累计一次。
-一个 client 最多保留 `logical_concurrency` 个 clean source lanes。仅未裁剪本地 DIFF 状态且
-chart cleanup 成功的 session 可复用；本地裁剪后的 lane 必须丢弃，防止后续 slice 缺失重叠 DIFF。
-同一 chart 内分页不重建连接。pool 饱和时 overflow 不等待且不回池；取消或错误也丢弃 lane。
-coverage 仍按 slice 独立提交。消费后保留末行及预取数据，仅裁剪更早的 ID。
-每条专用 lane 把 runtime commit retention 收窄到 8；消费后的 Tick/Kline page data 也立即经正常
-runtime commit 清理。这样保留 cursor/revision 语义，同时避免默认 8192-entry commit history 持有
-大页 `ChangeSet`。canonical-minute 和 native-daily 仍只在服务端明确 terminal 后发布 final coverage；
+默认 source factory 在同一进程共享最多 2 条远端连接（active + idle），与 logical concurrency 解耦。
+额度不足时先释放 series fill lease，再可取消地等待；不建立 overflow 连接。
+同一 chart 内分页不重连；未裁剪 DIFF、chart cleanup 成功的 session 可跨 slice 复用。
+DIFF 的序列化保留预算为 4 MiB（不等同于 heap/RSS）；超过后裁剪且该 session 不再回池。
+取消、错误或 cleanup 失败也销毁 session。coverage 仍按 slice 独立提交。
+每条专用 session 的 commit history 同时限制为 8 entries / 4 MiB，保留 cursor/revision 语义。
+canonical-minute 与 native-daily 仍只在服务端明确 terminal 后发布 coverage；
 为避免终态前整段驻留，minute 子区间最多覆盖 10,000 分钟，daily 子区间最多覆盖 1,024 天，多个
 子区间连续且不重叠。
 

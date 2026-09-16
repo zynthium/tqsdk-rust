@@ -29,6 +29,11 @@ pub enum ContractError {
     Auth(String),
     Transport(String),
     Http(String),
+    /// HTTP response or WebSocket handshake status, without sensitive payloads.
+    HttpStatus {
+        status: u16,
+        retry_after_secs: Option<u64>,
+    },
     Adapter(String),
     UnsupportedCommand(&'static str),
     UnsupportedInput(&'static str),
@@ -62,6 +67,10 @@ impl ContractError {
             Self::Auth(_) => ContractErrorKind::Auth,
             Self::Transport(_) => ContractErrorKind::Transport,
             Self::Http(_) => ContractErrorKind::Http,
+            Self::HttpStatus {
+                status: 401 | 403, ..
+            } => ContractErrorKind::Auth,
+            Self::HttpStatus { .. } => ContractErrorKind::Http,
             Self::Adapter(_) => ContractErrorKind::Adapter,
             Self::UnsupportedCommand(_) => ContractErrorKind::UnsupportedCommand,
             Self::UnsupportedInput(_) => ContractErrorKind::UnsupportedInput,
@@ -73,6 +82,8 @@ impl ContractError {
         match self {
             Self::Transport(_) => RetryHint::RetryAfterReconnect,
             Self::Http(_) => RetryHint::RetryWithBackoff,
+            Self::HttpStatus { status, .. } if *status >= 500 => RetryHint::RetryWithBackoff,
+            Self::HttpStatus { .. } => RetryHint::DoNotRetry,
             Self::Validation(_)
             | Self::Auth(_)
             | Self::Adapter(_)
@@ -89,6 +100,16 @@ impl Display for ContractError {
             Self::Auth(message) => write!(f, "auth error: {message}"),
             Self::Transport(message) => write!(f, "transport error: {message}"),
             Self::Http(message) => write!(f, "http error: {message}"),
+            Self::HttpStatus {
+                status,
+                retry_after_secs,
+            } => {
+                write!(f, "HTTP status {status}")?;
+                if let Some(seconds) = retry_after_secs {
+                    write!(f, "; retry after {seconds} seconds")?;
+                }
+                Ok(())
+            }
             Self::Adapter(message) => write!(f, "adapter error: {message}"),
             Self::UnsupportedCommand(kind) => write!(f, "unsupported command: {kind}"),
             Self::UnsupportedInput(kind) => write!(f, "unsupported input: {kind}"),

@@ -1,5 +1,10 @@
 # tqsdk-rust
 
+`tqsdk-cache fill` 进程内最多保留 2 个历史 WebSocket，同用户 CLI 跨 cache root 串行化；
+有界未裁剪 DIFF 可复用连接。新增 `SessionClientBuilder::websocket_connect_attempts(...)`，
+初始预算与 reconnect policy 独立。`ContractError::HttpStatus` 新增公开 variant，外部穷举匹配
+需要适配。连接、冷却与兼容口径见 [Fill 合同](docs/architecture/history-fill-recovery.md)。
+
 `tqsdk-cache fill` 已加入进程内远端准入、回测 token 复用与拒绝后熔断。
 底层调用方可通过 `tqsdk_session::SessionClientBuilder::reconnect_policy` 选择自动恢复预算；
 边界见 [Fill 远端准入](docs/architecture/history-fill-recovery.md#远端准入与认证)。

@@ -1,5 +1,9 @@
 # `tqsdk-core`
 
+`WebSocketTransport::with_connect_attempts(NonZeroUsize)` 显式设置初始 socket 预算，默认 3 次；
+HTTP 握手状态不在底层重试，返回新的 `ContractError::HttpStatus`。401/403 分类为 Auth，
+429/5xx 分类为 Http；外部错误穷举匹配需要适配。ReconnectPolicy 语义不变。
+
 `ReconnectPolicy::max_attempts = Some(0)` 禁用自动重连，记录统一 `Closed` 状态并返回
 Transport 错误，供上层统一控制重试。默认 `None` 仍无限恢复；初始 socket 的有界尝试独立。
 

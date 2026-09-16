@@ -23,15 +23,23 @@ const WEBSOCKET_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(250);
 /// established-session reconnect policy, heartbeat semantics, and state
 /// projection remain the responsibility of higher contract layers.
 pub struct WebSocketTransport {
+    connect_attempts: Option<std::num::NonZeroUsize>,
     url: String,
     connect_options: WebSocketConnectOptions,
     socket: Option<TcpWebSocket>,
 }
 
 impl WebSocketTransport {
+    /// Overrides initial socket attempts without changing reconnect policy.
+    pub fn with_connect_attempts(mut self, attempts: std::num::NonZeroUsize) -> Self {
+        self.connect_attempts = Some(attempts);
+        self
+    }
+
     /// Creates a websocket transport for the provided route URL.
     pub fn new(url: impl Into<String>) -> Self {
         Self {
+            connect_attempts: None,
             url: url.into(),
             connect_options: WebSocketConnectOptions::default(),
             socket: None,
@@ -109,6 +117,12 @@ impl WebSocketTransport {
             .await
             {
                 Ok(Ok(socket)) => return Ok(socket),
+                Ok(Err(yawc::WebSocketError::InvalidStatusCode(status))) => {
+                    return Err(ContractError::HttpStatus {
+                        status,
+                        retry_after_secs: None,
+                    });
+                }
                 Ok(Err(error)) => last_error = error.to_string(),
                 Err(_) => {
                     last_error = format!("attempt timed out after {attempt_timeout:?}");
@@ -131,7 +145,8 @@ impl WebSocketTransport {
         let socket = self
             .connect_with_retry(
                 url,
-                WEBSOCKET_CONNECT_ATTEMPTS,
+                self.connect_attempts
+                    .map_or(WEBSOCKET_CONNECT_ATTEMPTS, std::num::NonZeroUsize::get),
                 WEBSOCKET_CONNECT_ATTEMPT_TIMEOUT,
                 WEBSOCKET_CONNECT_RETRY_DELAY,
             )
@@ -226,6 +241,42 @@ fn require_tokio_runtime() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn handshake_status_is_typed_and_never_retried_inside_transport() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for status in [401, 403, 429, 503] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let count = Arc::clone(&accepted);
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let mut buffer = [0; 4096];
+                    let _ = socket.read(&mut buffer).await;
+                    socket.write_all(format!("HTTP/1.1 {status} Refused\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                }
+            });
+            let transport = WebSocketTransport::new(format!("ws://{address}"));
+            let error = transport
+                .connect_with_retry(
+                    Url::parse(&format!("ws://{address}")).unwrap(),
+                    3,
+                    Duration::from_secs(1),
+                    Duration::from_millis(1),
+                )
+                .await
+                .err()
+                .expect("handshake must be rejected");
+            assert!(
+                matches!(error, crate::ContractError::HttpStatus { status: found, .. } if found == status)
+            );
+            assert_eq!(accepted.load(Ordering::SeqCst), 1);
+            server.abort();
+        }
+    }
+
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;

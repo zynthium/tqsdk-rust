@@ -193,11 +193,12 @@ async fn warmup(start_ns: i64, end_ns: i64) -> tqsdk::Result<()> {
 checkpoint 提交方式，不改变普通 replay/CacheOnly coverage；调用方仍应固定单次运行的
 `as_of_ns`，不能在同一次 warmup 中随墙钟漂移。
 
-`batch_size(...)` 只保留兼容报告 hint，不再串行切远端任务。多 symbol 的网络并发由
-`TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY` 控制，合并会话大小由
-`TQSDK_REMOTE_FILL_SYMBOL_BATCH_SIZE` 控制；data client 最多保留 logical concurrency 个 clean source
-lanes。pool 饱和时 overflow 不等待且不会回池。未做基准测试时保持默认值，也不要设置过小的
-`TQSDK_REMOTE_FILL_SLICE_SECS`。
+`batch_size(...)` 只保留兼容报告 hint，不再串行切远端任务。
+`TQSDK_REMOTE_FILL_SYMBOL_CONCURRENCY` 控制逻辑任务并发，合并会话大小由
+`TQSDK_REMOTE_FILL_SYMBOL_BATCH_SIZE` 控制；默认 source factory 的远端连接独立限制为进程级 2 条
+（active + idle）。额度不足先释放 series fill lease 再等待，不创建 overflow。
+等待采用可取消的 250 ms 轮询，不保证 FIFO 或等待时间上界；高并发下应关注等待时长。
+未做基准测试时保持默认值，也不要设置过小的 `TQSDK_REMOTE_FILL_SLICE_SECS`。
 
 长区间正常以持续进展为准。默认 60 秒无 tick 进展会触发保护；可按作业环境设置
 `TQSDK_REMOTE_FILL_IDLE_TIMEOUT_SECS`。`TQSDK_REMOTE_FILL_BATCH_TIMEOUT_SECS` 默认关闭，

@@ -1,5 +1,9 @@
 # AI 工作流与架构守则
 
+历史 fill 的连接额度饱和时必须先释放 series lease，再等待；不得通过 overflow 绕过额度。
+仅未裁剪且符合保留预算的 DIFF session 可以复用。初始握手次数通过 session builder 显式选择，
+不得将 `ReconnectPolicy::Some(0)` 隐式解释为初始建连预算；见 [Fill 合同](history-fill-recovery.md)。
+
 历史 fill 的进程内远端准入归 `tqsdk-data`，回测 token 复用归 `tqsdk-session`。
 不得移除裁剪后禁止 session 复用的 DIFF 约束；见 [Fill 恢复合同](history-fill-recovery.md#远端准入与认证)。
 零预算自动重连仍由 core 记录统一 Closed/reconnect 状态；session 的 flush/peek 不得绕过预算。

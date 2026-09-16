@@ -8,6 +8,25 @@ use tqsdk_core::{AuthContext, AuthProvider, Result};
 
 use super::TqAuthProvider;
 
+pub(super) async fn read_backtest_token_response(
+    response: reqwest::Response,
+) -> Result<serde_json::Value> {
+    read_backtest_response(response, "token request")
+        .await
+        .map_err(|error| match error {
+            tqsdk_core::ContractError::HttpStatus { status, .. }
+                if (400..500).contains(&status) && !matches!(status, 401 | 403 | 429) =>
+            {
+                // Token endpoint rejection (e.g. invalid_grant) must also stop
+                // later fills using the same credentials. Keep 429 structured.
+                tqsdk_core::ContractError::auth(format!(
+                    "token request rejected with HTTP {status}"
+                ))
+            }
+            error => error,
+        })
+}
+
 pub(super) async fn read_backtest_response(
     response: reqwest::Response,
     context: &str,
@@ -15,11 +34,22 @@ pub(super) async fn read_backtest_response(
     use tqsdk_core::ContractError;
     let status = response.status();
     if !status.is_success() {
-        let message = format!("{context} failed with status {status}");
-        return Err(if status.is_server_error() {
-            ContractError::transport(message)
-        } else {
-            ContractError::auth(message)
+        let retry_after_secs = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| {
+                value.parse::<u64>().ok().or_else(|| {
+                    chrono::DateTime::parse_from_rfc2822(value)
+                        .ok()
+                        .map(|date| {
+                            (date.timestamp() - chrono::Utc::now().timestamp()).max(0) as u64
+                        })
+                })
+            });
+        return Err(ContractError::HttpStatus {
+            status: status.as_u16(),
+            retry_after_secs,
         });
     }
     let bytes = crate::response_body::read_limited_response_bytes(
@@ -197,10 +227,11 @@ mod tests {
     #[tokio::test]
     async fn backtest_http_distinguishes_refusal_from_temporary_failure() {
         for (status, body, expected) in [
+            (400, "invalid_grant", tqsdk_core::ContractErrorKind::Auth),
             (401, "denied", tqsdk_core::ContractErrorKind::Auth),
             (403, "denied", tqsdk_core::ContractErrorKind::Auth),
-            (429, "limited", tqsdk_core::ContractErrorKind::Auth),
-            (503, "unavailable", tqsdk_core::ContractErrorKind::Transport),
+            (429, "limited", tqsdk_core::ContractErrorKind::Http),
+            (503, "unavailable", tqsdk_core::ContractErrorKind::Http),
             (
                 200,
                 "invalid json",
@@ -222,6 +253,7 @@ mod tests {
                 socket.write_all(format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             });
             let response = reqwest::Client::builder()
+                .http1_only()
                 .no_proxy()
                 .build()
                 .unwrap()
@@ -229,11 +261,65 @@ mod tests {
                 .send()
                 .await
                 .unwrap();
-            let error = read_backtest_response(response, "market endpoint request")
-                .await
-                .unwrap_err();
+            let error = if status == 400 {
+                read_backtest_token_response(response).await.unwrap_err()
+            } else {
+                read_backtest_response(response, "market endpoint request")
+                    .await
+                    .unwrap_err()
+            };
             assert_eq!(error.kind(), expected);
+            if status != 200 && status != 400 {
+                assert!(
+                    matches!(error, tqsdk_core::ContractError::HttpStatus { status: found, .. } if found == status)
+                );
+            }
             server.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn discovery_reuses_http_socket_without_reusing_authorization_headers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            for token in ["first-test-token", "second-test-token"] {
+                let mut headers = String::new();
+                loop {
+                    let mut line = String::new();
+                    assert!(socket.read_line(&mut line).await.unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    headers.push_str(&line);
+                }
+                assert!(headers.contains(&format!("Bearer {token}")));
+                let body = r#"{"mdurl":"wss://example.invalid/history"}"#;
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut provider = TqAuthProvider::new(PasswordCredentials::new("test", "test"));
+        provider.name_service_url = format!("http://{address}");
+        for token in ["first-test-token", "second-test-token"] {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                provider.request_market_url(&AuthContext::new(token), false, true),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        server.await.unwrap();
     }
 }

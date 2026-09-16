@@ -2,6 +2,12 @@
 use crate::DataError;
 
 pub(super) fn server_refused(error: &DataError) -> bool {
+    if let DataError::Session(tqsdk_session::SessionFacadeError::Core(
+        tqsdk_core::ContractError::HttpStatus { status, .. },
+    )) = error
+    {
+        return matches!(status, 401 | 403 | 429);
+    }
     if matches!(error, DataError::PermissionDenied(_)) {
         return true;
     }
@@ -33,6 +39,7 @@ mod live {
     #[derive(Default)]
     pub(crate) struct FillAdmission {
         refused: AtomicBool,
+        cooldown: std::sync::Mutex<Option<Instant>>,
     }
 
     impl FillAdmission {
@@ -54,7 +61,20 @@ mod live {
             Ok(next)
         }
 
-        fn check(&self) -> Result<()> {
+        pub(crate) fn check(&self) -> Result<()> {
+            let mut cooldown = self.cooldown.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(deadline) = *cooldown {
+                if deadline > Instant::now() {
+                    return Err(DataError::PermissionDenied(format!(
+                        "remote fill rate limit cooldown: {} seconds remaining",
+                        deadline
+                            .duration_since(Instant::now())
+                            .as_secs()
+                            .saturating_add(1),
+                    )));
+                }
+                *cooldown = None;
+            }
             if self.refused.load(Ordering::Acquire) {
                 return Err(DataError::PermissionDenied(
                     "remote fill stopped after authentication rejection or server rate limit; check credentials and server limits before starting a new fill client".into(),
@@ -64,6 +84,22 @@ mod live {
         }
 
         pub(crate) fn observe<T>(&self, result: &Result<T>) {
+            if let Err(DataError::Session(tqsdk_session::SessionFacadeError::Core(
+                tqsdk_core::ContractError::HttpStatus {
+                    status: 429,
+                    retry_after_secs,
+                },
+            ))) = result
+            {
+                let delay = Duration::from_secs(retry_after_secs.unwrap_or(60).max(60));
+                if let Some(until) = Instant::now().checked_add(delay) {
+                    let mut cooldown = self.cooldown.lock().unwrap_or_else(|p| p.into_inner());
+                    *cooldown = Some(cooldown.map_or(until, |current| current.max(until)));
+                } else {
+                    self.refused.store(true, Ordering::Release);
+                }
+                return;
+            }
             if result.as_ref().is_err_and(super::server_refused) {
                 self.refused.store(true, Ordering::Release);
             }
@@ -73,6 +109,31 @@ mod live {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn rate_limit_cooldown_is_shared_and_respects_retry_after() {
+            let admission = std::sync::Arc::new(FillAdmission::default());
+            let other_client = std::sync::Arc::clone(&admission);
+            admission.observe::<()>(&Err(DataError::Session(
+                tqsdk_core::ContractError::HttpStatus {
+                    status: 429,
+                    retry_after_secs: Some(120),
+                }
+                .into(),
+            )));
+            assert!(other_client.check().is_err());
+            assert!(
+                admission
+                    .cooldown
+                    .lock()
+                    .unwrap()
+                    .unwrap()
+                    .duration_since(Instant::now())
+                    > Duration::from_secs(119)
+            );
+            *admission.cooldown.lock().unwrap() = Some(Instant::now());
+            assert!(other_client.check().is_ok());
+        }
 
         #[tokio::test]
         async fn admission_spaces_clients_and_cancelled_wait_does_not_reserve_a_slot() {
