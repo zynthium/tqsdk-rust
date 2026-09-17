@@ -323,13 +323,10 @@ async fn configured_upstream_tick_charts_with_contracts(
     }
 
     let contracts = contracts_by_symbol.into_values().collect::<Vec<_>>();
-    let charts = if config.prewarm_symbols().is_empty() {
-        config.relay_config().upstream_tick_charts_for_symbols(
-            contracts.iter().map(|contract| contract.symbol.as_str()),
-        )?
-    } else {
-        config.upstream_tick_charts_for_symbols(std::iter::empty::<&str>())?
-    };
+    // A resolved universe is metadata for later downstream demand, not an
+    // upstream subscription request. Only explicit prewarm symbols start a
+    // chart before a downstream client expresses interest.
+    let charts = config.upstream_tick_charts_for_symbols(std::iter::empty::<&str>())?;
     Ok(ConfiguredTickCharts {
         charts,
         contracts,
@@ -795,6 +792,25 @@ mod tests {
 
         assert_eq!(charts.len(), 1);
         assert_eq!(charts[0].symbol(), "DCE.m2609");
+    }
+
+    #[tokio::test]
+    async fn startup_without_prewarm_subscribes_no_resolved_universe_symbols() {
+        let config = RelayRuntimeConfig::new(RelayConfig {
+            futures_universe_expression: Some(
+                crate::universe_expression::UniverseExpression::parse(
+                    "symbol:SHFE.au2602,DCE.m2609",
+                )
+                .unwrap(),
+            ),
+            ..RelayConfig::default()
+        });
+
+        let charts = configured_upstream_tick_charts_with_contracts(&config)
+            .await
+            .unwrap()
+            .charts;
+        assert!(charts.is_empty());
     }
 
     #[tokio::test]

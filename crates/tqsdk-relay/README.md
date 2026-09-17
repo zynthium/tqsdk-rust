@@ -40,7 +40,7 @@ relay 不改变 SDK 运行时模型：
 | 下游 websocket 服务 | 在本地地址接受 SDK 行情 websocket 连接。 |
 | 下游 WebSocket 资源边界 | 使用有状态的标准 WebSocket codec 处理 fragmentation/control/64-bit payload；握手、header、frame/message、连接数和写入均有显式上限/超时。 |
 | 下游命令子集 | 处理 `subscribe_quote`、`set_chart` 和 `peek_message`。未知行情命令会明确失败。 |
-| 上游数据源 | 动态发现当前活跃期货合约，打开一个天勤行情 websocket，启动时发送累计 `subscribe_quote` 作为首样本 bootstrap；quote update 会转成本地合成 tick 驱动 K 线，下游 chart 或未覆盖合约需要真实 tick chart 时再动态发送 duration 为 `0` 的 `set_chart`。 |
+| 上游数据源 | 动态发现当前活跃期货合约只形成可用 universe，不在启动时订阅。下游 `subscribe_quote` 或 `set_chart` 后才按 exact interest 打开上游订阅；quote update 会转成本地合成 tick 驱动 K 线。 |
 | 合约集合刷新 | 使用 `TQSDK_RELAY_FUTURES_UNIVERSE` 组合全部活跃、指定产品、主力、加权指数、主连、每品种活跃度前 N、静态符号文件和排除规则；动态发现模式下按本地每日固定时间重建上游 quote bootstrap 集合，默认 `08:30:00`。 |
 | 订阅长度防线 | 在连接上游前统计累计 quote 订阅和动态 tick chart 命令里的最大 `ins_list` 长度；超过 hard limit 会拒绝订阅，超过 warn threshold 会体现在 metrics 中。 |
 | quote 分发 | 接收上游 quote，或将最新 tick 投影成 quote frame，并发送给已订阅的下游客户端。 |
@@ -115,7 +115,7 @@ TQSDK_RELAY_UPSTREAM_TICK_VIEW_WIDTH=1 \
 cargo run -p tqsdk-relay
 ```
 
-`view_width=1` 只要求最小窗口；当前 relay 不允许 `0`，因为上游是否接受完全不取历史尚未作为稳定协议验证。设置非空 `TQSDK_RELAY_PREWARM_SYMBOLS` 时，启动只为该集合打开 tick chart，其他合约在下游请求后立即补订；未设置时保留既有的 resolved-universe tick-chart 启动行为。两种模式都不会主动发送 trading status 订阅。
+`view_width=1` 只要求最小窗口；当前 relay 不允许 `0`，因为上游是否接受完全不取历史尚未作为稳定协议验证。默认启动不打开任何上游 quote 或 tick chart；设置非空 `TQSDK_RELAY_PREWARM_SYMBOLS` 才会启动预热该集合。其他合约仅在下游请求后补订。两种模式都不会主动发送 trading status 订阅。
 
 如果只需要每个品种的主力和次主力，用 `top:2:all`：
 
@@ -263,7 +263,7 @@ cargo check -p tqsdk-relay --no-default-features --features history
 | --- | --- | --- |
 | `TQSDK_RELAY_FUTURES_UNIVERSE` | 空 | legacy-first universe 字符串。推荐 V2 `contract/main/top/continuous/index/symbol`；`snapshot(...)` 强制 V2，`timeline(...)` 在触网前拒绝。 |
 | `TQSDK_RELAY_FUTURES_UNIVERSE_FILES` | 空 | 平台 path-list 格式的 external exact-symbol files；可与 V2 expression 合并，每次刷新只在全部读取/编译成功后替换上游。 |
-| `TQSDK_RELAY_PREWARM_SYMBOLS` | 空 | 逗号分隔的启动 tick-chart 预热集合；非空时只预热此集合，其他 chart 按下游请求补订；空值保持 legacy universe bootstrap。 |
+| `TQSDK_RELAY_PREWARM_SYMBOLS` | 空 | 逗号分隔的启动 tick-chart 预热集合；默认空值不订阅任何上游合约；非空时只预热此集合，其他 chart 按下游请求补订。 |
 | `TQ_AUTH_USER` | 空 | 动态 contract/main/top/continuous/index 发现需要的天勤账号；纯 `symbol:` / external files 不需要。 |
 | `TQ_AUTH_PASS` | 空 | 动态 contract/main/top/continuous/index 发现需要的天勤密码；纯 `symbol:` / external files 不需要。 |
 | `TQSDK_RELAY_DRY_RUN` | `false` | 设置为 `1` / `true` / `yes` / `on` 时执行启动自检并输出 JSON 诊断后退出。 |
@@ -301,10 +301,10 @@ Universe V2 或 external exact-symbol files 时，用 `RelayRuntimeConfig::from(
 
 ### 上游订阅
 
-对于动态发现或显式配置得到的期货合约集合，relay 启动时会在同一个上游 websocket 上
-发送累计 `subscribe_quote`，命令后发送一次 `{"aid":"peek_message"}`。这让 quote
-快照和 `/symbol-metrics` 能在夜盘开盘时先从
-上游 quote 流拿到首样本，避免全量 tick chart bootstrap 卡住启动：
+对于动态发现或显式配置得到的期货合约集合，relay 仅将其作为下游请求时的可用 universe。
+默认启动不发送 `subscribe_quote`、`set_chart` 或 `peek_message`。当下游请求 quote/chart
+（或显式配置 `TQSDK_RELAY_PREWARM_SYMBOLS`）后，relay 才会在同一个上游 websocket 上发送
+累计 `subscribe_quote`，命令后发送一次 `{"aid":"peek_message"}`：
 
 ```json
 {

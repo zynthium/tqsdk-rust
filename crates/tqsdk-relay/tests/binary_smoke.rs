@@ -7,8 +7,6 @@ use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde_json::json;
-
 #[path = "../../tqsdk-core/tests/support/websocket.rs"]
 mod websocket_support;
 
@@ -16,16 +14,6 @@ static RELAY_BINARY_BIND_LOCK: Mutex<()> = Mutex::new(());
 
 fn relay_binary_bind_lock() -> MutexGuard<'static, ()> {
     RELAY_BINARY_BIND_LOCK.lock().unwrap()
-}
-
-fn recv_text_json(
-    socket: &mut websocket_support::TestWebSocketConnection,
-    expected: &str,
-) -> serde_json::Value {
-    let websocket_support::ClientFrame::Text(text) = socket.recv().unwrap() else {
-        panic!("expected upstream {expected} text frame");
-    };
-    serde_json::from_str(&text).unwrap()
 }
 
 #[test]
@@ -38,14 +26,6 @@ fn relay_binary_loads_symbols_file_and_opens_downstream_listener() {
     let upstream = TestWebSocketServer::spawn(|mut socket| {
         assert_eq!(socket.request().path, "/market");
 
-        assert_eq!(
-            recv_text_json(&mut socket, "subscribe_quote"),
-            json!({"aid": "subscribe_quote", "ins_list": "SHFE.au2602"})
-        );
-        assert_eq!(
-            recv_text_json(&mut socket, "peek_message"),
-            json!({"aid": "peek_message"})
-        );
         socket.send_close().unwrap();
     })
     .unwrap();

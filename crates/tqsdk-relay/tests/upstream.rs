@@ -1306,7 +1306,10 @@ async fn configured_product_discovery_requires_auth_credentials() {
 
 #[tokio::test]
 async fn configured_upstream_pump_ingests_upstream_quotes() {
-    use tqsdk_relay::{RelayConfig, RelayServer, spawn_configured_upstream_pump};
+    use tqsdk_relay::{
+        RelayConfig, RelayRuntimeConfig, RelayServer,
+        spawn_configured_upstream_pump_with_runtime_config,
+    };
     use websocket_support::TestWebSocketServer;
 
     let upstream = TestWebSocketServer::spawn(|mut socket| {
@@ -1332,18 +1335,21 @@ async fn configured_upstream_pump_ingests_upstream_quotes() {
                 .to_string(),
             )
             .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
         socket.send_close().unwrap();
     })
     .unwrap();
-    let config = RelayConfig {
+    let config = RelayRuntimeConfig::new(RelayConfig {
         upstream_market_url: upstream.url("/market"),
         futures_universe_expression: Some(UniverseExpression::parse("symbol:SHFE.au2602").unwrap()),
         ..RelayConfig::default()
-    };
+    })
+    .with_prewarm_symbols(["SHFE.au2602"])
+    .unwrap();
     let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
     let server = RelayServer::new(engine.clone());
 
-    let _shutdown = spawn_configured_upstream_pump(&config, server)
+    let _shutdown = spawn_configured_upstream_pump_with_runtime_config(&config, server)
         .await
         .unwrap()
         .unwrap();
@@ -1391,21 +1397,23 @@ async fn configured_upstream_pump_degrades_without_blocking_when_connect_fails()
 #[tokio::test]
 async fn configured_upstream_pump_retries_after_startup_connect_failure() {
     use tqsdk_relay::{
-        RelayConfig, RelayServer, RelaySourceStatus,
-        spawn_configured_upstream_pump_with_retry_interval,
+        RelayConfig, RelayRuntimeConfig, RelayServer, RelaySourceStatus,
+        spawn_configured_upstream_pump_with_runtime_config_and_retry_interval,
     };
     use websocket_support::TestWebSocketServer;
 
     let addr = free_loopback_addr();
     let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
     let server = RelayServer::new(engine.clone());
-    let config = RelayConfig {
+    let config = RelayRuntimeConfig::new(RelayConfig {
         upstream_market_url: format!("ws://{addr}/market"),
         futures_universe_expression: Some(UniverseExpression::parse("symbol:SHFE.au2602").unwrap()),
         ..RelayConfig::default()
-    };
+    })
+    .with_prewarm_symbols(["SHFE.au2602"])
+    .unwrap();
 
-    let shutdown = spawn_configured_upstream_pump_with_retry_interval(
+    let shutdown = spawn_configured_upstream_pump_with_runtime_config_and_retry_interval(
         &config,
         server,
         Duration::from_millis(20),
@@ -1438,6 +1446,7 @@ async fn configured_upstream_pump_retries_after_startup_connect_failure() {
                 .to_string(),
             )
             .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
         socket.send_close().unwrap();
     })
     .unwrap();
@@ -1538,7 +1547,9 @@ async fn configured_upstream_refresh_failure_keeps_existing_source_live() {
         )),
         ..RelayConfig::default()
     })
-    .universe_symbol_file(universe_file.clone());
+    .universe_symbol_file(universe_file.clone())
+    .with_prewarm_symbols(["SHFE.au2602"])
+    .unwrap();
     let engine = Arc::new(Mutex::new(RelayEngine::new_memory_only(16, 16)));
     let server = RelayServer::new(engine.clone());
 

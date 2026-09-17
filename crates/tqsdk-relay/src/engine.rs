@@ -904,18 +904,12 @@ impl RelayEngine {
     }
 
     /// Returns the exact upstream tick-chart symbols required by current
-    /// downstream interests. Symbols already covered by the configured
-    /// quote-only universe do not need a tick chart unless a client explicitly
-    /// owns a chart for them.
+    /// downstream interests. A configured universe is metadata, not an
+    /// already-active upstream subscription.
     #[must_use]
     pub fn desired_upstream_tick_chart_symbols(&self) -> BTreeSet<String> {
         let mut desired = self.interests.chart_symbols();
-        desired.extend(
-            self.interests
-                .subscribed_symbols()
-                .into_iter()
-                .filter(|symbol| !self.upstream_base_symbols.contains(symbol)),
-        );
+        desired.extend(self.interests.subscribed_symbols());
         desired
     }
 
