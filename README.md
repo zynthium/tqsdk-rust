@@ -1,5 +1,9 @@
 # tqsdk-rust
 
+回测与 `tqsdk-cache fill` 共享官方风格的 8964 双 chart 分页器，history client 内独立序列可共享
+活跃连接；wait 保留 Kline 开收盘阶段并合并同时间 Tick/Kline。跨持久化分片的网络连续游标尚未
+合并，不能宣称逐包完全一致。实现与验收边界见 [回测网络对齐](docs/architecture/backtest-wire-parity.md)。
+
 `tqsdk-cache fill` 进程内最多保留 2 个历史 WebSocket，同用户 CLI 跨 cache root 串行化；
 有界未裁剪 DIFF 可复用连接。新增 `SessionClientBuilder::websocket_connect_attempts(...)`，
 初始预算与 reconnect policy 独立。`ContractError::HttpStatus` 新增公开 variant，外部穷举匹配

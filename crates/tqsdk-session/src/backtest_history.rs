@@ -9,13 +9,16 @@ use tokio::sync::{Mutex, Notify};
 use tokio::time::Instant;
 use tqsdk_core::{Chart, Kline, MarketChartCommand, RuntimeReader, Symbol, Tick, UpdateCursor};
 
-use crate::{MarketChartLease, Result, SessionClient, SessionFacadeError};
+use crate::{
+    BACKTEST_PAGE_WIDTH, BacktestChartPager, MarketChartLease, Result, SessionClient,
+    SessionFacadeError,
+};
 
 /// The only Kline duration persisted by the backtest cache hierarchy.
 pub const SERVER_BACKTEST_CANONICAL_MINUTE_NS: i64 = 60_000_000_000;
 /// Native daily server-backtest chart duration.
 pub const SERVER_BACKTEST_CANONICAL_DAILY_NS: i64 = 86_400_000_000_000;
-const SERVER_BACKTEST_HISTORY_PAGE_WIDTH: usize = 10_000;
+const SERVER_BACKTEST_HISTORY_PAGE_WIDTH: usize = BACKTEST_PAGE_WIDTH;
 
 /// Market family selected for an official server-backtest history stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,43 +96,30 @@ pub struct ServerBacktestHistoryStream {
 #[derive(Debug)]
 struct HistoryChartState {
     chart: ServerBacktestHistoryChart,
-    page_number: usize,
-    current_page_chart_id: String,
-    next_left_kline_id: Option<i64>,
+    pager: BacktestChartPager,
     last_emitted_id: Option<i64>,
     last_page_right_id: Option<i64>,
     completed: bool,
 }
 
 impl HistoryChartState {
-    fn new(chart: ServerBacktestHistoryChart) -> Self {
-        Self {
-            current_page_chart_id: chart.chart_id.clone(),
-            chart,
-            page_number: 0,
-            next_left_kline_id: None,
-            last_emitted_id: None,
-            last_page_right_id: None,
-            completed: false,
-        }
-    }
-
-    fn duration_ns(&self) -> i64 {
-        match self.chart.kind {
+    fn new(chart: ServerBacktestHistoryChart, start_ns: i64) -> Self {
+        let duration_ns = match chart.kind {
             ServerBacktestHistoryKind::Tick => 0,
             ServerBacktestHistoryKind::CanonicalMinute => SERVER_BACKTEST_CANONICAL_MINUTE_NS,
             ServerBacktestHistoryKind::CanonicalDaily => SERVER_BACKTEST_CANONICAL_DAILY_NS,
-        }
-    }
-
-    fn page_chart_id(&self) -> String {
-        if self.page_number == 0 {
-            self.chart.chart_id.clone()
-        } else {
-            format!(
-                "{}--server-history-page-{}",
-                self.chart.chart_id, self.page_number
-            )
+        };
+        Self {
+            pager: BacktestChartPager::new(
+                chart.chart_id.clone(),
+                vec![Symbol::new(chart.symbol.as_str())],
+                duration_ns,
+                start_ns,
+            ),
+            chart,
+            last_emitted_id: None,
+            last_page_right_id: None,
+            completed: false,
         }
     }
 }
@@ -206,8 +196,15 @@ impl StreamCleanup {
         });
     }
 
-    async fn insert(&self, chart_id: String, lease: MarketChartLease) {
-        self.leases.lock().await.insert(chart_id, lease);
+    async fn set_chart(&self, session: &SessionClient, command: MarketChartCommand) -> Result<()> {
+        let mut leases = self.leases.lock().await;
+        if let Some(lease) = leases.get_mut(&command.chart_id) {
+            lease.update(command).await?;
+        } else {
+            let chart_id = command.chart_id.clone();
+            leases.insert(chart_id, session.ensure_chart(command).await?);
+        }
+        Ok(())
     }
 
     async fn close(&self, chart_id: &str) -> Result<()> {
@@ -275,7 +272,7 @@ impl ServerBacktestHistoryStream {
                 .charts
                 .iter()
                 .cloned()
-                .map(HistoryChartState::new)
+                .map(|chart| HistoryChartState::new(chart, request.start_ns))
                 .collect(),
             request,
             next_chart_index: 0,
@@ -309,13 +306,13 @@ impl ServerBacktestHistoryStream {
         deadline: Option<Instant>,
     ) -> Result<Option<ServerBacktestHistoryEvent>> {
         loop {
+            if self.stream_completed {
+                return Ok(None);
+            }
             if let Some(event) = self.poll_ready_events().await? {
                 return Ok(Some(event));
             }
 
-            if self.stream_completed {
-                return Ok(None);
-            }
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Ok(None);
             }
@@ -381,6 +378,12 @@ impl ServerBacktestHistoryStream {
         let old_last_page_right_id = self.charts[chart_index].last_page_right_id;
         let right_id = page.right_id();
         let page_terminal = page.terminal();
+        // Python requests the alternate window before consuming this page,
+        // including the last nonempty page. Keep both leases until completion.
+        if right_id >= 0 {
+            self.charts[chart_index].pager.advance(right_id);
+            self.open_page(chart_index).await?;
+        }
         let mut reached_requested_end = false;
         let event = match page {
             ReadyPage::Ticks {
@@ -429,14 +432,6 @@ impl ServerBacktestHistoryStream {
 
         if terminal {
             self.complete_chart(chart_index).await?;
-        } else {
-            self.charts[chart_index].next_left_kline_id = Some(right_id);
-            self.charts[chart_index].page_number =
-                self.charts[chart_index].page_number.saturating_add(1);
-            self.cleanup
-                .close(self.charts[chart_index].current_page_chart_id.as_str())
-                .await?;
-            self.open_page(chart_index).await?;
         }
         Ok(event)
     }
@@ -509,37 +504,30 @@ impl ServerBacktestHistoryStream {
         }
         let chart_id = self.charts[chart_index].chart.chart_id.clone();
         let symbol = self.charts[chart_index].chart.symbol.clone();
-        let page_chart_id = self.charts[chart_index].current_page_chart_id.clone();
+        let chart_ids = self.charts[chart_index].pager.chart_ids().clone();
+        for chart_id in chart_ids {
+            self.cleanup.close(&chart_id).await?;
+        }
         self.charts[chart_index].completed = true;
-        self.cleanup.close(page_chart_id.as_str()).await?;
         self.pending_events
             .push_back(ServerBacktestHistoryEvent::ChartCompleted { chart_id, symbol });
         Ok(())
     }
 
     async fn open_page(&mut self, chart_index: usize) -> Result<()> {
-        let state = &self.charts[chart_index];
-        let chart_id = state.page_chart_id();
-        let command = MarketChartCommand {
-            chart_id: chart_id.clone(),
-            symbols: vec![Symbol::new(state.chart.symbol.as_str())],
-            duration_ns: state.duration_ns(),
-            view_width: SERVER_BACKTEST_HISTORY_PAGE_WIDTH,
-            left_kline_id: state.next_left_kline_id,
-            focus_datetime_ns: (state.page_number == 0).then_some(self.request.start_ns),
-            focus_position: (state.page_number == 0).then_some(0),
-        };
-        let lease = self.session.ensure_chart(command).await?;
-        self.cleanup.insert(chart_id.clone(), lease).await;
-        self.charts[chart_index].current_page_chart_id = chart_id;
-        Ok(())
+        self.cleanup
+            .set_chart(
+                &self.session,
+                self.charts[chart_index].pager.command().clone(),
+            )
+            .await
     }
 
     fn read_ready_page(&self, chart_index: usize) -> Result<Option<ReadyPage>> {
         let state = &self.charts[chart_index];
         let market = self.reader.read_market_state();
         let Some(chart) =
-            market.decode_path::<Chart>(&["charts", state.current_page_chart_id.as_str()])?
+            market.decode_path::<Chart>(&["charts", state.pager.command().chart_id.as_str()])?
         else {
             return Ok(None);
         };
@@ -626,7 +614,7 @@ impl ServerBacktestHistoryStream {
                     ));
                 }
                 Ok(Some(ReadyPage::Ticks {
-                    right_id: effective_right_id,
+                    right_id: chart.right_id,
                     terminal,
                     rows,
                 }))
@@ -639,7 +627,7 @@ impl ServerBacktestHistoryStream {
                     ));
                 }
                 Ok(Some(ReadyPage::CanonicalMinutes {
-                    right_id: effective_right_id,
+                    right_id: chart.right_id,
                     terminal,
                     rows,
                 }))
@@ -652,7 +640,7 @@ impl ServerBacktestHistoryStream {
                     ));
                 }
                 Ok(Some(ReadyPage::CanonicalDaily {
-                    right_id: effective_right_id,
+                    right_id: chart.right_id,
                     terminal,
                     rows,
                 }))
@@ -698,9 +686,11 @@ fn validate_request(session: &SessionClient, request: &ServerBacktestHistoryRequ
                 "server-backtest history symbol must be non-empty and trimmed",
             ));
         }
-        if !chart_ids.insert(chart.chart_id.as_str()) {
+        if !chart_ids.insert(chart.chart_id.clone())
+            || !chart_ids.insert(format!("{}--backtest-b", chart.chart_id))
+        {
             return Err(validation_error(
-                "server-backtest history chart_id values must be unique",
+                "server-backtest history physical chart_id values must be unique",
             ));
         }
     }
@@ -712,18 +702,8 @@ fn page_state_matches(
     state: &HistoryChartState,
     request: &ServerBacktestHistoryRequest,
 ) -> bool {
-    let expected_ins_list = state.chart.symbol.as_str();
-    let expected_duration = state.duration_ns();
-    chart.state.get("ins_list").and_then(Value::as_str) == Some(expected_ins_list)
-        && chart.state.get("duration").and_then(Value::as_i64) == Some(expected_duration)
-        && chart.state.get("view_width").and_then(Value::as_u64)
-            == Some(SERVER_BACKTEST_HISTORY_PAGE_WIDTH as u64)
-        && if state.page_number == 0 {
-            chart.state.get("focus_datetime").and_then(Value::as_i64) == Some(request.start_ns)
-                && chart.state.get("focus_position").and_then(Value::as_u64) == Some(0)
-        } else {
-            chart.state.get("left_kline_id").and_then(Value::as_i64) == state.next_left_kline_id
-        }
+    let _ = request;
+    state.pager.matches(chart)
 }
 
 fn decode_page_rows<T>(
@@ -751,7 +731,7 @@ where
     rows.sort_by_key(HasHistoryRowId::row_id);
     if rows.len() > SERVER_BACKTEST_HISTORY_PAGE_WIDTH {
         return Err(validation_error(
-            "server-backtest history page exceeded the 10,000-row event bound",
+            "server-backtest history page exceeded the 8,964-row event bound",
         ));
     }
     Ok(rows)

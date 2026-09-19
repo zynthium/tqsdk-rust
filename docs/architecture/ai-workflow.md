@@ -105,6 +105,10 @@ git diff --check
 Rust、feature、public API、relay 与 release 检查按 [`validation.md`](validation.md) 的任务分类执行。public API、crate 拆分、feature 或 facade/runtime 消费方式变化时，相关 `crates/*/examples/api_contract_sXX_*.rs` 必须继续清晰且可编译。
 # History source DIFF 一致性
 
+回测分页器归 session，消费时间推进归 wait，job 连接共享与 durable checkpoint 归 data。
+跨片网络游标合并必须证明 carry-over 与恢复边界；不得仅删除现有切片限制。
+本轮对齐状态与验证入口见 [回测网络对齐](backtest-wire-parity.md)。
+
 统一历史容器的 TickXorV1 已按 magic 接入 Tick store，但默认新分区仍为 TQBN。
 适配器通过测试不等于 P1、真实缓存迁移或 P0–P3 全部完成；格式默认切换和旧代码收缩仍待验收。
 旧 Tick reader 的去重结果依赖请求范围，common 异常写入则按整日规范化；未获用户明确

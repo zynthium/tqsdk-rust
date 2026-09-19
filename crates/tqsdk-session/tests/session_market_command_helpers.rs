@@ -166,3 +166,50 @@ async fn chart_leases_share_session_interest_until_last_owner_closes() {
     assert_eq!(body.get("chart_id"), Some(&json!(chart.chart_id)));
     assert_eq!(body.get("ins_list"), Some(&json!("")));
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn chart_window_update_preserves_exclusive_lease_and_rejects_shared_mutation() {
+    fn charts(session: &ManualSession) -> Vec<serde_json::Value> {
+        transport_bodies(session)
+            .into_iter()
+            .filter(|body| body["aid"] == "set_chart")
+            .collect()
+    }
+    let session = ManualSession::from_runtime(runtime_handle_with_default_adapters());
+    let pager = tqsdk_session::BacktestChartPager::new(
+        "pager-a".into(),
+        vec![Symbol::new("SHFE.au2602")],
+        0,
+        1000,
+    );
+    let mut command = pager.command().clone();
+    let mut lease = session
+        .client()
+        .ensure_chart(command.clone())
+        .await
+        .unwrap();
+    transport_bodies(&session);
+    command.left_kline_id = Some(8963);
+    command.focus_datetime_ns = None;
+    command.focus_position = None;
+    lease.update(command.clone()).await.unwrap();
+    let bodies = charts(&session);
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["left_kline_id"], 8963);
+    assert_ne!(bodies[0]["ins_list"], "");
+    let other = session
+        .client()
+        .ensure_chart(command.clone())
+        .await
+        .unwrap();
+    command.left_kline_id = Some(17926);
+    assert!(lease.update(command.clone()).await.is_err());
+    assert!(charts(&session).is_empty());
+    other.close().await.unwrap();
+    lease.update(command).await.unwrap();
+    assert_eq!(charts(&session).len(), 1);
+    lease.close().await.unwrap();
+    let bodies = charts(&session);
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["ins_list"], "");
+}

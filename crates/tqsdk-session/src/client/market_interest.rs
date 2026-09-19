@@ -38,6 +38,15 @@ pub struct MarketChartLease {
     closed: bool,
 }
 
+impl std::fmt::Debug for MarketChartLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MarketChartLease")
+            .field("chart_id", &self.chart_id)
+            .field("closed", &self.closed)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SessionClient {
     pub async fn ensure_quotes<I, S>(&self, symbols: I) -> crate::error::Result<MarketQuoteLease>
     where
@@ -211,6 +220,34 @@ impl MarketTradingStatusLease {
 }
 
 impl MarketChartLease {
+    /// Move an exclusively owned chart without cancelling its subscription.
+    /// Shared leases cannot change each other's request parameters.
+    pub async fn update(&mut self, command: MarketChartCommand) -> crate::error::Result<()> {
+        if self.closed || command.chart_id != self.chart_id {
+            return Err(crate::error::SessionFacadeError::InvalidState(
+                "chart update requires the active lease's chart_id",
+            ));
+        }
+        let mut interests = self.session.market_interests.lock().await;
+        let Some(interest) = interests.charts.get_mut(&self.chart_id) else {
+            return Err(crate::error::SessionFacadeError::InvalidState(
+                "chart lease is not registered",
+            ));
+        };
+        if interest.refs != 1 {
+            return Err(crate::error::SessionFacadeError::InvalidState(
+                "cannot update a shared chart lease",
+            ));
+        }
+        if interest.command != command {
+            self.session
+                .submit_market_command(MarketCommand::SetChart(command.clone()))
+                .await?;
+            interest.command = command;
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn chart_id(&self) -> &str {
         &self.chart_id

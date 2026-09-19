@@ -252,13 +252,17 @@ storage orchestration 是 async，但 TQBN 解压/解码仍由有界 `spawn_bloc
 结果。Tick fill 按 trading day 顺序消费并以 8192 rows 缓冲；取消会 flush 已接受短尾但不提交未 terminal
 coverage。fill-only materialization 不回读刚写入的 cache，物理写入计数在 shared fill 中只累计一次。
 默认 source factory 在同一进程共享最多 2 条远端连接（active + idle），与 logical concurrency 解耦。
+同一 client、凭证及 runtime 内的独立序列可在活跃连接上多 chart 消费；最后一个 reader 退出才回池。
+任一 reader 的取消、失败或 DIFF 裁剪使整个连接不再接受新 reader，也不可回池。
+分页与 wait 共用 8964 双 chart 状态机；尚未合并跨 checkpoint 的网络游标，见
+[回测网络对齐](../../docs/architecture/backtest-wire-parity.md)。
 额度不足时先释放 series fill lease，再可取消地等待；不建立 overflow 连接。
 同一 chart 内分页不重连；未裁剪 DIFF、chart cleanup 成功的 session 可跨 slice 复用。
 DIFF 的序列化保留预算为 4 MiB（不等同于 heap/RSS）；超过后裁剪且该 session 不再回池。
 取消、错误或 cleanup 失败也销毁 session。coverage 仍按 slice 独立提交。
 每条专用 session 的 commit history 同时限制为 8 entries / 4 MiB，保留 cursor/revision 语义。
 canonical-minute 与 native-daily 仍只在服务端明确 terminal 后发布 coverage；
-为避免终态前整段驻留，minute 子区间最多覆盖 10,000 分钟，daily 子区间最多覆盖 1,024 天，多个
+为避免终态前整段驻留，minute 父区间最多覆盖 10,000 分钟、内部 checkpoint 最多 24 小时，daily 子区间最多覆盖 32 天，多个
 子区间连续且不重叠。
 
 其中：

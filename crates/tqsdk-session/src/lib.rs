@@ -25,6 +25,7 @@
 //! ```
 
 mod backtest_history;
+mod backtest_pager;
 mod builder;
 mod client;
 mod direct_query;
@@ -55,6 +56,8 @@ pub use backtest_history::{
     ServerBacktestHistoryChart, ServerBacktestHistoryEvent, ServerBacktestHistoryKind,
     ServerBacktestHistoryRequest, ServerBacktestHistoryStream, ServerBacktestMarketKind,
 };
+#[doc(hidden)]
+pub use backtest_pager::{BACKTEST_PAGE_WIDTH, BacktestChartPager};
 pub use builder::SessionClientBuilder;
 pub use client::{
     MarketChartLease, MarketQuoteLease, MarketTradingStatusLease, SessionClient, SessionProgress,

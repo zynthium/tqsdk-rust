@@ -129,6 +129,12 @@ wait facade。
 
 ## 设计边界
 
+回测的 Tick/Kline 使用 session 共享的 8964 双 chart 分页器；相同 Kline 序列的不同窗口共享远端
+订阅。动态订阅以当前时间定位，mid-bar 起点先给 open-only 状态；同时间 Tick/Kline 合并为一次
+runtime commit，时间写入现有 `replay/wait_backtest/cursor/dt`，`step()` 与 `wait_update()` 一致。
+下面的 `view_width=10000` 启动规则仅指 live 多合约 Kline。已实现与剩余差异见
+[回测网络对齐](../../docs/architecture/backtest-wire-parity.md)。
+
 - market / trade 对象都只是状态树上的轻量 `Ref`
 - 常见多合约实时行情入口使用 `quotes(...).await`，一次提交批量 quote 订阅并返回
   symbol-indexed `QuoteSet`；单合约 `quote(...)` 仍保留为便利入口。订阅意图由底层

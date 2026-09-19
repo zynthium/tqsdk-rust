@@ -13,7 +13,7 @@ use tqsdk_session::{
 };
 
 const MINUTE_NS: i64 = 60_000_000_000;
-const PAGE_WIDTH: usize = 10_000;
+const PAGE_WIDTH: usize = 8_964;
 
 #[derive(Clone, Copy)]
 struct PageStatus {
@@ -27,6 +27,252 @@ const PAGE_COMPLETE: PageStatus = PageStatus {
     more_data: false,
     mdhis_more_data: false,
 };
+
+#[tokio::test]
+async fn slow_chart_survives_shared_session_commit_log_eviction() {
+    let mut adapters = AdapterRegistry::new();
+    adapters.register_default_adapters();
+    let session = ManualSession::from_runtime(
+        RuntimeHandle::with_adapters_and_commit_log_retention(adapters, 8),
+    );
+    let mut slow = ServerBacktestHistoryStream::open(
+        session.client_clone(),
+        request(vec![chart(
+            "slow",
+            "SHFE.slow",
+            ServerBacktestHistoryKind::Tick,
+        )]),
+    )
+    .await
+    .unwrap();
+    let mut fast = ServerBacktestHistoryStream::open(
+        session.client_clone(),
+        request(vec![chart(
+            "fast",
+            "SHFE.fast",
+            ServerBacktestHistoryKind::Tick,
+        )]),
+    )
+    .await
+    .unwrap();
+    transport_bodies(&session);
+    ingest(
+        &session,
+        tick_page(
+            "slow",
+            "SHFE.slow",
+            5,
+            5,
+            json!({"5":{"datetime":1500}}),
+            PAGE_COMPLETE,
+        ),
+    );
+    let mut chart_id = "fast".to_string();
+    for id in 0..25 {
+        let left = (id - 1).max(0);
+        let rows = if id == 0 {
+            json!({"0":{"datetime":1000}})
+        } else {
+            json!({left.to_string():{"datetime":1000 + left * 20}, id.to_string():{"datetime":1000 + id * 20}})
+        };
+        let mut page = tick_page(&chart_id, "SHFE.fast", left, id, rows, PAGE_COMPLETE);
+        if id > 0 {
+            page = follow_up_tick_page(page, &chart_id, left);
+        }
+        ingest(&session, page);
+        assert!(
+            matches!(fast.next_event(None).await.unwrap(), Some(ServerBacktestHistoryEvent::Ticks { rows, .. }) if rows.len() == 1 && rows[0].id == id)
+        );
+        chart_id = transport_bodies(&session)
+            .into_iter()
+            .find(|body| body["ins_list"] == "SHFE.fast")
+            .unwrap()["chart_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    }
+    // The slow cursor has fallen behind > 8 commits. Its unconsumed chart and
+    // rows remain authoritative; a fast sibling never deletes this series.
+    assert!(
+        matches!(slow.next_event(None).await.unwrap(), Some(ServerBacktestHistoryEvent::Ticks { rows, .. }) if rows.len() == 1 && rows[0].id == 5)
+    );
+    let slow_next = transport_bodies(&session)
+        .into_iter()
+        .find(|body| body["ins_list"] == "SHFE.slow")
+        .unwrap()["chart_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for (stream, id, symbol, left, right) in [
+        (&mut slow, slow_next, "SHFE.slow", 5, 6),
+        (&mut fast, chart_id, "SHFE.fast", 24, 25),
+    ] {
+        ingest(
+            &session,
+            follow_up_tick_page(
+                tick_page(
+                    &id,
+                    symbol,
+                    left,
+                    right,
+                    json!({left.to_string():{"datetime":1500},right.to_string():{"datetime":2000}}),
+                    PAGE_COMPLETE,
+                ),
+                &id,
+                left,
+            ),
+        );
+        assert!(matches!(
+            stream.next_event(None).await.unwrap(),
+            Some(ServerBacktestHistoryEvent::ChartCompleted { .. })
+        ));
+        assert!(matches!(
+            stream.next_event(None).await.unwrap(),
+            Some(ServerBacktestHistoryEvent::StreamCompleted)
+        ));
+        assert!(stream.next_event(None).await.unwrap().is_none());
+    }
+    slow.close().await.unwrap();
+    fast.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn official_two_chart_trace_keeps_exact_start_and_rejects_stale_reused_window() {
+    for (kind, duration) in [
+        (ServerBacktestHistoryKind::Tick, 0),
+        (ServerBacktestHistoryKind::CanonicalMinute, MINUTE_NS),
+        (
+            ServerBacktestHistoryKind::CanonicalDaily,
+            SERVER_BACKTEST_CANONICAL_DAILY_NS,
+        ),
+    ] {
+        let session = manual_session();
+        let mut stream = ServerBacktestHistoryStream::open(
+            session.client_clone(),
+            request(vec![chart("oracle", "SHFE.au2608", kind)]),
+        )
+        .await
+        .unwrap();
+        let initial = transport_bodies(&session)
+            .into_iter()
+            .find(|p| p["aid"] == "set_chart")
+            .unwrap();
+        assert_eq!(initial["view_width"], 8964);
+        assert_eq!(initial["focus_position"], 8964);
+        assert_eq!(initial["focus_datetime"], 1000);
+        let response = |command: &Value, left: i64, right: i64, data: Value| {
+            let mut diff = json!({"mdhis_more_data": false, "charts": {
+                command["chart_id"].as_str().unwrap(): {
+                    "state": command, "left_id": left, "right_id": right,
+                    "ready": true, "more_data": false
+                }
+            }});
+            let serial = json!({"last_id": 10, "data": data});
+            if duration == 0 {
+                diff["ticks"] = json!({"SHFE.au2608": serial});
+            } else {
+                diff["klines"] = json!({"SHFE.au2608": {duration.to_string(): serial}});
+            }
+            json!({"aid": "rtn_data", "data": [diff]})
+        };
+        let first = response(
+            &initial,
+            0,
+            1,
+            json!({
+                "0": {"id": 0, "datetime": 900}, "1": {"id": 1, "datetime": 999}
+            }),
+        );
+        ingest(&session, first.clone());
+        assert!(
+            stream
+                .next_event(Some(Instant::now() + Duration::from_millis(2)))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let commands = transport_bodies(&session);
+        assert!(!commands.iter().any(|p| p["ins_list"] == ""));
+        let second = commands
+            .into_iter()
+            .find(|p| p.get("left_kline_id").is_some())
+            .unwrap();
+        assert_ne!(second["chart_id"], initial["chart_id"]);
+        assert_eq!(second["left_kline_id"], 1);
+        assert!(second.get("focus_datetime").is_none());
+        assert!(second.get("focus_position").is_none());
+        ingest(
+            &session,
+            response(
+                &second,
+                1,
+                3,
+                json!({
+                    "1": {"id": 1, "datetime": 999}, "2": {"id": 2, "datetime": 1000},
+                    "3": {"id": 3, "datetime": 1100}
+                }),
+            ),
+        );
+        let event = stream.next_event(None).await.unwrap().unwrap();
+        let ids = match event {
+            ServerBacktestHistoryEvent::Ticks { chart_id, rows, .. } => {
+                assert_eq!(chart_id, "oracle");
+                rows.into_iter().map(|r| r.id).collect::<Vec<_>>()
+            }
+            ServerBacktestHistoryEvent::CanonicalMinutes { chart_id, rows, .. }
+            | ServerBacktestHistoryEvent::CanonicalDaily { chart_id, rows, .. } => {
+                assert_eq!(chart_id, "oracle");
+                rows.into_iter().map(|r| r.id).collect::<Vec<_>>()
+            }
+            _ => panic!("expected rows"),
+        };
+        assert_eq!(ids, [2, 3]);
+        let commands = transport_bodies(&session);
+        assert!(!commands.iter().any(|p| p["ins_list"] == ""));
+        let third = commands
+            .into_iter()
+            .find(|p| p.get("left_kline_id").is_some())
+            .unwrap();
+        assert_eq!(third["chart_id"], initial["chart_id"]);
+        assert_eq!(third["left_kline_id"], 3);
+        ingest(&session, first);
+        assert!(
+            stream
+                .next_event(Some(Instant::now() + Duration::from_millis(2)))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        ingest(
+            &session,
+            response(
+                &third,
+                3,
+                4,
+                json!({
+                    "3": {"id": 3, "datetime": 1100}, "4": {"id": 4, "datetime": 2000}
+                }),
+            ),
+        );
+        assert!(matches!(
+            stream.next_event(None).await.unwrap(),
+            Some(ServerBacktestHistoryEvent::ChartCompleted { .. })
+        ));
+        let final_commands = transport_bodies(&session);
+        let prefetch = final_commands
+            .iter()
+            .position(|p| p.get("left_kline_id") == Some(&json!(4)))
+            .unwrap();
+        let closes = final_commands
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p["aid"] == "set_chart" && p["ins_list"] == "")
+            .collect::<Vec<_>>();
+        assert_eq!(closes.len(), 2);
+        assert!(closes.iter().all(|(i, _)| *i > prefetch));
+        stream.close().await.unwrap();
+    }
+}
 
 fn manual_session() -> ManualSession {
     let mut adapters = AdapterRegistry::new();
@@ -115,7 +361,7 @@ fn tick_page(
                         "duration": 0,
                         "view_width": PAGE_WIDTH,
                         "focus_datetime": 1_000,
-                        "focus_position": 0,
+                        "focus_position": PAGE_WIDTH,
                     },
                     "left_id": left_id,
                     "right_id": right_id,
@@ -160,7 +406,7 @@ async fn tick_first_page_uses_start_focus_and_zero_position() {
     assert_eq!(body.get("chart_id"), Some(&json!("ticks-au")));
     assert_eq!(body.get("duration"), Some(&json!(0)));
     assert_eq!(body.get("focus_datetime"), Some(&json!(1_000)));
-    assert_eq!(body.get("focus_position"), Some(&json!(0)));
+    assert_eq!(body.get("focus_position"), Some(&json!(PAGE_WIDTH)));
     assert_eq!(body.get("view_width"), Some(&json!(PAGE_WIDTH)));
 }
 
@@ -303,7 +549,7 @@ async fn canonical_minute_reads_only_the_60_second_kline_path() {
                             "duration": MINUTE_NS,
                             "view_width": PAGE_WIDTH,
                             "focus_datetime": 1_000,
-                            "focus_position": 0,
+                            "focus_position": PAGE_WIDTH,
                         },
                         "left_id": 1,
                         "right_id": 1,
@@ -435,7 +681,7 @@ async fn canonical_daily_uses_native_one_day_chart_path_and_event() {
                             "duration": SERVER_BACKTEST_CANONICAL_DAILY_NS,
                             "view_width": PAGE_WIDTH,
                             "focus_datetime": 1_000,
-                            "focus_position": 0,
+                            "focus_position": PAGE_WIDTH,
                         },
                         "left_id": 1,
                         "right_id": 1,
@@ -506,7 +752,7 @@ async fn canonical_minute_terminal_page_allows_last_id_before_chart_right_id() {
                             "duration": MINUTE_NS,
                             "view_width": PAGE_WIDTH,
                             "focus_datetime": 1_000,
-                            "focus_position": 0,
+                            "focus_position": PAGE_WIDTH,
                         },
                         "left_id": 1,
                         "right_id": 2,

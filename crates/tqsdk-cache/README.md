@@ -1,5 +1,9 @@
 # `tqsdk-cache`
 
+`fill` 的远端页改为官方 8964 双 chart 轮换，job 内独立序列可共享活跃连接；缓存命中仍不联网。
+Tick/Minute/Daily 的提交与恢复分片保持不变，尚未合并跨片网络游标。
+详见 [回测网络对齐及剩余差异](../../docs/architecture/backtest-wire-parity.md)。
+
 同用户可能访问远端的 CLI fill 跨 cache root 串行执行，默认最多等全局锁 30 秒，争用超时返回 exit 75（`cache_busy`）；
 `--lock-wait-secs` 可覆盖等待预算，并扣除全局锁等待后再等待 root lock。无凭证和静态 dry-run 不取此锁。
 历史 source 在进程内最多 2 个 WebSocket，复用有界且未裁剪的 DIFF session；

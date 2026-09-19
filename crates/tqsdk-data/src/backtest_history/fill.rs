@@ -58,6 +58,12 @@ const REMOTE_FILL_RETRY_ATTEMPTS: usize = 3;
 #[path = "fill_admission.rs"]
 mod admission;
 
+#[cfg(all(feature = "live", feature = "services"))]
+#[path = "fill_session.rs"]
+mod job_session;
+#[cfg(all(feature = "live", feature = "services"))]
+use job_session::{HistorySourceLease, JobHistorySession};
+
 static NEXT_CHART_ID: AtomicU64 = AtomicU64::new(1);
 
 type ServerHistorySourceFuture<'a> =
@@ -377,6 +383,7 @@ pub(crate) fn default_server_history_source_factory(
     static POOL: OnceLock<Arc<ServerHistorySessionPool>> = OnceLock::new();
     Arc::new(SessionServerHistorySourceFactory {
         pool: Arc::clone(POOL.get_or_init(|| Arc::new(ServerHistorySessionPool::new(2)))),
+        jobs: tokio::sync::Mutex::new(Vec::new()),
     })
 }
 
@@ -390,6 +397,7 @@ pub(crate) fn default_server_history_source_factory(
 #[cfg(all(feature = "live", feature = "services"))]
 struct SessionServerHistorySourceFactory {
     pool: Arc<ServerHistorySessionPool>,
+    jobs: tokio::sync::Mutex<Vec<Weak<JobHistorySession>>>,
 }
 
 #[cfg(all(feature = "live", feature = "services"))]
@@ -397,6 +405,7 @@ impl SessionServerHistorySourceFactory {
     fn new(max_sessions: usize) -> Self {
         Self {
             pool: Arc::new(ServerHistorySessionPool::new(max_sessions.max(1))),
+            jobs: tokio::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -612,7 +621,7 @@ impl ServerHistorySourceFactory for SessionServerHistorySourceFactory {
                     "cache fill sources require exactly one history chart".to_string(),
                 ));
             }
-            let lease = self.pool.acquire(credentials).await?;
+            let lease = self.acquire_chart(credentials, &request.charts[0]).await?;
             let chart_kinds = request
                 .charts
                 .iter()
@@ -622,7 +631,7 @@ impl ServerHistorySourceFactory for SessionServerHistorySourceFactory {
                 tqsdk_session::ServerBacktestHistoryStream::open(lease.session().clone(), request)
                     .await
                     .map_err(DataError::from);
-            lease.admission.observe(&stream);
+            lease.admission().observe(&stream);
             let stream = stream?;
             Ok(Box::new(SessionServerHistorySource {
                 stream: Some(stream),
@@ -638,7 +647,7 @@ impl ServerHistorySourceFactory for SessionServerHistorySourceFactory {
 #[cfg(all(feature = "live", feature = "services"))]
 struct SessionServerHistorySource {
     stream: Option<tqsdk_session::ServerBacktestHistoryStream>,
-    lease: Option<ServerHistorySessionLease>,
+    lease: Option<HistorySourceLease>,
     chart_kinds: BTreeMap<String, ServerBacktestHistoryKind>,
     state_pruned: bool,
     admitted: bool,
@@ -648,52 +657,51 @@ struct SessionServerHistorySource {
 impl ServerHistorySource for SessionServerHistorySource {
     fn next_event<'a>(&'a mut self) -> ServerHistorySourceFuture<'a> {
         Box::pin(async move {
-            // Opening a chart only queues commands. Gate the actual lazy
-            // authentication/connection, not allocation of the source object.
-            if !self.admitted {
-                let lease = self.lease.as_mut().ok_or(DataError::InvalidState(
+            let result = async {
+                // Opening a chart only queues commands. Gate the actual lazy
+                // authentication/connection, not allocation of the source object.
+                if !self.admitted {
+                    let lease = self.lease.as_mut().ok_or(DataError::InvalidState(
+                        "server-history source was already closed",
+                    ))?;
+                    lease.establish().await?;
+                    self.admitted = true;
+                }
+                let stream = self.stream.as_mut().ok_or(DataError::InvalidState(
                     "server-history source was already closed",
                 ))?;
-                let already_established =
-                    lease.entry.as_ref().is_some_and(|entry| entry.established);
-                lease.admission.check()?;
-                let _admission = if already_established {
-                    None
-                } else {
-                    Some(lease.admission.enter().await?)
-                };
-                let established = lease
-                    .session()
-                    .ensure_established()
-                    .await
-                    .map_err(DataError::from);
-                lease.admission.observe(&established);
-                established?;
-                if let Some(entry) = &mut lease.entry {
-                    entry.established = true;
+                let event = stream.next_event(None).await.map_err(DataError::from)?;
+                if let (Some(event), Some(lease)) = (&event, &self.lease)
+                    && (self.state_pruned || !server_history_state_fits(lease.session()))
+                {
+                    self.state_pruned |= prune_consumed_server_history_page(
+                        lease.session(),
+                        &self.chart_kinds,
+                        event,
+                    )?;
+                    if self.state_pruned {
+                        lease.mark_pruned();
+                    }
                 }
-                self.admitted = true;
+                Ok(event)
             }
-            let stream = self.stream.as_mut().ok_or(DataError::InvalidState(
-                "server-history source was already closed",
-            ))?;
-            let event = stream.next_event(None).await.map_err(DataError::from);
+            .await;
             if let Some(lease) = &self.lease {
-                lease.admission.observe(&event);
+                lease.admission().observe(&result);
+                if result.is_err() {
+                    lease.begin_close(false).finish(false);
+                }
             }
-            let event = event?;
-            if let (Some(event), Some(lease)) = (&event, &self.lease)
-                && (self.state_pruned || !server_history_state_fits(lease.session()))
-            {
-                self.state_pruned |=
-                    prune_consumed_server_history_page(lease.session(), &self.chart_kinds, event)?;
-            }
-            Ok(event)
+            result
         })
     }
 
     fn close<'a>(&'a mut self, reusable: bool) -> CloseServerHistorySourceFuture<'a> {
         Box::pin(async move {
+            let closing = self
+                .lease
+                .as_ref()
+                .map(|lease| lease.begin_close(reusable && !self.state_pruned));
             let cleanup_result = match self.stream.take() {
                 Some(stream) => stream.close().await.map_err(Into::into),
                 None => Ok(()),
@@ -701,7 +709,7 @@ impl ServerHistorySource for SessionServerHistorySource {
             // The peer still remembers locally pruned DIFF rows. A later request
             // may revisit them, so only unmodified connections can be recycled.
             if let Some(lease) = &self.lease {
-                lease.admission.observe(&cleanup_result);
+                lease.admission().observe(&cleanup_result);
             }
             if reusable
                 && !self.state_pruned
@@ -711,10 +719,16 @@ impl ServerHistorySource for SessionServerHistorySource {
                     .as_ref()
                     .is_some_and(|lease| server_history_state_fits(lease.session()))
             {
+                if let Some(closing) = closing {
+                    closing.finish(true);
+                }
                 if let Some(lease) = self.lease.take() {
-                    lease.recycle();
+                    lease.finish(true);
                 }
             } else {
+                if let Some(closing) = closing {
+                    closing.finish(false);
+                }
                 self.lease.take();
             }
             cleanup_result
@@ -3083,7 +3097,7 @@ mod tests {
         };
         let mut source = SessionServerHistorySource {
             stream: Some(stream),
-            lease: Some(lease),
+            lease: Some(lease.into()),
             state_pruned: false,
             admitted: false,
             chart_kinds: BTreeMap::from([(
@@ -3110,9 +3124,9 @@ mod tests {
                                         "chart_id": "ticks-au",
                                         "ins_list": "SHFE.au2608",
                                         "duration": 0,
-                                        "view_width": 10_000,
+                                    "view_width": 8_964,
                                         "focus_datetime": 1_000,
-                                        "focus_position": 0
+                                    "focus_position": 8_964
                                     },
                                     "left_id": 1,
                                     "right_id": 3,
@@ -3189,7 +3203,7 @@ mod tests {
                 .unwrap();
         let mut second = SessionServerHistorySource {
             stream: Some(stream),
-            lease: Some(lease),
+            lease: Some(lease.into()),
             state_pruned: false,
             admitted: false,
             chart_kinds: BTreeMap::from([("ticks-next".into(), ServerBacktestHistoryKind::Tick)]),
@@ -3200,7 +3214,7 @@ mod tests {
                 "mdhis_more_data": false,
                 "charts":{"ticks-next":{
                     "state":{"aid":"set_chart", "chart_id":"ticks-next", "ins_list":"SHFE.au2608",
-                        "duration":0, "view_width":10_000, "focus_datetime":1_000, "focus_position":0},
+                        "duration":0, "view_width":8_964, "focus_datetime":1_000, "focus_position":8_964},
                     "left_id":1, "right_id":3, "ready":true, "more_data":false
                 }},
                 "ticks":{"SHFE.au2608":{"last_id":2,"data":{"1":{"last_price":7.0}}}}
@@ -3269,7 +3283,7 @@ mod tests {
         };
         let mut source = SessionServerHistorySource {
             stream: Some(stream),
-            lease: Some(lease),
+            lease: Some(lease.into()),
             state_pruned: false,
             admitted: false,
             chart_kinds: BTreeMap::from([(
@@ -3296,9 +3310,9 @@ mod tests {
                                         "chart_id": "ticks-au",
                                         "ins_list": "SHFE.au2608",
                                         "duration": 0,
-                                        "view_width": 10_000,
+                                    "view_width": 8_964,
                                         "focus_datetime": 1_000,
-                                        "focus_position": 0
+                                    "focus_position": 8_964
                                     },
                                     "left_id": 1,
                                     "right_id": 3,
@@ -3414,7 +3428,7 @@ mod tests {
         };
         let mut source = SessionServerHistorySource {
             stream: Some(stream),
-            lease: Some(lease),
+            lease: Some(lease.into()),
             state_pruned: false,
             admitted: false,
             chart_kinds: BTreeMap::from([(
@@ -3441,9 +3455,9 @@ mod tests {
                                         "chart_id": "ticks-au",
                                         "ins_list": "SHFE.au2608",
                                         "duration": 0,
-                                        "view_width": 10_000,
+                                    "view_width": 8_964,
                                         "focus_datetime": 1_000,
-                                        "focus_position": 0
+                                    "focus_position": 8_964
                                     },
                                     "left_id": 1,
                                     "right_id": 2,

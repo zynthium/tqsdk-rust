@@ -1,5 +1,19 @@
 # 验收标准与测试矩阵
 
+回测网络对齐的离线门禁：
+
+```bash
+python3 scripts/check_python_backtest_pager.py
+cargo test -p tqsdk-session --test server_backtest_history --test session_market_command_helpers --offline
+cargo test -p tqsdk-wait --offline
+cargo test -p tqsdk-data --lib backtest_history --offline
+cargo clippy -p tqsdk-session -p tqsdk-wait -p tqsdk-data --all-targets --offline -- -D warnings
+```
+
+覆盖双 chart、短尾预取、过期回显、慢 reader、同时间 Tick/Kline、动态订阅、mid-bar 首屏、
+共享连接污染/attach 竞态；边界及尚未完成项见 [回测网络对齐](backtest-wire-parity.md)。
+Python oracle 只读取指定本地官方源码，无凭证、无网络；生产网络和性能仍需独立验收。
+
 历史连接优化的本地门禁：
 
 ```bash

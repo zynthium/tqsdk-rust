@@ -6,6 +6,11 @@ core 提供通用连接尝试预算与结构化 HTTP 状态。不改变状态树
 
 ## 远端准入与认证
 
+一个 history client 的独立 `(symbol, kind)` 序列可共享活跃 WebSocket，分页统一使用 8964
+双 chart 轮换。连接的污染与 attach 在同一临界区检查；所有 reader 退出后才允许回池。
+这一改动不合并下面的 durable checkpoint，也不允许回收被裁剪过的 DIFF 连接。
+完整对齐范围、证据及剩余差异见 [回测网络对齐](backtest-wire-parity.md)。
+
 官方历史 source 在进程内共享最多 2 个 WebSocket（包含空闲连接），独立于 client、
 cache root 和 logical concurrency。池满不创建 overflow 连接；fill 先释放 series lease，
 再可取消地等待额度，重新检查 coverage 后续填。额度等待不消耗远端 retry attempt。

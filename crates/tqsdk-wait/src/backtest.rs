@@ -4,14 +4,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 use tqsdk_core::{
-    Chart, CommitScope, InputPayload, IoEvent, MarketChartCommand, ObjectKey, ProtocolDomain,
-    RuntimeInput, RuntimeReader, SharedCommitResult, Symbol,
+    Chart, CommitScope, InputPayload, IoEvent, ObjectKey, ProtocolDomain, RuntimeInput,
+    RuntimeReader, SharedCommitResult, Symbol,
 };
-use tqsdk_session::SessionClient;
+use tqsdk_session::{BACKTEST_PAGE_WIDTH, BacktestChartPager, MarketChartLease, SessionClient};
 
 use crate::error::{Result, WaitFacadeError};
 
-const BACKTEST_PAGE_VIEW_WIDTH: usize = 10_000;
+#[path = "backtest_kline.rs"]
+mod kline;
+
+const BACKTEST_PAGE_VIEW_WIDTH: usize = BACKTEST_PAGE_WIDTH;
 pub(crate) const BACKTEST_TICK_ROW_MARKER_FIELD: &str = "_wait_backtest_tick_row_id";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +102,9 @@ pub(crate) struct BacktestPump {
     next_page_seq: u64,
     tick_serials: BTreeMap<String, BacktestTickSerial>,
     internal_tick_charts: BTreeMap<String, String>,
+    tick_pagers: BTreeMap<String, BacktestChartPager>,
+    tick_leases: BTreeMap<String, MarketChartLease>,
+    klines: kline::KlinePump,
     mode: BacktestPumpMode,
 }
 
@@ -116,8 +122,13 @@ impl BacktestPump {
 
     pub(crate) fn with_mode(mode: BacktestPumpMode) -> Self {
         Self {
+            next_page_seq: 0,
+            tick_serials: BTreeMap::new(),
+            internal_tick_charts: BTreeMap::new(),
+            tick_pagers: BTreeMap::new(),
+            tick_leases: BTreeMap::new(),
+            klines: kline::KlinePump::default(),
             mode,
-            ..Self::default()
         }
     }
 
@@ -129,6 +140,21 @@ impl BacktestPump {
         self.tick_serials
             .get(chart_id)
             .map(|serial| serial.exhausted)
+    }
+
+    pub(crate) async fn ensure_kline_serial(
+        &mut self,
+        session: &SessionClient,
+        backtest: &TqBacktest,
+        symbols: Vec<String>,
+        duration: i64,
+        width: usize,
+        chart_id: String,
+    ) -> Result<()> {
+        let backtest = backtest_at_current_time(session.reader(), backtest);
+        self.klines
+            .subscribe(session, &backtest, symbols, duration, width, chart_id)
+            .await
     }
 
     pub(crate) async fn ensure_tick_serial(
@@ -143,16 +169,15 @@ impl BacktestPump {
             return Ok(());
         }
 
-        let focus_position = match self.mode {
-            BacktestPumpMode::Strategy => BACKTEST_PAGE_VIEW_WIDTH,
-            BacktestPumpMode::CacheFill => 0,
-        };
+        let focus_position = BACKTEST_PAGE_VIEW_WIDTH;
         let internal_chart_id = self
             .request_tick_page(
                 session,
                 symbol,
+                chart_id,
                 TickPageRequest::Focus {
-                    datetime_ns: backtest.start_datetime_ns(),
+                    datetime_ns: backtest_at_current_time(session.reader(), backtest)
+                        .start_datetime_ns(),
                     position: focus_position,
                 },
             )
@@ -164,6 +189,8 @@ impl BacktestPump {
             awaiting_page: true,
             current_page_left_id: None,
             current_page_right_id: None,
+            wire_right_id: None,
+            prefetch_requested: false,
             next_emit_id: None,
             first_emitted_id: None,
             last_emitted_id: None,
@@ -193,10 +220,40 @@ impl BacktestPump {
                 .await;
         }
 
+        let effective_backtest = backtest_at_current_time(reader, backtest);
+        let backtest = &effective_backtest;
+
+        let (klines_ready, kline_candidate) = self.klines.poll(session, reader, backtest).await?;
+        if !klines_ready {
+            return Ok(None);
+        }
+
         let chart_ids = self.tick_serials.keys().cloned().collect::<Vec<_>>();
         let mut best: Option<TickPumpCandidate> = None;
 
         for chart_id in chart_ids {
+            if let Some(serial) = self.tick_serials.get_mut(&chart_id)
+                && serial
+                    .next_emit_id
+                    .zip(serial.current_page_right_id)
+                    .is_some_and(|(id, right)| id > right)
+                && serial.prefetched_page.is_some()
+            {
+                serial.next_page_or_finish()?;
+            }
+            let prefetch = self.tick_serials.get(&chart_id).and_then(|serial| {
+                (!serial.exhausted
+                    && !serial.awaiting_page
+                    && serial.prefetched_page.is_none()
+                    && !serial.prefetch_requested)
+                    .then_some(serial.wire_right_id.or(serial.current_page_right_id))
+                    .flatten()
+                    .map(|right| (serial.symbol.clone(), right))
+            });
+            if let Some((symbol, right)) = prefetch {
+                self.request_next_tick_page(session, &symbol, &chart_id, right)
+                    .await?;
+            }
             let candidate = {
                 let Some(serial) = self.tick_serials.get(&chart_id) else {
                     continue;
@@ -264,21 +321,49 @@ impl BacktestPump {
             }
         }
 
-        let Some(candidate) = best else {
+        let datetime = best
+            .as_ref()
+            .map(|tick| tick.datetime)
+            .into_iter()
+            .chain(kline_candidate.map(|kline| kline.datetime))
+            .min();
+        let Some(datetime) = datetime else {
+            self.close_exhausted_tick_charts().await?;
             return Ok(None);
         };
-        if let Some(serial) = self.tick_serials.get_mut(&candidate.user_chart_id) {
-            serial.consume_emit_candidate(candidate.row_id);
+        let mut diffs = self.klines.take_at(datetime)?;
+        for serial in self.tick_serials.values_mut() {
+            while let Some(candidate) = serial.peek_emit_candidate(reader, backtest)? {
+                if candidate.datetime != datetime {
+                    break;
+                }
+                serial.consume_emit_candidate(candidate.row_id);
+                diffs.push(tick_diff(
+                    &candidate.symbol,
+                    &candidate.user_chart_id,
+                    candidate.row_id,
+                    candidate.row,
+                    candidate.first_visible_id,
+                ));
+            }
         }
-        synthesize_tick_commit(
-            session,
-            &candidate.symbol,
-            &candidate.user_chart_id,
-            candidate.row_id,
-            candidate.row,
-            candidate.datetime,
-            candidate.first_visible_id,
-        )
+        synthesize_backtest_commit(session, diffs, datetime)
+    }
+
+    async fn close_exhausted_tick_charts(&mut self) -> Result<()> {
+        for (id, serial) in &self.tick_serials {
+            if serial.exhausted
+                && let Some(pager) = self.tick_pagers.remove(id)
+            {
+                for chart_id in pager.chart_ids() {
+                    self.internal_tick_charts.remove(chart_id);
+                    if let Some(lease) = self.tick_leases.remove(chart_id) {
+                        lease.close().await?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn emit_pending_tick_cache_fill(
@@ -336,6 +421,7 @@ impl BacktestPump {
             }
         }
 
+        self.close_exhausted_tick_charts().await?;
         Ok(None)
     }
 
@@ -347,7 +433,7 @@ impl BacktestPump {
         backtest: &TqBacktest,
     ) -> Result<BacktestCommitAction> {
         let internal_chart_ids = self.touched_internal_tick_charts(&commit);
-        if internal_chart_ids.is_empty() {
+        if internal_chart_ids.is_empty() && !self.klines.touches(&commit) {
             return Ok(BacktestCommitAction::Expose(commit));
         }
 
@@ -358,6 +444,17 @@ impl BacktestPump {
             };
 
             if let Some(serial) = self.tick_serials.get_mut(&user_chart_id) {
+                if let Some(pager) = self.tick_pagers.get(&user_chart_id) {
+                    let market = reader.read_market_state();
+                    let Some(chart) =
+                        market.decode_path::<Chart>(&["charts", &internal_chart_id])?
+                    else {
+                        continue;
+                    };
+                    if !pager.matches(&chart) {
+                        continue;
+                    }
+                }
                 trace_backtest_tick(format_args!(
                     "load_page internal={internal_chart_id} user={user_chart_id}"
                 ));
@@ -422,42 +519,47 @@ impl BacktestPump {
         &mut self,
         session: &SessionClient,
         symbol: &str,
+        user_chart_id: &str,
         request: TickPageRequest,
     ) -> Result<String> {
-        self.next_page_seq += 1;
-        let chart_id = format!(
-            "wait-backtest-tick-{}-{}",
-            sanitize_chart_token(symbol),
-            self.next_page_seq
-        );
-
-        let mut command = MarketChartCommand {
-            chart_id: chart_id.clone(),
-            symbols: vec![Symbol::new(symbol)],
-            duration_ns: 0,
-            view_width: BACKTEST_PAGE_VIEW_WIDTH,
-            left_kline_id: None,
-            focus_datetime_ns: None,
-            focus_position: None,
-        };
+        let pager = self
+            .tick_pagers
+            .entry(user_chart_id.to_owned())
+            .or_insert_with(|| {
+                self.next_page_seq += 1;
+                BacktestChartPager::new(
+                    format!(
+                        "wait-backtest-tick-{}-{}",
+                        sanitize_chart_token(symbol),
+                        self.next_page_seq
+                    ),
+                    vec![Symbol::new(symbol)],
+                    0,
+                    match request {
+                        TickPageRequest::Focus { datetime_ns, .. } => datetime_ns,
+                        _ => 0,
+                    },
+                )
+            });
         match request {
             TickPageRequest::Focus {
-                datetime_ns,
+                datetime_ns: _,
                 position,
             } => {
-                command.focus_datetime_ns = Some(datetime_ns);
-                command.focus_position = Some(position);
+                debug_assert_eq!(position, BACKTEST_PAGE_WIDTH);
             }
             TickPageRequest::LeftId(left_id) => {
-                command.left_kline_id = Some(left_id);
+                pager.advance(left_id);
             }
         }
-
-        session
-            .ensure_chart(command)
-            .await
-            .map_err(WaitFacadeError::Session)?;
-
+        let command = pager.command().clone();
+        let chart_id = command.chart_id.clone();
+        if let Some(lease) = self.tick_leases.get_mut(&chart_id) {
+            lease.update(command).await?;
+        } else {
+            self.tick_leases
+                .insert(chart_id.clone(), session.ensure_chart(command).await?);
+        }
         Ok(chart_id)
     }
 
@@ -471,15 +573,36 @@ impl BacktestPump {
         self.internal_tick_charts
             .retain(|_, mapped_user_chart_id| mapped_user_chart_id != user_chart_id);
         let internal_chart_id = self
-            .request_tick_page(session, symbol, TickPageRequest::LeftId(left_id))
+            .request_tick_page(
+                session,
+                symbol,
+                user_chart_id,
+                TickPageRequest::LeftId(left_id),
+            )
             .await?;
         if let Some(serial) = self.tick_serials.get_mut(user_chart_id) {
             serial.awaiting_page = true;
-            serial.prefetching_page = self.mode == BacktestPumpMode::CacheFill;
+            serial.prefetching_page = serial.current_page_right_id.is_some();
+            serial.prefetch_requested = true;
         }
         self.internal_tick_charts
             .insert(internal_chart_id, user_chart_id.to_string());
         Ok(())
+    }
+}
+
+impl Drop for BacktestPump {
+    fn drop(&mut self) {
+        let leases = std::mem::take(&mut self.tick_leases);
+        if !leases.is_empty()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            runtime.spawn(async move {
+                for lease in leases.into_values() {
+                    let _ = lease.close().await;
+                }
+            });
+        }
     }
 }
 
@@ -493,6 +616,7 @@ enum TickPageRequest {
 struct BacktestTickPage {
     left_id: i64,
     right_id: i64,
+    wire_right_id: i64,
     terminal: bool,
 }
 
@@ -504,6 +628,8 @@ struct BacktestTickSerial {
     awaiting_page: bool,
     current_page_left_id: Option<i64>,
     current_page_right_id: Option<i64>,
+    wire_right_id: Option<i64>,
+    prefetch_requested: bool,
     next_emit_id: Option<i64>,
     first_emitted_id: Option<i64>,
     last_emitted_id: Option<i64>,
@@ -520,7 +646,7 @@ impl BacktestTickSerial {
         reader: &RuntimeReader,
         backtest: &TqBacktest,
     ) -> Result<Option<TickPumpCandidate>> {
-        if self.exhausted || self.awaiting_page {
+        if self.exhausted || (self.awaiting_page && !self.prefetching_page) {
             return Ok(None);
         }
 
@@ -587,7 +713,7 @@ impl BacktestTickSerial {
         &mut self,
         reader: &RuntimeReader,
         internal_chart_id: &str,
-        mode: BacktestPumpMode,
+        _mode: BacktestPumpMode,
     ) -> Result<()> {
         let market = reader.read_market_state();
         let Some(chart) = market.decode_path::<Chart>(&["charts", internal_chart_id])? else {
@@ -607,7 +733,7 @@ impl BacktestTickSerial {
         }
         let serial_last_id = tick_last_id(&market, &self.symbol);
         let mdhis_more_data = market_mdhis_more_data(&market);
-        let cache_fill_page = mode == BacktestPumpMode::CacheFill;
+        let cache_fill_page = true;
         let page_last_id = cache_fill_page
             .then(|| {
                 tick_page_last_existing_id(&market, &self.symbol, chart.left_id, chart.right_id)
@@ -631,6 +757,7 @@ impl BacktestTickSerial {
 
         self.awaiting_page = false;
         if self.prefetching_page {
+            self.prefetch_requested = true;
             self.prefetching_page = false;
             let Some(page_right_id) = page_right_id else {
                 self.terminal_after_current_page = true;
@@ -647,6 +774,7 @@ impl BacktestTickSerial {
             self.prefetched_page = Some(BacktestTickPage {
                 left_id: chart.left_id,
                 right_id: page_right_id,
+                wire_right_id: chart.right_id,
                 terminal: terminal_page || chart.left_id > page_right_id,
             });
             return Ok(());
@@ -661,6 +789,8 @@ impl BacktestTickSerial {
         };
         self.current_page_left_id = Some(chart.left_id);
         self.current_page_right_id = Some(page_right_id);
+        self.wire_right_id = Some(chart.right_id);
+        self.prefetch_requested = false;
         self.terminal_after_current_page = terminal_page;
         if self
             .last_loaded_right_id
@@ -694,8 +824,8 @@ impl BacktestTickSerial {
         if !self.exhausted
             && !self.awaiting_page
             && self.prefetched_page.is_none()
-            && !self.terminal_after_current_page
-            && let Some(right_id) = self.current_page_right_id
+            && !self.prefetch_requested
+            && let Some(right_id) = self.wire_right_id.or(self.current_page_right_id)
         {
             return Ok(TickPumpDecision::RequestNextPage {
                 symbol: self.symbol.clone(),
@@ -712,7 +842,7 @@ impl BacktestTickSerial {
         reader: &RuntimeReader,
         backtest: &TqBacktest,
     ) -> Result<TickPumpDecision> {
-        if self.exhausted || self.awaiting_page {
+        if self.exhausted || (self.awaiting_page && !self.prefetching_page) {
             return Ok(TickPumpDecision::None);
         }
 
@@ -788,6 +918,8 @@ impl BacktestTickSerial {
         if let Some(page) = self.prefetched_page.take() {
             self.current_page_left_id = Some(page.left_id);
             self.current_page_right_id = Some(page.right_id);
+            self.wire_right_id = Some(page.wire_right_id);
+            self.prefetch_requested = false;
             self.terminal_after_current_page = page.terminal;
             let next_after_last = self
                 .last_emitted_id
@@ -796,13 +928,16 @@ impl BacktestTickSerial {
             self.next_emit_id = Some(next_after_last.max(page.left_id));
             return Ok(TickPumpDecision::AdvancePage);
         }
-
         if self.terminal_after_current_page {
             self.current_page_left_id = None;
             self.current_page_right_id = None;
             self.next_emit_id = None;
             self.terminal_after_current_page = false;
             self.exhausted = true;
+            return Ok(TickPumpDecision::None);
+        }
+
+        if self.awaiting_page {
             return Ok(TickPumpDecision::None);
         }
 
@@ -1007,19 +1142,25 @@ fn synthesize_tick_commit(
     datetime: i64,
     first_visible_id: i64,
 ) -> Result<Option<BacktestSyntheticCommit>> {
+    synthesize_backtest_commit(
+        session,
+        vec![tick_diff(symbol, chart_id, row_id, row, first_visible_id)],
+        datetime,
+    )
+}
+
+fn tick_diff(
+    symbol: &str,
+    chart_id: &str,
+    row_id: i64,
+    row: Value,
+    first_visible_id: i64,
+) -> Value {
     let row_key = row_id.to_string();
     let prune_key = row_id
         .saturating_sub(BACKTEST_PAGE_VIEW_WIDTH as i64)
         .to_string();
-    let commit = session
-        .handle()
-        .ingest(
-            RuntimeInput::Io(IoEvent {
-                route: "market".to_string(),
-                domains: vec![ProtocolDomain::Market],
-                payload: InputPayload::Json(json!({
-                    "aid": "rtn_data",
-                    "data": [{
+    json!({
                         "charts": {
                             chart_id: {
                                 "state": {
@@ -1042,13 +1183,44 @@ fn synthesize_tick_commit(
                                 }
                             }
                         }
-                    }]
-                })),
+    })
+}
+
+fn backtest_at_current_time(reader: &RuntimeReader, backtest: &TqBacktest) -> TqBacktest {
+    let mut current = backtest.clone();
+    let watermark = reader
+        .read()
+        .get_path(&["replay", "wait_backtest", "cursor", "dt"])
+        .and_then(Value::as_i64)
+        .unwrap_or(current.start_datetime_ns);
+    current.start_datetime_ns = current.start_datetime_ns.max(watermark);
+    current
+}
+
+fn synthesize_backtest_commit(
+    session: &SessionClient,
+    diffs: Vec<Value>,
+    datetime: i64,
+) -> Result<Option<BacktestSyntheticCommit>> {
+    // Replay time and market rows are one runtime commit, also for wait_update.
+    // Use the existing ReplayStep namespace, not a facade-private state root.
+    let clock = RuntimeInput::Replay(tqsdk_core::ReplayEvent {
+        label: "wait_backtest",
+        session_id: None,
+        payload: Some(json!({"cursor": {"dt": datetime}})),
+    });
+    let commit = session.handle().ingest_batch(
+        vec![
+            RuntimeInput::Io(IoEvent {
+                route: "market".into(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({"aid": "rtn_data", "data": diffs})),
             }),
-            vec![],
-            CommitScope::RealtimeUpdate,
-        )
-        .map_err(WaitFacadeError::from)?;
+            clock,
+        ],
+        vec![],
+        CommitScope::RealtimeUpdate,
+    )?;
 
     Ok(commit.map(|commit| BacktestSyntheticCommit {
         commit,
@@ -1314,6 +1486,11 @@ mod tests {
                 .expect("terminal page should advance"),
             TickPumpDecision::AdvancePage
         ));
+        assert!(matches!(
+            serial.next_cache_fill_decision(&reader, &backtest).unwrap(),
+            TickPumpDecision::RequestNextPage { left_id: 5, .. }
+        ));
+        serial.prefetch_requested = true;
         match serial
             .next_cache_fill_decision(&reader, &backtest)
             .expect("terminal tail should emit")
@@ -1392,6 +1569,11 @@ mod tests {
 
         let backtest = TqBacktest::futures(10_000, 20_000).expect("valid backtest range");
         assert!(matches!(
+            serial.next_cache_fill_decision(&reader, &backtest).unwrap(),
+            TickPumpDecision::RequestNextPage { left_id: 5, .. }
+        ));
+        serial.prefetch_requested = true;
+        assert!(matches!(
             serial
                 .next_cache_fill_decision(&reader, &backtest)
                 .expect("out-of-range terminal page should exhaust"),
@@ -1454,11 +1636,13 @@ mod tests {
             Some(1_000)
         );
         assert_eq!(emitted_marker(&reader, "a-chart"), Some(10));
-        assert_eq!(emitted_marker(&reader, "b-chart"), None);
+        assert_eq!(emitted_marker(&reader, "b-chart"), Some(20));
 
-        assert_eq!(
-            emit_current_dt(&mut pump, &session, &reader, &backtest).await,
-            Some(1_000)
+        assert!(
+            pump.emit_pending_tick(&session, &reader, &backtest)
+                .await
+                .unwrap()
+                .is_none()
         );
         assert_eq!(emitted_marker(&reader, "b-chart"), Some(20));
     }
@@ -1500,7 +1684,10 @@ mod tests {
             .expect("cache fill tick serial should be requested");
         let cache_fill_body = set_chart_body(&cache_fill_session);
         assert_eq!(cache_fill_body.get("focus_datetime"), Some(&json!(1_000)));
-        assert_eq!(cache_fill_body.get("focus_position"), Some(&json!(0)));
+        assert_eq!(
+            cache_fill_body.get("focus_position"),
+            Some(&json!(BACKTEST_PAGE_VIEW_WIDTH))
+        );
     }
 
     #[test]
@@ -1630,6 +1817,8 @@ mod tests {
             awaiting_page: false,
             current_page_left_id: Some(left_id),
             current_page_right_id: Some(right_id),
+            wire_right_id: Some(right_id),
+            prefetch_requested: false,
             next_emit_id: Some(left_id),
             first_emitted_id: None,
             last_emitted_id: None,

@@ -1,5 +1,9 @@
 # tqsdk-rs 分层内核架构
 
+回测/history 共享 8964 双 chart 分页器，data 支持 job 内独立序列连接共享；wait 合并同时间
+Tick/Kline，并通过现有 runtime replay 路径提交回测时间。已实现边界及尚未完成的跨片连续游标见
+[回测网络对齐](backtest-wire-parity.md)，不能将本轮改动解释为与 Python 逐包完全一致。
+
 历史 fill 的硬连接额度、有界 DIFF 复用、同凭证拒绝/冷却和 CLI 跨进程准入见
 [Fill 连接合同](history-fill-recovery.md)。core 的结构化 HTTP 状态与 session 初始握手配置
 属于本轮 public API 更新；不改变 runtime commit/revision/cursor 或默认重连语义。

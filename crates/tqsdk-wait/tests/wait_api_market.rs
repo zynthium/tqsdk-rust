@@ -62,8 +62,8 @@ fn hidden_backtest_chart_id(api: &tqsdk_wait::TqApi, symbol: &str) -> String {
             payload["aid"] == "set_chart"
                 && payload["ins_list"] == symbol
                 && payload["duration"] == 0
-                && payload["view_width"] == 10_000
-                && payload["focus_position"] == 10_000
+                && payload["view_width"] == 8_964
+                && payload["focus_position"] == 8_964
         })
         .and_then(|payload| payload["chart_id"].as_str().map(ToOwned::to_owned))
         .expect("backtest tick subscription should request a hidden history chart")
@@ -71,6 +71,355 @@ fn hidden_backtest_chart_id(api: &tqsdk_wait::TqApi, symbol: &str) -> String {
 
 fn seed_backtest_tick_page(api: &mut tqsdk_wait::TqApi, chart_id: &str, symbol: &str) {
     seed_backtest_tick_page_with_bounds(api, chart_id, symbol, 11, false);
+}
+
+fn seed_backtest_kline_window(
+    api: &tqsdk_wait::TqApi,
+    command: &serde_json::Value,
+    left: i64,
+    right: i64,
+) {
+    let symbols = command["ins_list"]
+        .as_str()
+        .unwrap()
+        .split(',')
+        .collect::<Vec<_>>();
+    let mut klines = serde_json::Map::new();
+    for (offset, symbol) in symbols.iter().enumerate() {
+        let rows = (left..=right)
+            .map(|id| {
+                (
+                    (id + offset as i64 * 100).to_string(),
+                    json!({
+                        "datetime": (id + 1) * 1_000_000_000_i64,
+                        "open": 10.0 + id as f64, "high": 30.0, "low": 5.0, "close": 20.0,
+                        "volume": 100, "open_oi": 50, "close_oi": 60
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let binding = symbols
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, s)| {
+                (
+                    s.to_string(),
+                    serde_json::Value::Object(
+                        (left..=right)
+                            .map(|id| (id.to_string(), json!(id + i as i64 * 100)))
+                            .collect(),
+                    ),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        klines.insert(symbol.to_string(), json!({"1000000000": {"last_id": right + offset as i64 * 100, "data": rows, "binding": binding}}));
+    }
+    api.session().handle().ingest(RuntimeInput::Io(IoEvent {
+        route: "market".into(), domains: vec![ProtocolDomain::Market],
+        payload: InputPayload::Json(json!({"aid":"rtn_data", "data":[{
+            "mdhis_more_data": false, "charts": {command["chart_id"].as_str().unwrap(): {
+                "state": command, "left_id":left, "right_id":right, "ready":true, "more_data":false
+            }}, "klines":klines
+        }]})),
+    }), vec![], CommitScope::RealtimeUpdate).unwrap();
+}
+
+async fn next_backtest_market_step(api: &mut tqsdk_wait::TqApi) -> tqsdk_wait::WaitStep {
+    for _ in 0..32 {
+        if let Some(step) = api
+            .step_until(Some(
+                tokio::time::Instant::now() + Duration::from_millis(50),
+            ))
+            .await
+            .unwrap()
+            && step.current_dt().is_some()
+        {
+            return step;
+        }
+    }
+    panic!("backtest did not produce a market step");
+}
+
+fn seed_timed_ticks(api: &tqsdk_wait::TqApi, command: &serde_json::Value) {
+    api.session()
+        .handle()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".into(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({"aid":"rtn_data", "data":[{
+                    "mdhis_more_data":false, "charts": {command["chart_id"].as_str().unwrap(): {
+                        "state":command, "left_id":0, "right_id":1, "ready":true, "more_data":false
+                    }}, "ticks":{"SHFE.au2602":{"last_id":1,"data":{
+                        "0":{"datetime":1_000_000_000_i64,"last_price":10.0},
+                        "1":{"datetime":1_500_000_000_i64,"last_price":11.0}
+                    }}}
+                }]})),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn backtest_batches_tick_and_kline_at_the_same_time() {
+    let mut api = support::backtest_api_for_test(1_000_000_000, 3_000_000_000);
+    let bars = api
+        .kline("SHFE.au2602", Duration::from_secs(1), 2)
+        .await
+        .unwrap();
+    let ticks = api.tick("SHFE.au2602", 2).await.unwrap();
+    let commands = drain_backtest_set_chart_payloads(&api);
+    for command in &commands {
+        if command["duration"] == 0 {
+            seed_timed_ticks(&api, command);
+        } else {
+            seed_backtest_kline_window(&api, command, 0, 1);
+        }
+    }
+    let step = next_backtest_market_step(&mut api).await;
+    assert_eq!(step.current_dt(), Some(1_000_000_000));
+    assert!(step.is_changing(&ticks));
+    assert!(step.is_changing(&bars));
+    assert_eq!(ticks.last().unwrap().unwrap().id, 0);
+    assert_eq!(bars.last().unwrap().unwrap().close, 10.0);
+    assert_eq!(api.last_step().unwrap().current_dt(), step.current_dt());
+}
+
+#[tokio::test]
+async fn dynamic_kline_subscription_uses_current_time_and_bootstraps_mid_bar() {
+    let mut api = support::backtest_api_for_test(1_000_000_000, 1_700_000_000);
+    let _ticks = api.tick("SHFE.au2602", 2).await.unwrap();
+    let command = drain_backtest_set_chart_payloads(&api).pop().unwrap();
+    seed_timed_ticks(&api, &command);
+    assert_eq!(
+        next_backtest_market_step(&mut api).await.current_dt(),
+        Some(1_000_000_000)
+    );
+    assert_eq!(
+        next_backtest_market_step(&mut api).await.current_dt(),
+        Some(1_500_000_000)
+    );
+    for command in drain_backtest_set_chart_payloads(&api) {
+        if command["duration"] == 0 && command["ins_list"] != "" {
+            // Complete the outstanding Tick prefetch with an overlap-only tail.
+            seed_timed_ticks(&api, &command);
+        }
+    }
+    let bars = api
+        .kline("SHFE.au2602", Duration::from_secs(1), 2)
+        .await
+        .unwrap();
+    let command = drain_backtest_set_chart_payloads(&api).pop().unwrap();
+    assert_eq!(command["focus_datetime"], 1_500_000_000_i64);
+    seed_backtest_kline_window(&api, &command, 0, 1);
+    assert_eq!(
+        next_backtest_market_step(&mut api).await.current_dt(),
+        Some(1_500_000_000)
+    );
+    assert!(bars.is_ready().unwrap());
+    assert_eq!(bars.last().unwrap().unwrap().close, 10.0);
+}
+
+#[tokio::test]
+async fn mid_bar_wait_update_keeps_time_in_the_same_runtime_commit() {
+    let mut api = support::backtest_api_for_test(1_500_000_000, 1_700_000_000);
+    let bars = api
+        .kline("SHFE.au2602", Duration::from_secs(1), 2)
+        .await
+        .unwrap();
+    let command = drain_backtest_set_chart_payloads(&api).pop().unwrap();
+    seed_backtest_kline_window(&api, &command, 0, 1);
+    for _ in 0..16 {
+        assert!(
+            api.wait_update(Some(
+                tokio::time::Instant::now() + Duration::from_millis(50)
+            ))
+            .await
+            .unwrap()
+        );
+        if bars.is_ready().unwrap() {
+            assert_eq!(api.last_step().unwrap().current_dt(), Some(1_500_000_000));
+            assert_eq!(bars.last().unwrap().unwrap().close, 10.0);
+            return;
+        }
+    }
+    panic!("mid-bar bootstrap never became ready");
+}
+
+#[tokio::test]
+async fn daily_mid_bar_start_materializes_open_without_waiting_for_close() {
+    let daily_datetime = 1_700_000_000_000_000_000_i64;
+    let start = daily_datetime + 1_000_000;
+    let mut api = support::backtest_api_for_test(start, start + 1_000_000);
+    let bars = api
+        .kline("SHFE.au2602", Duration::from_secs(86_400), 2)
+        .await
+        .unwrap();
+    let command = drain_backtest_set_chart_payloads(&api).pop().unwrap();
+    api.session()
+        .handle()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".into(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({"aid":"rtn_data", "data":[{
+                    "mdhis_more_data":false,"charts":{command["chart_id"].as_str().unwrap(): {
+                        "state":command,"left_id":0,"right_id":0,"ready":true,"more_data":false
+                    }},"klines":{"SHFE.au2602":{"86400000000000":{"last_id":0,"data":{"0":{
+                        "datetime":daily_datetime,"open":10.0,"high":30.0,"low":5.0,"close":20.0,
+                        "volume":100,"open_oi":50,"close_oi":60
+                    }}}}}
+                }]})),
+            }),
+            vec![],
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap();
+    assert_eq!(
+        next_backtest_market_step(&mut api).await.current_dt(),
+        Some(start)
+    );
+    assert!(bars.is_ready().unwrap());
+    assert_eq!(bars.last().unwrap().unwrap().close, 10.0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn backtest_empty_kline_window_becomes_ready_without_refetching() {
+    let mut api = support::backtest_api_for_test(1_000_000_000, 4_000_000_000);
+    let bars = api
+        .kline("SHFE.au2602", Duration::from_secs(1), 2)
+        .await
+        .unwrap();
+    let command = drain_backtest_set_chart_payloads(&api).pop().unwrap();
+    api.session()
+        .handle()
+        .ingest(
+            RuntimeInput::Io(IoEvent {
+                route: "market".into(),
+                domains: vec![ProtocolDomain::Market],
+                payload: InputPayload::Json(json!({"aid": "rtn_data", "data": [{
+                    "mdhis_more_data": false,
+                    "charts": {command["chart_id"].as_str().unwrap(): {
+                        "state": command, "left_id": -1, "right_id": -1,
+                        "ready": true, "more_data": false
+                    }},
+                    "klines": {"SHFE.au2602": {"1000000000": {"last_id": -1, "data": {}}}}
+                }]})),
+            }),
+            Vec::new(),
+            CommitScope::RealtimeUpdate,
+        )
+        .unwrap();
+    assert_eq!(
+        next_backtest_market_step(&mut api).await.current_dt(),
+        Some(1_000_000_000)
+    );
+    assert!(bars.is_ready().unwrap());
+    assert!(bars.last().unwrap().is_none());
+    assert!(drain_backtest_set_chart_payloads(&api).is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn backtest_kline_prefetches_and_reuses_two_charts_without_exposing_future_bars() {
+    let mut api = support::backtest_api_for_test(1_000_000_000, 4_000_000_000);
+    let bars = api
+        .kline("SHFE.au2602", Duration::from_secs(1), 2)
+        .await
+        .unwrap();
+    let other_width = api
+        .kline("SHFE.au2602", Duration::from_secs(1), 4)
+        .await
+        .unwrap();
+    let commands = drain_backtest_set_chart_payloads(&api);
+    assert_eq!(
+        commands.len(),
+        1,
+        "different local widths share one history serial"
+    );
+    let a = &commands[0];
+    seed_backtest_kline_window(&api, a, 0, 1);
+    let open = next_backtest_market_step(&mut api).await;
+    assert_eq!(open.current_dt(), Some(1_000_000_000));
+    let first = bars.last().unwrap().unwrap();
+    assert_eq!(
+        (first.id, first.close, first.high, first.volume),
+        (0, 10.0, 10.0, 0)
+    );
+    assert!(bars.row(1).unwrap().is_none());
+    assert_eq!(other_width.last().unwrap().unwrap().id, 0);
+    let b = drain_backtest_set_chart_payloads(&api).pop().unwrap();
+    assert_ne!(a["chart_id"], b["chart_id"]);
+    assert_eq!(b["left_kline_id"], 1);
+    assert!(b.get("focus_datetime").is_none());
+    seed_backtest_kline_window(&api, &b, 1, 2);
+    let close = next_backtest_market_step(&mut api).await;
+    assert_eq!(close.current_dt(), Some(1_999_999_000));
+    assert_eq!(bars.last().unwrap().unwrap().close, 20.0);
+    assert_eq!(
+        next_backtest_market_step(&mut api).await.current_dt(),
+        Some(2_000_000_000)
+    );
+    assert_eq!(
+        next_backtest_market_step(&mut api).await.current_dt(),
+        Some(2_999_999_000)
+    );
+    assert_eq!(
+        next_backtest_market_step(&mut api).await.current_dt(),
+        Some(3_000_000_000)
+    );
+    let reuse = drain_backtest_set_chart_payloads(&api);
+    assert_eq!(reuse.len(), 1);
+    assert_eq!(reuse[0]["chart_id"], a["chart_id"]);
+    assert_eq!(reuse[0]["left_kline_id"], 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn backtest_multi_kline_preserves_binding_and_open_close_phases() {
+    let mut api = support::backtest_api_for_test(1_000_000_000, 3_000_000_000);
+    let bars = api
+        .kline_multi(["SHFE.au2602", "SHFE.au2604"], Duration::from_secs(1), 2)
+        .await
+        .unwrap();
+    let command = drain_backtest_set_chart_payloads(&api).pop().unwrap();
+    seed_backtest_kline_window(&api, &command, 0, 1);
+    assert_eq!(
+        next_backtest_market_step(&mut api).await.current_dt(),
+        Some(1_000_000_000)
+    );
+    let market = api.session().reader().clone();
+    let snapshot = market.read_market_state();
+    assert_eq!(
+        snapshot.get_path(&[
+            "klines",
+            "SHFE.au2602",
+            "1000000000",
+            "binding",
+            "SHFE.au2604",
+            "0"
+        ]),
+        Some(&json!("100"))
+    );
+    drop(snapshot);
+    assert!(bars.is_ready().unwrap());
+    assert_eq!(
+        next_backtest_market_step(&mut api).await.current_dt(),
+        Some(1_999_999_000)
+    );
+    let snapshot = market.read_market_state();
+    assert_eq!(
+        snapshot.get_path(&[
+            "klines",
+            "SHFE.au2604",
+            "1000000000",
+            "data",
+            "100",
+            "close"
+        ]),
+        Some(&json!(20.0))
+    );
 }
 
 fn seed_backtest_tick_page_with_bounds(
@@ -97,9 +446,9 @@ fn seed_backtest_tick_page_with_bounds(
                                     "chart_id": chart_id,
                                     "ins_list": symbol,
                                     "duration": 0,
-                                    "view_width": 10_000,
+                                    "view_width": 8_964,
                                     "focus_datetime": 1_000,
-                                    "focus_position": 10_000,
+                                    "focus_position": 8_964,
                                 },
                                 "left_id": 10,
                                 "right_id": 11,
@@ -199,9 +548,9 @@ fn seed_backtest_tick_page_with_rows(
                                     "chart_id": chart_id,
                                     "ins_list": symbol,
                                     "duration": 0,
-                                    "view_width": 10_000,
-                                    "focus_datetime": 1_000,
-                                    "focus_position": 10_000,
+                                    "view_width": 8_964,
+                                    "focus_datetime": 10_000,
+                                    "focus_position": 8_964,
                                 },
                                 "left_id": left_id,
                                 "right_id": right_id,
@@ -243,9 +592,9 @@ fn seed_backtest_tick_page_header_only(api: &mut tqsdk_wait::TqApi, chart_id: &s
                                     "chart_id": chart_id,
                                     "ins_list": symbol,
                                     "duration": 0,
-                                    "view_width": 10_000,
+                                    "view_width": 8_964,
                                     "focus_datetime": 1_000,
-                                    "focus_position": 10_000,
+                                    "focus_position": 8_964,
                                 },
                                 "left_id": 10,
                                 "right_id": 11,
@@ -720,7 +1069,8 @@ async fn backtest_kline_requests_the_first_window_from_the_backtest_start() {
         .expect("backtest kline should submit set_chart");
 
     assert_eq!(set_chart["focus_datetime"], json!(start_ns));
-    assert_eq!(set_chart["focus_position"], json!(0));
+    assert_eq!(set_chart["focus_position"], json!(8_964));
+    assert_eq!(set_chart["view_width"], json!(8_964));
 }
 
 #[tokio::test(flavor = "current_thread")]

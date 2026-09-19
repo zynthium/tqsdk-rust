@@ -149,6 +149,9 @@ dependency 换成版本号即可。默认 feature 包含 live session 与 servic
 
 `ServerBacktestHistoryStream` 是同一 session 层提供给 data 的 server-backtest history chart
 substrate：它只负责连接、chart 分页和 terminal signal，可读取 Tick、canonical 60s K 或 native 1d K。
+它与 wait 共用 `BacktestChartPager`：8964 窗口、focus position 8964、两个 chart 交替、消费前预取。
+`MarketChartLease::update` 仅允许独占 lease 原位移动窗口，完成事件中的 chart ID 保持逻辑 ID。
+`StreamCompleted` 只返回一次。对齐范围见 [回测网络对齐](../../docs/architecture/backtest-wire-parity.md)。
 1d 使用 `set_chart.duration=86400000000000`，从 `klines/<symbol>/86400000000000` 读取，并产生
 `CanonicalDaily` event。它不拥有
 cache directory、coverage、metadata sidecar、缺口规划、K 线聚合或 retention；这些都归
@@ -156,7 +159,7 @@ cache directory、coverage、metadata sidecar、缺口规划、K 线聚合或 re
 leases 完成释放；直接 Drop 仍会请求异步 best-effort cleanup。高周期和 sub-minute K 的本地派生也不应
 回流到 session。
 
-`SessionClientBuilder::commit_log_retention(max_entries)` 允许专用、单消费者 session 收窄 runtime commit history；未调用时仍使用 core 默认值，且活动 cursor 需要的 commit 不会被截断。server-history cache fill 使用较小 retention，避免大批 Tick 的字段级 `ChangeSet` 在长任务中按默认窗口累积。
+`SessionClientBuilder::commit_log_retention(max_entries)` 允许专用 session 收窄 runtime commit history；未调用时仍使用 core 默认值。硬保留上限可以使慢 cursor 落后；history stream 通过当前 chart/state 读取尚未消费的页，不依赖每个中间 commit 都被保留。共享 session 回归覆盖快 reader 超过 8 次提交后慢 reader 的行和 terminal 恰好一次。server-history cache fill 使用较小 retention，避免大批 Tick 的字段级 `ChangeSet` 在长任务中按默认窗口累积。
 
 交易日历的 holiday JSON 是官方公开静态文件，请求时不会携带天勤鉴权 token。
 同一个 `SessionClient` 会缓存已解析的 holiday payload，重复

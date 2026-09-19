@@ -497,19 +497,37 @@ impl TqApi {
             });
 
         if !self.driver.serial_charts.contains(&chart_id) {
-            self.driver
-                .session
-                .ensure_chart(MarketChartCommand {
-                    chart_id: chart_id.clone(),
-                    symbols: vec![Symbol::new(symbol)],
-                    duration_ns,
-                    view_width: data_length,
-                    left_kline_id: None,
-                    focus_datetime_ns,
-                    focus_position,
-                })
-                .await
-                .map_err(crate::error::WaitFacadeError::Session)?;
+            if let Some(backtest) = self.driver.backtest.as_ref() {
+                self.driver
+                    .backtest_pump
+                    .as_mut()
+                    .ok_or(crate::error::WaitFacadeError::InvalidState(
+                        "backtest pump not initialized",
+                    ))?
+                    .ensure_kline_serial(
+                        &self.driver.session,
+                        backtest,
+                        vec![symbol.to_string()],
+                        duration_ns,
+                        data_length,
+                        chart_id.clone(),
+                    )
+                    .await?;
+            } else {
+                self.driver
+                    .session
+                    .ensure_chart(MarketChartCommand {
+                        chart_id: chart_id.clone(),
+                        symbols: vec![Symbol::new(symbol)],
+                        duration_ns,
+                        view_width: data_length,
+                        left_kline_id: None,
+                        focus_datetime_ns,
+                        focus_position,
+                    })
+                    .await
+                    .map_err(crate::error::WaitFacadeError::Session)?;
+            }
             self.driver.serial_charts.insert(chart_id.clone());
         }
 
@@ -550,19 +568,37 @@ impl TqApi {
         };
 
         if !self.driver.serial_charts.contains(&chart_id) {
-            self.driver
-                .session
-                .ensure_chart(MarketChartCommand {
-                    chart_id: chart_id.clone(),
-                    symbols: symbols.iter().map(Symbol::new).collect(),
-                    duration_ns,
-                    view_width: request_view_width,
-                    left_kline_id: None,
-                    focus_datetime_ns: None,
-                    focus_position: None,
-                })
-                .await
-                .map_err(crate::error::WaitFacadeError::Session)?;
+            if let Some(backtest) = self.driver.backtest.as_ref() {
+                self.driver
+                    .backtest_pump
+                    .as_mut()
+                    .ok_or(crate::error::WaitFacadeError::InvalidState(
+                        "backtest pump not initialized",
+                    ))?
+                    .ensure_kline_serial(
+                        &self.driver.session,
+                        backtest,
+                        symbols.clone(),
+                        duration_ns,
+                        data_length,
+                        chart_id.clone(),
+                    )
+                    .await?;
+            } else {
+                self.driver
+                    .session
+                    .ensure_chart(MarketChartCommand {
+                        chart_id: chart_id.clone(),
+                        symbols: symbols.iter().map(Symbol::new).collect(),
+                        duration_ns,
+                        view_width: request_view_width,
+                        left_kline_id: None,
+                        focus_datetime_ns: None,
+                        focus_position: None,
+                    })
+                    .await
+                    .map_err(crate::error::WaitFacadeError::Session)?;
+            }
             self.driver.serial_charts.insert(chart_id.clone());
         }
 
@@ -980,8 +1016,13 @@ fn current_dt_from_reader(reader: &tqsdk_core::RuntimeReader) -> Option<i64> {
     let guard = reader.read();
 
     guard
-        .get_path(&["_tqsdk_backtest", "current_dt"])
+        .get_path(&["replay", "wait_backtest", "cursor", "dt"])
         .and_then(serde_json::Value::as_i64)
+        .or_else(|| {
+            guard
+                .get_path(&["_tqsdk_backtest", "current_dt"])
+                .and_then(serde_json::Value::as_i64)
+        })
         .or_else(|| {
             let replay = guard.get_path(&["replay"])?;
             replay
